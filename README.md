@@ -1,7 +1,11 @@
-Peer Stables
+## Peer Stables
 
-Peer Stables provide synthetic USD ... 
-
+Peer Stables provides two services to users:
+<ol>
+  <li>synthetic USD exposure to <i><stableReceivers/i> .... this is effectively a 1x shorrt on BTC/USD</li>
+  <li>1x leveraged long exposure to <i>stableReceivers</i></li>
+</ol>
+synthetic USD 
 Top use-cases
 
 stableReceiver // stableProvider
