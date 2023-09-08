@@ -1,11 +1,11 @@
 ## Peer Stables
 
-Peer Stables provides two services to users:
+Peer Stables provides two services to users. These users are matched up over Lightning channels, which we call "stable channels":
 <ol>
-  <li>synthetic USD exposure to <i><stableReceivers</i> .... this is effectively a 1x shorrt on BTC/USD</li>
-  <li>1x leveraged long exposure to <i>stableReceivers</i></li>
+  <li>synthetic USD exposure to <i>stableReceivers</i> .... this is effectively a 1x short on BTC/USD. These users want a stable USD value experience.</li>
+  <li>1x leveraged long exposure to <i>stableProviders. These users want to go long BTC, and are want to take the BTC upside and downside of the stableReceiver.</i></li>
 </ol>
-synthetic USD 
+
 Top use-cases
 
 stableReceiver // stableProvider
