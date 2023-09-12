@@ -1,6 +1,8 @@
 ## Peer Stables
 
-Peer Stables is open-source code that provides services to two types of users. These two types of users are matched up over Lightning channels, which we call "stable channels." This codebase is a CLN ("Core Lightning") plugin that manages these stable channels to provide the following services:
+PeerStables is open-source code that provides a USD dollar payments experience on top of bitcoin. 
+
+PeerStables provides services to two types of users. These two types of users are matched up over Lightning channels, which we call "stable channels." This codebase is a CLN ("Core Lightning") plugin that manages these stable channels to provide the following services:
 <ol>
   <li>synthetic USD exposure to <i>stableReceivers</i> .... this is effectively a 1x short on BTC/USD. These users want a stable USD value experience.</li>
   <li>1x leveraged long exposure to <i>stableProviders. These users want to go long BTC, and are want to take the BTC upside and downside of the stableReceiver.</i></li>
