@@ -59,20 +59,20 @@ time / expected dollar amount / stableReceiver balance / stable provider balance
 
 The value behind most stablecoins today is custodial. USDC and Tether face regulatroy risk of having their assets freezed and banking access revoked. 
 
-PeerStables aims to provide a more soscially scalable solution. PeerStables is self-custodial, has no token or token issuer, and have a real-time streaming finance experience for bitcoin Lightning network. 
-
+PeerStables intends to provide a more soscially scalable solution. PeerStables is self-custodial, has no token or token issuer, and have a real-time streaming finance experience for bitcoin Lightning network. 
 
 PeerStables faces some challenges. For example, Peer Stables inherits many of the challenges of the Lightning Network such as that bitcoin is held in a online wallet and both nodes must always be online.
 
 Furthermore, there are various attacks we can envision. The PeerStables approach is that while all of these attacks are plausible, it is only by building a USD experience on top of <i>only bitcoin</i> that we can, paradoxically, give users without access to the US banking system a stable USD asset. 
 
-## Dual-funded channel workflow
+## Interactive channel open workflow
 
-Peer Stable state maps to Core Lightning states. These state mappings will change with dual-funded channels.
+Peer Stable intends use interactive channel opening  to neogtiate the terms of the stable agreement and start a well-balanced channel.  
 
-We want to implement  ____
+The Channel state in CLN map to Core Lightning states to Peer Stable states, but have several differences. 
 
-| CLN State               | Description                                                                                                                                                                       | Peer Stables Correlation |
+
+| CLN State               | Description                                                                                                                                                                       | Peer Stables differences |
 |-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|
 | OPENINGD                | The channel funding protocol with the peer is ongoing, and both sides are negotiating parameters.                                                                               |                          |
 | CHANNELD_AWAITING_LOCKIN| The peer and you have agreed on channel parameters and are just waiting for the channel funding transaction to be confirmed deeply. Both you and the peer must acknowledge the channel funding transaction to be confirmed deeply before entering the next state. |                          |
@@ -85,6 +85,9 @@ We want to implement  ____
 | ONCHAIN                 | You saw the funding transaction getting spent and now know what happened (i.e. if it was a proper unilateral close by the peer, or a theft attempt).                            |                          |
 | CLOSED                  | The channel closure has been confirmed deeply. The channel will eventually be removed from this array.                                                                         |                          |
 
+## Splicing workflow
+
+PeerStables intends to use channel splicing to handle "margin calls" ... 
 
 ## Greenlight 
 
