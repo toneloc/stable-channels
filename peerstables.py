@@ -7,8 +7,6 @@
 ╩  └─┘└─┘┴└─╚═╝ ┴ ┴ ┴└─┘┴─┘└─┘└─┘                                                       
 """
 
-# Please contact Tony Klausing on Twitter @tonklaus.
-
 from pyln.client import Plugin
 from collections import namedtuple
 from pyln.client import Millisatoshi
@@ -358,22 +356,3 @@ plugin.add_option(name='stable-details', default='', description='Add source nam
 plugin.options['stable-details']['multi'] = True
 
 plugin.run()
-
-# TODO - add create channel flow
-# TODO - add state in JSON file
-# TODO - add splicing for margin call
-# TODO - add test cases
-# TODO - add docs
-# TODO - add UI :)
-
-# scp -i stableprovider2.pem peerstables.py ubuntu@3.141.33.221:~/plugins/peerstables/peerstables.py
-
-# ssh-i stableprovider2.pem ubuntu@3.141.33.221
-
-# first lightning
-# lightning-cli --testnet connect 030d21990f4c6394165aabd43e793ea572b822fa33c2fd2c7f9b406315e191234c
-# lightning-cli --testnet stop &&  lightningd --daemon --network=testnet --log-file=/home/ubuntu/cln.log --experimental-dual-fund --plugin=/home/ubuntu/plugins/peerstables/peerstables.py --stable-details=2440124x15x0,1.75,0.2,True,030d21990f4c6394165aabd43e793ea572b822fa33c2fd2c7f9b406315e191234c,/home/ubuntu/.lightning/testnet/lightning-rpc && tail -f cln.log
-
-# second lightning
-# lightning-cli --testnet --lightning-dir=/home/ubuntu/.second-lightning connect 03affb7a33ebe5d2055c2812af87a63913bd4f6931448e908ffce693544d0d958d
-# lightning-cli --testnet --lightning-dir=/home/ubuntu/.second-lightning stop &&  lightningd --daemon --network=testnet --lightning-dir=/home/ubuntu/.second-lightning --log-file=/home/ubuntu/cln2.log --experimental-dual-fund --plugin=/home/ubuntu/plugins/peerstables/peerstables.py --stable-details=2440124x15x0,1.75,0.2,False,03affb7a33ebe5d2055c2812af87a63913bd4f6931448e908ffce693544d0d958d,/home/ubuntu/.second-lightning/testnet/lightning-rpc --announce-addr=0.0.0.0:19736 && tail -f cln2.log
