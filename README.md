@@ -33,42 +33,27 @@ A Stable Channels work like this:
 </ul>
 </ol>
 
-Example:
+# Bitcoin Agreement Analysis
 
-Let's break this down:
+Both parties contribute 1 Bitcoin each at the starting point, with each Bitcoin valued at $27,500.
 
-Stable Receiver: This actor desires stability in terms of USD. They do not want to benefit or lose from Bitcoin price fluctuations.
-Stable Provider: This actor is willing to absorb the Bitcoin price fluctuation risk in exchange for potential profits.
-Scenario:
+## Table of Outcomes
 
-Starting Point: Both users put in $100 of Bitcoin into the pot, so the pot holds $200 worth of Bitcoin.
-Now, consider three potential outcomes:
+| Price Change (%) | New BTC Price | SR (BTC) | SR (USD) | SP (BTC) | SP (USD) | SR Fiat Δ$ | SR BTC Δ | SR Fiat Δ% | SR BTC Δ% | SP Fiat Δ$ | SP BTC Δ | SP Fiat Δ% | SP BTC Δ% |
+|------------------|---------------|----------|----------|----------|----------|------------|----------|------------|----------|------------|----------|------------|----------|
+| -30              | $19,250      | 1.4286   | $27,500  | 0.5714   | $11,000  | $0         | +0.4286  | 0%         | +42.86%  | -$16,500   | -0.4286  | -60%       | -42.86%  |
+| -20              | $22,000      | 1.25     | $27,500  | 0.75     | $16,500  | $0         | +0.25    | 0%         | +25%     | -$11,000   | -0.25    | -40%       | -25%     |
+| -10              | $24,750      | 1.1111   | $27,500  | 0.8889   | $22,000  | $0         | +0.1111  | 0%         | +11.11%  | -$5,500    | -0.1111  | -20%       | -11.11%  |
+| 0                | $27,500      | 1        | $27,500  | 1        | $27,500  | $0         | 0       | 0%         | 0%       | $0         | 0       | 0%         | 0%       |
+| 10               | $30,250      | 0.9091   | $27,500  | 1.0909   | $33,000  | $0         | -0.0909 | 0%         | -9.09%   | +$5,500    | +0.0909 | +20%       | +9.09%   |
+| 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
+| 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
 
-A. Bitcoin price remains the same.
-B. Bitcoin price increases by 10%.
-C. Bitcoin price decreases by 10%.
+Abbreviations:
+- SR: Stable Receiver
+- SP: Stable Provider
+- Δ: Represents change
 
-A. Price remains the same:
-
-Stable Receiver: Gets back their $100.
-Stable Provider: Gets back their $100.
-B. Price increases by 10%:
-The $200 worth of Bitcoin in the pot becomes $220.
-
-Stable Receiver: Still gets back only their $100. They forfeit the additional $10 that their original Bitcoin would have earned.
-Stable Provider: Gets their original $100 plus the $10 forfeited by the Stable Receiver. So, they receive $110.
-C. Price decreases by 10%:
-The $200 worth of Bitcoin in the pot becomes $180.
-
-Stable Receiver: Gets back their original $100. This means they get an extra $10 from the pot to offset the Bitcoin price drop.
-Stable Provider: Gets only $90 because they had to cover the $10 to keep the Stable Receiver whole.
-Which side is leveraged short/long?
-
-Stable Receiver: Is effectively leveraged short on Bitcoin. This is because they profit when Bitcoin goes down (compared to not being in this agreement). The exact leverage depends on the total change in price, but in our scenario where Bitcoin moves by 10%, the leverage is essentially 2x, because a 10% drop results in a 20% gain for the Stable Receiver.
-
-Stable Provider: Is effectively leveraged long on Bitcoin. They benefit when Bitcoin rises but take the hit when it falls. Again, using our 10% price change scenario, they are 2x leveraged long on Bitcoin because a 10% increase gives them a 20% gain.
-
-In essence, the Stable Provider is doubling down on the volatility of Bitcoin, hoping for upward movement, while the Stable Receiver is seeking stability and protection against downward movement.
 
 ## Getting started
 
