@@ -33,10 +33,6 @@ A Stable Channels work like this:
 </ul>
 </ol>
 
-# Bitcoin Agreement Analysis
-
-Both parties contribute 1 Bitcoin each at the starting point, with each Bitcoin valued at $27,500.
-
 ##  Payout matrix
 
 Assume that we enter into a stable agreement at a price of $27,500 per Bitcoin. Each side puts in 1 Bitcoin, for a total channel capacity of 2 Bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%.
@@ -56,7 +52,7 @@ Abbreviations:
 | 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
 | 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
 
-## Getting started
+## Getting started with Core Lightning Plugins
 
 Terminal access to a "Core Lighting" node is required.
 
@@ -82,20 +78,9 @@ If you already have a channel and it is correctly balanced, then change if to St
 
 The full command might look like this: `stable-channels 2440124x15x0 100 0.2 True`
 
-## Workflow Example
-
-Make this a markdown table ... 
-
-Imagine the following stable agreement for $25,000.
-
-time / expected dollar amount / stableReceiver balance / stable provider balance / btc price / expected action from prior row
-0 / / 25001 / 1 / 25000
-1 / 2 /
-2 / 3 /
-
 ## Rationale and Challenges
 
-The most valuable stablecoins today are Tether and USDX. These stablecoins hold their value in cash and bonds. This cash and these bonds have custodians. These custodians are centralized companies and may be forced to freeze these assets or revoke banking access. Either of these may mark the effective failure of that stablecoin to retain its purchasing power. 
+The most valuable stablecoins today are Tether and USDC. These stablecoins hold their value in cash and bonds. This cash and these bonds have custodians. These custodians are centralized companies and may be forced to freeze these assets or revoke banking access. Either of these may mark the effective failure of that stablecoin to retain its purchasing power. 
 
 Stable Channels intends to provide a more socially scalable solution. Stable Channels, as a solution, is self-custodial, has no token or token issuer, and intends to give a real-time, streaming finance experience for its users. 
 
@@ -125,20 +110,17 @@ The Channel state in CLN map to Core Lightning states to Stable Channel states, 
 | ONCHAIN                 | You saw the funding transaction getting spent and now know what happened (i.e. if it was a proper unilateral close by the peer, or a theft attempt).                            |         No difference.                 |
 | CLOSED                  | The channel closure has been confirmed deeply. The channel will eventually be removed from this array.                                                                         |           No difference.               |
 
-## Splicing workflow
+### Splicing workflow
 
 Stable Channels intends to use channel splicing to handle "margin calls."
 
-Splicing works as follows:
 
-
-
-## Greenlight 
+### Greenlight 
 
 Stable Channels intends to integrate with Blockstream's Greenlight product. 
 
 
-## Acknowledgements
+### Acknowledgements
 
 Thanks to Christian Decker and the Core Lightning team from Blockstream for his help with setting up Greenlight. Thanks to Michael Schmoock (m-schmoock) for writing the "currencyrate" plugin, which I use. Thanks to @jamaljsr for developing the Polar Lightning Network visualization tool. I also used Jamal's code for the Stable Channels.com website. Thanks to Dan Robinson for his work on Rainbow Channels.
 
