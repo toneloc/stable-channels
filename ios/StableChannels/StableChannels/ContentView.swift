@@ -11,7 +11,14 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 20) {
             HStack {
-                Spacer()  // Push the button to the far right
+                Image("StableChannelsIcon")  // <-- Add this line here
+                           .resizable()
+                           .scaledToFit()
+                           .frame(width: 45, height: 45)  // Adjust size as needed
+                           .padding(.trailing, 20)  // Optional padding to separate the icon from other elements
+
+                Spacer()
+                
                 Button(action: {
                     showMenu.toggle()
                 }) {
@@ -28,8 +35,12 @@ struct ContentView: View {
                     ])
                 }
             }
+
+            Text("Stable Receiver")
+                       .font(.largeTitle)
+                       .padding(.top, 20)
             
-            Spacer().frame(height: (UIScreen.main.bounds.height * 0.25) - 120)
+            Spacer().frame(height: (UIScreen.main.bounds.height * 0.25) - 170)
             
             Text("USD balance")
                 .font(.title2)
@@ -51,7 +62,7 @@ struct ContentView: View {
 
             HStack(spacing: 20) {
                 Button(action: {
-//                    self.sendPayment()
+                    self.sendPayment()
                 }) {
                     HStack {
                         Image(systemName: "arrow.up.right.square.fill")
@@ -121,37 +132,37 @@ struct ContentView: View {
         return formatter.string(from: date)
     }
     
-//    func sendPayment() {
-//        guard let url = URL(string: "https://stablechannels.com/keysend") else {
-//            print("Invalid URL")
-//            return
-//        }
-//
-//        let paymentData = [
-//            "destination": "03affb7a33ebe5d2055c2812af87a63913bd4f6931448e908ffce693544d0d958d",
-//            "amount": "100"
-//        ]
-//
-//        var request = URLRequest(url: url)
-//        request.httpMethod = "POST"
-//        request.httpBody = try? JSONSerialization.data(withJSONObject: paymentData)
-//        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-//
-//        let task = URLSession.shared.dataTask(with: request) { data, response, error in
-//            guard let data = data, error == nil else {
-//                print("Error in sending payment:", error?.localizedDescription ?? "No data")
-//                return
-//            }
-//
-//            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
-//                print("Payment successful. Response:", String(data: data, encoding: .utf8) ?? "")
-//            } else {
-//                print("Failed to make payment. Response:", String(data: data, encoding: .utf8) ?? "")
-//            }
-//        }
-//
-//        task.resume()
-//    }
+    func sendPayment() {
+        guard let url = URL(string: "https://stablechannels.com/keysend") else {
+            print("Invalid URL")
+            return
+        }
+
+        let paymentData: [String: Any] = [
+            "destination": "03affb7a33ebe5d2055c2812af87a63913bd4f6931448e908ffce693544d0d958d",
+            "amount_msat": 100
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try? JSONSerialization.data(withJSONObject: paymentData)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            guard let data = data, error == nil else {
+                print("Error in sending payment:", error?.localizedDescription ?? "No data")
+                return
+            }
+
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                print("Payment successful. Response:", String(data: data, encoding: .utf8) ?? "")
+            } else {
+                print("Failed to make payment. Response:", String(data: data, encoding: .utf8) ?? "")
+            }
+        }
+
+        task.resume()
+    }
 }
 
 struct BalanceResponse: Decodable {
