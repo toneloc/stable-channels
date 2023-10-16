@@ -1,16 +1,16 @@
 ## Stable Channels
 
-<i>View available Stable Channel offers on https://www.stablechannels.com.</i>
+<b>Stable Channels</b> lets Lightning Network node runners keep one of their channel balances stable in dollar terms, for example $100. These special channels are called <b>Stable Channels</b>. These node runners are called <b>Stable Receivers</b>.
 
-<b>Stable Channels</b> let Lightning Network node runners keep one of their channel balances stable in dollar terms, for example $100. These special channels are called <b>Stable Channels</b>. These node runners are called <b>Stable Receivers</b>.
+On the other side of the channel are <b>Stable Providers</b>. Stable Providers want to go levered long bitcoin. This means that Stable Providers want to use their Bitcoin to get more Bitcoin. However, Stable Receivers put their Bitcoin at risk by doing so.
 
-On the other side of the channel are <b>Stable Providers</b>. Stable Providers go 1x leveraged long bitcoin. This is what that means:
-<ul>
-<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms.
-<li>If the price of bitcoin goes down, the Stable Provider loses bitcoin. This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms.
-</ul>
 
 These two nodes query price feeds at regular intervals. Then, based on the new price, they update their channel balance to keep the Stable Receiver stable at $100 of bitcoin. Either party may opt out at anytime, either by a cooperative or forced channel close. 
+
+<ul>
+<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less Bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider.
+<li>If the price of bitcoin goes down, the Stable Provider loses bitcoin. This is because it takes more Bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
+</ul>
 
 Stable Channels are unannounced to the public network and are non-routing channels. These are vanilla Lightning channels with no DLCs.
 
@@ -37,7 +37,14 @@ A Stable Channels work like this:
 
 Both parties contribute 1 Bitcoin each at the starting point, with each Bitcoin valued at $27,500.
 
-## Table of Outcomes
+##  Payout matrix
+
+Assume that we enter into a stable agreement at a price of $27,500 per Bitcoin. Each side puts in 1 Bitcoin, for a total channel capacity of 2 Bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%.
+
+Abbreviations:
+- SR = Stable Receiver
+- SP = Stable Provider
+- Δ = Represents change
 
 | Price Change (%) | New BTC Price | SR (BTC) | SR (USD) | SP (BTC) | SP (USD) | SR Fiat Δ$ | SR BTC Δ | SR Fiat Δ% | SR BTC Δ% | SP Fiat Δ$ | SP BTC Δ | SP Fiat Δ% | SP BTC Δ% |
 |------------------|---------------|----------|----------|----------|----------|------------|----------|------------|----------|------------|----------|------------|----------|
@@ -48,12 +55,6 @@ Both parties contribute 1 Bitcoin each at the starting point, with each Bitcoin 
 | 10               | $30,250      | 0.9091   | $27,500  | 1.0909   | $33,000  | $0         | -0.0909 | 0%         | -9.09%   | +$5,500    | +0.0909 | +20%       | +9.09%   |
 | 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
 | 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
-
-Abbreviations:
-- SR: Stable Receiver
-- SP: Stable Provider
-- Δ: Represents change
-
 
 ## Getting started
 
