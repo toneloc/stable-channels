@@ -58,7 +58,7 @@ Terminal access to a "Core Lighting" node is required.
 
 Access or create the `/plugins` folder on your node. and `cd` into this folder.
 
-Run `git clone stablechannels.com`
+Run `git clone [stablechannels.com](https://github.com/toneloc/stable-channels)`
 
 This will create the `stable-channels` folder in `/plugins`.
 
