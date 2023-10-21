@@ -2,40 +2,40 @@
 
 <b>Stable Channels</b> lets Lightning Network node runners keep one of their channel balances stable in dollar terms, for example $100. These special channels are called <b>Stable Channels</b>. These node runners are called <b>Stable Receivers</b>.
 
-On the other side of the channel are <b>Stable Providers</b>. Stable Providers want to go levered long bitcoin. This means that Stable Providers want to use their Bitcoin to get more Bitcoin. However, Stable Receivers put their Bitcoin at risk by doing so.
+On the other side of the channel are <b>Stable Providers</b>. Stable Providers want to lever their bitcoin. In simple terms, this means that Stable Providers want to use their Bitcoin to get more Bitcoin. However, Stable Receivers put their Bitcoin at risk by doing so.
 
+These two nodes query price feeds at regular intervals. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $100 of bitcoin. Each party remains self-custodial. Either party may opt out at anytime, either by a cooperative on-chain channel close or forced channel close. 
 
-These two nodes query price feeds at regular intervals. Then, based on the new price, they update their channel balance to keep the Stable Receiver stable at $100 of bitcoin. Either party may opt out at anytime, either by a cooperative or forced channel close. 
-
+This basic process works as follows:
 <ul>
-<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less Bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider.
+<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less Bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. In the base case, the Stable Provider has a 2x long bitcoin position. 
 <li>If the price of bitcoin goes down, the Stable Provider loses bitcoin. This is because it takes more Bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
 </ul>
 
-Stable Channels are unannounced to the public network and are non-routing channels. These are vanilla Lightning channels with no DLCs.
+Stable Channels are unannounced to the public network and are non-routing channels. Technologially, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
-Stable Channels work on "Core Lightning" -- which is Blockstream's implementation of the Lightning Network <link>https://www.github.com/BOLTs <link>. 
+Stable Channels work on "Core Lightning," which is Blockstream's implementation of the Lightning Network specification. 
 
 A Stable Channels work like this:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
-<li>Select the price feeds. By default, Stable Channels uses the median of five price feeds: BitStamp, Coinbase, CoinGecko, Coinbase, and BitBlock.
-<li>Create a dual-funded channel with the counterparty, each putting in the full amount of the Stable Channel. 
+<li>Select the price feeds. By default, Stable Channels takes the median of five price feeds: BitStamp, Coinbase, CoinGecko, Coinbase, and BitBlock.
+<li>Create a dual-funded channel with the counterparty, each putting in the amount of the Stable Channel. 
 <ul>
-<li> <i>Example: If the Stable Channel is for $100, each side of the channel puts in $100, for a total channel capacity of $200</i>
+<li> <i>Example: If the Stable Channel is for $100, each side of the channel puts in $100, for a total channel capacity of $200 at the time of channel creation</i>
 </ul>
-<li>Query the price feeds' APIs and update the Stable Channel balance accordingly:
+<li>Query the five price feeds' APIs and update the Stable Channel balance accordingly:
 <ul>
 <li>If the price went down, the Stable Provider needs to pay the Stable Receiver. 
 <li>If the price went up, the Stable Receiver needs to pay the Stable Provider.
-<li>If the price stayed the same or moved only a tiny amount, no payment is needed.
+<li>If the price stayed the same or moved only a tiny amount, no payment is required
 </ul>
 </ol>
 
 ##  Payout matrix
 
-Assume that we enter into a stable agreement at a price of $27,500 per Bitcoin. Each side puts in 1 Bitcoin, for a total channel capacity of 2 Bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%.
+Assume that we enter into a stable agreement at a price of $27,500 per Bitcoin. Each side puts in 1 Bitcoin, for a total channel capacity of 2 Bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%. Check out this payout matrix to better understand the mechanics of the trade agreement.
 
 Abbreviations:
 - SR = Stable Receiver
@@ -54,9 +54,9 @@ Abbreviations:
 
 ## Getting started with Core Lightning Plugins
 
-Terminal access to a "Core Lighting" node is required.
+Terminal access to Bitcoind and a "Core Lighting" node is required.
 
-Access or create the `/plugins` folder on your node. and `cd` into this folder.
+Access or create the `/plugins` folder on your node, and `cd` into this folder.
 
 Run `git clone [stablechannels.com](https://github.com/toneloc/stable-channels)`
 
@@ -80,15 +80,15 @@ The full command might look like this: `stable-channels 2440124x15x0 100 0.2 Tru
 
 ## Rationale and Challenges
 
-The most valuable stablecoins today are Tether and USDC. These stablecoins hold their value in cash and bonds. This cash and these bonds have custodians. These custodians are centralized companies and may be forced to freeze these assets or revoke banking access. Either of these may mark the effective failure of that stablecoin to retain its purchasing power. 
+The most valuable stablecoins today are Tether and USDC. These stablecoins hold their value in fiat: cash and bonds. This cash and these bonds have fiat custodians. These fiat custodians are centralized companies that may be forced to freeze these assets or revoke banking access. Either of these scenarios mark a liveness failure of that stablecoin to retain its purchasing power, or worse.
 
-Stable Channels intends to provide a more socially scalable solution. Stable Channels, as a solution, is self-custodial, has no token or token issuer, and intends to give a real-time, streaming finance experience for its users. 
+Stable Channels intends to provide a more socially scalable solution. Stable Channels, as a solution, is self-custodial, has no token or token issuer, and intends to give a real-time, streaming finance experience for its users. The vision is to create a self-custoodial derivatives exchange where users can hedge or lever up their Bitcoin exposure.
 
-Stable Channels faces challenges. Stable Channels inherit many of the challenges of the Lightning Network. One challeges is that with Lightning, bitcoin is held in an online wallet. Another challenges is that both nodes must always be online. Yet another challenge is getting trustworthy price feeds. Finally, there are various cyber and social engineering attacks that we can envision. 
+Stable Channels inherit many of the challenges of the Lightning Network. One challeges is that with Lightning, Bitcoin is held in an online wallet. Another challenges is that both nodes must always be online. Yet another challenge is getting trustworthy price feeds. Finally, there are various potential cyber and social engineering attacks.
 
-The Stable Channels approach is that while all of these failure modes and attacks are plausible, it is only by building a USD experience on top of <i>only bitcoin</i> that we can give users the best USD-like experience. 
+The Stable Channels approach is that while all of these failure modes and attacks are plausible, it is only by building a USD experience on top of <i>only bitcoin</i> that we can, over the longterm, give users the best derivatives trading experience. 
 
-For those users who want USD experience and are Americans, we recommmend FDIC-insured bank accounts. 
+For those users who want USD experience and are Americans, we recommmend FDIC-insured bank accounts. For those users who want Bitcoin exposure, we recommend simply HODLing spot Bitcoin.
 
 ## Interactive channel open workflow
 
