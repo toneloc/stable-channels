@@ -78,6 +78,29 @@ If you already have a channel and it is correctly balanced, then change if to St
 
 The full command might look like this: `stable-channels 2440124x15x0 100 0.2 True`
 
+## Roadmap
+
+#### Done:
+- [x] bash script version
+- [x] first CLN plugin version
+- [x] first Python version
+- [x] CLI Greenlight integration
+- [x] price feed integration
+
+#### To do:
+- [ ] user feedback on CLN plugin
+- [ ] use CLN `datastore` command to manage Stable Channel details
+- [ ] price feed sanity checks
+- [ ] accounting commands
+- [ ] Python Greenlight integration
+- [ ] VLS integration
+- [ ] mobile <-> Greenlight integration
+- [ ] dual-funded flow
+- [ ] read-only iPhone app published in App Store
+- [ ] read-only Android app published in App Store
+- [ ] crypto keys on mobile
+- [ ] FinalBoss plugin
+
 ## Rationale and Challenges
 
 The most valuable stablecoins today are Tether and USDC. These stablecoins hold their value in fiat: cash and bonds. This cash and these bonds have fiat custodians. These fiat custodians are centralized companies that may be forced to freeze these assets or revoke banking access. Either of these scenarios mark a liveness failure of that stablecoin to retain its purchasing power, or worse.
