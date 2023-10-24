@@ -93,6 +93,7 @@ The full command might look like this: `stable-channels 2440124x15x0 100 0.2 Tru
 - [ ] price feed sanity checks
 - [ ] accounting commands
 - [ ] Python Greenlight integration
+- [ ] trading web app
 - [ ] VLS integration
 - [ ] mobile <-> Greenlight integration
 - [ ] dual-funded flow
