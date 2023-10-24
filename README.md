@@ -88,6 +88,7 @@ The full command might look like this: `stable-channels 2440124x15x0 100 0.2 Tru
 - [x] price feed integration
 
 #### To do:
+- [ ] move Stable Channels details to conf files
 - [ ] user feedback on CLN plugin
 - [ ] use CLN `datastore` command to manage Stable Channel details
 - [ ] price feed sanity checks
