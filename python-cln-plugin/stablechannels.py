@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 
 # PeerStables: p2p USD stable channels on Lightning
 
@@ -202,20 +203,20 @@ def currencyconvert(plugin, amount, currency):
     val = statistics.median([m.millisatoshis for m in rates.values()]) * float(amount)
     return {"msat": Millisatoshi(round(val))}
 
-# 5 scenarios
-# 1 - amount to small to worry about = do nothing
-# 2 - node is stableReceiver and needs to get paid = enter expect payment loop
-# 3 - node is stableProvider and needs to get paid = enter expect payment loop
-# 4 - node is stableReceiver and needs to pay = pay
-# 5 - mode is stableProvider and needs to pay = pay
+# 5 possible initial scenarios:
+# Scenario 1 - amount to small for payment => do nothing
+# Scenario 2 - node is stableReceiver and expects to get paid => enter expect payment loop
+# Scenario 3 - node is stableReceiver and expects to pay => pay
+# Scenario 4 - node is stableProvider and expects to pay => pay
+# Scenario 5 - node is stableProvider and expects to get paid => enter expect payment loop
 def check_stables(stable_channel):
     print(stable_channel.is_stable_receiver)
     l1 = LightningRpc(stable_channel.lightning_rpc_path)
 
     expected_msats = currencyconvert(plugin, stable_channel.expected_dollar_amount, "USD")['msat']
 
-    # ensure connected ... 
-    print(l1.connect(stable_channel.counterparty))
+    # Ensure connected
+    print("LN connection details" + l1.connect(stable_channel.counterparty))
     user_funds_data = l1.listfunds()
     channels = user_funds_data.get("channels", [])
     
@@ -226,22 +227,16 @@ def check_stables(stable_channel):
             print("Our balance.................... = " + str(stable_channel.our_balance))
             print("Their balance.................. = " + str(stable_channel.their_balance))
    
-
     if stable_channel.is_stable_receiver:
         stable_channel.stable_receiver_dollar_amount = round((int(stable_channel.our_balance) * stable_channel.expected_dollar_amount) / int(expected_msats), 3)
     else:
         stable_channel.stable_receiver_dollar_amount = round((int(stable_channel.their_balance) * stable_channel.expected_dollar_amount) / int(expected_msats), 3)
-
-     # Set the timezone to Eastern Time (ET)
+    
+    # Get time
     eastern_timezone = pytz.timezone('US/Eastern')
-
-    # Get the current time in the Eastern Time zone
     current_time_et = datetime.datetime.now(eastern_timezone)
-
-    # Format the current time prettily
     formatted_time = current_time_et.strftime('%A, %B %d, %Y %I:%M:%S %p %Z')
 
-    # Print the formatted time
     print("Time = " + formatted_time)
     print("Is stable receiver?......     = " + str(stable_channel.is_stable_receiver))
     print("Stable asset.............     = USD")
@@ -251,15 +246,14 @@ def check_stables(stable_channel):
     # print("Current margin ratio........ = " + str("TODO"))
     print("Expected stable receiver msats= " + str(expected_msats))
     
-
     if stable_channel.is_stable_receiver:
         print("Current stable receiver msats = " + str(stable_channel.our_balance))
     else:
         print("Current stable receiver msats = " + str(stable_channel.their_balance))
 
-
     amount_too_small = False
 
+    # scenario 1 - amount to small for payment => do nothingy
     if abs(stable_channel.expected_dollar_amount - float(stable_channel.stable_receiver_dollar_amount)) < 0.01:
         amount_too_small = True
         print("Difference too small for payment.")
@@ -271,33 +265,28 @@ def check_stables(stable_channel):
         else:
             may_need_to_pay_amount = round(abs(int(expected_msats) - int(stable_channel.their_balance)))
 
-    # USD price went down.
+    # Scenario 2 - node is stableReceiver and expects to get paid => enter expect payment loop
     if not amount_too_small and (stable_channel.stable_receiver_dollar_amount < stable_channel.expected_dollar_amount):
-        # Scenario 1 - is stable receiver
         if stable_channel.is_stable_receiver:
             print("As Stable Receiver, I expect to GET PAID.")
             # TODO add expect payment loop
 
-        # Scenario 2 - is stable provider
+        # Scenario 3 - node is stableProvider and expects to pay => pay
         elif not(stable_channel.is_stable_receiver):
             print("As Stable Provider, I expect to PAY node ID = " + stable_channel.counterparty)
             result = l1.keysend(stable_channel.counterparty,may_need_to_pay_amount)
             print(result)
 
-    # Scenario 3
-    elif amount_too_small:
-        print("Price unchanged or difference too small; no payment needed.")
-
     # USD price went up
     # TODO why isnt expected_dollar_amount being a float?
     elif not amount_too_small and stable_channel.stable_receiver_dollar_amount > stable_channel.expected_dollar_amount:
-        # Scenario 4
+        # Scenario 4 - mode is stableProvider and expects to pay => pay
         if stable_channel.is_stable_receiver:
             print("As Stable Receiver, I expect to PAY + " + stable_channel.counterparty)
             result = l1.keysend(stable_channel.counterparty,may_need_to_pay_amount)
             print(result)
 
-        # Scenario 5
+        # Scenario 5 - node is stableProvider and expects to get paid => enter expect payment loop
         elif not(stable_channel.is_stable_receiver):
             print("As Stable Provider, I expect to GET PAID.")
             # do_expect_payment_loop(need_to_pay_amount + our_balance)
