@@ -86,18 +86,19 @@ The full command might look like this: `stable-channels 2440124x15x0 100 0.2 Tru
 - [x] first Python version
 - [x] CLI Greenlight integration
 - [x] price feed integration
+- [x] UTXOracle plugin - https://github.com/toneloc/plugins/blob/master/utxoracle/utxoracle.py
+- [x] dual-funded flow
 
 #### To do:
-- [ ] move Stable Channels details to conf files
+- [ ] move Stable Channels details to conf files (*)
 - [ ] user feedback on CLN plugin
-- [ ] use CLN `datastore` command to manage Stable Channel details
+- [ ] use CLN `datastore` command to manage Stable Channel details (*)
 - [ ] price feed sanity checks
 - [ ] accounting commands
 - [ ] Python Greenlight integration
 - [ ] trading web app
 - [ ] VLS integration
-- [ ] mobile <-> Greenlight integration
-- [ ] dual-funded flow
+- [ ] mobile <-> RPC Greenlight integration
 - [ ] read-only iPhone app published in App Store
 - [ ] read-only Android app published in App Store
 - [ ] crypto keys on mobile
