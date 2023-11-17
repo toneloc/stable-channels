@@ -64,7 +64,6 @@ class StableChannel:
     def log_json(instance):
         print(json.dumps(instance.__dict__, indent=4, default=str))
 
-
 Source = namedtuple('Source', ['name', 'urlformat', 'replymembers'])
 
 sources = [
