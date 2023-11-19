@@ -1,12 +1,6 @@
 #!/usr/bin/python3
 
-# PeerStables: p2p USD stable channels on Lightning
-
-"""
-╔═╗┌─┐┌─┐┬─┐╔═╗┌┬┐┌─┐┌┐ ┬  ┌─┐┌─┐  
-╠═╝├┤ ├┤ ├┬┘╚═╗ │ ├─┤├┴┐│  ├┤ └─┐  
-╩  └─┘└─┘┴└─╚═╝ ┴ ┴ ┴└─┘┴─┘└─┘└─┘                                                       
-"""
+# PeerStables: p2p BTCUSD trading on Lightning
 
 from pyln.client import Plugin
 from collections import namedtuple
@@ -17,13 +11,10 @@ from requests.packages.urllib3.util.retry import Retry
 import requests
 import statistics
 from pyln.client import LightningRpc
-import random 
-from threading import Timer
-import os
 import time
-import datetime
-import pytz
-from decimal import Decimal
+from datetime import datetime
+from apscheduler.schedulers.blocking import BlockingScheduler
+import threading
 
 plugin = Plugin()
 
@@ -39,9 +30,12 @@ class StableChannel:
         lightning_rpc_path: str,
         our_balance: float,
         their_balance: float,
-        deliquency_meter: int,
-        stable_receiver_dollar_amount: float,   # New attribute
-        stable_provider_dollar_amount: float    # New attribute
+        delinquency_meter: int,
+        stable_receiver_dollar_amount: float,
+        stable_provider_dollar_amount: float,
+        timestamp: int,
+        formatted_datetime: str,
+        payment_made: bool
     ):
         self.plugin = plugin
         self.short_channel_id = short_channel_id
@@ -52,26 +46,16 @@ class StableChannel:
         self.lightning_rpc_path = lightning_rpc_path
         self.our_balance = our_balance
         self.their_balance = their_balance
-        self.deliquency_meter = deliquency_meter
+        self.delinquency_meter = delinquency_meter
         self.stable_receiver_dollar_amount = stable_receiver_dollar_amount
         self.stable_provider_dollar_amount = stable_provider_dollar_amount
-
-    def print_values(self):
-        # print("Plugin:", self.plugin)
-        print("Short Channel id:", self.short_channel_id)
-        print("Expected Dollar Amount:", self.expected_dollar_amount)
-        print("Minimum Margin Ratio:", self.minimum_margin_ratio)
-        print("Is Stable Receiver:", self.is_stable_receiver)
-        print("Counterparty:", self.counterparty)
-        print("Lightning RPC path", self.lightning_rpc_path)
-        print("Our Balance:", self.our_balance)
-        print("Their Balance:", self.their_balance)
-        print("Deliquency Meter:", self.deliquency_meter)
-        print("Stable Receiver Dollar Amount:", self.stable_receiver_dollar_amount)
-        print("Stable Provider Dollar Amount:", self.stable_provider_dollar_amount)
+        self.timestamp = timestamp
+        self.formatted_datetime = datetime
+        self.payment_made = payment_made
 
 Source = namedtuple('Source', ['name', 'urlformat', 'replymembers'])
 
+# 5 price feed sources
 sources = [
     # e.g. {"high": "18502.56", "last": "17970.41", "timestamp": "1607650787", "bid": "17961.87", "vwap": "18223.42", "volume": "7055.63066541", "low": "17815.92", "ask": "17970.41", "open": "18250.30"}
     Source('bitstamp',
@@ -165,36 +149,6 @@ def get_rates(plugin, currency):
     print("rates line 165",rates)
     return rates
 
-##############
-@plugin.method("listalltransactions")
-def listalltransactions():
-    l1 = LightningRpc("/home/ubuntu/.lightning/testnet/lightning-rpc")
-    balances = l1.listtransactions()
-    print(balances)
-    return balances
-
-@plugin.method("printinvoice")
-def printinvoice():
-    """Prints invoice."""
-    l1 = LightningRpc("/home/ubuntu/.lightning/testnet/lightning-rpc")
-    invoice = l1.invoice(100, "lbl{}".format(random.random()), "testpayment")
-    print("invoice")
-    print(invoice)
-    return invoice
-    # return get_rates(plugin, cu
-
-@plugin.method("stablesendcustommmsg")
-def stablesendcustommmsg(plugin):
-    """Gets currency from given APIs."""
-    l1 = LightningRpc("/home/ubuntu/.lightning/testnet/lightning-rpc")
-    result = l1.sendcustommsg("030d21990f4c6394165aabd43e793ea572b822fa33c2fd2c7f9b406315e191234c","0X68656C6C6F")
-    return result
-
-@plugin.method("acceptstable")
-def acceptstable(plugin, currency):
-    return {"hello!" : 2}
-    # return get_rates(plugin, currency.upper())
-
 @plugin.method("currencyconvert")
 def currencyconvert(plugin, amount, currency):
     """Converts currency using given APIs."""
@@ -204,73 +158,54 @@ def currencyconvert(plugin, amount, currency):
 
     val = statistics.median([m.millisatoshis for m in rates.values()]) * float(amount)
     
-    print("Estimated USD price =", "{:.2f}".format(100000000000 / statistics.median([m.millisatoshis for m in rates.values()])))
+    estimated_price = "{:.2f}".format(100000000000 / statistics.median([m.millisatoshis for m in rates.values()]))
 
-    return {"msat": Millisatoshi(round(val))}
+    return ({"msat": Millisatoshi(round(val))}, estimated_price)
 
-# 5 scenarios
-# 1 - amount to small to worry about = do nothing
-# 2 - node is stableReceiver and needs to get paid = enter expect payment loop
-# 3 - node is stableProvider and needs to get paid = enter expect payment loop
-# 4 - node is stableReceiver and needs to pay = pay
-# 5 - mode is stableProvider and needs to pay = pay
-# sc = stable channel
+def start_scheduler(sc):
+    # Now, enter into regularly scheduled programming
+    # Schedule the check balances every 1 minute 
+    scheduler = BlockingScheduler()
+    scheduler.add_job(check_stables, 'cron', minute='0/1', args=[sc])
+    scheduler.start()
+
+# 5 scenarios to handle
+# Scenario 1 - Difference to small to worry about = do nothing
+# Scenario 2 - Node is stableReceiver and needs to get paid = wait 60 seconds; check on payment
+# Scenario 3 - Node is stableProvider and needs to pay = keysend
+# Scenario 4 - Node is stableReceiver and needs to pay = keysend
+# Scenario 5 - Node is stableProvider and expects to get paid
+# "sc" = "Stable Channel" object
 def check_stables(sc):
     l1 = LightningRpc(sc.lightning_rpc_path)
 
-    expected_msats = currencyconvert(plugin, sc.expected_dollar_amount, "USD")['msat']
+    msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
 
-    # ensure connected ... 
-    print(l1.connect(sc.counterparty))
-    user_funds_data = l1.listfunds()
-    channels = user_funds_data.get("channels", [])
+    expected_msats = msat_dict["msat"]
+
+    # Ensure we are connected
+    list_funds_data = l1.listfunds()
+    channels = list_funds_data.get("channels", [])
     
+    # Find the correct stable channel
     for channel in channels:
         if channel.get("short_channel_id") == sc.short_channel_id:
             sc.our_balance = channel.get("our_amount_msat")
             sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
-            print("Our balance.................... = " + str(sc.our_balance))
-            print("Their balance.................. = " + str(sc.their_balance))
-   
 
+    # Get Stable Receiver dollar amount
     if sc.is_stable_receiver:
         sc.stable_receiver_dollar_amount = round((int(sc.our_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
     else:
         sc.stable_receiver_dollar_amount = round((int(sc.their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
-     # Set the timezone to Eastern Time (ET)
-    eastern_timezone = pytz.timezone('US/Eastern')
-
-    # Get the current time in the Eastern Time zone
-    current_time_et = datetime.datetime.now(eastern_timezone)
-
-    # Format the current time prettily
-    formatted_time = current_time_et.strftime('%A, %B %d, %Y %I:%M:%S %p %Z')
-
-    # Print the formatted time
-    print("Time = " + formatted_time)
-    print("Price feed median = ..... ")
-    print("Is stable receiver?......     = " + str(sc.is_stable_receiver))
-    print("Stable asset.............     = USD")
-    print("Expected stable reciever amt  = " + str(sc.expected_dollar_amount))
-    print("Current stable receiver amt   = " + str(sc.stable_receiver_dollar_amount))
-    print("Minimum margin ratio........  = " + str(sc.minimum_margin_ratio))
-    # print("Current margin ratio........ = " + str("TODO"))
-    print("Expected stable receiver msats= " + str(expected_msats))
+    formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
     
-
-    if sc.is_stable_receiver:
-        print("Current stable receiver msats = " + str(sc.our_balance))
-    else:
-        print("Current stable receiver msats = " + str(sc.their_balance))
-
-
     amount_too_small = False
 
+    # 1 - Difference to small to worry about = do nothing
     if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
         amount_too_small = True
-        print("Difference too small for payment.")
-        print("")
     else:
         # Round to nearest msat
         if sc.is_stable_receiver:
@@ -280,57 +215,98 @@ def check_stables(sc):
 
     # USD price went down.
     if not amount_too_small and (sc.stable_receiver_dollar_amount < sc.expected_dollar_amount):
-        # Scenario 1 - is stable receiver
+        # Scenario 2 - Node is stableReceiver and needs to get paid 
+        # Wait 30 seconds
         if sc.is_stable_receiver:
-            print("As Stable Receiver, I expect to get paid.")
-            # TODO add expect payment loop
+            time.sleep(30)
 
-        # Scenario 2 - is stable provider
+            # We should have payment now; check amount is within 1 penny
+            sc.our_balance = channel.get("our_amount_msat")
+            sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
+
+            sc.stable_receiver_dollar_amount = round((int(sc.our_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
+
+            if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
+                sc.payment_made = True
+            else:
+                # Delinquecny. Increase delinquency meter
+                sc.delinquency_meter = sc.delinquency_meter + 1
+            
+
         elif not(sc.is_stable_receiver):
-            print("As Stable Provider, I expect to pay.")
+            # 3 - Node is stableProvider and needs to pay = keysend
             result = l1.keysend(sc.counterparty,may_need_to_pay_amount)
-            print(result)
+            
+            # TODO - error handling
+            sc.payment_made = True
 
-    # Scenario 3
     elif amount_too_small:
-        print("Price unchanged or difference too small. No payment needed.")
+        sc.payment_made = False
 
     # USD price went up
     # TODO why isnt expected_dollar_amount being a float?
     elif not amount_too_small and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
-        # Scenario 4
+        # 4 - Node is stableReceiver and needs to pay = keysend
         if sc.is_stable_receiver:
-            print("As Stable Receiver, I expect to pay.")
             result = l1.keysend(sc.counterparty,may_need_to_pay_amount)
-            print(result)
+            
+            # TODO - error handling
+            sc.payment_made = True
 
-        # Scenario 5
+        # Scenario 5 - Node is stableProvider and expects to get paid
         elif not(sc.is_stable_receiver):
-            print("As Stable Provider, I expect to get paid.")
-            # do_expect_payment_loop(need_to_pay_amount + our_balance)
+            time.sleep(30)
 
+            # We should have payment now; check amount is within 1 penny
+            sc.our_balance = channel.get("our_amount_msat")
+            sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
 
-    Timer(600, check_stables, args=[sc]).start()
+            sc.stable_receiver_dollar_amount = round((int(sc.their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
+
+            if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
+                sc.payment_made = True
+            else:
+                # Delinquecny. Increase delinquency meter
+                sc.delinquency_meter = sc.delinquency_meter + 1
+
+    json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "delinquency_meter": {sc.delinquency_meter}}},\n'
+
+    # Log the result
+    if sc.is_stable_receiver:
+        file_path = '/home/ubuntu/stablelog1.csv'
+
+        with open(file_path, 'a') as file:
+            file.write(json_line)
+
+    elif not(sc.is_stable_receiver):
+        file_path = '/home/ubuntu/stablelog2.csv'
+
+        with open(file_path, 'a') as file:
+            file.write(json_line)
+
 
 @plugin.init()
 def init(options, configuration, plugin):
+    print("here")
     set_proxies(plugin)
-    sourceopts = options['stable-details']
+    stable_details = options['stable-details']
 
-    # TODO pass in as args or add to lightning conf file instead?
-    if sourceopts != ['']:
-        for s in sourceopts:
+    print(str(stable_details))
+
+    # TODO - Pass in as plugin start args
+    if stable_details != ['']:
+        for s in stable_details:
             parts = s.split(',')
             
             if len(parts) != 6:
-                raise Exception("Too few or too many paramaters at start.")
+                raise Exception("Too few or too many Stable Channel paramaters at start.")
 
             if parts[3] == "False":
                 is_stable_receiver = False
             elif parts[3] == "True":
                 is_stable_receiver = True
 
-            stable_channel = StableChannel(
+            sc = StableChannel(
                 plugin=plugin, 
                 short_channel_id=parts[0],  
                 expected_dollar_amount=float(parts[1]), 
@@ -340,20 +316,28 @@ def init(options, configuration, plugin):
                 lightning_rpc_path=parts[5],
                 our_balance=0,
                 their_balance=0,
-                deliquency_meter=0,
+                delinquency_meter=0,
                 stable_receiver_dollar_amount=0,
-                stable_provider_dollar_amount=0
+                stable_provider_dollar_amount=0,        
+                timestamp=0,
+                formatted_datetime='',
+                payment_made=False
             )
 
-        # stable_channel.print_values()
-
+    # Let lightningd sync up before starting the stable tests
     time.sleep(15)
-    check_stables(stable_channel)
 
-# As a bad example: binance,https://api.binance.com/api/v3/ticker/price?symbol=BTC{currency}T,price
-plugin.add_option(name='stable-details', default='', description='Add source name,urlformat,resultmembers...')
+    # And ensure connected
+    l1 = LightningRpc(sc.lightning_rpc_path)
+    assert(l1.connect(sc.counterparty))
+
+    # need to start a new thread so init funciotn can return
+    threading.Thread(target=start_scheduler, args=(sc,)).start()
+    
+plugin.add_option(name='stable-details', default='', description='Input stable details.')
 
 # This has an effect only for recent pyln versions (0.9.3+).
 plugin.options['stable-details']['multi'] = True
 
 plugin.run()
+
