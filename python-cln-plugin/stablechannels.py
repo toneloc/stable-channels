@@ -166,7 +166,7 @@ def start_scheduler(sc):
     # Now, enter into regularly scheduled programming
     # Schedule the check balances every 1 minute 
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/1', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
     scheduler.start()
 
 # 5 scenarios to handle
@@ -220,13 +220,16 @@ def check_stables(sc):
         if sc.is_stable_receiver:
             time.sleep(30)
 
-            # We should have payment now; check amount is within 1 penny
-            sc.our_balance = channel.get("our_amount_msat")
-            sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
+            # We should have payment now; check that amount is within 1 penny
+            channels = list_funds_data.get("channels", [])
+    
+            for channel in channels:
+                if channel.get("short_channel_id") == sc.short_channel_id:
+                    new_our_balance = channel.get("our_amount_msat")
+                  
+            new_stable_receiver_dollar_amount = round((int(new_our_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
-            sc.stable_receiver_dollar_amount = round((int(sc.our_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
-
-            if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
+            if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
             else:
                 # Delinquecny. Increase delinquency meter
@@ -257,13 +260,18 @@ def check_stables(sc):
         elif not(sc.is_stable_receiver):
             time.sleep(30)
 
-            # We should have payment now; check amount is within 1 penny
-            sc.our_balance = channel.get("our_amount_msat")
-            sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
+            channels = list_funds_data.get("channels", [])
+    
+            for channel in channels:
+                if channel.get("short_channel_id") == sc.short_channel_id:
 
-            sc.stable_receiver_dollar_amount = round((int(sc.their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
+                    # We should have payment now; check amount is within 1 penny
+                    new_our_balance = channel.get("our_amount_msat")
+                    new_their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance)
 
-            if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
+                    new_stable_receiver_dollar_amount = round((int(new_their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
+
+            if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
             else:
                 # Delinquecny. Increase delinquency meter
@@ -283,7 +291,6 @@ def check_stables(sc):
 
         with open(file_path, 'a') as file:
             file.write(json_line)
-
 
 @plugin.init()
 def init(options, configuration, plugin):
