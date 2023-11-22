@@ -1,7 +1,6 @@
 body {
     text-align: center;
     margin-top: 50px;
-    position: relative; /* For absolute positioning of circles and line */
 }
 
 .circle {
@@ -16,7 +15,7 @@ body {
     font-size: 14px;
     font-weight: bold;
     position: absolute;
-    top: 50px; /* Adjust top position */
+    top: 120px; /* Adjust top position */
 }
 
 #circle1 {
@@ -33,10 +32,10 @@ body {
     height: 30px; /* Line thickness */
     background-color: gray;
     position: absolute;
-    top: 150px; /* Align with circle center */
     left: calc(33.3%); /* Start from the edge of the left circle */
     right: calc(33.3%); /* End at the edge of the right circle */
     z-index: -1; /* Behind the circles */
+    top: 205px;
 }
 
 .caption {
@@ -52,11 +51,20 @@ body {
 .table-container {
     width: 100%;
     height: 50vh; /* Half of the viewport height */
-    overflow-y: auto; /* Make it scrollable */
-    position: absolute;
+    overflow-y: auto
     bottom: 0;
     left: 0;
-    background-color: white; /* Ensure contrast with table for visibility */
+    background-color: white; *//* Ensure contrast with table for visibility */
+}
+
+.bottom-half-div {
+    position: absolute;
+    top: 50vh; /* Start the div 50% down the page */
+    left: 0;
+    width: 100%; /* Full width */
+    height: 50vh; /* Take up the bottom half of the viewport height */
+    /* Additional styling as needed */
+    background-color: #f8f9fa; /* Just an example color */
 }
 
 table {
@@ -67,7 +75,7 @@ table {
 
 th, td {
     padding: 8px;
-    border: 1px solid #ddd; /* Light grey border */
+    border: 1px solid #ddd;  Light grey border 
 }
 
 th {
@@ -77,4 +85,4 @@ th {
 
 tr:nth-child(even) {
     background-color: #f9f9f9;
-}
+}/**/
