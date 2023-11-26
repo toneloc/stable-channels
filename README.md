@@ -1,3 +1,6 @@
+
+#### Note: Skip to [Getting Started](#getting-started)** for technical startup instructions.
+
 ## Stable Channels
 
 <b>Stable Channels</b> lets Lightning Network node runners keep one of their channel balances stable in dollar terms, for example $100. These special channels are called <b>Stable Channels</b>. These node runners are called <b>Stable Receivers</b>.
@@ -52,9 +55,9 @@ Abbreviations:
 | 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
 | 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
 
-## Getting started with Core Lightning Plugins
+## Getting Started
 
-Terminal access to Bitcoind and a "Core Lighting" node is required.
+Terminal access to bitcoind and a CLN node running version `23.05.2` is required.
 
 Access or create the `/plugins` folder on your node, and `cd` into this folder.
 
@@ -88,6 +91,7 @@ The full command might look like this: `stable-channels 2440124x15x0 100 0.2 Tru
 - [x] price feed integration
 - [x] UTXOracle plugin - https://github.com/toneloc/plugins/blob/master/utxoracle/utxoracle.py
 - [x] dual-funded flow
+- [x] mainnet deployment
 
 #### To do:
 - [ ] move Stable Channels details to conf files (*)
