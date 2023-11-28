@@ -69,7 +69,7 @@ Stable Channels has a few dependencies. Either copy the `requirements.txt` file 
 
 Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
-### Creating a dual-funded channel
+### Connecting and creating a dual-funded channel
 
 If your Lightning Node is running, you will need to stop your Lightning Node and restart it with the proper commands for dual-funded (or interactive) channels.
 
@@ -82,11 +82,31 @@ Next, start your CLN node, or modify your config files, to enable dual-funding c
 ```bash
 lightningd --daemon --log-file=/home/ubuntu/cln.log --lightning-dir=/home/ubuntu/lightning --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=200000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false
 ```
-
 THe "funder" flags instruct CLN on how to handle dual-funded channels. Bascially this command is saying: "This node is willing to fund a dual-funded up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
 
-Restart Lightning with the plugin: `lightningd --daemon --network=testnet --plugin=/home/ubuntu/stablechannels.py --
+Your counterparty will need to run a similary command. 
 
+Next connect to your counterparty running the CLN `connect` command. This will look something like: `lightning-cli connect 021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81 54.314.42.1`
+
+Now you are ready to dual-fund. This command will look something like `lightning-cli fundchannel 021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81 0.0025btc`
+
+If all goes well, we should be returned a txid for the dual-funded channel, and  both parties should have contributed 0.0025btc to the channel. 
+
+Now this needs to be confirmed on the blockchain. 
+
+### Starting Stable Channels
+
+First let's create the. If you are the stable receiver, your logs get writtent to `stablelog1.json`. Create that file
+
+We need to restart Lightning running the plugin and with the relevant details of the Stable Channel.
+
+This command will look something like this:
+
+```bash
+lightningd --daemon --log-file=/home/ubuntu/cln.log --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=1000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false --plugin=/home/ubuntu/stablechannels.py --stable-details=515501x1272x1,100,0.2,True,021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81,/home/ubuntu/.lightning/bitcoin/lightning-rpc
+```
+
+Your counterparty will need to run a similar command, and the Stable CHannels software should do the rest. 
 
 
 ## Roadmap
