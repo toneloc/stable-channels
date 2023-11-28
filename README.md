@@ -1,5 +1,5 @@
 
-#### Note: Skip to [Getting Started](#getting-started)** for technical startup instructions.
+#### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
 ## Stable Channels
 
@@ -57,29 +57,37 @@ Abbreviations:
 
 ## Getting Started
 
-Terminal access to bitcoind and a CLN node running version `23.05.2` is required.
+### Enivronment and dependencies
 
-Access or create the `/plugins` folder on your node, and `cd` into this folder.
+Terminal access to bitcoind and a CLN node running version `23.05.2` is required. Other versions may work but `23.08.1` does not work.
 
-Run `git clone [stablechannels.com](https://github.com/toneloc/stable-channels)`
+Python3 is also required. 
 
-This will create the `stable-channels` folder in `/plugins`.
+Clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py`. 
 
-If your Lightning Node is running, you will need to restart your Lightning Node to run the plugin. You can do this with the following commands. These commands are written for testnet.
+Stable Channels has a few dependencies. Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`. 
 
-Stop Lightning: `lightning-cli --testnet stop`
+Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
-Restart Lightning with the plugin: `lightningd --daemon --network=testnet --plugin=/home/ubuntu/plugins/`
+### Creating a dual-funded channel
 
-If you already have a channel and it is correctly balanced, then change if to Stable Channel with the following flags:
+If your Lightning Node is running, you will need to stop your Lightning Node and restart it with the proper commands for dual-funded (or interactive) channels.
 
-<ul>
-<li>1st parameter = short channel ID -> <i>Example:</i> `2440124x15x0`
-<li>2nd parameter = amount, in dollars, that you want to hold stabl, for example 100
-<li>3rd parameter = whether you are the stable receiver or not. Put `True` if you are the `Stable Receiver` and `False` if you are the `Stable Provider`
-</ul>
+You can do this with the following commands. These commands are written for testnet.
 
-The full command might look like this: `stable-channels 2440124x15x0 100 0.2 True`
+Stop Lightning: `lightning-cli stop` or `lightning-cli --testnet stop`.
+
+Next, start your CLN node, or modify your config files, to enable dual-funding channels up to the amount you want to stablize or leverage. This will look like this
+
+```bash
+lightningd --daemon --log-file=/home/ubuntu/cln.log --lightning-dir=/home/ubuntu/lightning --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=200000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false
+```
+
+THe "funder" flags instruct CLN on how to handle dual-funded channels. Bascially this command is saying: "This node is willing to fund a dual-funded up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
+
+Restart Lightning with the plugin: `lightningd --daemon --network=testnet --plugin=/home/ubuntu/stablechannels.py --
+
+
 
 ## Roadmap
 
@@ -95,9 +103,9 @@ The full command might look like this: `stable-channels 2440124x15x0 100 0.2 Tru
 
 #### To do:
 - [ ] move Stable Channels details to conf files (*)
+- [ ] dual-fund commands?
 - [ ] user feedback on CLN plugin
-- [ ] use CLN `datastore` command to manage Stable Channel details (*)
-- [ ] price feed sanity checks
+- [ ] use CLN `datastore` command to manage Stable Channel details (?)
 - [ ] accounting commands
 - [ ] Python Greenlight integration
 - [ ] trading web app
