@@ -1,0 +1,88 @@
+body {
+    text-align: center;
+    margin-top: 50px;
+}
+
+.circle {
+    width: 200px; /* Circle size */
+    height: 200px; /* Circle size */
+    border-radius: 50%;
+    color: black;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    font-weight: bold;
+    position: absolute;
+    top: 120px; /* Adjust top position */
+}
+
+#circle1 {
+    background-color: green;
+    left: calc(33.3% - 100px); /* Positioning 1/3rd from the left */
+}
+
+#circle2 {
+    background-color: orange;
+    right: calc(33.3% - 100px); /* Positioning 1/3rd from the right */
+}
+
+.line {
+    height: 30px; /* Line thickness */
+    background-color: gray;
+    position: absolute;
+    left: calc(33.3%); /* Start from the edge of the left circle */
+    right: calc(33.3%); /* End at the edge of the right circle */
+    z-index: -1; /* Behind the circles */
+    top: 205px;
+}
+
+.caption {
+    position: absolute;
+    font-weight: bold;
+    width: 100%;
+    text-align: center;
+    top: -20px; /* Caption position */
+    font-family: Arial, sans-serif;
+    font-size: 16px;
+}
+
+.table-container {
+    width: 100%;
+    height: 50vh; /* Half of the viewport height */
+    overflow-y: auto
+    bottom: 0;
+    left: 0;
+    background-color: white; *//* Ensure contrast with table for visibility */
+}
+
+.bottom-half-div {
+    position: absolute;
+    top: 50vh; /* Start the div 50% down the page */
+    left: 0;
+    width: 100%; /* Full width */
+    height: 50vh; /* Take up the bottom half of the viewport height */
+    /* Additional styling as needed */
+    background-color: #f8f9fa; /* Just an example color */
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+th, td {
+    padding: 8px;
+    border: 1px solid #ddd;  Light grey border 
+}
+
+th {
+    background-color: #f2f2f2;
+    font-weight: bold;
+}
+
+tr:nth-child(even) {
+    background-color: #f9f9f9;
+}/**/
