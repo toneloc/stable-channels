@@ -59,15 +59,14 @@ Abbreviations:
 
 ### Enivronment and dependencies
 
-Terminal access to bitcoind and a CLN node running version `23.05.2` is required. Other versions may work but `23.08.1` does not work.
-
-Python3 is also required. 
+- Terminal access to bitcoind and a CLN node running version `23.05.2` is required. Other versions may work but `23.08.1` does not work.
+- Python3 is also required. 
 
 Clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py`. 
 
-Stable Channels has a few dependencies. Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`. 
-
-Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
+Stable Channels has a few dependencies. 
+- Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
+- Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
 ### Connecting and creating a dual-funded channel
 
@@ -96,11 +95,13 @@ Now this needs to be confirmed on the blockchain.
 
 ### Starting Stable Channels
 
-First let's create the. If you are the stable receiver, your logs get writtent to `stablelog1.json`. Create that file
+First let's create the log file. If you are the stable receiver, your logs get writtent to `stablelog1.json`. Create that file
 
 We need to restart Lightning running the plugin and with the relevant details of the Stable Channel.
 
-This command will look something like this:
+Stop Lightning: `lightning-cli stop` or `lightning-cli --testnet stop`.
+
+The startup command will look something like this:
 
 ```bash
 lightningd --daemon --log-file=/home/ubuntu/cln.log --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=1000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false --plugin=/home/ubuntu/stablechannels.py --stable-details=515501x1272x1,100,0.2,True,021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81,/home/ubuntu/.lightning/bitcoin/lightning-rpc
