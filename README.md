@@ -38,25 +38,6 @@ A Stable Channels work like this:
 </ul>
 </ol>
 
-##  Payout matrix
-
-Assume that we enter into a stable agreement at a price of $27,500 per Bitcoin. Each side puts in 1 Bitcoin, for a total channel capacity of 2 Bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%. Check out this payout matrix to better understand the mechanics of the trade agreement.
-
-Abbreviations:
-- SR = Stable Receiver
-- SP = Stable Provider
-- Δ = Represents change
-
-| Price Change (%) | New BTC Price | SR (BTC) | SR (USD) | SP (BTC) | SP (USD) | SR Fiat Δ$ | SR BTC Δ | SR Fiat Δ% | SR BTC Δ% | SP Fiat Δ$ | SP BTC Δ | SP Fiat Δ% | SP BTC Δ% |
-|------------------|---------------|----------|----------|----------|----------|------------|----------|------------|----------|------------|----------|------------|----------|
-| -30              | $19,250      | 1.4286   | $27,500  | 0.5714   | $11,000  | $0         | +0.4286  | 0%         | +42.86%  | -$16,500   | -0.4286  | -60%       | -42.86%  |
-| -20              | $22,000      | 1.25     | $27,500  | 0.75     | $16,500  | $0         | +0.25    | 0%         | +25%     | -$11,000   | -0.25    | -40%       | -25%     |
-| -10              | $24,750      | 1.1111   | $27,500  | 0.8889   | $22,000  | $0         | +0.1111  | 0%         | +11.11%  | -$5,500    | -0.1111  | -20%       | -11.11%  |
-| 0                | $27,500      | 1        | $27,500  | 1        | $27,500  | $0         | 0       | 0%         | 0%       | $0         | 0       | 0%         | 0%       |
-| 10               | $30,250      | 0.9091   | $27,500  | 1.0909   | $33,000  | $0         | -0.0909 | 0%         | -9.09%   | +$5,500    | +0.0909 | +20%       | +9.09%   |
-| 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
-| 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
-
 ## Getting Started
 
 ### Enivronment and dependencies
@@ -114,6 +95,27 @@ What this command says is: "Make the Lightning channel with short ID a stable ch
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
 Logs for the Stable Receiver a are written to `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
+
+
+
+##  Payout matrix
+
+Assume that we enter into a stable agreement at a price of $27,500 per Bitcoin. Each side puts in 1 Bitcoin, for a total channel capacity of 2 Bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%. Check out this payout matrix to better understand the mechanics of the trade agreement.
+
+Abbreviations:
+- SR = Stable Receiver
+- SP = Stable Provider
+- Δ = Represents change
+
+| Price Change (%) | New BTC Price | SR (BTC) | SR (USD) | SP (BTC) | SP (USD) | SR Fiat Δ$ | SR BTC Δ | SR Fiat Δ% | SR BTC Δ% | SP Fiat Δ$ | SP BTC Δ | SP Fiat Δ% | SP BTC Δ% |
+|------------------|---------------|----------|----------|----------|----------|------------|----------|------------|----------|------------|----------|------------|----------|
+| -30              | $19,250      | 1.4286   | $27,500  | 0.5714   | $11,000  | $0         | +0.4286  | 0%         | +42.86%  | -$16,500   | -0.4286  | -60%       | -42.86%  |
+| -20              | $22,000      | 1.25     | $27,500  | 0.75     | $16,500  | $0         | +0.25    | 0%         | +25%     | -$11,000   | -0.25    | -40%       | -25%     |
+| -10              | $24,750      | 1.1111   | $27,500  | 0.8889   | $22,000  | $0         | +0.1111  | 0%         | +11.11%  | -$5,500    | -0.1111  | -20%       | -11.11%  |
+| 0                | $27,500      | 1        | $27,500  | 1        | $27,500  | $0         | 0       | 0%         | 0%       | $0         | 0       | 0%         | 0%       |
+| 10               | $30,250      | 0.9091   | $27,500  | 1.0909   | $33,000  | $0         | -0.0909 | 0%         | -9.09%   | +$5,500    | +0.0909 | +20%       | +9.09%   |
+| 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
+| 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
 
 
 ## Roadmap
