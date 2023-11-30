@@ -3,11 +3,13 @@
 
 ## Stable Channels
 
+This Twitter thread explains things pretty well, with an example - https://x.com/tonklaus/status/1729567459579945017
+
 <b>Stable Channels</b> lets Lightning Network node runners keep one of their channel balances stable in dollar terms, for example $100. These special channels are called <b>Stable Channels</b>. These node runners are called <b>Stable Receivers</b>.
 
-On the other side of the channel are <b>Stable Providers</b>. Stable Providers want to lever their bitcoin. In simple terms, this means that Stable Providers want to use their Bitcoin to get more Bitcoin. However, Stable Receivers put their Bitcoin at risk by doing so.
+On the other side of the channel are <b>Stable Providers</b>. Stable Providers want to leverage their bitcoin. In simple terms, this means that Stable Providers want to use their Bitcoin to get more Bitcoin. However, Stable Receivers put their Bitcoin at risk by doing so.
 
-These two nodes query price feeds at regular intervals. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $100 of bitcoin. Each party remains self-custodial. Either party may opt out at anytime, either by a cooperative on-chain channel close or forced channel close. 
+These two nodes query price feeds every 5 minutes. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $100 of bitcoin. Each party remains self-custodial. Either party may opt out at anytime, either by a cooperative on-chain channel close or forced channel close. 
 
 This basic process works as follows:
 <ul>
