@@ -72,11 +72,11 @@ Stable Channels has a few dependencies.
 
 If your Lightning Node is running, you will need to stop your Lightning Node and restart it with the proper commands for dual-funded (or interactive) channels.
 
-You can do this with the following commands. These commands are written for testnet.
+You can do this with the following commands.
 
 Stop Lightning: `lightning-cli stop` or `lightning-cli --testnet stop`.
 
-Next, start your CLN node, or modify your config files, to enable dual-funding channels up to the amount you want to stablize or leverage. This will look like this
+Next, start your CLN node, or modify your config files, to enable dual-funding channels up to the amount you want to stablize, or leverage. This will look like this
 
 ```bash
 lightningd --daemon --log-file=/home/ubuntu/cln.log --lightning-dir=/home/ubuntu/lightning --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=200000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false
@@ -107,10 +107,16 @@ The startup command will look something like this:
 lightningd --daemon --log-file=/home/ubuntu/cln.log --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=1000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false --plugin=/home/ubuntu/stablechannels.py --stable-details=515501x1272x1,100,0.2,True,021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81,/home/ubuntu/.lightning/bitcoin/lightning-rpc
 ```
 
-Your counterparty will need to run a similar command, and the Stable CHannels software should do the rest. 
+What this command says is: "Make the Lightning channel with short ID a stable channel at $100.00. Require the Stable Provider counterparty maintain 20% of the par value of the peg amount on his side of the channel. Is is `True` that the node running this commmand is the Stable Receiver. Here's the ID of the counterparty `02105..` and here's the RPC path."
+
+Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
+
+Logs for the Stable Receiver a are written to `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
 
 
 ## Roadmap
+
+Hope to move all this to issues and PRs soon.
 
 #### Done:
 - [x] bash script version
@@ -123,8 +129,9 @@ Your counterparty will need to run a similar command, and the Stable CHannels so
 - [x] mainnet deployment
 
 #### To do:
+- [ ] manage channel creation via `fundchannel` command
+- [ ] monitor channel creation tx, and commence `check_stables` after
 - [ ] move Stable Channels details to conf files (*)
-- [ ] dual-fund commands?
 - [ ] user feedback on CLN plugin
 - [ ] use CLN `datastore` command to manage Stable Channel details (?)
 - [ ] accounting commands
