@@ -40,6 +40,10 @@ A Stable Channels work like this:
 
 ## Getting Started
 
+Currently, this only works as a CLN plugin. This code is at the root of this directory. 
+
+I have also built some iOS apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
+
 ### Enivronment and dependencies
 
 - Terminal access to bitcoind and a CLN node running version `23.05.2` is required. Other versions may work but `23.08.1` does not work.
