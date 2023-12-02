@@ -1,7 +1,7 @@
 
 #### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
-## Stable Channels
+## Stable Channels - Version 1
 
 This Twitter thread explains things pretty well, with an example - https://x.com/tonklaus/status/1729567459579945017
 
@@ -42,7 +42,7 @@ A Stable Channels work like this:
 
 Currently, this only works as a CLN plugin. This code is at the root of this directory. 
 
-I have also built some iOS apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
+There are also some in-progress iOS apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
 
 ### Enivronment and dependencies
 
