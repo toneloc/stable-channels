@@ -106,7 +106,7 @@ while is_in_stable_mode:
 
 
 
-# our_macaroon='AgELYy1saWdodG5pbmcCPlNhdCBOb3YgMDUgMjAyMiAwNTowMzoxMiBHTVQrMDAwMCAoQ29vcmRpbmF0ZWQgVW5pdmVyc2FsIFRpbWUpAAAGIBcnf+0eDYq75V0fKEN42ulqrTHPRQAJ0JY6MBTaLAV3'
+# our_macaroon='______+0eDYq75V0fKEN42ulqrTHPRQAJ0JY6MBTaLAV3'
 # self_is_stable_receiver = True
 
 
