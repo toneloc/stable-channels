@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-# PeerStables: p2p BTCUSD trading on Lightning
+# Stable Channels: p2p BTCUSD trading on Lightning
 # Contents
 # Section 1 - Dependencies and main data structure
 # Section 2 - Price feed config and logic
