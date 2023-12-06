@@ -1,10 +1,16 @@
 #!/usr/bin/python3
 
 # PeerStables: p2p BTCUSD trading on Lightning
+# Contents
+# Section 1 - Dependencies and main data structure
+# Section 2 - Price feed config and logic
+# Section 3 - Core logic 
+# Section 4 - Plug-in initialization
 
-from pyln.client import Plugin
-from collections import namedtuple
-from pyln.client import Millisatoshi
+# Section 1 - Dependencies and main data structure
+from pyln.client import Plugin # Library for CLN Python plug-ins created by Blockstream 
+from collections import namedtuple # Standard on Python3
+from pyln.client import Millisatoshi # Library for CLN Python plug-ins created by Blockstream 
 from cachetools import cached, TTLCache
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
@@ -53,6 +59,7 @@ class StableChannel:
         self.formatted_datetime = datetime
         self.payment_made = payment_made
 
+# Section 2 - Price feed config and logic
 Source = namedtuple('Source', ['name', 'urlformat', 'replymembers'])
 
 # 5 price feed sources
@@ -162,19 +169,21 @@ def currencyconvert(plugin, amount, currency):
 
     return ({"msat": Millisatoshi(round(val))}, estimated_price)
 
+# Section 3 - Core logic 
+
+# This function is the scheduler, formatted to fire every 5 minutes
+# Regularly scheduled programming
 def start_scheduler(sc):
-    # Now, enter into regularly scheduled programming
-    # Schedule the check balances every 1 minute 
     scheduler = BlockingScheduler()
     scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
     scheduler.start()
 
 # 5 scenarios to handle
-# Scenario 1 - Difference to small to worry about = do nothing
-# Scenario 2 - Node is stableReceiver and needs to get paid = wait 60 seconds; check on payment
-# Scenario 3 - Node is stableProvider and needs to pay = keysend
-# Scenario 4 - Node is stableReceiver and needs to pay = keysend
-# Scenario 5 - Node is stableProvider and expects to get paid
+# Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
+# Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
+# Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
+# Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
+# Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
 def check_stables(sc):
     l1 = LightningRpc(sc.lightning_rpc_path)
@@ -183,11 +192,11 @@ def check_stables(sc):
 
     expected_msats = msat_dict["msat"]
 
-    # Ensure we are connected
+    # Get channel data  
     list_funds_data = l1.listfunds()
     channels = list_funds_data.get("channels", [])
     
-    # Find the correct stable channel
+    # Find the correct stable channel and set balances
     for channel in channels:
         if channel.get("short_channel_id") == sc.short_channel_id:
             sc.our_balance = channel.get("our_amount_msat")
@@ -204,11 +213,11 @@ def check_stables(sc):
     sc.payment_made = False
     amount_too_small = False
 
-    # 1 - Difference to small to worry about = do nothing
+    # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
     if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
         amount_too_small = True
     else:
-        # Round to nearest msat
+        # Round difference to nearest msat; we may need to pay it
         if sc.is_stable_receiver:
             may_need_to_pay_amount = round(abs(int(expected_msats) -  int(sc.our_balance)))
         else:
@@ -216,8 +225,7 @@ def check_stables(sc):
 
     # USD price went down.
     if not amount_too_small and (sc.stable_receiver_dollar_amount < sc.expected_dollar_amount):
-        # Scenario 2 - Node is stableReceiver and needs to get paid 
-        # Wait 30 seconds
+        # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment 
         if sc.is_stable_receiver:
             time.sleep(30)
 
@@ -225,24 +233,22 @@ def check_stables(sc):
 
             # We should have payment now; check that amount is within 1 penny
             channels = list_funds_data.get("channels", [])
-            print(channels)
     
             for channel in channels:
                 if channel.get("short_channel_id") == sc.short_channel_id:
                     new_our_balance = channel.get("our_amount_msat")
                   
             new_stable_receiver_dollar_amount = round((int(new_our_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
-            print("2,",str(new_stable_receiver_dollar_amount))
 
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
             else:
-                # Risk score. Increase risk score
+                # Increase risk score
                 sc.risk_score = sc.risk_score + 1
             
 
         elif not(sc.is_stable_receiver):
-            # 3 - Node is stableProvider and needs to pay = keysend
+            # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
             result = l1.keysend(sc.counterparty,may_need_to_pay_amount)
             
             # TODO - error handling
@@ -261,7 +267,7 @@ def check_stables(sc):
             # TODO - error handling
             sc.payment_made = True
 
-        # Scenario 5 - Node is stableProvider and expects to get paid
+        # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
         elif not(sc.is_stable_receiver):
             time.sleep(30)
 
@@ -278,17 +284,18 @@ def check_stables(sc):
                     new_their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance)
 
                     new_stable_receiver_dollar_amount = round((int(new_their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
-                    print("5,",str(new_stable_receiver_dollar_amount))
 
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
             else:
-                # Risk score. Increase risk score 
+                # Increase risk score 
                 sc.risk_score = sc.risk_score + 1
 
+    # We write this to the main ouput file.
     json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}}},\n'
 
     # Log the result
+    # How to log better?
     if sc.is_stable_receiver:
         file_path = '/home/ubuntu/stablelog1.json'
 
@@ -301,6 +308,7 @@ def check_stables(sc):
         with open(file_path, 'a') as file:
             file.write(json_line)
 
+# Section 4 - Plug-in initialization
 @plugin.init()
 def init(options, configuration, plugin):
     print("here")
@@ -339,9 +347,6 @@ def init(options, configuration, plugin):
                 formatted_datetime='',
                 payment_made=False
             )
-
-    # Let lightningd sync up before starting the stable tests
-    # time.sleep(10)
 
     # need to start a new thread so init funciotn can return
     threading.Thread(target=start_scheduler, args=(sc,)).start()
