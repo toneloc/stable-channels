@@ -9,18 +9,18 @@
 
 # Section 1 - Dependencies and main data structure
 from pyln.client import Plugin # Library for CLN Python plug-ins created by Blockstream 
-from collections import namedtuple # Standard on Python3
 from pyln.client import Millisatoshi # Library for CLN Python plug-ins created by Blockstream 
-from cachetools import cached, TTLCache
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
-import requests
-import statistics
 from pyln.client import LightningRpc
-import time
-from datetime import datetime
-from apscheduler.schedulers.blocking import BlockingScheduler
-import threading
+from collections import namedtuple # Standard on Python 3
+from cachetools import cached, TTLCache # Used to handle price feed calls; probably can remove
+import requests # Standard on Python 3.7+
+from requests.adapters import HTTPAdapter 
+from requests.packages.urllib3.util.retry import Retry
+import statistics # Standard on Python 3
+import time # Standard on Python 3
+from datetime import datetime 
+from apscheduler.schedulers.blocking import BlockingScheduler # Used to check balances every 5 minutes
+import threading # Standard on Python 3
 
 plugin = Plugin()
 
