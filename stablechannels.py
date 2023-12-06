@@ -144,7 +144,8 @@ def set_proxies(plugin):
     else:
         plugin.proxies = None
 
-# Don't grab these more than once per minute.
+# Cache returns cached result if <60 seconds old.
+# Stable Channels may not need
 @cached(cache=TTLCache(maxsize=1024, ttl=60))
 def get_rates(plugin, currency):
     rates = {}
