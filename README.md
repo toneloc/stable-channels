@@ -40,6 +40,7 @@ A Stable Channels work like this:
 <li>If the price went down, the Stable Provider needs to pay the Stable Receiver. 
 <li>If the price went up, the Stable Receiver needs to pay the Stable Provider.
 <li>If the price stayed the same or moved only a tiny amount, no payment is required
+<li>Continue until either party wants to close
 </ul>
 </ol>
 
