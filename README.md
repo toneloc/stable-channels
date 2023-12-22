@@ -76,7 +76,7 @@ lightningd --daemon --log-file=/home/ubuntu/cln.log --lightning-dir=/home/ubuntu
 ```
 The "funder" flags instruct CLN on how to handle dual-funded channels. Basically this command is saying: "This node is willing to fund a dual-funded up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
 
-Your counterparty will need to run a similarly command. 
+Your counterparty will need to run a similar command. 
 
 Next connect to your counterparty running the CLN `connect` command. This will look something like: `lightning-cli connect 021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81 54.314.42.1`
 
