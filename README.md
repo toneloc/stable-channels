@@ -22,11 +22,11 @@ This basic process works as follows:
 <li>If the price of bitcoin goes down, the Stable Provider loses bitcoin. This is because it takes more Bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
 </ul>
 
-Stable Channels are unannounced to the public network and are non-routing channels. Technologially, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
+Stable Channels are unannounced to the public network and are non-routing channels. Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
 Stable Channels work on "Core Lightning," which is Blockstream's implementation of the Lightning Network specification. 
 
-A Stable Channels work like this:
+Stable Channels work like this:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
@@ -50,7 +50,7 @@ Currently, this only works as a CLN plugin. This code is at the root of this dir
 
 There are also some in-progress iOS apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
 
-### Enivronment and dependencies
+### Environment and dependencies
 
 - Terminal access to bitcoind and a CLN node running version `23.05.2` is required. Other versions may work but `23.08.1` does not work.
 - Python3 is also required. 
@@ -69,14 +69,14 @@ You can do this with the following commands.
 
 Stop Lightning: `lightning-cli stop` or `lightning-cli --testnet stop`.
 
-Next, start your CLN node, or modify your config files, to enable dual-funding channels up to the amount you want to stablize, or leverage. This will look like this
+Next, start your CLN node, or modify your config files, to enable dual-funding channels up to the amount you want to stabilize, or leverage. This will look like this
 
 ```bash
 lightningd --daemon --log-file=/home/ubuntu/cln.log --lightning-dir=/home/ubuntu/lightning --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=200000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false
 ```
-THe "funder" flags instruct CLN on how to handle dual-funded channels. Bascially this command is saying: "This node is willing to fund a dual-funded up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
+The "funder" flags instruct CLN on how to handle dual-funded channels. Basically this command is saying: "This node is willing to fund a dual-funded up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
 
-Your counterparty will need to run a similary command. 
+Your counterparty will need to run a similarly command. 
 
 Next connect to your counterparty running the CLN `connect` command. This will look something like: `lightning-cli connect 021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81 54.314.42.1`
 
@@ -88,7 +88,7 @@ Now this needs to be confirmed on the blockchain.
 
 ### Starting Stable Channels
 
-First let's create the log file. If you are the stable receiver, your logs get writtent to `stablelog1.json`. Create that file
+First let's create the log file. If you are the stable receiver, your logs get written to `stablelog1.json`. Create that file
 
 We need to restart Lightning running the plugin and with the relevant details of the Stable Channel.
 
@@ -100,7 +100,7 @@ The startup command will look something like this:
 lightningd --daemon --log-file=/home/ubuntu/cln.log --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=1000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false --plugin=/home/ubuntu/stablechannels.py --stable-details=515501x1272x1,100,0.2,True,021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81,/home/ubuntu/.lightning/bitcoin/lightning-rpc
 ```
 
-What this command says is: "Make the Lightning channel with short ID a stable channel at $100.00. Require the Stable Provider counterparty maintain 20% of the par value of the peg amount on his side of the channel. Is is `True` that the node running this commmand is the Stable Receiver. Here's the ID of the counterparty `02105..` and here's the RPC path."
+What this command says is: "Make the Lightning channel with short ID a stable channel at $100.00. Require the Stable Provider counterparty maintain 20% of the par value of the peg amount on his side of the channel. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `02105..` and here's the RPC path."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
@@ -162,17 +162,17 @@ Hope to move all this to issues and PRs soon.
 
 The most valuable stablecoins today are Tether and USDC. These stablecoins hold their value in fiat: cash and bonds. This cash and these bonds have fiat custodians. These fiat custodians are centralized companies that may be forced to freeze these assets or revoke banking access. Either of these scenarios mark a liveness failure of that stablecoin to retain its purchasing power, or worse.
 
-Stable Channels intends to provide a more socially scalable solution. Stable Channels, as a solution, is self-custodial, has no token or token issuer, and intends to give a real-time, streaming finance experience for its users. The vision is to create a self-custoodial p2p exchange where users can hedge or lever up their Bitcoin exposure.
+Stable Channels intends to provide a more socially scalable solution. Stable Channels, as a solution, is self-custodial, has no token or token issuer, and intends to give a real-time, streaming finance experience for its users. The vision is to create a self-custodial p2p exchange where users can hedge or lever up their Bitcoin exposure.
 
-Stable Channels inherit many of the challenges of the Lightning Network. One challeges is that with Lightning, Bitcoin is held in an online wallet. Another challenges is that both nodes must always be online. Yet another challenge is getting trustworthy price feeds. Finally, there are various potential cyber and social engineering attacks.
+Stable Channels inherit many of the challenges of the Lightning Network. One challenges is that with Lightning, Bitcoin is held in an online wallet. Another challenges is that both nodes must always be online. Yet another challenge is getting trustworthy price feeds. Finally, there are various potential cyber and social engineering attacks.
 
-The Stable Channels approach is that while all of these failure modes and attacks are plausible, it is only by building a USD experience on top of <i>only bitcoin</i> that we can, over the longterm, give users the best derivatives trading experience. 
+The Stable Channels approach is that while all of these failure modes and attacks are plausible, it is only by building a USD experience on top of <i>only bitcoin</i> that we can, over the long term, give users the best derivatives trading experience. 
 
-For those users who want USD experience and are Americans, we recommmend FDIC-insured bank accounts. For those users who want Bitcoin exposure, we recommend simply HODLing spot Bitcoin.
+For those users who want USD experience and are Americans, we recommend FDIC-insured bank accounts. For those users who want Bitcoin exposure, we recommend simply HODLing spot Bitcoin.
 
 ## Interactive channel open workflow
 
-Stable Channels intends to use interactive channel opening to neogtiate the terms of the stable agreement and start a well-balanced channel.  
+Stable Channels intends to use interactive channel opening to negotiate the terms of the stable agreement and start a well-balanced channel.  
 
 The Channel state in CLN map to Core Lightning states to Stable Channel states, but have several differences. 
 
