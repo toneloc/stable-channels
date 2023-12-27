@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css" rel="stylesheet">
+
+     <style>
+        /* General styling */
+
+
+        body, .navbar-brand, .nav-link, .card-title, .table, button, input, select, textarea {
+            font-family: 'Nunito', sans-serif;
+            color: #ffffff;
+        }
+
+        /* Adjust font weights */
+        .navbar-brand, .nav-link, .card-title, th {
+            font-weight: 600; /* Semi-bold */
+        }
+
+        h1, h2, h3 {
+            font-weight: 800; /* Extra-bold */
+        }
+
+        /* Backgrounds */
+        body, .navbar, .card, .table {
+            background-color: #181a1f; /* Dark background */
+        }
+
+        .card-header, .navbar, .footer {
+            background-color: #1f1f1f;
+            border-bottom: 1px solid #333;
+        }
+
+        .table thead th {
+            background-color: #262626; /* Darker background for headers */
+            border-bottom: 2px solid #3a3a3a;
+        }
+
+        .footer {
+            padding: 0.5rem 1rem;
+            text-align: center;
+            background-color: #181a1f; /* Consistent footer background */
+        }
+
+
+
+        /* Adjust font weights */
+        .navbar-brand, .nav-link, .card-title, th {
+            font-weight: 700; /* Semi-bold */
+        }
+
+        h1, h2, h3 {
+            font-weight: 900; /* Extra-bold */
+        }
+
+        /* Backgrounds */
+        body, .navbar, .card, .table {
+            background-color: #181a1f; /* Dark background */
+        }
+
+        .card-header, .navbar, .footer {
+            background-color: #1f1f1f;
+            border-bottom: 1px solid #333;
+        }
+
+        .table thead th {
+            background-color: #262626; /* Darker background for headers */
+            border-bottom: 2px solid #3a3a3a;
+        }
+
+        .footer {
+            padding: 0.5rem 1rem;
+            text-align: center;
+            background-color: #181a1f; /* Consistent footer background */
+        }
+
+        /* Cards */
+        .card {
+            border: 1px solid #2c2c2c; /* Card border */
+        }
+
+        .card-header {
+            border-bottom: none; /* Remove header border */
+        }
+
+        /* Tables */
+        .table {
+            border-collapse: collapse;
+            color: #fff;
+        }
+
+         .table th {
+            color: #7da7d9; /* A lighter shade for better contrast and readability */
+            font-weight: bold; /* Keep it bold for emphasis */
+        }
+
+        .table td {
+            color: #e0e0e0; /* Slightly lighter text color for table cells for readability */
+        }
+
+        /* Navbar */
+        .navbar {
+            border-bottom: none;
+        }
+
+        .navbar-nav .nav-link {
+            margin-right: 1rem; /* Space out navbar items */
+        }
+
+        .navbar-nav .nav-item:last-child {
+            margin-left: auto; /* Align the account nav item to the right */
+        }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1f1f1f;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #565656;
+            border-radius: 4px;
+        }
+
+        /* Graph styling */
+         #summaryGraph {
+            background-color: #232323;
+            border-radius: 4px;
+            height: 400px; /* Increased height */
+        }
+
+        /* Additional styles for attractiveness */
+        .chartjs-render-monitor {
+            box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.5);
+            border-radius: 4px;
+        }
+
+        /* Text and Status Styling */
+        .performance-positive {
+            color: #28a745 !important; /* Bootstrap success color */
+        }
+
+        .text-muted {
+            color: #6c757d !important; /* Bootstrap muted text color */
+        }
+
+        .footer .connection-status {
+            color: #4caf50; /* Green color for active status */
+        }
+
+        /* Table adjustments */
+        .summary-table .table td, .summary-table .table th {
+            padding: .25rem;
+        }
+
+        .summary-table .table th {
+            font-weight: bold; /* Bold for table headings */
+        }
+
+        .thead-dark th {
+            background-color: #343a40; /* Dark table header background */
+            border-color: #454d55; /* Dark table header border */
+        }
+        .nav-link-dark {
+            color: #343a40 !important; /* Bootstrap's dark gray */
+        }
+        .blue-text {
+            color: #7da7d9 !important; /* The blue color code used before */
+        }
+
+
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>  
+   <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <a class="navbar-brand" href="#">
+        Stable Channels v1.02
+    </a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+        <span class="navbar-toggler-icon"></span>
+    </button>
+
+    <div class="collapse navbar-collapse" id="navbarNav">
+        <ul class="navbar-nav mr-auto">
+            <li class="nav-item">
+                <a class="nav-link" href="#"><i class="fas fa-home" style="margin-right: 8px;"></i>Home</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="#"><i class="fas fa-chart-line" style="margin-right: 8px;"></i>Markets</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="#"><i class="fas fa-stream" style="margin-right: 8px;"></i>My Channels</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="#"><i class="fas fa-envelope" style="margin-right: 8px;"></i>Contact</a>
+            </li>
+        </ul>
+
+        <ul class="navbar-nav">
+            <li class="nav-item">
+                <a class="nav-link" href="#"><i class="fas fa-user-circle" style="margin-right: 8px;"></i>Account</a>
+            </li>
+        </ul>
+    </div>
+    </nav>
+    
+
+    <div class="container mt-4">
+        <!-- Title and Last Updated Text -->
+        <div class="row">
+            <div class="col-12 text-center mb-4">
+                <h1 class="display-7">Stable Provider Dashboard</h1>
+                <h3 class="display-7">Channel ID 818502x1978x1 </h3>
+                <p class="text-muted">Last updated 01:54 26 Nov 2023 🔄 </p>
+                <text>Status: </text>
+                <text class="text-success">
+                    <span class="mr-1"></span>Active 🟢
+                </text>
+
+                <p>Counterparty Risk Score: 
+                <text class="text-success">
+                    <span class="mr-1"></span>0 🟢
+                </text>
+                </p>
+
+            </div>
+        </div>
+
+    <div class="container mt-4">
+        <!-- Summary Row -->
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h4 class="card-title">Stable Channel Terms</h4>
+                    </div>
+                    <div class="card-body">
+                        <table class="table table-sm">
+                            <!-- Summary items for the first column -->
+                            <tbody id="summary-left">
+                                <!-- JavaScript will populate this -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h4 class="card-title">Performance</h4>
+                    </div>
+                    <div class="card-body">
+                        <table class="table table-sm">
+                            <!-- Summary items for the second column -->
+                            <tbody id="summary-right">
+                                <!-- JavaScript will populate this -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Graph Row -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h4 class="card-title">Price Graph</h4>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="summaryGraph"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <br><br>
+        <!-- Payments Table Section -->
+        <div class="col-md-12">
+            <div class="card-header">
+                    <h4 class="card-title">Most Recent Payments</h4>
+            </div>
+            <div class="row">
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-striped mb-0">
+                            <thead class="thead-dark">
+                                <tr>
+                                    <th>Settlement Period</th>
+                                    <th>Bitcoin Price</th>
+                                    <th>Expected Dollar Amount</th>
+                                    <th>Stable Receiver Dollar Amount</th>
+                                    <th>Payment Made?</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dashboard">
+                                <!-- Payment data will be dynamically inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+    <script>
+        const data = [{"formatted_time": "01:35 26 Nov 2023", "estimated_price": 37721.66, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 99.975, "payment_made": true, "risk_score": 0},
+{"formatted_time": "01:40 26 Nov 2023", "estimated_price": 37722.03, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 100.001, "payment_made": false, "risk_score": 0},
+{"formatted_time": "01:45 26 Nov 2023", "estimated_price": 37726.61, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 100.013, "payment_made": true, "risk_score": 0},
+{"formatted_time": "01:50 26 Nov 2023", "estimated_price": 37726.78, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 100.0, "payment_made": false, "risk_score": 0},
+{"formatted_time": "01:55 26 Nov 2023", "estimated_price": 37728.05, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 100.004, "payment_made": false, "risk_score": 0},
+{"formatted_time": "02:00 26 Nov 2023", "estimated_price": 37714.23, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 99.967, "payment_made": true, "risk_score": 0},
+{"formatted_time": "02:05 26 Nov 2023", "estimated_price": 37695.58, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 99.951, "payment_made": true, "risk_score": 0},
+{"formatted_time": "02:10 26 Nov 2023", "estimated_price": 37705.26, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 100.027, "payment_made": true, "risk_score": 0},
+{"formatted_time": "02:15 26 Nov 2023", "estimated_price": 37723.01, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 100.047, "payment_made": true, "risk_score": 0},
+{"formatted_time": "02:20 26 Nov 2023", "estimated_price": 37719.65, "expected_dollar_amount": 100.0, "stable_receiver_dollar_amount": 99.991, "payment_made": false, "risk_score": 0}]
+;
+
+        // Function to calculate and display summary statistics
+        function displaySummary(data) {
+            // Calculations
+        let differences = data.filter(item => item.payment_made)
+                             .map(item => Math.abs(item.stable_receiver_dollar_amount - item.expected_dollar_amount));
+        let counter = differences.length;
+        let cumulativeSum = differences.reduce((acc, val) => acc + val, 0);
+        let meanDifference = cumulativeSum / counter;
+        let sortedDifferences = [...differences].sort((a, b) => a - b);
+        let medianDifference = sortedDifferences[Math.floor(counter / 2)];
+        let standardDeviation = Math.sqrt(differences.map(x => Math.pow(x - meanDifference, 2)).reduce((a, b) => a + b) / counter);
+        let largestAmount = Math.max(...data.map(item => item.stable_receiver_dollar_amount));
+        let smallestAmount = Math.min(...data.map(item => item.stable_receiver_dollar_amount));
+
+        // Displaying the summary
+        const summaryDivLeft = document.getElementById('summary-left');
+        summaryDivLeft.innerHTML = `
+            <table class="table table-sm mb-0">
+                <tbody>
+                    <tr><th>Asset:</th><td>USD</td></tr>
+                    <tr><th>Stable Amount:</th><td>100</td></tr>
+                    <tr><th>Channel:</th><td>818502x1978x1</td></tr>
+                    <tr><th>Counterparty:</th><td>0x23120ef34058fe933ab340034de33023</td></tr>
+                    <tr><th>Direction:</th><td>Stable Provider, 2x leverage</td></tr>
+                    <tr><th>Expected duration:</th><td>3 months+</td></tr>
+                    <tr><th>Settlement:</th><td>every 5 minutes</td></tr>
+                    <tr><th>Price Feeds:</th><td>Spot price. Median of Coinbase, Binance, Bitstamp, Coin Gecko, Coin Telegraph</td></tr>
+                    <tr><th>Rates:</th><td>None</td></tr>
+                    <tr><th>Minimum Margin Ratio:</th><td>0.2</td></tr>
+                </tbody>
+            </table>
+        `;
+
+
+        // Displaying the summary
+        const summaryDivRight = document.getElementById('summary-right');
+        summaryDivRight.innerHTML = `
+            <table class="table table-sm mb-0">
+                <tbody>
+                    <tr><th>Bitcoin Performance:</th><td class="performance-positive">+0.0000100 BTC</td></tr>
+                    <tr><th>Bitcoin Performance %:</th><td class="performance-positive">+23.03% BTC</td></tr>
+                    <tr><th>USD Performance:</th><td class="performance-positive">+$4.32</td></tr>
+                    <tr><th>USD Performance %:</th><td class="performance-positive">+32.34%</td></tr>
+                    <tr><th>Starting Date:</th><td>24 Nov 2023</td></tr>
+                    <tr><th>Current Duration:</th><td>32 days</td></tr>
+                    <tr><th>Starting Bitcoin:</th><td>0.002648 BTC</td></tr>
+                    <tr><th>Ending Bitcoin:</th><td>0.0000345 BTC</td></tr>
+                    <tr><th>Uptime:</th><td>100%</td></tr>
+                    <tr><th>Largest Stable Receiver Amount:</th><td>$${largestAmount.toFixed(3)}</td></tr>
+                    <tr><th>Smallest Stable Receiver Amount:</th><td>$${smallestAmount.toFixed(3)}</td></tr>
+                    <tr><th>Payment Count:</th><td> 5,684</td></tr>
+                    <tr><th>Cumulative Sum:</th><td>$${cumulativeSum.toFixed(3)}</td></tr>
+                    <tr><th>Mean Difference:</th><td>$${meanDifference.toFixed(3)}</td></tr>
+                    <tr><th>Median Difference:</th><td>$${medianDifference.toFixed(3)}</td></tr>
+                </tbody>
+            </table>
+        `;
+       
+        }
+
+        // Function to display the last 100 payment data entries in a table
+        function displayPayments(data) {
+
+            const sortedData = data.sort((a, b) => new Date(b.formatted_time) - new Date(a.formatted_time));
+
+        
+            const dashboardTbody = document.getElementById('dashboard');
+            dashboardTbody.innerHTML = sortedData.slice(-100).map(item => {
+                // Format the price with commas
+                const formattedPrice = item.estimated_price.toLocaleString('en-US', {
+                    style: 'currency',
+                    currency: 'USD',
+                });
+
+            // Return the row with the formatted price
+            return `
+                <tr>
+                <td class="blue-text">${item.formatted_time}</td>
+                <td>${formattedPrice}</td>
+                <td>$${item.expected_dollar_amount.toFixed(2)}</td>
+                <td>$${item.stable_receiver_dollar_amount.toFixed(3)}</td>
+                <td>${item.payment_made ? '✅' : ''}</td>
+            </tr>
+            `;
+        }).join('');
+    }
+
+        // Call the functions to display data
+        displaySummary(data);
+        displayPayments(data);
+
+        // Generate the graph
+        const ctx = document.getElementById('summaryGraph').getContext('2d');
+        
+        const timeLabels = data.map(item => {
+            let date = new Date(item.formatted_time);
+            return `${date.getDate()}-${date.getMonth() + 1}`; // Format: day-month
+        });
+        const prices = data.map(item => item.estimated_price);
+
+        const summaryGraph = new Chart(ctx, {
+            type: 'line', // Type of graph
+            data: {
+                labels: timeLabels,
+                datasets: [{
+                    label: 'Estimated Price',
+                    data: prices,
+                    fill: false,
+                    borderColor: 'rgb(75, 192, 192)',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                scales: {
+                    y: {
+                        beginAtZero: false
+                    }
+                },
+                responsive: true,
+                maintainAspectRatio: false
+            }
+        });
+    </script>
+
+</body>
+</html>
+
