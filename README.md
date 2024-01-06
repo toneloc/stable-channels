@@ -18,7 +18,7 @@ Each of these two nodes query 5 price feeds every 5 minutes. Then, based on the 
 
 This basic process works as follows:
 <ul>
-<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. In the base case, the Stable Provider has a 1.5x long bitcoin position. 
+<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. 
 <li>If the price of bitcoin goes down, the Stable Provider loses bitcoin. This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
 </ul>
 
