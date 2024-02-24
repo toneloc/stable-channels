@@ -16,10 +16,24 @@ Each of these two nodes query 5 price feeds every 5 minutes. Then, based on the 
 - Each party remains self-custodial.
 - Either party may opt out at anytime, either by a cooperative on-chain channel close or forced channel close on-chain. 
 
-This basic process works as follows:
+This basic process works as follows. 
+
+Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) stays the same:
 <ul>
-<li>If the price of bitcoin goes up, the Stable Provider gets more bitcoin. This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. 
-<li>If the price of bitcoin goes down, the Stable Provider loses bitcoin. This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
+<li>(a) If the price of bitcoin goes up:
+    <ul>
+      <li>the Stable Provider gets more bitcoin. 
+      <li>This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. 
+    </ul>
+<li>(b) If the price of bitcoin goes down:
+    <ul>
+      <li>the Stable Provider loses bitcoin. 
+      <li></li>This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
+    </ul>
+<li>(c) the price of bitcoin stays the same:
+  <ul>
+    <li>nobody needs to do anything
+  </ul>
 </ul>
 
 Stable Channels are unannounced to the public network and are non-routing channels. Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
