@@ -28,7 +28,7 @@ Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) 
 <li>(b) If the price of bitcoin goes down:
     <ul>
       <li>the Stable Provider loses bitcoin. 
-      <li></li>This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
+      <li>This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
     </ul>
 <li>(c) the price of bitcoin stays the same:
   <ul>
