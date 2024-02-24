@@ -36,11 +36,13 @@ Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) 
   </ul>
 </ul>
 
-Stable Channels are unannounced to the public network and are non-routing channels. Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
+Stable Channels are unannounced to the public network and are non-routing channels. We are working on adding routing. 
+
+Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
 Stable Channels work on "Core Lightning," which is Blockstream's implementation of the Lightning Network specification. 
 
-Stable Channels work like this:
+Stable Channels workflows end-to-end work like this:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
