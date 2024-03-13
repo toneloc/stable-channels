@@ -186,26 +186,6 @@ The Stable Channels approach is that while all of these failure modes and attack
 
 For those users who want USD experience and are Americans, we recommend FDIC-insured bank accounts. For those users who want bitcoin exposure, we recommend simply HODLing spot bitcoin.
 
-## Interactive channel open workflow
-
-Stable Channels intends to use interactive channel opening to negotiate the terms of the stable agreement and start a well-balanced channel.  
-
-The Channel state in CLN map to Core Lightning states to Stable Channel states, but have several differences. 
-
-
-| Core Lightning State               | Description                                                                                                                                                                       | Stable Channel differences |
-|------------|------------|------------|
-| OPENINGD      | The channel funding protocol with the peer is ongoing, and both sides are negotiating parameters.                                                                               |              Instead of using the ``fund-channel`` command, use the ``create-stable-channel command`` with the parameters listed above in the "Getting Started" section.          |
-| CHANNELD_AWAITING_LOCKIN| The peer and you have agreed on channel parameters and are just waiting for the channel funding transaction to be confirmed deeply. Both you and the peer must acknowledge the channel funding transaction to be confirmed deeply before entering the next state. |        No difference.                  |
-| CHANNELD_NORMAL         | The channel can be used for normal payments.                                                                                                                                     |           Listening on an event subcription to the CHANNELD_NORMAL state. Need to implement. Then Stable Channels plugin is monitoring the behavior of the counterparty.               |
-| CHANNELD_SHUTTING_DOWN  | A mutual close was requested (by you or peer), and both of you are waiting for HTLCs in-flight to be either failed or succeeded. The channel can no longer be used for normal payments and forwarding. Mutual close will proceed only once all HTLCs in the channel have either been fulfilled or failed. |                 No difference.         |
-| CLOSINGD_SIGEXCHANGE    | You and the peer are negotiating the mutual close onchain fee.                                                                                                                    | No difference.                         |
-| CLOSINGD_COMPLETE       | You and the peer have agreed on the mutual close onchain fee and are awaiting the mutual close getting confirmed deeply.                                                          | No difference.                          |
-| AWAITING_UNILATERAL     | You initiated a unilateral close, and are now waiting for the peer-selected unilateral close timeout to complete.                                                                |            No difference.              |
-| FUNDING_SPEND_SEEN      | You saw the funding transaction getting spent (usually the peer initiated a unilateral close) and will now determine what exactly happened (i.e. if it was a theft attempt).    |                 No difference.         |
-| ONCHAIN                 | You saw the funding transaction getting spent and now know what happened (i.e. if it was a proper unilateral close by the peer, or a theft attempt).                            |         No difference.                 |
-| CLOSED                  | The channel closure has been confirmed deeply. The channel will eventually be removed from this array.                                                                         |           No difference.               |
-
 ### Splicing workflow
 
 Stable Channels intends to use channel splicing to handle "margin calls."
