@@ -275,7 +275,6 @@ def check_stables(sc):
             list_funds_data = l1.listfunds()
 
             channels = list_funds_data.get("channels", [])
-            print(channels)
     
             for channel in channels:
                 if channel.get("short_channel_id") == sc.short_channel_id:
@@ -312,7 +311,6 @@ def check_stables(sc):
 # Section 4 - Plug-in initialization
 @plugin.init()
 def init(options, configuration, plugin):
-    print("here")
     set_proxies(plugin)
     stable_details = options['stable-details']
 
