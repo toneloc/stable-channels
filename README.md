@@ -68,7 +68,7 @@ There are also some in-progress iOS apps, web apps, bash scripts, Python servers
 
 ### Environment and dependencies
 
-- Terminal access to bitcoind and a CLN node running version `23.05.2` is required. Other versions may work but `23.08.1` does not work.
+- Terminal access to bitcoind and a CLN node running version `23.05.2` or version `24.02` is required. Other versions may work but `23.08.1` does not work.
 - Python3 is also required. 
 
 Clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py`. 
