@@ -30,7 +30,6 @@ class StableChannel:
         plugin: Plugin,
         short_channel_id: str,
         expected_dollar_amount: float,
-        minimum_margin_ratio: float,
         is_stable_receiver: bool,
         counterparty: str,
         lightning_rpc_path: str,
@@ -46,7 +45,6 @@ class StableChannel:
         self.plugin = plugin
         self.short_channel_id = short_channel_id
         self.expected_dollar_amount = expected_dollar_amount
-        self.minimum_margin_ratio = minimum_margin_ratio
         self.is_stable_receiver = is_stable_receiver
         self.counterparty = counterparty
         self.lightning_rpc_path = lightning_rpc_path
@@ -312,49 +310,43 @@ def check_stables(sc):
 @plugin.init()
 def init(options, configuration, plugin):
     set_proxies(plugin)
-    stable_details = options['stable-details']
 
-    print(str(stable_details))
+    # Need to handle boolean input this way
+    if options['is-stable-receiver'] == "False":
+        is_stable_receiver = False
+    elif options['is-stable-receiver'] == "True":
+        is_stable_receiver = True
 
-    # TODO - Pass in as plugin start args
-    if stable_details != ['']:
-        for s in stable_details:
-            parts = s.split(',')
-            
-            if len(parts) != 6:
-                raise Exception("Too few or too many Stable Channel paramaters at start.")
+    sc = StableChannel(
+            plugin=plugin,
+            short_channel_id=options['short-channel-id'],
+            expected_dollar_amount=float(options['stable-dollar-amount']),
+            is_stable_receiver=is_stable_receiver,
+            counterparty=options['counterparty'],
+            lightning_rpc_path=options['lightning-rpc-path'],
+            our_balance=0,
+            their_balance=0,
+            risk_score=0,
+            stable_receiver_dollar_amount=0,
+            stable_provider_dollar_amount=0,
+            timestamp=0,
+            formatted_datetime='',
+            payment_made=False
+    )
 
-            if parts[3] == "False":
-                is_stable_receiver = False
-            elif parts[3] == "True":
-                is_stable_receiver = True
+    print("Starting Stable Channel with these details:")
+    print(sc.short_channel_id)
+    print(sc.expected_dollar_amount)
+    print(sc.counterparty)
+    print(sc.lightning_rpc_path)
 
-            sc = StableChannel(
-                plugin=plugin, 
-                short_channel_id=parts[0],  
-                expected_dollar_amount=float(parts[1]), 
-                minimum_margin_ratio=float(parts[2]),
-                is_stable_receiver=is_stable_receiver,  
-                counterparty=parts[4],
-                lightning_rpc_path=parts[5],
-                our_balance=0,
-                their_balance=0,
-                risk_score=0,
-                stable_receiver_dollar_amount=0,
-                stable_provider_dollar_amount=0,        
-                timestamp=0,
-                formatted_datetime='',
-                payment_made=False
-            )
-
-    # need to start a new thread so init funciotn can return
+    # Need to start a new thread so init funciotn can return
     threading.Thread(target=start_scheduler, args=(sc,)).start()
-    
-plugin.add_option(name='stable-details', default='', description='Input stable details.')
 
-# This has an effect only for recent pyln versions (0.9.3+).
-plugin.options['stable-details']['multi'] = True
+plugin.add_option(name='short-channel-id', default='', description='Input stable details.')
+plugin.add_option(name='is-stable-receiver', default='', description='Input stable details.')
+plugin.add_option(name='stable-dollar-amount', default='', description='Input stable details.')
+plugin.add_option(name='counterparty', default='', description='Input stable details.')
+plugin.add_option(name='lightning-rpc-path', default='', description='Input stable details.')
 
 plugin.run()
-
-
