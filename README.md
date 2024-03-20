@@ -40,13 +40,13 @@ Stable Channels are unannounced to the public network and are non-routing channe
 
 Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
-Stable Channels work on "Core Lightning," which is Blockstream's implementation of the Lightning Network specification. 
+Stable Channels works as a plug-in on CLN, which is Blockstream's implementation of the Lightning Network specification. 
 
 Stable Channels workflows end-to-end work like this:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
-<li>Select the price feeds. By default, Stable Channels takes the median of five price feeds: BitStamp, Coinbase, CoinGecko, Coinbase, and BitBlock.
+<li>Select the price feeds. By default, Stable Channels takes the median of five price feeds: BitStamp, CoinGecko, CoinDesk, Coinbase, and Blockchain.info
 <li>Create a *dual-funded channel* with the counterparty, each putting in the amount of the Stable Channel. 
 <ul>
 <li> <i>Example: If the Stable Channel is for $100, each side of the channel puts in $100, for a total channel capacity of $200 at the time of channel creation</i>
