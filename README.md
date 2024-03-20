@@ -104,25 +104,24 @@ Now this needs to be confirmed on the blockchain.
 
 ### Starting Stable Channels
 
-First let's create the log file. If you are the stable receiver, your logs get written to `stablelog1.json`. Create that file
+First let's create the log file. If you are the stable receiver, your logs get written to `stablelog1.json`. Create that file.
 
-We need to restart Lightning running the plugin and with the relevant details of the Stable Channel.
+Note: this log file path is hardcoded in the code. Change this path to your location. 
 
-Stop Lightning: `lightning-cli stop` or `lightning-cli --testnet stop`.
+Now, we need to start the Stable Channels plugin and with the relevant details of the Stable Channel.
 
-The startup command will look something like this:
+The plugin startup command will look something like this:
 
 ```bash
-lightningd --daemon --log-file=/home/ubuntu/cln.log --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=1000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false --plugin=/home/ubuntu/stablechannels.py --stable-details=515501x1272x1,100,0.2,True,021051a25e9798698f9baad3e7c815da9d9cc98221a0f63385eb1339bfc637ca81,/home/ubuntu/.lightning/bitcoin/lightning-rpc
+lightning-cli plugin subcommand=start plugin=/home/ubuntu/stablechannels.py short-channel-id=834973x927x0 stable-dollar-amount=100 is-stable-receiver=True counterparty=041655321cga6309f716v863fb39bc5fb7bbdc3824b7fd3353ad2793e5be940d23 lightning-rpc-path=/home/ubuntu/.lightning/bitcoin/lightning-rpc
 ```
+Modify the directory for your plugin and your lighning-rpc.
 
-What this command says is: "Make the Lightning channel with short ID a stable channel at $100.00. Require the Stable Provider counterparty maintain 20% of the par value of the peg amount on his side of the channel. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `02105..` and here's the RPC path."
+What this command says is: "Start the pl;ugin at this directory. Make the Lightning channel with short ID 834973x927x0 a stable channel at $100.00. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `04165..` and here's the RPC path."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
 Logs for the Stable Receiver a are written to `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
-
-
 
 ##  Payout matrix
 
