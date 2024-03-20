@@ -5,7 +5,7 @@
 
 This Twitter thread explains things pretty well, with an example - https://x.com/tonklaus/status/1729567459579945017
 
-<b>Stable Channels</b> lets Lightning Network node runners keep one side of their channel balances stable in dollar terms, for example $100. 
+<b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms, for example $100. 
 - These special channels are called <b>Stable Channels</b>. 
 - These node runners are called <b>Stable Receivers</b>.
 - On the other side of the channel are <b>Stable Providers</b>. 
