@@ -47,6 +47,7 @@ class StableChannel:
         self.short_channel_id = short_channel_id
         self.expected_dollar_amount = expected_dollar_amount
         self.nonstable_amount_msat = nonstable_amount_msat
+        self.is_stable_receiver = is_stable_receiver
         self.counterparty = counterparty
         self.lightning_rpc_path = lightning_rpc_path
         self.our_balance = our_balance
