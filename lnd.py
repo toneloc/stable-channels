@@ -197,7 +197,6 @@ def currencyconvert(amount, currency):
 
 
 # Section 3 - Core logic 
-
 # This function is the scheduler, formatted to fire every 5 minutes
 # Regularly scheduled programming
 
@@ -214,6 +213,7 @@ def start_scheduler(sc):
     scheduler = BlockingScheduler()
     scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
     scheduler.start()
+    pass
 
 # 5 scenarios to handle
 # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
@@ -279,10 +279,6 @@ def check_stables(sc):
         if sc.is_stable_receiver:
             time.sleep(30)
 
-            ############# HERE
-            list_funds_data = l1.listfunds()
-
-            # We should have payment now; check that amount is within 1 penny
             url = sc.lnd_server_url + '/v1/channels'
 
             headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
@@ -439,16 +435,17 @@ def check_stables(sc):
     # Log the result
     # How to log better?
     if sc.is_stable_receiver:
-        file_path = '/Users/t/Desktop/stable-channels.stablelog1.json'
+        file_path = '/Users/t/Desktop/stable-channels/stablelog1.json'
 
         with open(file_path, 'a') as file:
             file.write(json_line)
 
     elif not(sc.is_stable_receiver):
-        file_path = '/Users/t/Desktop/stable-channels.stablelog2.json'
+        file_path = '/Users/t/Desktop/stable-channels/stablelog2.json'
 
         with open(file_path, 'a') as file:
             file.write(json_line)
+
 
 def main():
     parser = argparse.ArgumentParser(description='LND Script Arguments')
@@ -487,7 +484,9 @@ def main():
     print("Initializating a Stable Channel with these details:")
     print(sc)
 
-    check_stables(sc)
+    thread = threading.Thread(target=start_scheduler, args=(sc,))
+    thread.start()
+    thread.join()
 
 if __name__ == "__main__":
     main()
@@ -497,6 +496,16 @@ if __name__ == "__main__":
 # curl --cacert /Users/t/.polar/networks/8/volumes/lnd/alice/tls.cert \
 #      --header "Grpc-Metadata-macaroon: 0201036c6e6402f801030a103def9a17d1aa8476cb50a975bb3ef1ee1201301a160a0761646472657373120472656164120577726974651a130a04696e666f120472656164120577726974651a170a08696e766f69636573120472656164120577726974651a210a086d616361726f6f6e120867656e6572617465120472656164120577726974651a160a076d657373616765120472656164120577726974651a170a086f6666636861696e120472656164120577726974651a160a076f6e636861696e120472656164120577726974651a140a057065657273120472656164120577726974651a180a067369676e6572120867656e657261746512047265616400000620f0e59d2963cb3246e9fd8d835ea47e056bf4eb80002ae98204b62bcb5ebf3809" \
 #      https://127.0.0.1:8081/v1/balance/channels 
+
+
+
+# ALice local startup LND
+# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/8/volumes/lnd/alice/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=True --counterparty=03a02e289f9f32e3c029c7aa8bab7bd5b580aee45470f62c1f033acf9380421cb5 --macaroon-path=/Users/t/.polar/networks/8/volumes/lnd/alice/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8081
+
+
+# Bob local startup LND as Stable Provider
+# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/8/volumes/lnd/bob/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=False --counterparty=02a69511ad99253076f955e1e79fcba20cf4bd53ffe8e25ff060d31a031129193b --macaroon-path=/Users/t/.polar/networks/8/volumes/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8082
+
 
 
 # Sample startup command
