@@ -197,23 +197,60 @@ def currencyconvert(amount, currency):
 
 
 # Section 3 - Core logic 
-# This function is the scheduler, formatted to fire every 5 minutes
-# Regularly scheduled programming
+# Helper functions
 
 def b64_hex_transform(plain_str: str) -> str:
     """Returns the b64 transformed version of a hex string"""
     a_string = bytes.fromhex(plain_str)
     return base64.b64encode(a_string).decode()
 
+def get_channel_info(sc):
+    url = sc.lnd_server_url + '/v1/channels'
+    headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
+    response = requests.get(url, headers=headers, verify=sc.tls_cert_path)
+    return response.json()
+
+def update_our_and_their_balance(sc, channels_data):
+    for channel in channels_data['channels']:
+        if channel['chan_id'] == sc.channel_id:
+            sc.our_balance = int(channel['local_balance']) * 1000
+            sc.their_balance = int(channel['remote_balance']) * 1000
+            return
+    print("Could not find channel")
+
 def b64_transform(plain_str: str) -> str:
     """Returns the b64 transformed version of a string"""
     return base64.b64encode(plain_str.encode()).decode()
 
+# This function is the scheduler, formatted to fire every 5 minutes
+# Regularly scheduled programming
 def start_scheduler(sc):
     scheduler = BlockingScheduler()
     scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
     scheduler.start()
     pass
+
+def calculate_stable_receiver_dollar_amount(sc, balance, expected_msats):
+    return round((int(balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+
+def keysend_payment(sc, amount_msat):
+    dest = b64_hex_transform(sc.counterparty)
+    pre_image = token_hex(32)
+    payment_hash = sha256(bytes.fromhex(pre_image)).hexdigest()
+    dest_custom_records = {
+        5482373484: b64_hex_transform(pre_image),
+        34349334: b64_transform("yoo"),
+    }
+    url = sc.lnd_server_url + '/v1/channels/transactions'
+    headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
+    data = {
+        "dest": dest,
+        "amt": int(amount_msat / 1000),
+        "payment_hash": b64_hex_transform(payment_hash),
+        "dest_custom_records": dest_custom_records,
+    }
+    response = requests.post(url=url, headers=headers, json=data, verify=sc.tls_cert_path)
+    return response
 
 # 5 scenarios to handle
 # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
@@ -224,227 +261,87 @@ def start_scheduler(sc):
 # "sc" = "Stable Channel" object
 def check_stables(sc):
     msat_dict, estimated_price = currencyconvert(sc.expected_dollar_amount, "USD")
-
     expected_msats = msat_dict["msat"]
-
     print("expected msats")
     print(expected_msats)
 
-    currencyconvert(100, "USD")
-
-    url = sc.lnd_server_url + '/v1/channels'
-
-    headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
-    channels = requests.get(url, headers=headers, verify=sc.tls_cert_path)
-
-    channels_data = channels.json()
-    
-    for channel in channels_data['channels']:
-        if channel['chan_id'] == sc.channel_id:
-            # Need to subtract other values
-            sc.our_balance = int(channel['local_balance']) * 1000
-            sc.their_balance = int(channel['remote_balance']) * 1000
-
+    channels_data = get_channel_info(sc)
+    update_our_and_their_balance(sc, channels_data)
     print("Our balance = " + str(sc.our_balance))
     print("Their balance = " + str(sc.their_balance))
 
-    # Get Stable Receiver dollar amount
     if sc.is_stable_receiver:
-        # subtract the nonstable_amount_msat
-        sc.stable_receiver_dollar_amount = round((int(sc.our_balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        balance = sc.our_balance - sc.native_amount_msat
     else:
-        sc.stable_receiver_dollar_amount = round((int(sc.their_balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        balance = sc.their_balance - sc.native_amount_msat
 
+    sc.stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, balance, expected_msats)
     formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
-    
+    print(formatted_time)
+
     sc.payment_made = False
     amount_too_small = False
 
-    print(formatted_time)
-
-
-    # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
+    # Scenario 1 - Difference too small to worry about (under $0.01) = do nothing
     if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
+        print("Scenario 1 - Difference too small to worry about (under $0.01)")
         amount_too_small = True
-    else:
-        # Round difference to nearest msat; we may need to pay it
-        if sc.is_stable_receiver:
-            may_need_to_pay_amount_msat = round(abs(int(expected_msats) -  int(sc.our_balance)))
-        else:
-            may_need_to_pay_amount_msat = round(abs(int(expected_msats) - int(sc.their_balance)))
+        sc.payment_made = False
 
-    # USD price went down.
-    if not amount_too_small and (sc.stable_receiver_dollar_amount < sc.expected_dollar_amount):
-        # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment 
-        if sc.is_stable_receiver:
+    if not amount_too_small:
+        current_stable_receiver_balance = sc.our_balance if sc.is_stable_receiver else sc.their_balance
+        may_need_to_pay_amount_msat = round(abs(int(expected_msats) - int(current_stable_receiver_balance)))
+
+        # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
+        if sc.stable_receiver_dollar_amount < sc.expected_dollar_amount and sc.is_stable_receiver:
+            print("Scenario 2 - Node is stableReceiver and expects to get paid ")
             time.sleep(30)
-
-            url = sc.lnd_server_url + '/v1/channels'
-
-            headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
-            channels = requests.get(url, headers=headers, verify=sc.tls_cert_path)
-
-            channels_data = channels.json()
-            
-            for channel in channels_data['channels']:
-                if channel['chan_id'] == sc.channel_id:
-                    # Need to subtract other values
-                    sc.our_balance = int(channel['local_balance']) * 1000
-                    sc.their_balance = int(channel['remote_balance']) * 1000
-                    new_our_stable_balance_msat = sc.our_balance - sc.native_amount_msat
-                
-                else:
-                    print("Could not find channel")
-                  
-                new_stable_receiver_dollar_amount = round((int(new_our_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
-
+            channels_data = get_channel_info(sc)
+            update_our_and_their_balance(sc, channels_data)
+            new_our_stable_balance_msat = sc.our_balance - sc.native_amount_msat
+            new_stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, new_our_stable_balance_msat, expected_msats)
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
             else:
-                # Increase risk score
-                sc.risk_score = sc.risk_score + 1
-            
+                sc.risk_score += 1
 
-        elif not(sc.is_stable_receiver):
-            # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
- 
-            # Need to do a bunch of stuff for keysends on LND :(
-            # Base 64 encoded destination bytes
-            dest = b64_hex_transform(sc.counterparty)
-
-            # Generate a random 32 byte Hex pre_image
-            pre_image = token_hex(32)
-
-            payment_hash = sha256(bytes.fromhex(pre_image)).hexdigest()
-
-            dest_custom_records = {
-                5482373484: b64_hex_transform(pre_image),
-                34349334: b64_transform("yoo"),  # Example for additional message
-            }
-
-            # We should have payment now; check that amount is within 1 penny
-            url = sc.lnd_server_url + '/v1/channels/transactions'
-
-            headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
-
-            print("may need to pay")
-            print(str(may_need_to_pay_amount_msat))
-            
-            data = {
-                "dest": dest,
-                "amt": int(may_need_to_pay_amount_msat / 1000),
-                "payment_hash": b64_hex_transform(payment_hash),
-                "dest_custom_records": dest_custom_records,
-            }
-
-            print(str(data))
-            
-            # Making the POST request
-            response = requests.post(url=url, headers=headers, json=data, verify=sc.tls_cert_path)
-
-            # Check response
+        # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
+        elif not sc.is_stable_receiver and sc.stable_receiver_dollar_amount < sc.expected_dollar_amount:
+            print("Scenario 3 - Node is stableProvider and needs to pay")
+            response = keysend_payment(sc, may_need_to_pay_amount_msat)
             if response.status_code == 200:
                 print("Keysend successful:", response.json())
             else:
                 print("Failed to send keysend:", response.status_code, response.text)
-            
-            # TODO - error handling
             sc.payment_made = True
 
-    elif amount_too_small:
-        sc.payment_made = False
-
-    # USD price went up
-    elif not amount_too_small and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
-        # Scenario 4 - Node is stableReceiver and needs to pay = keysend
-        if sc.is_stable_receiver:
-            # Need to do a bunch of stuff for keysends on LND :(
-            # Base 64 encoded destination bytes
-            dest = b64_hex_transform(sc.counterparty)
-
-            pre_image = token_hex(32)
-            print()
-
-            payment_hash = sha256(bytes.fromhex(pre_image)).hexdigest()
-
-            # Custom records - assuming `keysend_message` is defined
-            dest_custom_records = {
-                5482373484: b64_hex_transform(pre_image),
-                34349334: b64_transform("yoo"),  # Example for additional message
-            }
-
-            # We should have payment now; check that amount is within 1 penny
-            url = sc.lnd_server_url + '/v1/channels/transactions'
-
-            headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
-            
-            # Preparing data payload
-            data = {
-                "dest": dest,
-                "amt": int(may_need_to_pay_amount_msat / 1000),
-                "payment_hash": b64_hex_transform(payment_hash),
-                "dest_custom_records": dest_custom_records,
-            }
-
-            print(str(data))
-            
-            # Making the POST request
-            response = requests.post(url=url, headers=headers, json=data, verify=sc.tls_cert_path)
-
-            # Check response
+        # Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
+        elif sc.is_stable_receiver and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
+            print("Scenario 4 - Node is stableReceiver and needs to pay")
+            response = keysend_payment(sc, may_need_to_pay_amount_msat)
             if response.status_code == 200:
                 print("Keysend successful:", response.json())
             else:
                 print("Failed to send keysend:", response.status_code, response.text)
-            
-            # TODO - error handling
             sc.payment_made = True
 
         # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
-        elif not(sc.is_stable_receiver):
+        elif not sc.is_stable_receiver and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
+            print("Scenario 5 - Node is stableProvider and expects to get paid")
             time.sleep(30)
-
-            # We should have payment now; check amount is within 1 penny
-            url = sc.lnd_server_url + '/v1/channels'
-            headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
-            channels = requests.get(url, headers=headers, verify=sc.tls_cert_path)
-
-            channels_data = channels.json()
-            
-            for channel in channels_data['channels']:
-                if channel['chan_id'] == sc.channel_id:
-                    # Need to subtract other values
-                    new_our_balance_msat = int(channel['local_balance']) * 1000 
-                    # And add native amount as required ... 
-                    new_their_stable_balance_msat = (int(channel['capacity']) - new_our_balance_msat) 
-                    new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
-
-                else:
-                    print("Could not find channel")
-          
+            channels_data = get_channel_info(sc)
+            update_our_and_their_balance(sc, channels_data)
+            new_their_stable_balance_msat = sc.their_balance - sc.native_amount_msat
+            new_stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, new_their_stable_balance_msat, expected_msats)
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
             else:
-                # Increase risk score 
-                sc.risk_score = sc.risk_score + 1
+                sc.risk_score += 1
 
-    # We write this to the main ouput file.
     json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}}},\n'
-
-    # Log the result
-    # How to log better?
-    if sc.is_stable_receiver:
-        file_path = '/Users/t/Desktop/stable-channels/stablelog1.json'
-
-        with open(file_path, 'a') as file:
-            file.write(json_line)
-
-    elif not(sc.is_stable_receiver):
-        file_path = '/Users/t/Desktop/stable-channels/stablelog2.json'
-
-        with open(file_path, 'a') as file:
-            file.write(json_line)
-
+    file_path = '/Users/t/Desktop/stable-channels/stablelog1.json' if sc.is_stable_receiver else '/Users/t/Desktop/stable-channels/stablelog2.json'
+    with open(file_path, 'a') as file:
+        file.write(json_line)
 
 def main():
     parser = argparse.ArgumentParser(description='LND Script Arguments')
