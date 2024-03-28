@@ -245,8 +245,8 @@ def check_stables(sc):
             sc.our_balance = int(channel['local_balance']) * 1000
             sc.their_balance = int(channel['remote_balance']) * 1000
 
-    print(sc.our_balance)
-    print(sc.their_balance)
+    print("Our balance = " + str(sc.our_balance))
+    print("Their balance = " + str(sc.their_balance))
 
     # Get Stable Receiver dollar amount
     if sc.is_stable_receiver:
@@ -315,10 +315,8 @@ def check_stables(sc):
             # Generate a random 32 byte Hex pre_image
             pre_image = token_hex(32)
 
-            # Hash of the pre-image
             payment_hash = sha256(bytes.fromhex(pre_image)).hexdigest()
 
-            # Custom records - assuming `keysend_message` is defined
             dest_custom_records = {
                 5482373484: b64_hex_transform(pre_image),
                 34349334: b64_transform("yoo"),  # Example for additional message
@@ -328,14 +326,18 @@ def check_stables(sc):
             url = sc.lnd_server_url + '/v1/channels/transactions'
 
             headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
+
+            print("may need to pay")
+            print(str(may_need_to_pay_amount_msat))
             
-            # Preparing data payload
             data = {
                 "dest": dest,
                 "amt": int(may_need_to_pay_amount_msat / 1000),
                 "payment_hash": b64_hex_transform(payment_hash),
                 "dest_custom_records": dest_custom_records,
             }
+
+            print(str(data))
             
             # Making the POST request
             response = requests.post(url=url, headers=headers, json=data, verify=sc.tls_cert_path)
@@ -360,16 +362,15 @@ def check_stables(sc):
             # Base 64 encoded destination bytes
             dest = b64_hex_transform(sc.counterparty)
 
-            # Generate a random 32 byte Hex pre_image
             pre_image = token_hex(32)
+            print()
 
-            # Hash of the pre-image
             payment_hash = sha256(bytes.fromhex(pre_image)).hexdigest()
 
             # Custom records - assuming `keysend_message` is defined
             dest_custom_records = {
                 5482373484: b64_hex_transform(pre_image),
-                34349334: b64_transform("yooo"),  # Example for additional message
+                34349334: b64_transform("yoo"),  # Example for additional message
             }
 
             # We should have payment now; check that amount is within 1 penny
@@ -405,7 +406,6 @@ def check_stables(sc):
 
             # We should have payment now; check amount is within 1 penny
             url = sc.lnd_server_url + '/v1/channels'
-
             headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
             channels = requests.get(url, headers=headers, verify=sc.tls_cert_path)
 
@@ -417,7 +417,6 @@ def check_stables(sc):
                     new_our_balance_msat = int(channel['local_balance']) * 1000 
                     # And add native amount as required ... 
                     new_their_stable_balance_msat = (int(channel['capacity']) - new_our_balance_msat) 
-
                     new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
                 else:
@@ -492,7 +491,6 @@ if __name__ == "__main__":
     main()
 
 
-
 # curl --cacert /Users/t/.polar/networks/8/volumes/lnd/alice/tls.cert \
 #      --header "Grpc-Metadata-macaroon: 0201036c6e6402f801030a103def9a17d1aa8476cb50a975bb3ef1ee1201301a160a0761646472657373120472656164120577726974651a130a04696e666f120472656164120577726974651a170a08696e766f69636573120472656164120577726974651a210a086d616361726f6f6e120867656e6572617465120472656164120577726974651a160a076d657373616765120472656164120577726974651a170a086f6666636861696e120472656164120577726974651a160a076f6e636861696e120472656164120577726974651a140a057065657273120472656164120577726974651a180a067369676e6572120867656e657261746512047265616400000620f0e59d2963cb3246e9fd8d835ea47e056bf4eb80002ae98204b62bcb5ebf3809" \
 #      https://127.0.0.1:8081/v1/balance/channels 
@@ -505,7 +503,6 @@ if __name__ == "__main__":
 
 # Bob local startup LND as Stable Provider
 # python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/8/volumes/lnd/bob/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=False --counterparty=02a69511ad99253076f955e1e79fcba20cf4bd53ffe8e25ff060d31a031129193b --macaroon-path=/Users/t/.polar/networks/8/volumes/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8082
-
 
 
 # Sample startup command
