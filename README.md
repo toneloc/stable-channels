@@ -1,4 +1,3 @@
-
 #### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
 ## Stable Channels - Version 16MAR2024
@@ -69,9 +68,12 @@ There are also some in-progress iOS apps, web apps, bash scripts, Python servers
 ### Environment and dependencies
 
 - Terminal access to bitcoind and a CLN node running version `23.05.2` or version `24.02` is required. Other versions may work but `23.08.1` does not work.
+- LND is recently supported and is tested with version `0.17.4-beta`
 - Python3 is also required. 
 
-Clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py`. 
+For CLN, clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py` for CLN. 
+
+Copy the contents of `lnd.py` for LND.
 
 Stable Channels has a few dependencies. 
 - Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
