@@ -7,6 +7,7 @@
 # Section 3 - Core logic 
 # Section 4 - Initialization
 
+
 # Section 1 - Dependencies and main data structure
 # Dependencies
 from cachetools import cached, TTLCache # Used to handle price feed calls; probably can remove
@@ -157,19 +158,6 @@ def get_currencyrate(currency, urlformat, replymembers):
        print(" could not convert to sat'.format(url, json))")
        return None
 
-def set_proxies():
-    return
-    # config = plugin.rpc.listconfigs()
-    # if 'always-use-proxy' in config and config['always-use-proxy']:
-    #     paddr = config['proxy']
-    #     # Default port in 9050
-    #     if ':' not in paddr:
-    #         paddr += ':9050'
-    #     plugin.proxies = {'https': 'socks5h://' + paddr,
-    #                       'http': 'socks5h://' + paddr}
-    # else:
-    #     plugin.proxies = None
-
 # Cache returns cached result if <60 seconds old.
 # Stable Channels may not need
 @cached(cache=TTLCache(maxsize=1024, ttl=60))
@@ -223,10 +211,9 @@ def b64_transform(plain_str: str) -> str:
     return base64.b64encode(plain_str.encode()).decode()
 
 # This function is the scheduler, formatted to fire every 5 minutes
-# Regularly scheduled programming
 def start_scheduler(sc):
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/1', args=[sc])
     scheduler.start()
     pass
 
@@ -243,15 +230,19 @@ def keysend_payment(sc, amount_msat):
     }
     url = sc.lnd_server_url + '/v1/channels/transactions'
     headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
+
     data = {
         "dest": dest,
         "amt": int(amount_msat / 1000),
         "payment_hash": b64_hex_transform(payment_hash),
         "dest_custom_records": dest_custom_records,
     }
+    print("")
+    print(str(data))
     response = requests.post(url=url, headers=headers, json=data, verify=sc.tls_cert_path)
     return response
 
+# Core logic
 # 5 scenarios to handle
 # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
 # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
@@ -266,16 +257,17 @@ def check_stables(sc):
     print(expected_msats)
 
     channels_data = get_channel_info(sc)
+    print(channels_data)
     update_our_and_their_balance(sc, channels_data)
     print("Our balance = " + str(sc.our_balance))
     print("Their balance = " + str(sc.their_balance))
 
     if sc.is_stable_receiver:
-        balance = sc.our_balance - sc.native_amount_msat
+        adjustedBalance = sc.our_balance - sc.native_amount_msat
     else:
-        balance = sc.their_balance - sc.native_amount_msat
+        adjustedBalance = sc.their_balance - sc.native_amount_msat
 
-    sc.stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, balance, expected_msats)
+    sc.stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, adjustedBalance, expected_msats)
     formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
     print(formatted_time)
 
@@ -290,7 +282,7 @@ def check_stables(sc):
 
     if not amount_too_small:
         current_stable_receiver_balance = sc.our_balance if sc.is_stable_receiver else sc.their_balance
-        may_need_to_pay_amount_msat = round(abs(int(expected_msats) - int(current_stable_receiver_balance)))
+        msat_difference_from_expected = round(abs(int(expected_msats) - int(current_stable_receiver_balance)))
 
         # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
         if sc.stable_receiver_dollar_amount < sc.expected_dollar_amount and sc.is_stable_receiver:
@@ -307,8 +299,15 @@ def check_stables(sc):
 
         # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
         elif not sc.is_stable_receiver and sc.stable_receiver_dollar_amount < sc.expected_dollar_amount:
+
             print("Scenario 3 - Node is stableProvider and needs to pay")
-            response = keysend_payment(sc, may_need_to_pay_amount_msat)
+            
+            print(str(msat_difference_from_expected))
+            print(sc.counterparty)
+            print(sc)
+
+            response = keysend_payment(sc, msat_difference_from_expected)
+            
             if response.status_code == 200:
                 print("Keysend successful:", response.json())
             else:
@@ -318,7 +317,7 @@ def check_stables(sc):
         # Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
         elif sc.is_stable_receiver and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
             print("Scenario 4 - Node is stableReceiver and needs to pay")
-            response = keysend_payment(sc, may_need_to_pay_amount_msat)
+            response = keysend_payment(sc, msat_difference_from_expected)
             if response.status_code == 200:
                 print("Keysend successful:", response.json())
             else:
@@ -333,7 +332,7 @@ def check_stables(sc):
             update_our_and_their_balance(sc, channels_data)
             new_their_stable_balance_msat = sc.their_balance - sc.native_amount_msat
             new_stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, new_their_stable_balance_msat, expected_msats)
-            if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
+            if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) > 0.01:
                 sc.payment_made = True
             else:
                 sc.risk_score += 1
@@ -347,7 +346,7 @@ def main():
     parser = argparse.ArgumentParser(description='LND Script Arguments')
     parser.add_argument('--lnd-server-url', type=str, required=True, help='LND server address')
     parser.add_argument('--macaroon-path', type=str, required=True, help='Hex-encoded macaroon for authentication')
-    parser.add_argument('--tls-cert-path', type=str, required=True, help='TLS cert path for auth to server for authentication')
+    parser.add_argument('--tls-cert-path', type=str, required=True, help='TLS cert path for server authentication')
     parser.add_argument('--expected-dollar-amount', type=float, required=True, help='Expected dollar amount')
     parser.add_argument('--channel-id', type=str, required=True, help='LND channel ID')
     parser.add_argument('--native-amount-sat', type=float, required=True, help='Native amount in msat')
@@ -392,15 +391,9 @@ if __name__ == "__main__":
 #      --header "Grpc-Metadata-macaroon: 0201036c6e6402f801030a103def9a17d1aa8476cb50a975bb3ef1ee1201301a160a0761646472657373120472656164120577726974651a130a04696e666f120472656164120577726974651a170a08696e766f69636573120472656164120577726974651a210a086d616361726f6f6e120867656e6572617465120472656164120577726974651a160a076d657373616765120472656164120577726974651a170a086f6666636861696e120472656164120577726974651a160a076f6e636861696e120472656164120577726974651a140a057065657273120472656164120577726974651a180a067369676e6572120867656e657261746512047265616400000620f0e59d2963cb3246e9fd8d835ea47e056bf4eb80002ae98204b62bcb5ebf3809" \
 #      https://127.0.0.1:8081/v1/balance/channels 
 
-
-
-# ALice local startup LND
-# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/8/volumes/lnd/alice/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=True --counterparty=03a02e289f9f32e3c029c7aa8bab7bd5b580aee45470f62c1f033acf9380421cb5 --macaroon-path=/Users/t/.polar/networks/8/volumes/lnd/alice/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8081
+# Alice local startup LND as Stable Receiver
+# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/18/volumes/lnd/alice/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=True --counterparty=031786135987ebd4c08999a4cbbae38f67f41828879d191a5c56092e408e1ce9c4 --macaroon-path=/Users/t/.polar/networks/18/volumes/lnd/alice/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8081
 
 
 # Bob local startup LND as Stable Provider
-# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/8/volumes/lnd/bob/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=False --counterparty=02a69511ad99253076f955e1e79fcba20cf4bd53ffe8e25ff060d31a031129193b --macaroon-path=/Users/t/.polar/networks/8/volumes/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8082
-
-
-# Sample startup command
-# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/8/volumes/lnd/alice/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=True --counterparty=03a02e289f9f32e3c029c7aa8bab7bd5b580aee45470f62c1f033acf9380421cb5 --macaroon-path=/Users/t/.polar/networks/8/volumes/lnd/alice/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8081
+# python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/18/volumes/lnd/bob/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=False --counterparty=030c66a66743e9f9802780c16cc0d97151c6dae61df450dbca276478dc7d0c931d --macaroon-path=/Users/t/.polar/networks/18/volumes/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8082
