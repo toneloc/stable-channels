@@ -152,6 +152,7 @@ Hope to move all this to issues and PRs soon.
 #### Done:
 - [x] bash script version
 - [x] first CLN plugin version
+- [x] LND version
 - [x] first Python version
 - [x] CLI Greenlight integration
 - [x] price feed integration
@@ -164,6 +165,7 @@ Hope to move all this to issues and PRs soon.
 - [ ] monitor channel creation tx, and commence `check_stables` after
 - [ ] move Stable Channels details to conf files (*)
 - [ ] user feedback on CLN plugin
+- [ ] Add native field / partially stable
 - [ ] use CLN `datastore` command to manage Stable Channel details (?)
 - [ ] accounting commands
 - [ ] Python Greenlight integration
