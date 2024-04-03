@@ -119,7 +119,7 @@ lightning-cli plugin subcommand=start plugin=/home/ubuntu/stablechannels.py shor
 ```
 Modify the directory for your plugin and your lighning-rpc.
 
-What this command says is: "Start the pl;ugin at this directory. Make the Lightning channel with short ID 834973x927x0 a stable channel at $100.00. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `04165..` and here's the RPC path."
+What this command says is: "Start the plugin at this directory. Make the Lightning channel with short ID 834973x927x0 a stable channel at $100.00. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `04165..` and here's the RPC path."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
