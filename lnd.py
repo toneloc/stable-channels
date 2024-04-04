@@ -213,7 +213,7 @@ def b64_transform(plain_str: str) -> str:
 # This function is the scheduler, formatted to fire every 5 minutes
 def start_scheduler(sc):
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/1', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
     scheduler.start()
     pass
 
