@@ -201,11 +201,15 @@ def get_channel_info(sc):
 def update_our_and_their_balance(sc, channels_data):
     for channel in channels_data['channels']:
         if channel['chan_id'] == sc.channel_id:
-            sc.our_balance = int(channel['local_balance']) * 1000
-            sc.their_balance = int(channel['remote_balance']) * 1000
+            # LND keeps a small balance in reserve for channel closure, doesn't showit in "balance" data parameter
+            # So we add it here
+            local_chan_reserve_msat = int(channel['local_chan_reserve_sat']) * 1000
+            remote_chan_reserve_msat = int(channel['remote_chan_reserve_sat']) * 1000
+            sc.our_balance = (int(channel['local_balance']) * 1000) + local_chan_reserve_msat
+            sc.their_balance = (int(channel['remote_balance']) * 1000) + remote_chan_reserve_msat
             return
     print("Could not find channel")
-
+    
 def b64_transform(plain_str: str) -> str:
     """Returns the b64 transformed version of a string"""
     return base64.b64encode(plain_str.encode()).decode()
@@ -226,7 +230,7 @@ def keysend_payment(sc, amount_msat):
     payment_hash = sha256(bytes.fromhex(pre_image)).hexdigest()
     dest_custom_records = {
         5482373484: b64_hex_transform(pre_image),
-        34349334: b64_transform("yoo"),
+        34349334: b64_transform("Custom Stable Channel message here, when needed."),
     }
     url = sc.lnd_server_url + '/v1/channels/transactions'
     headers = {'Grpc-Metadata-macaroon': sc.macaroon_hex}
@@ -301,11 +305,7 @@ def check_stables(sc):
         elif not sc.is_stable_receiver and sc.stable_receiver_dollar_amount < sc.expected_dollar_amount:
 
             print("Scenario 3 - Node is stableProvider and needs to pay")
-            
-            print(str(msat_difference_from_expected))
-            print(sc.counterparty)
-            print(sc)
-
+    
             response = keysend_payment(sc, msat_difference_from_expected)
             
             if response.status_code == 200:
