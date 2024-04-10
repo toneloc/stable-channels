@@ -337,7 +337,8 @@ def check_stables(sc):
             else:
                 sc.risk_score += 1
 
-    json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}}},\n'
+    json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}, "our_new_balance_msat": {sc.our_balance}, "their_new_balance_msat": {sc.their_balance}}},\n'
+    
     file_path = '/Users/t/Desktop/stable-channels/stablelog1.json' if sc.is_stable_receiver else '/Users/t/Desktop/stable-channels/stablelog2.json'
     with open(file_path, 'a') as file:
         file.write(json_line)
