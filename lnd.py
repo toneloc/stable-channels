@@ -201,10 +201,11 @@ def get_channel_info(sc):
 def update_our_and_their_balance(sc, channels_data):
     for channel in channels_data['channels']:
         if channel['chan_id'] == sc.channel_id:
-            # LND keeps a small balance in reserve for channel closure, doesn't showit in "balance" data parameter
+            # LND keeps a small balance in reserve for channel closure, doesn't show it in "balance" data parameter
             # So we add it here
             local_chan_reserve_msat = int(channel['local_chan_reserve_sat']) * 1000
             remote_chan_reserve_msat = int(channel['remote_chan_reserve_sat']) * 1000 
+            # The addition of these 660 sats are required if the channel open uses anchor outputs
             sc.our_balance = (int(channel['local_balance']) * 1000) + local_chan_reserve_msat + int(660000)
             sc.their_balance = (int(channel['remote_balance']) * 1000) + remote_chan_reserve_msat
             return
