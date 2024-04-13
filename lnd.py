@@ -204,8 +204,8 @@ def update_our_and_their_balance(sc, channels_data):
             # LND keeps a small balance in reserve for channel closure, doesn't showit in "balance" data parameter
             # So we add it here
             local_chan_reserve_msat = int(channel['local_chan_reserve_sat']) * 1000
-            remote_chan_reserve_msat = int(channel['remote_chan_reserve_sat']) * 1000
-            sc.our_balance = (int(channel['local_balance']) * 1000) + local_chan_reserve_msat
+            remote_chan_reserve_msat = int(channel['remote_chan_reserve_sat']) * 1000 
+            sc.our_balance = (int(channel['local_balance']) * 1000) + local_chan_reserve_msat + int(660000)
             sc.their_balance = (int(channel['remote_balance']) * 1000) + remote_chan_reserve_msat
             return
     print("Could not find channel")
