@@ -204,7 +204,7 @@ def update_our_and_their_balance(sc, channels_data):
             # LND keeps a small balance in reserve for channel closure
             # LNS doesn't show it in "balance" data parameter, so we add it here
             local_chan_reserve_msat = int(channel['commit_fee']) * 1000
-            # This following line may be troublesome +/- 20 sats if LND node wants to be a Stable Receiver
+            # This following line may be troublesome +/- 20 sats if LND node wants to be a Stable Provider
             remote_chan_reserve_msat = int(channel['remote_chan_reserve_sat']) * 1000 
             # The addition of these 660 sats are required if the channel open uses anchor outputs
             sc.our_balance = (int(channel['local_balance']) * 1000) + local_chan_reserve_msat + int(660000)
