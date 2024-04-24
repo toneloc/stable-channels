@@ -25,6 +25,8 @@ import codecs # Encodes macaroon as hex
 from hashlib import sha256
 from secrets import token_hex
 import base64
+from nostr.client.client import NostrClient
+import json
 
 # Main data structure
 class StableChannel:
@@ -112,6 +114,8 @@ sources = [
            ['{currency}', 'last']),
 ]
 
+# Nostr Private key TODO: Move this to .env
+private_key = ''
 # Request logic is from "currencyrate" plugin: 
 # https://github.com/lightningd/plugins/blob/master/currencyrate
 def requests_retry_session(
@@ -216,9 +220,9 @@ def b64_transform(plain_str: str) -> str:
     return base64.b64encode(plain_str.encode()).decode()
 
 # This function is the scheduler, formatted to fire every 5 minutes
-def start_scheduler(sc):
+def start_scheduler(sc, nostrClient):
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc, nostrClient])
     scheduler.start()
     pass
 
@@ -255,7 +259,7 @@ def keysend_payment(sc, amount_msat):
 # Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
 # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
-def check_stables(sc):
+def check_stables(sc, nostrClient):
     msat_dict, estimated_price = currencyconvert(sc.expected_dollar_amount, "USD")
     expected_msats = msat_dict["msat"]
     print("expected msats")
@@ -292,13 +296,15 @@ def check_stables(sc):
         # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
         if sc.stable_receiver_dollar_amount < sc.expected_dollar_amount and sc.is_stable_receiver:
             print("Scenario 2 - Node is stableReceiver and expects to get paid ")
-            time.sleep(30)
+            time.sleep(60)
             channels_data = get_channel_info(sc)
             update_our_and_their_balance(sc, channels_data)
             new_our_stable_balance_msat = sc.our_balance - sc.native_amount_msat
             new_stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, new_our_stable_balance_msat, expected_msats)
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
+                sc.risk_score = sc.risk_score - 1 if sc.risk_score > 0 else 0
+                sc.stable_receiver_dollar_amount = new_stable_receiver_dollar_amount
             else:
                 sc.risk_score += 1
 
@@ -328,21 +334,36 @@ def check_stables(sc):
         # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
         elif not sc.is_stable_receiver and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
             print("Scenario 5 - Node is stableProvider and expects to get paid")
-            time.sleep(30)
+            time.sleep(60)
             channels_data = get_channel_info(sc)
             update_our_and_their_balance(sc, channels_data)
             new_their_stable_balance_msat = sc.their_balance - sc.native_amount_msat
             new_stable_receiver_dollar_amount = calculate_stable_receiver_dollar_amount(sc, new_their_stable_balance_msat, expected_msats)
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) > 0.01:
                 sc.payment_made = True
+                sc.risk_score = sc.risk_score - 1 if sc.risk_score > 0 else 0
+                sc.stable_receiver_dollar_amount = new_stable_receiver_dollar_amount
             else:
                 sc.risk_score += 1
 
-    json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}, "our_new_balance_msat": {sc.our_balance}, "their_new_balance_msat": {sc.their_balance}}},\n'
-    
-    file_path = '/Users/t/Desktop/stable-channels/stablelog1.json' if sc.is_stable_receiver else '/Users/t/Desktop/stable-channels/stablelog2.json'
+    json_line = json.dumps({
+        "formatted_time": formatted_time,
+        "timestamp": int(time.time()),
+        "estimated_price": round(float(estimated_price)),
+        "expected_dollar_amount": sc.expected_dollar_amount,
+        "stable_receiver_dollar_amount": sc.stable_receiver_dollar_amount,
+        "payment_made": sc.payment_made,
+        "risk_score": sc.risk_score,
+        "our_new_balance": sc.our_balance/1000,
+        "their_new_balance": sc.their_balance/1000
+    })
+    file_path = '/home/ubuntu/stablelog1.json' if sc.is_stable_receiver else '/home/ubuntu/stablelog2.json'
     with open(file_path, 'a') as file:
-        file.write(json_line)
+        file.write(json_line + ' \n')
+    # Post the output on Nostr relay    
+    nostrClient.post(json_line)    
+
+
 
 def main():
     parser = argparse.ArgumentParser(description='LND Script Arguments')
@@ -358,6 +379,22 @@ def main():
     args = parser.parse_args()
 
     print(args.lnd_server_url)
+
+
+    # connect to Nostr relay
+    nostrClient = NostrClient(
+        private_key='',
+        relays=[
+            "wss://wc1.current.ninja",
+        ]
+    )
+    print(f"Your nostr public key: {nostrClient.public_key.bech32()}")
+
+    # Connect to relay
+    nostrClient.connect()
+
+    # Subscribe to relay
+    nostrClient.subscribe()
 
     sc = StableChannel(
         channel_id=args.channel_id, 
@@ -381,7 +418,7 @@ def main():
     print("Initializating a Stable Channel with these details:")
     print(sc)
 
-    thread = threading.Thread(target=start_scheduler, args=(sc,))
+    thread = threading.Thread(target=start_scheduler, args=(sc, nostrClient))
     thread.start()
     thread.join()
 
