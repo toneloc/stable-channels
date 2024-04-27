@@ -317,6 +317,8 @@ def check_stables(sc):
 def init(options, configuration, plugin):
     set_proxies(plugin)
 
+    print(options['is-stable-receiver'])
+    
     # Need to handle boolean input this way
     if options['is-stable-receiver'] == "False":
         is_stable_receiver = False
