@@ -280,8 +280,9 @@ def check_stables(sc):
     
             for channel in channels:
                 if channel.get("short_channel_id") == sc.short_channel_id:
-            else
-                print("Could not find channel")
+                    print("ok")
+                else:
+                    print("Could not find channel")
                 # We should have payment now; check amount is within 1 penny
                 new_our_balance = channel.get("our_amount_msat")
                 new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.nonstable_amount_msat
