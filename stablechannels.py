@@ -238,7 +238,7 @@ def check_stables(sc):
             for channel in channels:
                 if channel.get("short_channel_id") == sc.short_channel_id:
                     new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.nonstable_amount_msat
-                else
+                else:
                     print("Could not find channel")
                   
                 new_stable_receiver_dollar_amount = round((int(new_our_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
@@ -281,12 +281,12 @@ def check_stables(sc):
             for channel in channels:
                 if channel.get("short_channel_id") == sc.short_channel_id:
             else
-                    print("Could not find channel")
-                    # We should have payment now; check amount is within 1 penny
-                    new_our_balance = channel.get("our_amount_msat")
-                    new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.nonstable_amount_msat
+                print("Could not find channel")
+                # We should have payment now; check amount is within 1 penny
+                new_our_balance = channel.get("our_amount_msat")
+                new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.nonstable_amount_msat
 
-                    new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+                new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
             if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
                 sc.payment_made = True
@@ -325,7 +325,7 @@ def init(options, configuration, plugin):
     # convert to millsatoshis ...
     if options['nonstable_btc_amt']
         nonstable_btc_amt_msat = Millisatoshi(options['nonstable_btc_amt'])
-    else 
+    else:
         nonstable_btc_amt_msat = 0
 
     sc = StableChannel(
