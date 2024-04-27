@@ -325,6 +325,7 @@ def init(options, configuration, plugin):
     elif options['is-stable-receiver'] == "True":
         is_stable_receiver = True
 
+    print(is_stable_receiver)
     # convert to millsatoshis ...
     if int(options['nonstable-btc-amount']) > 0:
         nonstable_btc_amt_msat = Millisatoshi(int(options['nonstable-btc-amt']))
