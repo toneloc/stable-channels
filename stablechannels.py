@@ -300,13 +300,13 @@ def check_stables(sc):
     # Log the result
     # How to log better?
     if sc.is_stable_receiver:
-        file_path = '/home/ubuntu/stablelog1.json'
+        file_path = '/home/clightning/stablelog1.json'
 
         with open(file_path, 'a') as file:
             file.write(json_line)
 
     elif not(sc.is_stable_receiver):
-        file_path = '/home/ubuntu/stablelog2.json'
+        file_path = '/home/clightning/stablelog2.json'
 
         with open(file_path, 'a') as file:
             file.write(json_line)
