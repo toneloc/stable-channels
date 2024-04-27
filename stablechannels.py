@@ -325,7 +325,7 @@ def init(options, configuration, plugin):
 
     # convert to millsatoshis ...
     if options['nonstable_btc_amt'] > 0:
-        nonstable_btc_amt_msat = Millisatoshi(options['nonstable_btc_amt'])
+        nonstable_btc_amt_msat = Millisatoshi(options['nonstable-btc-amt'])
     else:
         nonstable_btc_amt_msat = 0
 
