@@ -329,7 +329,7 @@ def init(options, configuration, plugin):
     print(is_stable_receiver)
     # convert to millsatoshis ...
     if int(options['native-btc-amount']) > 0:
-        native_btc_amt_msat = Millisatoshi(int(options['native-btc-amount']))
+        native_btc_amt_msat = int(options['native-btc-amount']) * 1000
     else:
         native_btc_amt_msat = 0
 
