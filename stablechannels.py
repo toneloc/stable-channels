@@ -30,7 +30,7 @@ class StableChannel:
         plugin: Plugin,
         short_channel_id: str,
         expected_dollar_amount: float,
-        nonstable_amount_msat: int,
+        native_amount_msat: int,
         is_stable_receiver: bool,
         counterparty: str,
         lightning_rpc_path: str,
@@ -46,7 +46,7 @@ class StableChannel:
         self.plugin = plugin
         self.short_channel_id = short_channel_id
         self.expected_dollar_amount = expected_dollar_amount
-        self.nonstable_amount_msat = nonstable_amount_msat
+        self.native_amount_msat = native_amount_msat
         self.is_stable_receiver = is_stable_receiver
         self.counterparty = counterparty
         self.lightning_rpc_path = lightning_rpc_path
@@ -205,10 +205,10 @@ def check_stables(sc):
 
     # Get Stable Receiver dollar amount
     if sc.is_stable_receiver:
-        # subtract the nonstable_amount_msat
-        sc.stable_receiver_dollar_amount = round((int(sc.our_balance - sc.nonstable_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        # subtract the native_amount_msat (regular BTC)
+        sc.stable_receiver_dollar_amount = round((int(sc.our_balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
     else:
-        sc.stable_receiver_dollar_amount = round((int(sc.their_balance - sc.nonstable_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        sc.stable_receiver_dollar_amount = round((int(sc.their_balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
     formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
     
@@ -238,7 +238,7 @@ def check_stables(sc):
     
             for channel in channels:
                 if channel.get("short_channel_id") == sc.short_channel_id:
-                    new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.nonstable_amount_msat
+                    new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.native_amount_msat
                 else:
                     print("Could not find channel")
                   
@@ -286,7 +286,7 @@ def check_stables(sc):
                     print("Could not find channel")
                 # We should have payment now; check amount is within 1 penny
                 new_our_balance = channel.get("our_amount_msat")
-                new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.nonstable_amount_msat
+                new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.native_amount_msat
 
                 new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
@@ -328,16 +328,16 @@ def init(options, configuration, plugin):
 
     print(is_stable_receiver)
     # convert to millsatoshis ...
-    if int(options['nonstable-btc-amount']) > 0:
-        nonstable_btc_amt_msat = Millisatoshi(int(options['nonstable-btc-amt']))
+    if int(options['native-btc-amount']) > 0:
+        native_btc_amt_msat = Millisatoshi(int(options['native-btc-amount']))
     else:
-        nonstable_btc_amt_msat = 0
+        native_btc_amt_msat = 0
 
     sc = StableChannel(
             plugin=plugin,
             short_channel_id=options['short-channel-id'],
             expected_dollar_amount=float(options['stable-dollar-amount']),
-            nonstable_amount_msat=nonstable_btc_amt_msat,
+            native_amount_msat=native_btc_amt_msat,
             is_stable_receiver=is_stable_receiver,
             counterparty=options['counterparty'],
             lightning_rpc_path=options['lightning-rpc-path'],
@@ -354,7 +354,7 @@ def init(options, configuration, plugin):
     print("Starting Stable Channel with these details:")
     print(sc.short_channel_id)
     print(sc.expected_dollar_amount)
-    print(sc.nonstable_amount_msat)
+    print(sc.native_amount_msat)
     print(sc.counterparty)
     print(sc.lightning_rpc_path)
 
@@ -364,7 +364,7 @@ def init(options, configuration, plugin):
 plugin.add_option(name='short-channel-id', default='', description='Input the channel short-channel-id you wish to stabilize.')
 plugin.add_option(name='is-stable-receiver', default='', description='Input True if you are the Stable Receiever; False if you are the Stable Provider.')
 plugin.add_option(name='stable-dollar-amount', default='', description='Input the amount of dollars you want to keep stable.')
-plugin.add_option(name='nonstable-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable in dollar terms .. e.g. 0.0012btc. Include the btc at the end with no space.')
+plugin.add_option(name='native-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable in dollar terms .. e.g. 0.0012btc. Include the btc at the end with no space.')
 plugin.add_option(name='counterparty', default='', description='Input the nodeID of your counterparty.')
 plugin.add_option(name='lightning-rpc-path', default='', description='Input your Lightning RPC path.')
 
