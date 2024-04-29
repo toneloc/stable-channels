@@ -194,9 +194,10 @@ def currencyconvert(plugin, amount, currency):
 # This logs all 
 @plugin.subscribe("coin_movement")
 def notify_coin_movement(plugin, coin_movement, **kwargs):
+    l1 = LightningRpc(sc.lightning_rpc_path)
     plugin.log("coin movement: {}".format(coin_movement))
 
-    
+
     print(l1.listpays("null", coin_movement["payment_hash"]))
 
     # extract 
