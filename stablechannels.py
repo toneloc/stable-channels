@@ -195,7 +195,7 @@ def currencyconvert(plugin, amount, currency):
 # This begins your regularly scheduled programming
 def start_scheduler(sc):
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/1', args=[sc])
     scheduler.start()
 
 # 5 scenarios to handle
@@ -207,7 +207,7 @@ def start_scheduler(sc):
 # "sc" = "Stable Channel" object
 def check_stables(sc):
     print("beginning check")
-    print (channel.__str__())
+    print (sc.__str__())
     l1 = LightningRpc(sc.lightning_rpc_path)
 
     msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
@@ -237,7 +237,7 @@ def check_stables(sc):
     amount_too_small = False
 
     print("line 239 check")
-    print (channel.__str__())
+    print (sc.__str__())
 
     # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
     if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
