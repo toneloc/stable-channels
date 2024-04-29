@@ -386,8 +386,6 @@ def init(options, configuration, plugin):
             payment_made=False
     )
 
-    plugin.add_subscription("coin_movement", handle_coin_movement)
-
     print("Starting Stable Channel with these details:")
     print(sc.__str__())
 
@@ -400,6 +398,8 @@ plugin.add_option(name='stable-dollar-amount', default='', description='Input th
 plugin.add_option(name='native-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable in dollar terms .. e.g. 0.0012btc. Include the btc at the end with no space.')
 plugin.add_option(name='counterparty', default='', description='Input the nodeID of your counterparty.')
 plugin.add_option(name='lightning-rpc-path', default='', description='Input your Lightning RPC path.')
+
+plugin.add_subscription("coin_movement", handle_coin_movement)
 
 plugin.run()
 
