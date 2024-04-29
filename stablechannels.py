@@ -196,6 +196,11 @@ def currencyconvert(plugin, amount, currency):
 def notify_coin_movement(plugin, coin_movement, **kwargs):
     plugin.log("coin movement: {}".format(coin_movement))
 
+    
+    print(l1.listpays("null", coin_movement["payment_hash"]))
+
+    # extract 
+
     # # we save to disk so that we don't get borked if the node restarts
     # # assumes notification calls are synchronous (not thread safe)
     # with open('moves.json', 'a') as f:
@@ -217,8 +222,6 @@ def start_scheduler(sc):
 # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
 def check_stables(sc):
-    print("beginning check")
-    print (sc.__str__())
     l1 = LightningRpc(sc.lightning_rpc_path)
 
     msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
@@ -247,7 +250,7 @@ def check_stables(sc):
     sc.payment_made = False
     amount_too_small = False
 
-    print("line 239 check")
+    print("Line 239 check")
     print (sc.__str__())
 
     # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
