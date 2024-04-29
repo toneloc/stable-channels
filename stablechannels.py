@@ -24,6 +24,8 @@ import threading # Standard on Python 3
 
 plugin = Plugin()
 
+# modify to make this an array of sc objects
+# sc = stable channel
 sc = None
 
 class StableChannel:
@@ -236,9 +238,9 @@ def check_stables(sc):
     # Get Stable Receiver dollar amount
     if sc.is_stable_receiver:
         # subtract the native_amount_msat (regular BTC)
-        sc.stable_receiver_dollar_amount = round((int(sc.our_balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        sc.stable_receiver_dollar_amount = round((int(sc.our_balance * sc.expected_dollar_amount) / int(expected_msats), 3)
     else:
-        sc.stable_receiver_dollar_amount = round((int(sc.their_balance - sc.native_amount_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        sc.stable_receiver_dollar_amount = round((int(sc.their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
     formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
     
@@ -347,12 +349,8 @@ def check_stables(sc):
             file.write(json_line)
 
 def handle_coin_movement(sc, *args, **kwargs):
-    print("Positional arguments:", args)
-    print("Keyword arguments:", kwargs)
-    # Extracting the coin_movement dictionary from kwargs
-    coin_movement = kwargs.get('coin_movement', {})
 
-    # Accessing individual values from the coin_movement dictionary
+    coin_movement = kwargs.get('coin_movement', {})
     version = coin_movement.get('version')
     node_id = coin_movement.get('node_id')
     type_ = coin_movement.get('type')
@@ -427,20 +425,10 @@ def init(options, configuration, plugin):
 plugin.add_option(name='short-channel-id', default='', description='Input the channel short-channel-id you wish to stabilize.')
 plugin.add_option(name='is-stable-receiver', default='', description='Input True if you are the Stable Receiever; False if you are the Stable Provider.')
 plugin.add_option(name='stable-dollar-amount', default='', description='Input the amount of dollars you want to keep stable.')
-plugin.add_option(name='native-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable in dollar terms .. e.g. 0.0012btc. Include the btc at the end with no space.')
+plugin.add_option(name='native-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable, in sats.')
 plugin.add_option(name='counterparty', default='', description='Input the nodeID of your counterparty.')
 plugin.add_option(name='lightning-rpc-path', default='', description='Input your Lightning RPC path.')
 
 plugin.add_subscription("coin_movement", lambda *args, **kwargs: handle_coin_movement(sc, *args, **kwargs))
 
 plugin.run()
-
-
-# @plugin.subscribe("coin_movement")
-#     def notify_coin_movement(plugin, coin_movement, **kwargs):
-
-#         l1 = LightningRpc(plugin.lightning_rpc_path)
-#         plugin.log("coin movement: {}".format(coin_movement))
-
-
-#         print(l1.listpays("null", coin_movement["payment_hash"]))
