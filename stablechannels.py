@@ -347,6 +347,36 @@ def check_stables(sc):
 def handle_coin_movement(*args, **kwargs):
     print("Positional arguments:", args)
     print("Keyword arguments:", kwargs)
+    # Extracting the coin_movement dictionary from kwargs
+    coin_movement = kwargs.get('coin_movement', {})
+
+    # Accessing individual values from the coin_movement dictionary
+    version = coin_movement.get('version')
+    node_id = coin_movement.get('node_id')
+    type_ = coin_movement.get('type')
+    account_id = coin_movement.get('account_id')
+    payment_hash = coin_movement.get('payment_hash')
+    part_id = coin_movement.get('part_id')
+    credit_msat = coin_movement.get('credit_msat')
+    debit_msat = coin_movement.get('debit_msat')
+    fees_msat = coin_movement.get('fees_msat')
+    tags = coin_movement.get('tags')
+    timestamp = coin_movement.get('timestamp')
+    coin_type = coin_movement.get('coin_type')
+
+    # Print or manipulate the extracted values as needed
+    print("Version:", version)
+    print("Node ID:", node_id)
+    print("Type:", type_)
+    print("Account ID:", account_id)
+    print("Payment Hash:", payment_hash)
+    print("Part ID:", part_id)
+    print("Credit Millisatoshi:", credit_msat)
+    print("Debit Millisatoshi:", debit_msat)
+    print("Fees Millisatoshi:", fees_msat)
+    print("Tags:", tags)
+    print("Timestamp:", timestamp)
+    print("Coin Type:", coin_type)
 
 # Section 4 - Plug-in initialization
 @plugin.init()
