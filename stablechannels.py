@@ -429,7 +429,7 @@ plugin.add_option(name='native-btc-amount', default='', description='Input the a
 plugin.add_option(name='counterparty', default='', description='Input the nodeID of your counterparty.')
 plugin.add_option(name='lightning-rpc-path', default='', description='Input your Lightning RPC path.')
 
-plugin.add_subscription("coin_movement", handle_coin_movement)
+plugin.add_subscription("coin_movement", lambda *args, **kwargs: handle_coin_movement(sc, *args, **kwargs))
 
 plugin.run()
 
