@@ -77,6 +77,15 @@ class StableChannel:
             f"    payment_made={self.payment_made}\n"
             f")"
         )
+    
+    @plugin.subscribe("coin_movement")
+    def notify_coin_movement(plugin, coin_movement, **kwargs):
+    l1 = LightningRpc(sc.lightning_rpc_path)
+    plugin.log("coin movement: {}".format(coin_movement))
+
+
+    print(l1.listpays("null", coin_movement["payment_hash"]))
+
 
 # Section 2 - Price feed config and logic
 Source = namedtuple('Source', ['name', 'urlformat', 'replymembers'])
@@ -191,14 +200,6 @@ def currencyconvert(plugin, amount, currency):
 
 # Section 3 - Core logic 
 
-# This logs all 
-@plugin.subscribe("coin_movement")
-def notify_coin_movement(plugin, coin_movement, **kwargs):
-    l1 = LightningRpc(sc.lightning_rpc_path)
-    plugin.log("coin movement: {}".format(coin_movement))
-
-
-    print(l1.listpays("null", coin_movement["payment_hash"]))
 
     # extract 
 
