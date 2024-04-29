@@ -238,9 +238,9 @@ def check_stables(sc):
     # Get Stable Receiver dollar amount
     if sc.is_stable_receiver:
         # subtract the native_amount_msat (regular BTC)
-        sc.stable_receiver_dollar_amount = round((int(sc.our_balance * sc.expected_dollar_amount) / int(expected_msats), 3)
+        sc.stable_receiver_dollar_amount = round((int(sc.our_balance * sc.expected_dollar_amount)) / int(expected_msats), 3)
     else:
-        sc.stable_receiver_dollar_amount = round((int(sc.their_balance) * sc.expected_dollar_amount) / int(expected_msats), 3)
+        sc.stable_receiver_dollar_amount = round((int(sc.their_balance * sc.expected_dollar_amount)) / int(expected_msats), 3)
 
     formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
     
