@@ -191,6 +191,17 @@ def currencyconvert(plugin, amount, currency):
 
 # Section 3 - Core logic 
 
+# This logs all 
+@plugin.subscribe("coin_movement")
+def notify_coin_movement(plugin, coin_movement, **kwargs):
+    plugin.log("coin movement: {}".format(coin_movement))
+
+    # # we save to disk so that we don't get borked if the node restarts
+    # # assumes notification calls are synchronous (not thread safe)
+    # with open('moves.json', 'a') as f:
+    #     f.write(json.dumps(coin_movement) + ',')
+
+
 # This function is the scheduler, formatted to fire every 5 minutes
 # This begins your regularly scheduled programming
 def start_scheduler(sc):
