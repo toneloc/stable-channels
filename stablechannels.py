@@ -59,6 +59,25 @@ class StableChannel:
         self.formatted_datetime = datetime
         self.payment_made = payment_made
 
+    def __str__(self):
+        return (
+            f"StableChannel(\n"
+            f"    short_channel_id={self.short_channel_id},\n"
+            f"    expected_dollar_amount={self.expected_dollar_amount},\n"
+            f"    native_amount_msat={self.native_amount_msat},\n"
+            f"    is_stable_receiver={self.is_stable_receiver},\n"
+            f"    counterparty={self.counterparty},\n"
+            f"    our_balance={self.our_balance},\n"
+            f"    their_balance={self.their_balance},\n"
+            f"    risk_score={self.risk_score},\n"
+            f"    stable_receiver_dollar_amount={self.stable_receiver_dollar_amount},\n"
+            f"    stable_provider_dollar_amount={self.stable_provider_dollar_amount},\n"
+            f"    timestamp={self.timestamp},\n"
+            f"    formatted_datetime={self.formatted_datetime},\n"
+            f"    payment_made={self.payment_made}\n"
+            f")"
+        )
+
 # Section 2 - Price feed config and logic
 Source = namedtuple('Source', ['name', 'urlformat', 'replymembers'])
 
@@ -173,7 +192,7 @@ def currencyconvert(plugin, amount, currency):
 # Section 3 - Core logic 
 
 # This function is the scheduler, formatted to fire every 5 minutes
-# Regularly scheduled programming
+# This begins your regularly scheduled programming
 def start_scheduler(sc):
     scheduler = BlockingScheduler()
     scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
@@ -187,6 +206,8 @@ def start_scheduler(sc):
 # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
 def check_stables(sc):
+    print("beginning check")
+    print (channel.__str__())
     l1 = LightningRpc(sc.lightning_rpc_path)
 
     msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
@@ -214,6 +235,9 @@ def check_stables(sc):
     
     sc.payment_made = False
     amount_too_small = False
+
+    print("line 239 check")
+    print (channel.__str__())
 
     # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
     if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
