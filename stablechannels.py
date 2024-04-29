@@ -77,15 +77,6 @@ class StableChannel:
             f"    payment_made={self.payment_made}\n"
             f")"
         )
-    
-    @plugin.subscribe("coin_movement")
-    def notify_coin_movement(self, plugin, coin_movement, **kwargs):
-        l1 = LightningRpc(self.lightning_rpc_path)
-        plugin.log("coin movement: {}".format(coin_movement))
-
-
-        print(l1.listpays("null", coin_movement["payment_hash"]))
-
 
 # Section 2 - Price feed config and logic
 Source = namedtuple('Source', ['name', 'urlformat', 'replymembers'])
@@ -353,6 +344,10 @@ def check_stables(sc):
         with open(file_path, 'a') as file:
             file.write(json_line)
 
+def handle_coin_movement(*args, **kwargs):
+    print("Positional arguments:", args)
+    print("Keyword arguments:", kwargs)
+
 # Section 4 - Plug-in initialization
 @plugin.init()
 def init(options, configuration, plugin):
@@ -391,12 +386,10 @@ def init(options, configuration, plugin):
             payment_made=False
     )
 
+    plugin.add_subscription("coin_movement", handle_coin_movement)
+
     print("Starting Stable Channel with these details:")
-    print(sc.short_channel_id)
-    print(sc.expected_dollar_amount)
-    print(sc.native_amount_msat)
-    print(sc.counterparty)
-    print(sc.lightning_rpc_path)
+    print(sc.__str__())
 
     # Need to start a new thread so init funciotn can return
     threading.Thread(target=start_scheduler, args=(sc,)).start()
@@ -409,3 +402,13 @@ plugin.add_option(name='counterparty', default='', description='Input the nodeID
 plugin.add_option(name='lightning-rpc-path', default='', description='Input your Lightning RPC path.')
 
 plugin.run()
+
+
+# @plugin.subscribe("coin_movement")
+#     def notify_coin_movement(plugin, coin_movement, **kwargs):
+
+#         l1 = LightningRpc(plugin.lightning_rpc_path)
+#         plugin.log("coin movement: {}".format(coin_movement))
+
+
+#         print(l1.listpays("null", coin_movement["payment_hash"]))
