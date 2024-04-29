@@ -79,7 +79,7 @@ class StableChannel:
         )
     
     @plugin.subscribe("coin_movement")
-    def notify_coin_movement(plugin, coin_movement, **kwargs):
+    def notify_coin_movement(self, plugin, coin_movement, **kwargs):
         l1 = LightningRpc(self.lightning_rpc_path)
         plugin.log("coin movement: {}".format(coin_movement))
 
