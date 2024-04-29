@@ -24,6 +24,8 @@ import threading # Standard on Python 3
 
 plugin = Plugin()
 
+sc = None
+
 class StableChannel:
     def __init__(
         self,
@@ -344,7 +346,7 @@ def check_stables(sc):
         with open(file_path, 'a') as file:
             file.write(json_line)
 
-def handle_coin_movement(*args, **kwargs):
+def handle_coin_movement(sc, *args, **kwargs):
     print("Positional arguments:", args)
     print("Keyword arguments:", kwargs)
     # Extracting the coin_movement dictionary from kwargs
