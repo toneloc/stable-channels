@@ -371,7 +371,7 @@ def handle_coin_movement(sc, *args, **kwargs):
     print("Timestamp:", timestamp)
     print("Coin Type:", coin_type)
 
-    if coin_movement = "channel_mvt"
+    # if coin_movement = "channel_mvt"
     # if credit_msat > 0:
     #     sc.our_balance + credit_msat
 
