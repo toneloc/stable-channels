@@ -32,7 +32,7 @@ class StableChannel:
     def __init__(
         self,
         plugin: Plugin,
-        short_channel_id: str,
+        channel_id: str,
         expected_dollar_amount: float,
         native_amount_msat: int,
         is_stable_receiver: bool,
@@ -48,7 +48,7 @@ class StableChannel:
         payment_made: bool
     ):
         self.plugin = plugin
-        self.short_channel_id = short_channel_id
+        self.channel_id = channel_id
         self.expected_dollar_amount = expected_dollar_amount
         self.native_amount_msat = native_amount_msat
         self.is_stable_receiver = is_stable_receiver
@@ -66,7 +66,7 @@ class StableChannel:
     def __str__(self):
         return (
             f"StableChannel(\n"
-            f"    short_channel_id={self.short_channel_id},\n"
+            f"    channel_id={self.channel_id},\n"
             f"    expected_dollar_amount={self.expected_dollar_amount},\n"
             f"    native_amount_msat={self.native_amount_msat},\n"
             f"    is_stable_receiver={self.is_stable_receiver},\n"
@@ -195,15 +195,6 @@ def currencyconvert(plugin, amount, currency):
 
 # Section 3 - Core logic 
 
-
-    # extract 
-
-    # # we save to disk so that we don't get borked if the node restarts
-    # # assumes notification calls are synchronous (not thread safe)
-    # with open('moves.json', 'a') as f:
-    #     f.write(json.dumps(coin_movement) + ',')
-
-
 # This function is the scheduler, formatted to fire every 5 minutes
 # This begins your regularly scheduled programming
 def start_scheduler(sc):
@@ -231,7 +222,7 @@ def check_stables(sc):
     
     # Find the correct stable channel and set balances
     for channel in channels:
-        if channel.get("short_channel_id") == sc.short_channel_id:
+        if channel.get("channel_id") == sc.channel_id:
             sc.our_balance = channel.get("our_amount_msat")
             sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
 
@@ -271,7 +262,8 @@ def check_stables(sc):
             channels = list_funds_data.get("channels", [])
     
             for channel in channels:
-                if channel.get("short_channel_id") == sc.short_channel_id:
+                if channel.get("channel_id") == sc.channel_id:
+                    print("Found Stable Channel")
                     new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.native_amount_msat
                 else:
                     print("Could not find channel")
@@ -314,10 +306,11 @@ def check_stables(sc):
             channels = list_funds_data.get("channels", [])
     
             for channel in channels:
-                if channel.get("short_channel_id") == sc.short_channel_id:
-                    print("ok")
+                if channel.get("channel_id") == sc.channel_id:
+                    print("Found Stable Channel")
                 else:
-                    print("Could not find channel")
+                    print("Could not find Stable Channel")
+
                 # We should have payment now; check amount is within 1 penny
                 new_our_balance = channel.get("our_amount_msat")
                 new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.native_amount_msat
@@ -347,6 +340,7 @@ def check_stables(sc):
         with open(file_path, 'a') as file:
             file.write(json_line)
 
+# this method updates the balances in memory
 def handle_coin_movement(sc, *args, **kwargs):
 
     coin_movement = kwargs.get('coin_movement', {})
@@ -377,6 +371,13 @@ def handle_coin_movement(sc, *args, **kwargs):
     print("Timestamp:", timestamp)
     print("Coin Type:", coin_type)
 
+    if coin_movement = "channel_mvt"
+    # if credit_msat > 0:
+    #     sc.our_balance + credit_msat
+
+    # if debit_msat > 0:
+    #     sc.our_balance - debit_msat
+
 # Section 4 - Plug-in initialization
 @plugin.init()
 def init(options, configuration, plugin):
@@ -399,7 +400,7 @@ def init(options, configuration, plugin):
 
     sc = StableChannel(
             plugin=plugin,
-            short_channel_id=options['short-channel-id'],
+            channel_id=options['channel-id'],
             expected_dollar_amount=float(options['stable-dollar-amount']),
             native_amount_msat=native_btc_amt_msat,
             is_stable_receiver=is_stable_receiver,
@@ -421,7 +422,7 @@ def init(options, configuration, plugin):
     # Need to start a new thread so init funciotn can return
     threading.Thread(target=start_scheduler, args=(sc,)).start()
 
-plugin.add_option(name='short-channel-id', default='', description='Input the channel short-channel-id you wish to stabilize.')
+plugin.add_option(name='channel-id', default='', description='Input the channel ID you wish to stabilize.')
 plugin.add_option(name='is-stable-receiver', default='', description='Input True if you are the Stable Receiever; False if you are the Stable Provider.')
 plugin.add_option(name='stable-dollar-amount', default='', description='Input the amount of dollars you want to keep stable.')
 plugin.add_option(name='native-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable, in sats.')
