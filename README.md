@@ -191,12 +191,7 @@ For those users who want USD experience and are Americans, we recommend FDIC-ins
 
 ### Splicing workflow
 
-Stable Channels intends to use channel splicing to handle "margin calls."
-
-
-### Greenlight 
-
-Stable Channels intends to integrate with Blockstream's Greenlight product. 
+Stable Channels can use channel splicing to handle "margin calls."
 
 
 ### Acknowledgements
