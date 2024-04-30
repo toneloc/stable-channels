@@ -255,9 +255,9 @@ def check_stables(sc):
     else:
         # Round difference to nearest msat; we may need to pay it
         if sc.is_stable_receiver:
-            may_need_to_pay_amount = round(abs(int(expected_msats + native_amount_msat) -  int(sc.our_balance)))
+            may_need_to_pay_amount = round(abs(int(expected_msats + sc.native_amount_msat) -  int(sc.our_balance)))
         else:
-            may_need_to_pay_amount = round(abs(int(expected_msats + native_amount_msat) - int(sc.their_balance)))
+            may_need_to_pay_amount = round(abs(int(expected_msats + sc.native_amount_msat) - int(sc.their_balance)))
 
     # USD price went down.
     if not amount_too_small and (sc.stable_receiver_dollar_amount < sc.expected_dollar_amount):
