@@ -9,7 +9,7 @@ This Twitter thread explains things pretty well, with an example - https://x.com
 - These node runners are called <b>Stable Receivers</b>.
 - On the other side of the channel are <b>Stable Providers</b>. 
 
-Stable Providers want to leverage their bitcoin. In simple terms, this means that Stable Providers want to use their bitcoin to get more bitcoin. However, Stable Receivers put their bitcoin at risk by doing so.
+Stable Providers want to leverage their bitcoin. However, Stable Receivers put their bitcoin at risk by doing so.
 
 Each of these two nodes query 5 price feeds every 5 minutes. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $100 of bitcoin. 
 - Each party remains self-custodial.
@@ -21,12 +21,12 @@ Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) 
 <ul>
 <li>(a) If the price of bitcoin goes up:
     <ul>
-      <li>the Stable Provider gets more bitcoin. 
+      <li>the Stable Receiver loses bitcoin. 
       <li>This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. 
     </ul>
 <li>(b) If the price of bitcoin goes down:
     <ul>
-      <li>the Stable Provider loses bitcoin. 
+      <li>the Stable Receiver gets more bitcoin. 
       <li>This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
     </ul>
 <li>(c) the price of bitcoin stays the same:
@@ -35,19 +35,23 @@ Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) 
   </ul>
 </ul>
 
-Stable Channels are unannounced to the public network and are non-routing channels. We are working on adding routing. 
+Stable Channels are non-routing channels. We are working on adding routing. 
 
 Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
 Stable Channels works as a plug-in on CLN, which is Blockstream's implementation of the Lightning Network specification. 
+
+Stable Channels also works on LND. 
 
 Stable Channels workflows end-to-end work like this:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
 <li>Select the price feeds. By default, Stable Channels takes the median of five price feeds: BitStamp, CoinGecko, CoinDesk, Coinbase, and Blockchain.info
-<li>Create a *dual-funded channel* with the counterparty, each putting in the amount of the Stable Channel. 
+<li>Create a with the counterparty, each putting in the amount of the Stable Channel. 
 <ul>
+    <li>This can be dual-funded
+    <li>Or you can attach the Stable Channel software to an existing channel.
 <li> <i>Example: If the Stable Channel is for $100, each side of the channel puts in $100, for a total channel capacity of $200 at the time of channel creation</i>
 </ul>
 <li>Query the five price feeds' APIs and update the Stable Channel balance accordingly:
@@ -61,7 +65,12 @@ Stable Channels workflows end-to-end work like this:
 
 ## Getting Started
 
-Currently, this only works as a CLN plugin. This code is at the root of this directory. 
+Currently, this works as a CLN plugin and as a standalone LND app. This code is at the root of this directory. 
+
+<ul>
+    <li>The code for the CLN plugin is at stablechannels.py</li>
+    <li>The code for the standalone LND Python app is at lnd.py.</li>
+</ul>
 
 There are also some in-progress iOS apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
 
@@ -73,13 +82,15 @@ There are also some in-progress iOS apps, web apps, bash scripts, Python servers
 
 For CLN, clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py` for CLN. 
 
-Copy the contents of `lnd.py` for LND.
+Copy the contents of `lnd.py` to a working directory for LND.
 
 Stable Channels has a few dependencies. 
 - Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
 - Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
-### Connecting and creating a dual-funded channel
+Logs are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. You should create the log file and change the code to write to it. 
+
+### Connecting and creating a dual-funded channel (for CLN)
 
 If your Lightning Node is running, you will need to stop your Lightning Node and restart it with the proper commands for dual-funded (or interactive) channels.
 
@@ -115,11 +126,11 @@ Now, we need to start the Stable Channels plugin and with the relevant details o
 The plugin startup command will look something like this:
 
 ```bash
-lightning-cli plugin subcommand=start plugin=/home/ubuntu/stablechannels.py short-channel-id=834973x927x0 stable-dollar-amount=100 is-stable-receiver=True counterparty=041655321cga6309f716v863fb39bc5fb7bbdc3824b7fd3353ad2793e5be940d23 lightning-rpc-path=/home/ubuntu/.lightning/bitcoin/lightning-rpc
+lightning-cli plugin subcommand=start plugin=/home/clightning/stablechannels.py channel-id=b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a stable-dollar-amount=95 is-stable-receiver=True counterparty=026b9c2a005b182ff5b2a7002a03d6ea9d005d18ed2eb3113852d679b3ec3832c2 lightning-rpc-path=/home/clightning/.lightning/regtest/lightning-rpc native-btc-amount=0
 ```
 Modify the directory for your plugin and your lighning-rpc.
 
-What this command says is: "Start the plugin at this directory. Make the Lightning channel with short ID 834973x927x0 a stable channel at $100.00. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `04165..` and here's the RPC path."
+What this command says is: "Start the plugin at this directory. Make the Lightning channel with channel ID b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a a stable channel at $95.00. and 0 sats of BTC. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `026b9c..` and here's the RPC path."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
@@ -153,19 +164,19 @@ Hope to move all this to issues and PRs soon.
 - [x] bash script version
 - [x] first CLN plugin version
 - [x] LND version
-- [x] first Python version
-- [x] CLI Greenlight integration
+- [x] first Python app version
+- [x] test LI Greenlight integration
 - [x] price feed integration
 - [x] UTXOracle plugin - https://github.com/toneloc/plugins/blob/master/utxoracle/utxoracle.py
 - [x] dual-funded flow
 - [x] mainnet deployment
+- [x] Add native field / partially stable
 
 #### To do:
 - [ ] manage channel creation via `fundchannel` command
 - [ ] monitor channel creation tx, and commence `check_stables` after
 - [ ] move Stable Channels details to conf files (*)
 - [ ] user feedback on CLN plugin
-- [ ] Add native field / partially stable
 - [ ] use CLN `datastore` command to manage Stable Channel details (?)
 - [ ] accounting commands
 - [ ] Python Greenlight integration
