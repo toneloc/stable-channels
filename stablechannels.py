@@ -350,7 +350,7 @@ def handle_coin_movement(sc, *args, **kwargs):
     credit_msat = coin_movement.get('credit_msat')
     debit_msat = coin_movement.get('debit_msat')
     fees_msat = coin_movement.get('fees_msat')
-    tags = coin_movement.get('tags')
+    tags = coin_movement.get('tags', [])
     timestamp = coin_movement.get('timestamp')
     coin_type = coin_movement.get('coin_type')
 
@@ -370,11 +370,14 @@ def handle_coin_movement(sc, *args, **kwargs):
 
     if sc.channel_id == account_id:
         # this handles routing
-        if coin_movement == "routed" and debit_msat > 0:
-            print(here)
-            sc.stable_dollar_amount = sc.stable_dollar_amount - debit_msat
-        if coin_movement == "routed" and credit_msat > 0:
-            sc.our_balance = sc.our_balance + credit_msat
+        if 'routed' in tags:
+            if credit_msat > 0:
+                print("shall credit")
+
+                #sc.stable_dollar_amount += credit_msat
+            if debit_msat > 0:
+                print("shall debit, somehow")
+                # sc.our_balance = sc.our_balance + credit_msat
 
 # Section 4 - Plug-in initialization
 @plugin.init()
