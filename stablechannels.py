@@ -425,7 +425,7 @@ def init(options, configuration, plugin):
     print(sc.__str__())
 
     # Need to start a new thread so init funciotn can return
-    threading.Thread(target=start_scheduler, args=(sc,)).start()
+    # threading.Thread(target=start_scheduler, args=(sc,)).start()
 
 plugin.add_option(name='channel-id', default='', description='Input the channel ID you wish to stabilize.')
 plugin.add_option(name='is-stable-receiver', default='', description='Input True if you are the Stable Receiever; False if you are the Stable Provider.')
