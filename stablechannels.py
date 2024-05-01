@@ -371,9 +371,14 @@ def handle_coin_movement(sc, *args, **kwargs):
     print("Timestamp:", timestamp)
     print("Coin Type:", coin_type)
 
-    # if coin_movement = "channel_mvt"
-    # if credit_msat > 0:
-    #     sc.our_balance + credit_msat
+    # this handles routing
+    if coin_movement == "routed" and debit_msat > 0:
+        print(here)
+        sc.stable_dollar_amount = sc.stable_dollar_amount - debit_msat
+    if credit_msat > 0:
+        sc.our_balance = sc.our_balance + credit_msat
+
+
 
     # if debit_msat > 0:
     #     sc.our_balance - debit_msat
