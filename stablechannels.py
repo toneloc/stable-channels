@@ -368,15 +368,13 @@ def handle_coin_movement(sc, *args, **kwargs):
     print("Timestamp:", timestamp)
     print("Coin Type:", coin_type)
 
-    # this handles routing
-    if coin_movement == "routed" and debit_msat > 0:
-        print(here)
-        sc.stable_dollar_amount = sc.stable_dollar_amount - debit_msat
-    if coin_movement == "routed" and credit_msat > 0:
-        sc.our_balance = sc.our_balance + credit_msat
-
-    # if debit_msat > 0:
-    #     sc.our_balance - debit_msat
+    if sc.channel_id == account_id:
+        # this handles routing
+        if coin_movement == "routed" and debit_msat > 0:
+            print(here)
+            sc.stable_dollar_amount = sc.stable_dollar_amount - debit_msat
+        if coin_movement == "routed" and credit_msat > 0:
+            sc.our_balance = sc.our_balance + credit_msat
 
 # Section 4 - Plug-in initialization
 @plugin.init()
@@ -391,7 +389,6 @@ def init(options, configuration, plugin):
     elif options['is-stable-receiver'] == "True":
         is_stable_receiver = True
 
-    print(is_stable_receiver)
     # convert to millsatoshis ...
     if int(options['native-btc-amount']) > 0:
         native_btc_amt_msat = int(options['native-btc-amount']) * 1000
