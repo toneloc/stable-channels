@@ -387,7 +387,7 @@ def handle_coin_movement(sc, *args, **kwargs):
                 currency_units = msats_to_currency(int(credit_msat), estimated_price)
                 sc.expected_dollar_amount -= currency_units
                 print("estimated_price",estimated_price)
-                print("post stable_dollar_amount", expected_dollar_amount)
+                print("post stable_dollar_amount", sc.expected_dollar_amount)
 
             # the SR got paid
             if debit_msat > 0:
@@ -407,8 +407,9 @@ def handle_coin_movement(sc, *args, **kwargs):
                 # Thne it is a payment out, probably made by Stable Receiver
                 if sc.counterparty != destination:
             
+                    # if the we are the dest then we received, increase expected dollar value
                     if credit_msat > 0:
-                        print("shall credit")
+                        print("shall credit somehow")
 
                         #sc.stable_dollar_amount += credit_msat
 
