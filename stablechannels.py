@@ -382,7 +382,7 @@ def handle_coin_movement(sc, *args, **kwargs):
                 # need to convert msats to dollars
                 print("previous stable dollar amount", sc.expected_dollar_amount)
                 msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
-                currency_units = msats_to_currency(credit_msat, estimated_price)
+                currency_units = msats_to_currency(int(credit_msat), estimated_price)
                 sc.expected_dollar_amount -= currency_units
                 print("estimated_price",estimated_price)
                 print("post stable_dollar_amount", expected_dollar_amount)
@@ -404,11 +404,11 @@ def handle_coin_movement(sc, *args, **kwargs):
                 print("previous stable dollar amount", sc.expected_dollar_amount)
                 msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
                 debit_plus_fees = debit_msat + fees_msat
-                currency_units = msats_to_currency(debit_plus_fees, estimated_price)
+                currency_units = msats_to_currency(int(debit_plus_fees), estimated_price)
                 sc.expected_dollar_amount -= currency_units
                 print("estimated_price",estimated_price)
                 print("currency_units", currency_units)
-                print("post stable_dollar_amount", expected_dollar_amount)
+                print("post stable_dollar_amount", sc.expected_dollar_amount)
                 # sc.our_balance = sc.our_balance + credit_msat
 
         # handle keysends?
