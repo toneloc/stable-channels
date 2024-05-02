@@ -191,6 +191,8 @@ def currencyconvert(plugin, amount, currency):
 
 
 def msats_to_currency(msats, rate_currency_per_btc):
+    msats = float(msats) 
+    rate_currency_per_btc = float(rate_currency_per_btc) 
     return msats / 1e11 * rate_currency_per_btc
 
 # Section 3 - Core logic 
