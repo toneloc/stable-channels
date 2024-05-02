@@ -27,6 +27,9 @@ from secrets import token_hex
 import base64
 from nostr.client.client import NostrClient
 import json
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # Main data structure
 class StableChannel:
@@ -114,8 +117,6 @@ sources = [
            ['{currency}', 'last']),
 ]
 
-# Nostr Private key TODO: Move this to .env
-private_key = ''
 # Request logic is from "currencyrate" plugin: 
 # https://github.com/lightningd/plugins/blob/master/currencyrate
 def requests_retry_session(
@@ -357,7 +358,11 @@ def check_stables(sc, nostrClient):
         "our_new_balance": sc.our_balance/1000,
         "their_new_balance": sc.their_balance/1000
     })
-    file_path = '/home/ubuntu/stablelog1.json' if sc.is_stable_receiver else '/home/ubuntu/stablelog2.json'
+    # Get file paths from environment variables
+    stable_log_path1 = os.getenv("STABLE_LOG_RECEIVER_PATH")
+    stable_log_path2 = os.getenv("STABLE_LOG_PROVIDER_PATH")
+
+    file_path = stable_log_path1 if sc.is_stable_receiver else stable_log_path2 
     with open(file_path, 'a') as file:
         file.write(json_line + ' \n')
     # Post the output on Nostr relay    
@@ -383,10 +388,8 @@ def main():
 
     # connect to Nostr relay
     nostrClient = NostrClient(
-        private_key='',
-        relays=[
-            "wss://wc1.current.ninja",
-        ]
+        private_key=os.getenv("NOSTR_PRIVATE_KEY"),
+        relays=json.loads(os.getenv("NOSTR_RELAYS"))
     )
     print(f"Your nostr public key: {nostrClient.public_key.bech32()}")
 

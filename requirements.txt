@@ -5,6 +5,6 @@ statistics
 apscheduler
 pycryptodomex
 secp256k1
-websocket
 websocket-client==1.7.0 ; python_full_version >= "3.8.1" and python_full_version < "4.0.0"
 dataclasses
+python-dotenv==1.0.1 ; python_full_version >= "3.8.1" and python_full_version < "4.0.0"
