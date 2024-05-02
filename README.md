@@ -1,6 +1,6 @@
 #### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
-## Stable Channels - Version 16MAR2024
+## Stable Channels - Version 02MAY2024
 
 This Twitter thread explains things pretty well, with an example - https://x.com/tonklaus/status/1729567459579945017
 
