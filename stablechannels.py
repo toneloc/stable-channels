@@ -374,7 +374,9 @@ def handle_coin_movement(sc, *args, **kwargs):
     print("Coin Type:", coin_type)
 
     if sc.channel_id == account_id:
-        # this handles routing
+        # if a payment has been routed out of this account (channel)
+        # then this means we are the Stable Provider
+        # and we need to adjust the Stable Balance downwards
         if 'routed' in tags: 
 
             # the Stable Provider routed a pay out
@@ -393,25 +395,34 @@ def handle_coin_movement(sc, *args, **kwargs):
                 # sc.our_balance = sc.our_balance + credit_msat
 
         if 'invoice' in tags:
-            # this means that the Stable Receiver node has paid an invoice
-            if credit_msat > 0:
-                print("shall credit")
+            # We need to check the payment destination is NOT the counterparty
+            # Because CLN also records keysends as 'invoice'
+            l1 = LightningRpc(sc.lightning_rpc_path)
+            listpays_data =  l1.listpays("null", payment_hash)
 
-                #sc.stable_dollar_amount += credit_msat
+            if listpays_data and listpays_data["pays"]:
+                destination = listpays_data["pays"][0]["destination"]
 
-            # the Stable Receiver paid an invoice
-            if debit_msat > 0:
-                print("previous stable dollar amount", sc.expected_dollar_amount)
-                msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
-                debit_plus_fees = debit_msat + fees_msat
-                currency_units = msats_to_currency(int(debit_plus_fees), estimated_price)
-                sc.expected_dollar_amount -= currency_units
-                print("estimated_price",estimated_price)
-                print("currency_units", currency_units)
-                print("post stable_dollar_amount", sc.expected_dollar_amount)
-                # sc.our_balance = sc.our_balance + credit_msat
+                # If the counterparty is not the destination,
+                # Thne it is a payment out, probably made by Stable Receiver
+                if sc.counterparty != destination:
+            
+                    if credit_msat > 0:
+                        print("shall credit")
 
-        # handle keysends?
+                        #sc.stable_dollar_amount += credit_msat
+
+                    # the Stable Receiver paid an invoice
+                    if debit_msat > 0:
+                        print("previous stable dollar amount", sc.expected_dollar_amount)
+                        msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
+                        debit_plus_fees = debit_msat + fees_msat
+                        currency_units = msats_to_currency(int(debit_plus_fees), estimated_price)
+                        sc.expected_dollar_amount -= currency_units
+                        print("estimated_price",estimated_price)
+                        print("currency_units", currency_units)
+                        print("post stable_dollar_amount", sc.expected_dollar_amount)
+                        # sc.our_balance = sc.our_balance + credit_msat
 
 # Section 4 - Plug-in initialization
 @plugin.init()
