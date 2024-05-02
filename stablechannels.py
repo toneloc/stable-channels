@@ -378,7 +378,7 @@ def handle_coin_movement(sc, *args, **kwargs):
             # the Stable Provider routed a pay out
             if credit_msat > 0:
                 # need to convert msats to dollars
-                print("previous stable dollar amount", expected_dollar_amount)
+                print("previous stable dollar amount", sc.expected_dollar_amount)
                 msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
                 currency_units = msats_to_currency(credit_msat, estimated_price)
                 sc.expected_dollar_amount -= currency_units
@@ -399,7 +399,7 @@ def handle_coin_movement(sc, *args, **kwargs):
 
             # the Stable Receiver paid an invoice
             if debit_msat > 0:
-                print("previous stable dollar amount", expected_dollar_amount)
+                print("previous stable dollar amount", sc.expected_dollar_amount)
                 msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
                 debit_plus_fees = debit_msat + fees_msat
                 currency_units = msats_to_currency(debit_plus_fees, estimated_price)
