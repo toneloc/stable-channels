@@ -398,7 +398,7 @@ def handle_coin_movement(sc, *args, **kwargs):
             # We need to check the payment destination is NOT the counterparty
             # Because CLN also records keysends as 'invoice'
             l1 = LightningRpc(sc.lightning_rpc_path)
-            listpays_data =  l1.listpays("null", payment_hash)
+            listpays_data =  l1.listpays(payment_hash=payment_hash)
 
             if listpays_data and listpays_data["pays"]:
                 destination = listpays_data["pays"][0]["destination"]
