@@ -189,13 +189,17 @@ def currencyconvert(plugin, amount, currency):
 
     return ({"msat": Millisatoshi(round(val))}, estimated_price)
 
+
+def msats_to_currency(msats, rate_currency_per_btc):
+    return msats / 1e11 * rate_usd_per_btc
+
 # Section 3 - Core logic 
 
 # This function is the scheduler, formatted to fire every 5 minutes
 # This begins your regularly scheduled programming
 def start_scheduler(sc):
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/1', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
     scheduler.start()
 
 # 5 scenarios to handle
@@ -206,136 +210,135 @@ def start_scheduler(sc):
 # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
 def check_stables(sc):
-    return True
-    # l1 = LightningRpc(sc.lightning_rpc_path)
+    l1 = LightningRpc(sc.lightning_rpc_path)
 
-    # msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
+    msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
 
-    # expected_msats = msat_dict["msat"]
+    expected_msats = msat_dict["msat"]
 
-    # # Get channel data  
-    # list_funds_data = l1.listfunds()
-    # channels = list_funds_data.get("channels", [])
+    # Get channel data  
+    list_funds_data = l1.listfunds()
+    channels = list_funds_data.get("channels", [])
     
-    # # Find the correct stable channel and set balances
-    # for channel in channels:
-    #     if channel.get("channel_id") == sc.channel_id:
-    #         sc.our_balance = channel.get("our_amount_msat")
-    #         sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
+    # Find the correct stable channel and set balances
+    for channel in channels:
+        if channel.get("channel_id") == sc.channel_id:
+            sc.our_balance = channel.get("our_amount_msat")
+            sc.their_balance = Millisatoshi.__sub__(channel.get("amount_msat"), sc.our_balance)
 
-    # # Get Stable Receiver dollar amount
-    # if sc.is_stable_receiver:
-    #     sc.stable_receiver_dollar_amount = round((int((sc.our_balance - sc.native_amount_msat) * sc.expected_dollar_amount)) / int(expected_msats), 3)
-    # else:
-    #     sc.stable_receiver_dollar_amount = round((int((sc.their_balance - sc.native_amount_msat) * sc.expected_dollar_amount)) / int(expected_msats), 3)
+    # Get Stable Receiver dollar amount
+    if sc.is_stable_receiver:
+        sc.stable_receiver_dollar_amount = round((int((sc.our_balance - sc.native_amount_msat) * sc.expected_dollar_amount)) / int(expected_msats), 3)
+    else:
+        sc.stable_receiver_dollar_amount = round((int((sc.their_balance - sc.native_amount_msat) * sc.expected_dollar_amount)) / int(expected_msats), 3)
 
-    # formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
+    formatted_time = datetime.utcnow().strftime("%H:%M %d %b %Y")
     
-    # sc.payment_made = False
-    # amount_too_small = False
+    sc.payment_made = False
+    amount_too_small = False
 
-    # print("Line 239 check")
-    # print (sc.__str__())
+    print("Line 239 check")
+    print (sc.__str__())
 
-    # # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
-    # if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
-    #     amount_too_small = True
-    # else:
-    #     # Round difference to nearest msat; we may need to pay it
-    #     if sc.is_stable_receiver:
-    #         may_need_to_pay_amount = round(abs(int(expected_msats + sc.native_amount_msat) -  int(sc.our_balance)))
-    #     else:
-    #         may_need_to_pay_amount = round(abs(int(expected_msats + sc.native_amount_msat) - int(sc.their_balance)))
+    # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
+    if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
+        amount_too_small = True
+    else:
+        # Round difference to nearest msat; we may need to pay it
+        if sc.is_stable_receiver:
+            may_need_to_pay_amount = round(abs(int(expected_msats + sc.native_amount_msat) -  int(sc.our_balance)))
+        else:
+            may_need_to_pay_amount = round(abs(int(expected_msats + sc.native_amount_msat) - int(sc.their_balance)))
 
-    # # USD price went down.
-    # if not amount_too_small and (sc.stable_receiver_dollar_amount < sc.expected_dollar_amount):
-    #     # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment 
-    #     if sc.is_stable_receiver:
-    #         time.sleep(30)
+    # USD price went down.
+    if not amount_too_small and (sc.stable_receiver_dollar_amount < sc.expected_dollar_amount):
+        # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment 
+        if sc.is_stable_receiver:
+            time.sleep(30)
 
-    #         list_funds_data = l1.listfunds()
+            list_funds_data = l1.listfunds()
 
-    #         # We should have payment now; check that amount is within 1 penny
-    #         channels = list_funds_data.get("channels", [])
+            # We should have payment now; check that amount is within 1 penny
+            channels = list_funds_data.get("channels", [])
     
-    #         for channel in channels:
-    #             if channel.get("channel_id") == sc.channel_id:
-    #                 print("Found Stable Channel")
-    #                 new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.native_amount_msat
-    #             else:
-    #                 print("Could not find channel")
+            for channel in channels:
+                if channel.get("channel_id") == sc.channel_id:
+                    print("Found Stable Channel")
+                    new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.native_amount_msat
+                else:
+                    print("Could not find channel")
                   
-    #             new_stable_receiver_dollar_amount = round((int(new_our_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+                new_stable_receiver_dollar_amount = round((int(new_our_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
-    #         if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
-    #             sc.payment_made = True
-    #         else:
-    #             # Increase risk score
-    #             sc.risk_score = sc.risk_score + 1
+            if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
+                sc.payment_made = True
+            else:
+                # Increase risk score
+                sc.risk_score = sc.risk_score + 1
             
 
-    #     elif not(sc.is_stable_receiver):
-    #         # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
-    #         l1.keysend(sc.counterparty,may_need_to_pay_amount)
+        elif not(sc.is_stable_receiver):
+            # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
+            l1.keysend(sc.counterparty,may_need_to_pay_amount)
             
-    #         # TODO - error handling
-    #         sc.payment_made = True
+            # TODO - error handling
+            sc.payment_made = True
 
-    # elif amount_too_small:
-    #     sc.payment_made = False
+    elif amount_too_small:
+        sc.payment_made = False
 
-    # # USD price went up
-    # # TODO why isnt expected_dollar_amount being a float?
-    # elif not amount_too_small and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
-    #     # 4 - Node is stableReceiver and needs to pay = keysend
-    #     if sc.is_stable_receiver:
-    #         l1.keysend(sc.counterparty,may_need_to_pay_amount)
+    # USD price went up
+    # TODO why isnt expected_dollar_amount being a float?
+    elif not amount_too_small and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
+        # 4 - Node is stableReceiver and needs to pay = keysend
+        if sc.is_stable_receiver:
+            l1.keysend(sc.counterparty,may_need_to_pay_amount)
             
-    #         # TODO - error handling
-    #         sc.payment_made = True
+            # TODO - error handling
+            sc.payment_made = True
 
-    #     # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
-    #     elif not(sc.is_stable_receiver):
-    #         time.sleep(30)
+        # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
+        elif not(sc.is_stable_receiver):
+            time.sleep(30)
 
-    #         list_funds_data = l1.listfunds()
+            list_funds_data = l1.listfunds()
 
-    #         channels = list_funds_data.get("channels", [])
+            channels = list_funds_data.get("channels", [])
     
-    #         for channel in channels:
-    #             if channel.get("channel_id") == sc.channel_id:
-    #                 print("Found Stable Channel")
-    #             else:
-    #                 print("Could not find Stable Channel")
+            for channel in channels:
+                if channel.get("channel_id") == sc.channel_id:
+                    print("Found Stable Channel")
+                else:
+                    print("Could not find Stable Channel")
 
-    #             # We should have payment now; check amount is within 1 penny
-    #             new_our_balance = channel.get("our_amount_msat")
-    #             new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.native_amount_msat
+                # We should have payment now; check amount is within 1 penny
+                new_our_balance = channel.get("our_amount_msat")
+                new_their_stable_balance_msat = Millisatoshi.__sub__(channel.get("amount_msat"), new_our_balance) - sc.native_amount_msat
 
-    #             new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
+                new_stable_receiver_dollar_amount = round((int(new_their_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
-    #         if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
-    #             sc.payment_made = True
-    #         else:
-    #             # Increase risk score 
-    #             sc.risk_score = sc.risk_score + 1
+            if sc.expected_dollar_amount - float(new_stable_receiver_dollar_amount) < 0.01:
+                sc.payment_made = True
+            else:
+                # Increase risk score 
+                sc.risk_score = sc.risk_score + 1
 
-    # # We write this to the main ouput file.
-    # json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}}},\n'
+    # We write this to the main ouput file.
+    json_line = f'{{"formatted_time": "{formatted_time}", "estimated_price": {estimated_price}, "expected_dollar_amount": {sc.expected_dollar_amount}, "stable_receiver_dollar_amount": {sc.stable_receiver_dollar_amount}, "payment_made": {sc.payment_made}, "risk_score": {sc.risk_score}}},\n'
 
-    # # Log the result
-    # # How to log better?
-    # if sc.is_stable_receiver:
-    #     file_path = '/home/clightning/stablelog1.json'
+    # Log the result
+    # How to log better?
+    if sc.is_stable_receiver:
+        file_path = '/home/clightning/stablelog1.json'
 
-    #     with open(file_path, 'a') as file:
-    #         file.write(json_line)
+        with open(file_path, 'a') as file:
+            file.write(json_line)
 
-    # elif not(sc.is_stable_receiver):
-    #     file_path = '/home/clightning/stablelog2.json'
+    elif not(sc.is_stable_receiver):
+        file_path = '/home/clightning/stablelog2.json'
 
-    #     with open(file_path, 'a') as file:
-    #         file.write(json_line)
+        with open(file_path, 'a') as file:
+            file.write(json_line)
 
 # this method updates the balances in memory
 def handle_coin_movement(sc, *args, **kwargs):
@@ -370,14 +373,43 @@ def handle_coin_movement(sc, *args, **kwargs):
 
     if sc.channel_id == account_id:
         # this handles routing
-        if 'routed' in tags:
+        if 'routed' in tags: 
+
+            # the Stable Provider routed a pay out
+            if credit_msat > 0:
+                # need to convert msats to dollars
+                print("previous stable dollar amount", expected_dollar_amount)
+                msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
+                currency_units = msats_to_currency(credit_msat, estimated_price)
+                sc.expected_dollar_amount -= currency_units
+                print("estimated_price",estimated_price)
+                print("post stable_dollar_amount", expected_dollar_amount)
+
+            # the SR got paid
+            if debit_msat > 0:
+                print("shall debit, somehow")
+                # sc.our_balance = sc.our_balance + credit_msat
+
+        if 'invoice' in tags:
+            # this means that the Stable Receiver node has paid an invoice
             if credit_msat > 0:
                 print("shall credit")
 
                 #sc.stable_dollar_amount += credit_msat
+
+            # the Stable Receiver paid an invoice
             if debit_msat > 0:
-                print("shall debit, somehow")
+                print("previous stable dollar amount", expected_dollar_amount)
+                msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
+                debit_plus_fees = debit_msat + fees_msat
+                currency_units = msats_to_currency(debit_plus_fees, estimated_price)
+                sc.expected_dollar_amount -= currency_units
+                print("estimated_price",estimated_price)
+                print("currency_units", currency_units)
+                print("post stable_dollar_amount", expected_dollar_amount)
                 # sc.our_balance = sc.our_balance + credit_msat
+
+        # handle keysends?
 
 # Section 4 - Plug-in initialization
 @plugin.init()
