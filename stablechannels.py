@@ -425,6 +425,17 @@ def handle_coin_movement(sc, *args, **kwargs):
                         print("post stable_dollar_amount", sc.expected_dollar_amount)
                         # sc.our_balance = sc.our_balance + credit_msat
 
+def parse_boolean(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value_lower = value.strip().lower()
+        if value_lower in {'true', 'yes', '1'}:
+            return True
+        elif value_lower in {'false', 'no', '0'}:
+            return False
+    raise ValueError(f"Invalid boolean value: {value}")
+
 # Section 4 - Plug-in initialization
 @plugin.init()
 def init(options, configuration, plugin):
@@ -433,10 +444,7 @@ def init(options, configuration, plugin):
     print(options['is-stable-receiver'])
     
     # Need to handle boolean input this way
-    if options['is-stable-receiver'] == "False":
-        is_stable_receiver = False
-    elif options['is-stable-receiver'] == "True":
-        is_stable_receiver = True
+    is_stable_receiver = parse_boolean(options['is-stable-receiver'])
 
     # convert to millsatoshis ...
     if int(options['native-btc-amount']) > 0:
