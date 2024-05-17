@@ -126,11 +126,11 @@ Now, we need to start the Stable Channels plugin and with the relevant details o
 The plugin startup command will look something like this:
 
 ```bash
-lightning-cli plugin subcommand=start plugin=/home/clightning/stablechannels.py channel-id=b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a stable-dollar-amount=95 is-stable-receiver=True counterparty=026b9c2a005b182ff5b2a7002a03d6ea9d005d18ed2eb3113852d679b3ec3832c2 lightning-rpc-path=/home/clightning/.lightning/regtest/lightning-rpc native-btc-amount=0
+lightning-cli plugin subcommand=start plugin=/home/clightning/stablechannels.py channel-id=b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a stable-dollar-amount=95 is-stable-receiver=True counterparty=026b9c2a005b182ff5b2a7002a03d6ea9d005d18ed2eb3113852d679b3ec3832c2 native-btc-amount=0
 ```
-Modify the directory for your plugin and your lighning-rpc.
+Modify the directory for your plugin.
 
-What this command says is: "Start the plugin at this directory. Make the Lightning channel with channel ID b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a a stable channel at $95.00. and 0 sats of BTC. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `026b9c..` and here's the RPC path."
+What this command says is: "Start the plugin at this directory. Make the Lightning channel with channel ID b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a a stable channel at $95.00. and 0 sats of BTC. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `026b9c..`."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 

@@ -33,7 +33,6 @@ class StableChannel:
         native_amount_msat: int,
         is_stable_receiver: bool,
         counterparty: str,
-        lightning_rpc_path: str,
         our_balance: float,
         their_balance: float,
         risk_score: int,
@@ -49,7 +48,6 @@ class StableChannel:
         self.native_amount_msat = native_amount_msat
         self.is_stable_receiver = is_stable_receiver
         self.counterparty = counterparty
-        self.lightning_rpc_path = lightning_rpc_path
         self.our_balance = our_balance
         self.their_balance = their_balance
         self.risk_score = risk_score
@@ -199,9 +197,9 @@ def msats_to_currency(msats, rate_currency_per_btc):
 
 # This function is the scheduler, formatted to fire every 5 minutes
 # This begins your regularly scheduled programming
-def start_scheduler(sc):
+def start_scheduler(plugin, sc):
     scheduler = BlockingScheduler()
-    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[sc])
+    scheduler.add_job(check_stables, 'cron', minute='0/5', args=[plugin, sc])
     scheduler.start()
 
 # 5 scenarios to handle
@@ -211,15 +209,14 @@ def start_scheduler(sc):
 # Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
 # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
-def check_stables(sc):
-    l1 = LightningRpc(sc.lightning_rpc_path)
+def check_stables(plugin, sc):
 
     msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
 
     expected_msats = msat_dict["msat"]
 
     # Get channel data  
-    list_funds_data = l1.listfunds()
+    list_funds_data = plugin.rpc.listfunds()
     channels = list_funds_data.get("channels", [])
     
     # Find the correct stable channel and set balances
@@ -258,7 +255,7 @@ def check_stables(sc):
         if sc.is_stable_receiver:
             time.sleep(30)
 
-            list_funds_data = l1.listfunds()
+            list_funds_data = plugin.rpc.listfunds()
 
             # We should have payment now; check that amount is within 1 penny
             channels = list_funds_data.get("channels", [])
@@ -281,7 +278,7 @@ def check_stables(sc):
 
         elif not(sc.is_stable_receiver):
             # Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
-            l1.keysend(sc.counterparty,may_need_to_pay_amount)
+            plugin.rpc.keysend(sc.counterparty,may_need_to_pay_amount)
             
             # TODO - error handling
             sc.payment_made = True
@@ -294,7 +291,7 @@ def check_stables(sc):
     elif not amount_too_small and sc.stable_receiver_dollar_amount > sc.expected_dollar_amount:
         # 4 - Node is stableReceiver and needs to pay = keysend
         if sc.is_stable_receiver:
-            l1.keysend(sc.counterparty,may_need_to_pay_amount)
+            plugin.rpc.keysend(sc.counterparty,may_need_to_pay_amount)
             
             # TODO - error handling
             sc.payment_made = True
@@ -303,7 +300,7 @@ def check_stables(sc):
         elif not(sc.is_stable_receiver):
             time.sleep(30)
 
-            list_funds_data = l1.listfunds()
+            list_funds_data = plugin.rpc.listfunds()
 
             channels = list_funds_data.get("channels", [])
     
@@ -343,7 +340,7 @@ def check_stables(sc):
             file.write(json_line)
 
 # this method updates the balances in memory
-def handle_coin_movement(sc, *args, **kwargs):
+def handle_coin_movement(plugin, sc, *args, **kwargs):
 
     coin_movement = kwargs.get('coin_movement', {})
     version = coin_movement.get('version')
@@ -397,8 +394,7 @@ def handle_coin_movement(sc, *args, **kwargs):
         if 'invoice' in tags:
             # We need to check the payment destination is NOT the counterparty
             # Because CLN also records keysends as 'invoice'
-            l1 = LightningRpc(sc.lightning_rpc_path)
-            listpays_data =  l1.listpays(payment_hash=payment_hash)
+            listpays_data =  plugin.rpc.listpays(payment_hash=payment_hash)
 
             if listpays_data and listpays_data["pays"]:
                 destination = listpays_data["pays"][0]["destination"]
@@ -460,7 +456,6 @@ def init(options, configuration, plugin):
             native_amount_msat=native_btc_amt_msat,
             is_stable_receiver=is_stable_receiver,
             counterparty=options['counterparty'],
-            lightning_rpc_path=options['lightning-rpc-path'],
             our_balance=0,
             their_balance=0,
             risk_score=0,
@@ -475,15 +470,14 @@ def init(options, configuration, plugin):
     print(sc.__str__())
 
     # Need to start a new thread so init funciotn can return
-    threading.Thread(target=start_scheduler, args=(sc,)).start()
+    threading.Thread(target=start_scheduler, args=(plugin, sc)).start()
 
 plugin.add_option(name='channel-id', default='', description='Input the channel ID you wish to stabilize.')
 plugin.add_option(name='is-stable-receiver', default='', description='Input True if you are the Stable Receiever; False if you are the Stable Provider.')
 plugin.add_option(name='stable-dollar-amount', default='', description='Input the amount of dollars you want to keep stable.')
 plugin.add_option(name='native-btc-amount', default='', description='Input the amount of bitcoin you do not want to be kept stable, in sats.')
 plugin.add_option(name='counterparty', default='', description='Input the nodeID of your counterparty.')
-plugin.add_option(name='lightning-rpc-path', default='', description='Input your Lightning RPC path.')
 
-plugin.add_subscription("coin_movement", lambda *args, **kwargs: handle_coin_movement(sc, *args, **kwargs))
+plugin.add_subscription("coin_movement", lambda *args, **kwargs: handle_coin_movement(plugin, sc, *args, **kwargs))
 
 plugin.run()
