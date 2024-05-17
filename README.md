@@ -1,3 +1,5 @@
+[![main on CLN v24.02.2](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml/badge.svg?branch=main)](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml)
+
 #### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
 ## Stable Channels - Version 02MAY2024
