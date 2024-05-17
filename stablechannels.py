@@ -18,6 +18,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 import statistics # Standard on Python 3
 import time # Standard on Python 3
+import os
 from datetime import datetime 
 from apscheduler.schedulers.blocking import BlockingScheduler # Used to check balances every 5 minutes
 import threading # Standard on Python 3
@@ -40,7 +41,8 @@ class StableChannel:
         stable_provider_dollar_amount: float,
         timestamp: int,
         formatted_datetime: str,
-        payment_made: bool
+        payment_made: bool,
+        sc_dir: str
     ):
         self.plugin = plugin
         self.channel_id = channel_id
@@ -56,6 +58,7 @@ class StableChannel:
         self.timestamp = timestamp
         self.formatted_datetime = datetime
         self.payment_made = payment_made
+        self.sc_dir = sc_dir
 
     def __str__(self):
         return (
@@ -73,6 +76,7 @@ class StableChannel:
             f"    timestamp={self.timestamp},\n"
             f"    formatted_datetime={self.formatted_datetime},\n"
             f"    payment_made={self.payment_made}\n"
+            f"    sc_dir={self.sc_dir}\n"
             f")"
         )
 
@@ -171,7 +175,7 @@ def get_rates(plugin, currency):
         if r is not None:
             rates[s.name] = r
 
-    print("rates line 165",rates)
+    plugin.log(level="debug", message=f"rates line 165 {rates}")
     return rates
 
 @plugin.method("currencyconvert")
@@ -236,8 +240,8 @@ def check_stables(plugin, sc):
     sc.payment_made = False
     amount_too_small = False
 
-    print("Line 239 check")
-    print (sc.__str__())
+    plugin.log(level="debug", message="Line 239 check")
+    plugin.log (sc.__str__())
 
     # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
     if abs(sc.expected_dollar_amount - float(sc.stable_receiver_dollar_amount)) < 0.01:
@@ -262,10 +266,10 @@ def check_stables(plugin, sc):
     
             for channel in channels:
                 if channel.get("channel_id") == sc.channel_id:
-                    print("Found Stable Channel")
+                    plugin.log("Found Stable Channel")
                     new_our_stable_balance_msat = channel.get("our_amount_msat") - sc.native_amount_msat
                 else:
-                    print("Could not find channel")
+                    plugin.log("Could not find channel")
                   
                 new_stable_receiver_dollar_amount = round((int(new_our_stable_balance_msat) * sc.expected_dollar_amount) / int(expected_msats), 3)
 
@@ -306,9 +310,9 @@ def check_stables(plugin, sc):
     
             for channel in channels:
                 if channel.get("channel_id") == sc.channel_id:
-                    print("Found Stable Channel")
+                    plugin.log("Found Stable Channel")
                 else:
-                    print("Could not find Stable Channel")
+                    plugin.log("Could not find Stable Channel")
 
                 # We should have payment now; check amount is within 1 penny
                 new_our_balance = channel.get("our_amount_msat")
@@ -327,14 +331,15 @@ def check_stables(plugin, sc):
 
     # Log the result
     # How to log better?
+    plugin.log(json_line)
     if sc.is_stable_receiver:
-        file_path = '/home/clightning/stablelog1.json'
+        file_path = os.path.join(sc.sc_dir, "stablelog1.json")
 
         with open(file_path, 'a') as file:
             file.write(json_line)
 
     elif not(sc.is_stable_receiver):
-        file_path = '/home/clightning/stablelog2.json'
+        file_path = os.path.join(sc.sc_dir, "stablelog2.json")
 
         with open(file_path, 'a') as file:
             file.write(json_line)
@@ -357,18 +362,18 @@ def handle_coin_movement(plugin, sc, *args, **kwargs):
     coin_type = coin_movement.get('coin_type')
 
     # Print or manipulate the extracted values as needed
-    print("Version:", version)
-    print("Node ID:", node_id)
-    print("Type:", type_)
-    print("Account ID:", account_id)
-    print("Payment Hash:", payment_hash)
-    print("Part ID:", part_id)
-    print("Credit Millisatoshi:", credit_msat)
-    print("Debit Millisatoshi:", debit_msat)
-    print("Fees Millisatoshi:", fees_msat)
-    print("Tags:", tags)
-    print("Timestamp:", timestamp)
-    print("Coin Type:", coin_type)
+    plugin.log(f"Version:{version}")
+    plugin.log(f"Node ID:{node_id}")
+    plugin.log(f"Type:{type_}")
+    plugin.log(f"Account ID:{account_id}")
+    plugin.log(f"Payment Hash:{payment_hash}")
+    plugin.log(f"Part ID:{part_id}")
+    plugin.log(f"Credit Millisatoshi:{credit_msat}")
+    plugin.log(f"Debit Millisatoshi:{debit_msat}")
+    plugin.log(f"Fees Millisatoshi:{fees_msat}")
+    plugin.log(f"Tags:{tags}")
+    plugin.log(f"Timestamp:{timestamp}")
+    plugin.log(f"Coin Type:{coin_type}")
 
     if sc.channel_id == account_id:
         # if a payment has been routed out of this account (channel)
@@ -379,16 +384,16 @@ def handle_coin_movement(plugin, sc, *args, **kwargs):
             # the Stable Provider routed a pay out
             if credit_msat > 0:
                 # need to convert msats to dollars
-                print("previous stable dollar amount", sc.expected_dollar_amount)
+                plugin.log(f"previous stable dollar amount:{sc.expected_dollar_amount}")
                 msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
                 currency_units = msats_to_currency(int(credit_msat), estimated_price)
                 sc.expected_dollar_amount -= currency_units
-                print("estimated_price",estimated_price)
-                print("post stable_dollar_amount", sc.expected_dollar_amount)
+                plugin.log(f"estimated_price:{estimated_price}")
+                plugin.log(f"post stable_dollar_amount:{sc.expected_dollar_amount}", )
 
             # the SR got paid
             if debit_msat > 0:
-                print("shall debit, somehow")
+                plugin.log("shall debit, somehow")
                 # sc.our_balance = sc.our_balance + credit_msat
 
         if 'invoice' in tags:
@@ -405,20 +410,20 @@ def handle_coin_movement(plugin, sc, *args, **kwargs):
             
                     # if the we are the dest then we received, increase expected dollar value
                     if credit_msat > 0:
-                        print("shall credit somehow")
+                        plugin.log("shall credit somehow")
 
                         #sc.stable_dollar_amount += credit_msat
 
                     # the Stable Receiver paid an invoice
                     if debit_msat > 0:
-                        print("previous stable dollar amount", sc.expected_dollar_amount)
+                        plugin.log(f"previous stable dollar amount:{sc.expected_dollar_amount}")
                         msat_dict, estimated_price = currencyconvert(plugin, sc.expected_dollar_amount, "USD")
                         debit_plus_fees = debit_msat + fees_msat
                         currency_units = msats_to_currency(int(debit_plus_fees), estimated_price)
                         sc.expected_dollar_amount -= currency_units
-                        print("estimated_price",estimated_price)
-                        print("currency_units", currency_units)
-                        print("post stable_dollar_amount", sc.expected_dollar_amount)
+                        plugin.log(f"estimated_price:{estimated_price}")
+                        plugin.log(f"currency_units:{currency_units}")
+                        plugin.log(f"post stable_dollar_amount:{sc.expected_dollar_amount}")
                         # sc.our_balance = sc.our_balance + credit_msat
 
 def parse_boolean(value):
@@ -437,7 +442,7 @@ def parse_boolean(value):
 def init(options, configuration, plugin):
     set_proxies(plugin)
 
-    print(options['is-stable-receiver'])
+    plugin.log(level="debug", message=options['is-stable-receiver'])
     
     # Need to handle boolean input this way
     is_stable_receiver = parse_boolean(options['is-stable-receiver'])
@@ -447,6 +452,10 @@ def init(options, configuration, plugin):
         native_btc_amt_msat = int(options['native-btc-amount']) * 1000
     else:
         native_btc_amt_msat = 0
+
+    lightning_dir = plugin.rpc.getinfo()["lightning-dir"]
+    sc_dir = os.path.join(lightning_dir, "stablechannels")
+    os.makedirs(sc_dir, exist_ok=True)
 
     global sc
     sc = StableChannel(
@@ -463,11 +472,12 @@ def init(options, configuration, plugin):
             stable_provider_dollar_amount=0,
             timestamp=0,
             formatted_datetime='',
-            payment_made=False
+            payment_made=False,
+            sc_dir=sc_dir
     )
 
-    print("Starting Stable Channel with these details:")
-    print(sc.__str__())
+    plugin.log("Starting Stable Channel with these details:")
+    plugin.log(sc.__str__())
 
     # Need to start a new thread so init funciotn can return
     threading.Thread(target=start_scheduler, args=(plugin, sc)).start()

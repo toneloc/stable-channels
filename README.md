@@ -88,7 +88,7 @@ Stable Channels has a few dependencies.
 - Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
 - Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
-Logs are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. You should create the log file and change the code to write to it. 
+Stablechannel balance results are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. These are in the `stablechannels` directory inside your network directory, e.g. `~/.lightning/bitcoin/stablechannels/stablelog1.json`.
 
 ### Connecting and creating a dual-funded channel (for CLN)
 
@@ -117,11 +117,7 @@ Now this needs to be confirmed on the blockchain.
 
 ### Starting Stable Channels
 
-First let's create the log file. If you are the stable receiver, your logs get written to `stablelog1.json`. Create that file.
-
-Note: this log file path is hardcoded in the code. Change this path to your location. 
-
-Now, we need to start the Stable Channels plugin and with the relevant details of the Stable Channel.
+We need to start the Stable Channels plugin with the relevant details of the Stable Channel.
 
 The plugin startup command will look something like this:
 
@@ -134,7 +130,7 @@ What this command says is: "Start the plugin at this directory. Make the Lightni
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
-Logs for the Stable Receiver a are written to `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
+Stablechannel balance results for the Stable Receiver are written to the `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
 
 ##  Payout matrix
 
