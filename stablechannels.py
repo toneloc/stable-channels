@@ -24,6 +24,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler # Used to check ba
 import threading # Standard on Python 3
 
 plugin = Plugin()
+sc = None
 
 class StableChannel:
     def __init__(
@@ -436,6 +437,17 @@ def parse_boolean(value):
         elif value_lower in {'false', 'no', '0'}:
             return False
     raise ValueError(f"Invalid boolean value: {value}")
+
+@plugin.method("dev-check-stable")
+def dev_check_stable(plugin):
+    # immediately run check_stable, but only if we are a dev
+    # this can be used in tests and maybe to pass artificial currency rate changes
+    dev = plugin.rpc.listconfigs("developer")["configs"]["developer"]["set"]
+    if dev:
+        check_stables(plugin, sc)
+        return {"result": "OK"}
+    else:
+        raise Exception("ERROR: not a --developer")
 
 # Section 4 - Plug-in initialization
 @plugin.init()
