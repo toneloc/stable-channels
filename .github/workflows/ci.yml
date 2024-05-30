@@ -1,0 +1,140 @@
+name: CI
+
+# Cancel duplicate jobs
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+on:
+    workflow_call:
+        inputs:
+          cln-version:
+            required: true
+            type: string
+          pyln-version:
+            required: true
+            type: string
+          tagged-release:
+            required: true
+            type: boolean
+
+jobs:
+  build:
+    name: Test CLN=${{ inputs.cln-version }}, OS=${{ matrix.os }}, PY=${{ matrix.python-version }}, BCD=${{ matrix.bitcoind-version }}, EXP=${{ matrix.experimental }}, DEP=${{ matrix.deprecated }}
+    strategy:
+        fail-fast: false
+        matrix:
+            bitcoind-version: ["26.1"]
+            experimental: [1]
+            deprecated: [0]
+            python-version: ["3.8", "3.12"]
+            os: ["ubuntu-latest"]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Create cache paths
+      run: |
+        sudo mkdir /usr/local/libexec
+        sudo mkdir /usr/local/libexec/c-lightning
+        sudo mkdir /usr/local/libexec/c-lightning/plugins
+        sudo chown -R $USER /usr/local/libexec
+
+    - name: Cache CLN
+      id: cache-cln
+      uses: actions/cache@v4
+      with:
+        path: |
+          /usr/local/bin/lightning*
+          /usr/local/libexec/c-lightning
+        key: cache-cln-${{ inputs.cln-version }}-${{ runner.os }}
+
+    - name: Cache bitcoind
+      id: cache-bitcoind
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/bin/bitcoin*
+        key: cache-bitcoind-${{ matrix.bitcoind-version }}-${{ runner.os }}
+
+    - name: Download Bitcoin ${{ matrix.bitcoind-version }} & install binaries
+      if: ${{ steps.cache-bitcoind.outputs.cache-hit != 'true' }}
+      run: |
+        export BITCOIND_VERSION=${{ matrix.bitcoind-version }}
+        if [[ "${{ matrix.os }}" =~ "ubuntu" ]]; then
+          export TARGET_ARCH="x86_64-linux-gnu"
+        fi
+        if [[ "${{ matrix.os }}" =~ "macos" ]]; then
+          export TARGET_ARCH="x86_64-apple-darwin"
+        fi
+        wget https://bitcoincore.org/bin/bitcoin-core-${BITCOIND_VERSION}/bitcoin-${BITCOIND_VERSION}-${TARGET_ARCH}.tar.gz
+        tar -xzf bitcoin-${BITCOIND_VERSION}-${TARGET_ARCH}.tar.gz
+        sudo mv bitcoin-${BITCOIND_VERSION}/bin/* /usr/local/bin
+        rm -rf bitcoin-${BITCOIND_VERSION}-${TARGET_ARCH}.tar.gz bitcoin-${BITCOIND_VERSION}
+
+    - name: Download Core Lightning ${{ inputs.cln-version }} & install binaries
+      if: ${{ contains(matrix.os, 'ubuntu') &&  steps.cache-cln.outputs.cache-hit != 'true' }}
+      run: |
+          url=$(curl -s https://api.github.com/repos/ElementsProject/lightning/releases/tags/${{ inputs.cln-version }} \
+            | jq '.assets[] | select(.name | contains("22.04")) | .browser_download_url' \
+            | tr -d '\"')
+          wget $url
+          sudo tar -xvf ${url##*/} -C /usr/local --strip-components=2
+          echo "CLN_VERSION=$(lightningd --version)" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Checkout Core Lightning ${{ inputs.cln-version }}
+      if: ${{ contains(matrix.os, 'macos') && steps.cache-cln.outputs.cache-hit != 'true' }}
+      uses: actions/checkout@v4
+      with:
+        repository: 'ElementsProject/lightning'
+        path: 'lightning'
+        ref: ${{ inputs.cln-version }}
+        submodules: 'recursive'
+
+    - name: Install Python and System dependencies
+      run: |
+        if [[ "${{ matrix.os }}" =~ "macos" ]]; then
+          brew install autoconf automake libtool gnu-sed gettext libsodium sqlite
+        fi
+        python -m venv venv
+        source venv/bin/activate
+        python -m pip install -U pip poetry wheel
+        pip3 install "pyln-proto<=${{ inputs.pyln-version }}" "pyln-client<=${{ inputs.pyln-version }}" "pyln-testing<=${{ inputs.pyln-version }}"
+        pip3 install pytest-xdist pytest-test-groups pytest-timeout
+        pip3 install -r requirements.txt
+
+    - name: Compile Core Lightning ${{ inputs.cln-version }} & install binaries
+      if: ${{ contains(matrix.os, 'macos') && steps.cache-cln.outputs.cache-hit != 'true' }}
+      run: |
+        export EXPERIMENTAL_FEATURES=${{ matrix.experimental }}
+        export COMPAT=${{ matrix.deprecated }}
+        export VALGRIND=0
+        source venv/bin/activate
+
+        cd lightning
+
+        poetry lock
+        poetry install
+        ./configure --disable-valgrind
+        poetry run make
+        sudo make install
+
+    - name: Run tests
+      run: |
+        export CLN_PATH=${{ github.workspace }}/lightning
+        export COMPAT=${{ matrix.deprecated }}
+        export EXPERIMENTAL_FEATURES=${{ matrix.experimental }}
+        export SLOW_MACHINE=1
+        export TEST_DEBUG=1
+        export TRAVIS=1
+        export VALGRIND=0
+        export PYTEST_TIMEOUT=600
+        source venv/bin/activate
+        pytest -n=5 test_stablechannels.py

@@ -1,3 +1,5 @@
+[![main on CLN v24.02.2](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml/badge.svg?branch=main)](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml)
+
 #### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
 ## Stable Channels - Version 02MAY2024
@@ -90,7 +92,7 @@ Stable Channels has a few dependencies.
 - Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
 - Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
-Logs are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. You should create the log file and change the code to write to it. 
+Stablechannel balance results are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. These are in the `stablechannels` directory inside your network directory, e.g. `~/.lightning/bitcoin/stablechannels/stablelog1.json`.
 
 ### Connecting and creating a dual-funded channel (for CLN)
 
@@ -119,24 +121,20 @@ Now this needs to be confirmed on the blockchain.
 
 ### Starting Stable Channels
 
-First let's create the log file. If you are the stable receiver, your logs get written to `stablelog1.json`. Create that file.
-
-Note: this log file path is hardcoded in the code. Change this path to your location. 
-
-Now, we need to start the Stable Channels plugin and with the relevant details of the Stable Channel.
+We need to start the Stable Channels plugin with the relevant details of the Stable Channel.
 
 The plugin startup command will look something like this:
 
 ```bash
-lightning-cli plugin subcommand=start plugin=/home/clightning/stablechannels.py channel-id=b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a stable-dollar-amount=95 is-stable-receiver=True counterparty=026b9c2a005b182ff5b2a7002a03d6ea9d005d18ed2eb3113852d679b3ec3832c2 lightning-rpc-path=/home/clightning/.lightning/regtest/lightning-rpc native-btc-amount=0
+lightning-cli plugin subcommand=start plugin=/home/clightning/stablechannels.py channel-id=b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a stable-dollar-amount=95 is-stable-receiver=True counterparty=026b9c2a005b182ff5b2a7002a03d6ea9d005d18ed2eb3113852d679b3ec3832c2 native-btc-amount=0
 ```
-Modify the directory for your plugin and your lighning-rpc.
+Modify the directory for your plugin.
 
-What this command says is: "Start the plugin at this directory. Make the Lightning channel with channel ID b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a a stable channel at $95.00. and 0 sats of BTC. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `026b9c..` and here's the RPC path."
+What this command says is: "Start the plugin at this directory. Make the Lightning channel with channel ID b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a a stable channel at $95.00. and 0 sats of BTC. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `026b9c..`."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
-Logs for the Stable Receiver a are written to `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
+Stablechannel balance results for the Stable Receiver are written to the `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
 
 ##  Payout matrix
 
