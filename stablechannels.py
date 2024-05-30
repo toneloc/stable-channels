@@ -24,7 +24,6 @@ from apscheduler.schedulers.blocking import BlockingScheduler # Used to check ba
 import threading # Standard on Python 3
 
 plugin = Plugin()
-sc = None
 
 class StableChannel:
     def __init__(
