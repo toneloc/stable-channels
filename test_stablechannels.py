@@ -47,6 +47,12 @@ def test_start(node_factory, bitcoind):
         },
     )
     l1.daemon.wait_for_log("Starting Stable Channel with these details")
-    invoice = l2.rpc.invoice(5_000_000, "label1", "desc")
+    invoice = l2.rpc.invoice(1_000_000, "label1", "desc")
     l1.rpc.pay(invoice["bolt11"])
+
+    invoice = l1.rpc.invoice(1_000_000, "label1", "desc")
+    l2.rpc.pay(invoice["bolt11"])
+    
     l1.rpc.call("dev-check-stable")
+
+
