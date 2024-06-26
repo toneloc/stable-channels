@@ -123,18 +123,33 @@ Now this needs to be confirmed on the blockchain.
 
 We need to start the Stable Channels plugin with the relevant details of the Stable Channel.
 
-The plugin startup command will look something like this:
+The plugin startup command will look something like this for CLN:
 
 ```bash
 lightning-cli plugin subcommand=start plugin=/home/clightning/stablechannels.py channel-id=b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a stable-dollar-amount=95 is-stable-receiver=True counterparty=026b9c2a005b182ff5b2a7002a03d6ea9d005d18ed2eb3113852d679b3ec3832c2 native-btc-amount=0
 ```
+
 Modify the directory for your plugin.
 
 What this command says is: "Start the plugin at this directory. Make the Lightning channel with channel ID b37a51423e67a1f6733a78bb654535b2b81c427435600b0756bb65e21bdd411a a stable channel at $95.00. and 0 sats of BTC. Is is `True` that the node running this command is the Stable Receiver. Here's the ID of the counterparty `026b9c..`."
 
 Your counterparty will need to run a similar command, and the Stable Channels software should do the rest. 
 
-Stablechannel balance results for the Stable Receiver are written to the `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
+The startup command for the LND plugin will be something like this:
+
+```bash
+python3 lnd.py 
+    --tls-cert-path=/Users/alice/tls.cert
+    --expected-dollar-amount=100 
+    --channel-id=137344322632000 
+    --is-stable-receiver=false 
+    --counterparty=020c66e37461e9f9802e80c16cc0d97151c6da361df450dbca276478dc7d0c271e 
+    --macaroon-path=/Users/alice/admin.macaroon 
+    --native-amount-sat=0 
+    --lnd-server-url=https://127.0.0.1:8082
+```
+
+Stable Channel balance results for the Stable Receiver are written to the `stablelog1.json` file  and logs for the Stable Provider are written to the `stablelog2.json` file. 
 
 ##  Payout matrix
 
