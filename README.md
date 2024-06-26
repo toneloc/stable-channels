@@ -165,7 +165,7 @@ Hope to move all this to issues and PRs soon.
 - [x] first CLN plugin version
 - [x] LND version
 - [x] first Python app version
-- [x] test LI Greenlight integration
+- [x] test Greenlight integration
 - [x] price feed integration
 - [x] UTXOracle plugin - https://github.com/toneloc/plugins/blob/master/utxoracle/utxoracle.py
 - [x] dual-funded flow
@@ -177,6 +177,7 @@ Hope to move all this to issues and PRs soon.
 - [ ] monitor channel creation tx, and commence `check_stables` after
 - [ ] move Stable Channels details to conf files (*)
 - [ ] user feedback on CLN plugin
+- [ ] LDK version
 - [ ] use CLN `datastore` command to manage Stable Channel details (?)
 - [ ] accounting commands
 - [ ] Python Greenlight integration
