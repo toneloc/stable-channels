@@ -183,8 +183,8 @@ def currencyconvert(amount, currency):
 
     return ({"msat": round(val)}, estimated_price)
 
+# Section 3 - Core logic
 
-# Section 3 - Core logic 
 # Helper functions
 
 def b64_hex_transform(plain_str: str) -> str:
@@ -248,7 +248,8 @@ def keysend_payment(sc, amount_msat):
     response = requests.post(url=url, headers=headers, json=data, verify=sc.tls_cert_path)
     return response
 
-# Core logic
+# Main function
+
 # 5 scenarios to handle
 # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
 # Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
@@ -256,6 +257,7 @@ def keysend_payment(sc, amount_msat):
 # Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
 # Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
 # "sc" = "Stable Channel" object
+
 def check_stables(sc):
     msat_dict, estimated_price = currencyconvert(sc.expected_dollar_amount, "USD")
     expected_msats = msat_dict["msat"]
@@ -389,7 +391,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-
 # SAMPLE commands:
 
 # curl --cacert /Users/t/.polar/networks/8/volumes/lnd/alice/tls.cert \
@@ -398,7 +399,6 @@ if __name__ == "__main__":
 
 # Alice local startup LND as Stable Receiver
 # python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/18/volumes/lnd/alice/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=True --counterparty=031786135987ebd4c08999a4cbbae38f67f41828879d191a5c56092e408e1ce9c4 --macaroon-path=/Users/t/.polar/networks/18/volumes/lnd/alice/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8081
-
 
 # Bob local startup LND as Stable Provider
 # python3 lnd.py --tls-cert-path=/Users/t/.polar/networks/18/volumes/lnd/bob/tls.cert --expected-dollar-amount=100 --channel-id=125344325632000 --is-stable-receiver=False --counterparty=030c66a66743e9f9802780c16cc0d97151c6dae61df450dbca276478dc7d0c931d --macaroon-path=/Users/t/.polar/networks/18/volumes/lnd/bob/data/chain/bitcoin/regtest/admin.macaroon --native-amount-sat=0 --lnd-server-url=https://127.0.0.1:8082
