@@ -10,7 +10,6 @@
 # Section 1 - Dependencies and main data structure
 from pyln.client import Plugin # Library for CLN Python plug-ins created by Blockstream 
 from pyln.client import Millisatoshi # Library for CLN Python plug-ins created by Blockstream 
-from pyln.client import LightningRpc
 from collections import namedtuple # Standard on Python 3
 from cachetools import cached, TTLCache # Used to handle price feed calls; probably can remove
 import requests # Standard on Python 3.7+
