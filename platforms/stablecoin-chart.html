@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stablecoin Supply Chart</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #000;
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+        #chart-container {
+            width: 80%;
+            max-width: 800px;
+            height: 80%;
+            border: 2px solid #fff; /* Add a white border around the chart */
+            padding: 10px; /* Add some padding */
+            background-color: #111; /* Slightly different background to distinguish the border */
+        }
+    </style>
+</head>
+<body>
+    <div id="chart-container">
+        <canvas id="myChart"></canvas>
+    </div>
+    <script>
+        const ctx = document.getElementById('myChart').getContext('2d');
+        const myChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: ['2014', '2015', '2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024-01', '2024-07'],
+                datasets: [{
+                    label: 'USDT and USDC (billions)',
+                    data: [0, 1, 1.5, 2, 2.5, 2.5, 5, 30, 129, 119, 125, 146],
+                    backgroundColor: 'rgba(247, 102, 26, 0.4)', // Shaded area color
+                    borderColor: 'rgba(247, 147, 26, 1)', // Line color
+                    borderWidth: 3, // Accentuate the trend line
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0 // Remove the dots from the data points
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'year',
+                            displayFormats: {
+                                year: 'yyyy'
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Date',
+                            color: '#fff',
+                            font: {
+                                size: 16,
+                                weight: 'bold'
+                            }
+                        },
+                        ticks: {
+                            maxRotation: 0,
+                            minRotation: 0,
+                            color: '#fff',
+                            font: {
+                                size: 14,
+                                weight: 'bold'
+                            }
+                        },
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.1)' // Muted gridline color
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Total Supply (Billions USD)',
+                            color: '#fff',
+                            font: {
+                                size: 16,
+                                weight: 'bold'
+                            }
+                        },
+                        ticks: {
+                            color: '#fff',
+                            font: {
+                                size: 14,
+                                weight: 'bold'
+                            }
+                        },
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.1)' // Muted gridline color
+                        }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top',
+                        labels: {
+                            color: '#fff',
+                            font: {
+                                size: 16,
+                                weight: 'bold'
+                            }
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 'Stablecoin growth since Tether started in 2014',
+                        color: '#fff',
+                        font: {
+                            size: 24,
+                            weight: 'bold'
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.dataset.label || '';
+                                if (label) {
+                                    label += ': ';
+                                }
+                                if (context.parsed.y !== null) {
+                                    label += context.parsed.y + 'B';
+                                }
+                                return label;
+                            }
+                        }
+                    }
+                },
+                interaction: {
+                    mode: 'index',
+                    intersect: false
+                }
+            }
+        });
+    </script>
+</body>
+</html>
