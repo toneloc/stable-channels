@@ -17,9 +17,9 @@ Stable Providers want to leverage their bitcoin. However, Stable Receivers put t
 
 Each of these two nodes query 5 price feeds every 5 minutes. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $100 of bitcoin. 
 - Each party remains self-custodial.
-- Either party may opt out at anytime, either by a cooperative on-chain channel close or forced channel close on-chain. 
+- Either party may opt out at any time, either by a cooperative on-chain channel close or forced channel close on-chain. 
 
-This basic process works as follows. 
+This basic process works as follows:
 
 Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) stays the same:
 <ul>
@@ -52,7 +52,7 @@ Stable Channels workflows end-to-end work like this:
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
 <li>Select the price feeds. By default, Stable Channels takes the median of five price feeds: BitStamp, CoinGecko, CoinDesk, Coinbase, and Blockchain.info
-<li>Create a with the counterparty, each putting in the amount of the Stable Channel. 
+<li>Create a channel with the counterparty, each putting in the amount of the Stable Channel. 
 <ul>
     <li>This can be dual-funded
     <li>Or you can attach the Stable Channel software to an existing channel.
@@ -92,7 +92,7 @@ Stable Channels has a few dependencies.
 - Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
 - Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
 
-Stablechannel balance results are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. These are in the `stablechannels` directory inside your network directory, e.g. `~/.lightning/bitcoin/stablechannels/stablelog1.json`.
+Stable Channel balance results are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. These are in the `stablechannels` directory inside your network directory, e.g. `~/.lightning/bitcoin/stablechannels/stablelog1.json`.
 
 ### Connecting and creating a dual-funded channel (for CLN)
 
