@@ -239,7 +239,6 @@ def check_stables(plugin, sc):
     sc.payment_made = False
     amount_too_small = False
 
-    plugin.log(level="debug", message="Line 239 check")
     plugin.log (sc.__str__())
 
     # Scenario 1 - Difference to small to worry about (under $0.01) = do nothing
