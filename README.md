@@ -4,7 +4,7 @@
 
 ## Stable Channels - Version 30MAY2024
 
-This Twitter thread explains things pretty well, with an example - https://x.com/tonklaus/status/1729567459579945017
+This Twitter thread explains the basics, with an example - https://x.com/tonklaus/status/1729567459579945017
 
 And this Delving Bitcoin post goes more in-depth - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
 
