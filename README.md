@@ -39,7 +39,7 @@ Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) 
   </ul>
 </ul>
 
-Stable Channels are non-routing channels. We are working on adding routing. 
+Stable Channels are non-routing channels. We are working on adding routing and payments in and out.
 
 Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
