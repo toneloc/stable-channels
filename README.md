@@ -8,14 +8,14 @@ This Twitter thread explains the basics, with an example - https://x.com/tonklau
 
 And this Delving Bitcoin post goes more in-depth - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
 
-<b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms, for example $100. 
+<b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms, for example $10,000. 
 - These special channels are called <b>Stable Channels</b>. 
 - These node runners are called <b>Stable Receivers</b>.
 - On the other side of the channel are <b>Stable Providers</b>. 
 
 Stable Providers want to leverage their bitcoin. However, Stable Receivers put their bitcoin at risk by doing so.
 
-Each of these two nodes query 5 price feeds every 5 minutes. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $100 of bitcoin. 
+Each of these two nodes query 5 price feeds every 5 minutes. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at $10,000 of bitcoin. 
 - Each party remains self-custodial.
 - Either party may opt out at any time, either by a cooperative on-chain channel close or forced channel close on-chain. 
 
@@ -56,7 +56,7 @@ Stable Channels workflows end-to-end work like this:
 <ul>
     <li>This can be dual-funded
     <li>Or you can attach the Stable Channel software to an existing channel.
-<li> <i>Example: If the Stable Channel is for $100, each side of the channel puts in $100, for a total channel capacity of $200 at the time of channel creation</i>
+<li> <i>Example: If the Stable Channel is for $10,000, each side of the channel puts in $10,000, for a total channel capacity of $20,000 at the time of channel creation</i>
 </ul>
 <li>Query the five price feeds' APIs and update the Stable Channel balance accordingly:
 <ul>
