@@ -5,20 +5,16 @@
 // Section 4 - Core stability logic 
 // Section 5 - Program initialization and command-line-interface
 
-use ldk_node::bitcoin::base58::from;
+
 // Section 1 - Dependencies and main data structure
-use ldk_node::{lightning_invoice::Bolt11Invoice, Node};
-use ldk_node::Builder;
-use ldk_node::bitcoin::{Network, PublicKey};
-use std::borrow::Borrow;
+use ldk_node::bitcoin::secp256k1::PublicKey;
+use ldk_node::lightning::ln::ChannelId;
+use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder, UserChannelId};
+use ldk_node::bitcoin::{Network};
 use std::ops::{Div, Sub};
-use std::sync::{mpsc, Mutex};
 use std::{io::{self, Write}, sync::Arc, thread};
-use ldk_node::ChannelConfig;
-use std::fmt;
+use ldk_node::{ChannelConfig, ChannelDetails};
 use std::time::Duration;
-use reqwest::blocking::ClientBuilder;
-use reqwest::StatusCode;
 use serde_json::Value;
 use std::error::Error;
 use std::collections::HashMap;
@@ -81,8 +77,8 @@ impl std::fmt::Display for Bitcoin {
 struct USD(f64);
 
 impl USD {
-    fn from_bitcoin(btc: Bitcoin, usdbtc_price: f64) -> Self {
-        Self(btc.to_btc() * usdbtc_price)
+    fn from_bitcoin(btc: Bitcoin, btcusd_price: f64) -> Self {
+        Self(btc.to_btc() * btcusd_price)
     }
 
     fn from_f64(amount: f64) -> Self {
@@ -116,22 +112,22 @@ impl Div for USD {
 
 impl std::fmt::Display for USD {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.2} USD", self.0)
+        write!(f, "${:.2}", self.0)
     }
 }
 
 #[derive(Clone, Debug)]
 struct StableChannel {
-    channel_id: String,
+    channel_id: ChannelId, 
     is_stable_receiver: bool,
-    counterparty: String, // TODO change to PublicKey
+    counterparty: PublicKey, 
     expected_usd: USD,
     expected_btc: Bitcoin,
     stable_receiver_btc: Bitcoin,
     stable_provider_btc: Bitcoin,   
     stable_receiver_usd: USD,
     stable_provider_usd: USD,
-    risk_score: i32,
+    risk_level: i32,
     timestamp: i64,
     formatted_datetime: String,
     payment_made: bool,
@@ -280,75 +276,45 @@ fn calculate_median_price(prices: Vec<(String, f64)>) -> Result<f64, Box<dyn std
 }
 
 // Section 4 - Core stability logic 
-
-// 5 scenarios to handle
-fn check_stability(node: &Node, sc: &mut StableChannel) {
-    println!("here");
-
+fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
+    // First, get the latest prices from prices feeds
     let client = Client::new();
-    
-    let price_feeds = set_price_feeds();
-
+    let price_feeds = set_price_feeds(); // Set this earlier
     let prices = fetch_prices(&client, &price_feeds).unwrap_or(Vec::new());
 
-    // Set latest price
+    // Set the latest median price
     sc.latest_price = calculate_median_price(prices).unwrap();
 
-    // Get our balance for this channel, and theirs
-    let ln_balance = node.list_balances().total_lightning_balance_sats;
+    // Now, get our balance for this channel, and theirs
+    // This is outbound capacity ... need to add 
+    let mut channels = node.list_channels();
 
-    let channels = node.list_channels();
+    let sc = update_balances(sc, &channels);
+ 
+    let percent_from_par: f64 = (((sc.stable_receiver_usd - sc.expected_usd) / sc.expected_usd) * 100.0).abs();
+    // let _percent_from_par_formatted = format!("{:.2}%", percent_from_par);
 
-    let mut total_channel_btc: Option<Bitcoin> = None;
+    println!("Stable Receiver BTC: {}", sc.stable_receiver_btc);
+    println!("Expected USD: ${:.2}", sc.expected_usd);
+    println!("Stable Receiver USD: {}", sc.stable_receiver_usd);
+    println!("Expected BTC: {}", sc.expected_btc);
+    println!("Stable Provider USD: {}", sc.stable_provider_usd);
+    println!("Percent from par: {:.2}%", percent_from_par);
 
-    // Iterate through channels to find the one that matches sc.channel_id
-    for channel in channels {
-        println!("{}", channel.channel_id.to_string());
-        if channel.channel_id.to_string() == sc.channel_id {
-            let total_channel_sats = channel.channel_value_sats;
-            total_channel_btc = Some(Bitcoin::from_sats(total_channel_sats));
-            break; 
-        }
-    }
-
-    if let Some(total_channel_btc) = total_channel_btc {
-        print!("{}", ln_balance);
-
-        if sc.is_stable_receiver {
-            sc.stable_receiver_btc = Bitcoin::from_sats(ln_balance);
-            sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-            sc.stable_provider_btc = total_channel_btc - sc.stable_receiver_btc;
-            sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-        } else {
-            sc.stable_provider_btc = Bitcoin::from_sats(ln_balance);
-            sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-            sc.stable_receiver_btc = total_channel_btc - sc.stable_provider_btc;
-            sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-        }
-    } else {
-        eprintln!("Channel not found for channel_id: {}", sc.channel_id);
-    }
-  
-
-    let percent_from_par: f64 = (sc.stable_receiver_usd - sc.expected_usd) / sc.expected_usd;
-    println!("here3");
-    println!("{}", sc.stable_receiver_btc);
-    println!("{}", sc.expected_usd);
-    println!("{}", sc.expected_btc);
-    println!("{}", sc.stable_provider_usd);
-    println!("{}", percent_from_par);
-
-    // 5 scenarios to handle - explained below
-    // Scenario 1 - Difference too small to worry about (under 0.1%) = do nothing
+    // Now we are ready to do the basic logic. 5 scenarios to handle, explained below.
+    // Scenario 1 - Difference from par is too small to worry about (under 0.1%) = do nothing
     if percent_from_par < 0.1 {
-        println!("Difference under 0.1%. Doing nothing.");
+        println!("Difference from par under 0.1%. Doing nothing.");
     
     } else if sc.is_stable_receiver {
         // Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
         if sc.stable_receiver_usd < sc.expected_usd {
-            println!("Waiting 30 seconds and checking on payment...");
             std::thread::sleep(std::time::Duration::from_secs(30));
-            // Logic to check on payment here
+            
+            println!("Waiting 30 seconds and checking on payment...");
+            channels = node.list_channels();
+            sc = update_balances(sc, channels);
+            
         // Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
         } else if sc.stable_receiver_usd > sc.expected_usd {
             println!("Paying the difference...");
@@ -367,6 +333,35 @@ fn check_stability(node: &Node, sc: &mut StableChannel) {
         }
     }
 
+    sc
+
+}
+
+fn update_balances(mut sc: StableChannel, channels: &[ChannelDetails]) -> StableChannel {
+    let (our_balance, their_balance) = channels.iter()
+        .find(|channel| channel.channel_id == sc.channel_id)
+        .map(|channel| {
+            let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
+            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
+            let total_channel_value_sats = channel.channel_value_sats;
+            let their_balance_sats = total_channel_value_sats - our_balance_sats;
+            (our_balance_sats, their_balance_sats)
+        })
+        .unwrap_or((0, 0));
+
+    if sc.is_stable_receiver {
+        sc.stable_receiver_btc = Bitcoin::from_sats(our_balance);
+        sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
+        sc.stable_provider_btc = Bitcoin { sats: their_balance };
+        sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
+    } else {
+        sc.stable_provider_btc = Bitcoin::from_sats(our_balance);
+        sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
+        sc.stable_receiver_btc = Bitcoin { sats: their_balance };
+        sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
+    }
+
+    sc // Return the modified StableChannel
 }
 
 // Section 5 - Program initialization and command-line-interface
@@ -375,7 +370,7 @@ fn main() {
     let node2 = make_node("node2", 9736);
 
     // We store Stable Channels data here
-    let mut stable_channels: HashMap<String, StableChannel> = HashMap::new(); // Store StableChannel objects
+    let mut stable_channels: HashMap<String, StableChannel> = HashMap::new(); 
 
     loop {
         let mut input = String::new();
@@ -396,17 +391,34 @@ fn main() {
                 let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
                 let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
                 
+                // Get counterparty
+                // One let block to find the counterparty and handle the result
+                let counterparty= node1.list_channels()
+                    .iter()
+                    .find(|channel| channel.channel_id.to_string() == channel_id)
+                    .map(|channel| channel.counterparty_node_id)
+                    .expect("Failed to find channel with the specified ID");
+
+                // Now you can use the array with the from_bytes function to create a ChannelId
+                // let channel_id = ChannelId::from_bytes(bytes_array);`
+                let dummy_data: [u8; 32] = [
+                    0x71, 0x0f, 0x9e, 0x2d, 0xc7, 0xbd, 0x20, 0xa5,
+                    0x8e, 0xaa, 0x1c, 0x60, 0x96, 0xd7, 0xd8, 0x0c,
+                    0x58, 0xee, 0xc5, 0xec, 0x16, 0xb1, 0x5a, 0xca,
+                    0x59, 0x7e, 0xb0, 0x9a, 0x66, 0x2a, 0x28, 0xd7
+                ];
+            
                 let mut stable_channel = StableChannel {
-                    channel_id,
-                    is_stable_receiver,
-                    counterparty: "counterparty_xyz".to_string(),
+                    channel_id: ChannelId::from_bytes(dummy_data),
+                    is_stable_receiver,  
+                    counterparty,
                     expected_usd: USD::from_f64(expected_dollar_amount),
                     expected_btc: Bitcoin::from_btc(native_amount_sats),
                     stable_receiver_btc: Bitcoin::from_btc(0.0),
                     stable_provider_btc: Bitcoin::from_btc(0.0),  
                     stable_receiver_usd: USD::from_f64(0.0),
                     stable_provider_usd: USD::from_f64(0.0),
-                    risk_score: 0, 
+                    risk_level: 0, 
                     timestamp: 0,
                     formatted_datetime: "2021-06-01 12:00:00".to_string(), 
                     payment_made: false,
@@ -419,14 +431,14 @@ fn main() {
 
                 let key = stable_channel.channel_id.clone();
                 let value = stable_channel.clone();
-                stable_channels.insert(key, value); 
+                stable_channels.insert(key.to_string(), value); 
 
                 loop {
                     // print!("{}", node1.list_balances().total_onchain_balance_sats);
                     println!();
                     println!("Checking stability for channel {}...", stable_channel.channel_id);
                     
-                    check_stability(&node1, &mut stable_channel);
+                    stable_channel = check_stability(&node1, stable_channel);
 
                     thread::sleep(Duration::from_secs(20));
                 };
@@ -464,15 +476,9 @@ fn main() {
                 let balances = node2.list_balances();
                 println!("Node 2 Wallet Balance: {}", balances.total_onchain_balance_sats + balances.total_lightning_balance_sats);
             },
-            (Some("node1"), Some("getinvoice"), []) => {
-                let bolt11 = node1.bolt11_payment();
-                let invoice = bolt11.receive(10, "test invoice", 600);
-                match invoice {
-                    Ok(inv) => {
-                        println!("Node 1 Invoice: {}", inv);
-                    },
-                    Err(e) => println!("Error creating invoice: {}", e)
-                }
+            (Some("node2"), Some("closechannel"), []) => {
+                let balances = node2.list_balances();
+                println!("Node 2 Wallet Balance: {}", balances.total_onchain_balance_sats + balances.total_lightning_balance_sats);
             },
             (Some("node2"), Some("getinvoice"), []) => {
                 let bolt11 = node2.bolt11_payment();
