@@ -285,11 +285,15 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     // Set the latest median price
     sc.latest_price = calculate_median_price(prices).unwrap();
 
-    // Now, get our balance for this channel, and theirs
-    // This is outbound capacity ... need to add 
-    let mut channels = node.list_channels();
+    let channels = node
+        .list_channels(); // This might be huge?
 
-    let sc = update_balances(sc, &channels);
+    let mut channel_details = channels
+        .iter()
+        .find(|channel| channel.channel_id == sc.channel_id)
+        .clone();
+
+    sc = update_balances(sc, Some(channel_details.unwrap().clone()));
  
     let percent_from_par: f64 = (((sc.stable_receiver_usd - sc.expected_usd) / sc.expected_usd) * 100.0).abs();
     // let _percent_from_par_formatted = format!("{:.2}%", percent_from_par);
@@ -310,10 +314,10 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         // Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
         if sc.stable_receiver_usd < sc.expected_usd {
             std::thread::sleep(std::time::Duration::from_secs(30));
-            
+
             println!("Waiting 30 seconds and checking on payment...");
-            channels = node.list_channels();
-            sc = update_balances(sc, channels);
+            // channels = node.list_channels();
+            // sc = update_balances(sc, channels);
             
         // Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
         } else if sc.stable_receiver_usd > sc.expected_usd {
@@ -337,32 +341,34 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
 
 }
 
-fn update_balances(mut sc: StableChannel, channels: &[ChannelDetails]) -> StableChannel {
-    let (our_balance, their_balance) = channels.iter()
-        .find(|channel| channel.channel_id == sc.channel_id)
-        .map(|channel| {
+fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails>) -> StableChannel {
+    let (our_balance, their_balance) = match channel_details {
+        Some(channel) => {
             let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
             let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-            let total_channel_value_sats = channel.channel_value_sats;
-            let their_balance_sats = total_channel_value_sats - our_balance_sats;
+            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
             (our_balance_sats, their_balance_sats)
-        })
-        .unwrap_or((0, 0));
+        }
+        None => (0, 0), // Handle the case where channel_details is None
+    };
 
+    // Update balances based on whether this is a stable receiver or provider
     if sc.is_stable_receiver {
         sc.stable_receiver_btc = Bitcoin::from_sats(our_balance);
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
-        sc.stable_provider_btc = Bitcoin { sats: their_balance };
+        sc.stable_provider_btc = Bitcoin::from_sats(their_balance);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
     } else {
         sc.stable_provider_btc = Bitcoin::from_sats(our_balance);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-        sc.stable_receiver_btc = Bitcoin { sats: their_balance };
+        sc.stable_receiver_btc = Bitcoin::from_sats(their_balance);
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
     }
 
     sc // Return the modified StableChannel
 }
+
+
 
 // Section 5 - Program initialization and command-line-interface
 fn main() {
