@@ -5,13 +5,12 @@
 // Section 4 - Core stability logic 
 // Section 5 - Program initialization and command-line-interface
 
-
 // Section 1 - Dependencies and main data structure
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
 use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder, UserChannelId};
 use ldk_node::bitcoin::{Network};
-use std::ops::{Div, Sub};
+use std::ops::{Div, Mul, Sub};
 use std::{io::{self, Write}, sync::Arc, thread};
 use ldk_node::{ChannelConfig, ChannelDetails};
 use std::time::Duration;
@@ -84,6 +83,19 @@ impl USD {
     fn from_f64(amount: f64) -> Self {
         Self(amount)
     }
+
+    fn to_msats(self, btcusd_price: f64) -> u64 {
+        let btc_value = self.0 / btcusd_price; 
+        let sats = btc_value * Bitcoin::SATS_IN_BTC as f64; 
+        let millisats = sats * 1000.0; 
+        millisats.round() as u64 
+    }
+
+    fn as_f64(&self) -> f64 {
+        self.0
+    }
+
+
 }
 
 impl Sub for USD {
@@ -270,75 +282,82 @@ fn calculate_median_price(prices: Vec<(String, f64)>) -> Result<f64, Box<dyn std
         price_values[price_values.len() / 2]
     };
 
-    println!("The median BTC/USD price is: ${:.2}", median_price);
+    println!("Median BTC/USD price : ${:.2}", median_price);
 
     Ok(median_price)
 }
 
 // Section 4 - Core stability logic 
 fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
-    // First, get the latest prices from prices feeds
-    let client = Client::new();
-    let price_feeds = set_price_feeds(); // Set this earlier
-    let prices = fetch_prices(&client, &price_feeds).unwrap_or(Vec::new());
+    // Fetch and update prices
+    sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
+        .and_then(|prices| calculate_median_price(prices))
+        .unwrap_or(0.0);
 
-    // Set the latest median price
-    sc.latest_price = calculate_median_price(prices).unwrap();
+    // Update channel balances
+    if let Some(channel) = node.list_channels().iter().find(|c| c.channel_id == sc.channel_id) {
+        sc = update_balances(sc, Some(channel.clone()));
+    }
 
-    let channels = node
-        .list_channels(); // This might be huge?
+    // Calculate balance information
+    let dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
+    let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
 
-    let mut channel_details = channels
-        .iter()
-        .find(|channel| channel.channel_id == sc.channel_id)
-        .clone();
+    // Print balance information
+    println!("{:<25} {:>15}", "Stable Receiver BTC:", sc.stable_receiver_btc);
+    println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
+    println!("{:<25} {:>15}", "Stable Receiver USD:", sc.stable_receiver_usd);
+    println!("{:<25} {:>15}", "Expected BTC:", sc.expected_btc);
+    println!("{:<25} {:>15}", "Stable Provider USD:", sc.stable_provider_usd);
+    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%", percent_from_par));
 
-    sc = update_balances(sc, Some(channel_details.unwrap().clone()));
- 
-    let percent_from_par: f64 = (((sc.stable_receiver_usd - sc.expected_usd) / sc.expected_usd) * 100.0).abs();
-    // let _percent_from_par_formatted = format!("{:.2}%", percent_from_par);
+    enum Action {
+        Wait,
+        Pay,
+        DoNothing,
+        HighRisk,
+    }
 
-    println!("Stable Receiver BTC: {}", sc.stable_receiver_btc);
-    println!("Expected USD: ${:.2}", sc.expected_usd);
-    println!("Stable Receiver USD: {}", sc.stable_receiver_usd);
-    println!("Expected BTC: {}", sc.expected_btc);
-    println!("Stable Provider USD: {}", sc.stable_provider_usd);
-    println!("Percent from par: {:.2}%", percent_from_par);
-
-    // Now we are ready to do the basic logic. 5 scenarios to handle, explained below.
-    // Scenario 1 - Difference from par is too small to worry about (under 0.1%) = do nothing
-    if percent_from_par < 0.1 {
-        println!("Difference from par under 0.1%. Doing nothing.");
-    
-    } else if sc.is_stable_receiver {
-        // Scenario 2 - Node is stableReceiver and expects to get paid = wait 30 seconds; check on payment
-        if sc.stable_receiver_usd < sc.expected_usd {
-            std::thread::sleep(std::time::Duration::from_secs(30));
-
-            println!("Waiting 30 seconds and checking on payment...");
-            // channels = node.list_channels();
-            // sc = update_balances(sc, channels);
-            
-        // Scenario 3 - Node is stableProvider and needs to pay = keysend and exit
-        } else if sc.stable_receiver_usd > sc.expected_usd {
-            println!("Paying the difference...");
-            // Logic to pay the difference here
-        }
+    // Determine action based on channel state and risk level
+    let action = if percent_from_par < 0.1 {
+        Action::DoNothing
     } else {
-        // Scenario 4 - Node is stableReceiver and needs to pay = keysend and exit
-        if sc.stable_receiver_usd < sc.expected_usd {
-            println!("Sending payment...");
-            // Logic to send payment here
-        // Scenario 5 - Node is stableProvider and expects to get paid = wait 30 seconds; check on payment
-        } else if sc.stable_receiver_usd > sc.expected_usd {
-            println!("Waiting 30 seconds and checking on payment...");
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            // Logic to check on payment here
+        let is_receiver_below_expected: bool = sc.stable_receiver_usd < sc.expected_usd;
+        
+        match (sc.is_stable_receiver, is_receiver_below_expected, sc.risk_level > 100) {
+            (_, _, true) => Action::HighRisk, // High risk scenario
+            (true, true, false) => Action::Wait,   // We are stable receiver and below peg, wait for payment
+            (true, false, false) => Action::Pay,   // We are stable receiver and above peg, need to pay
+            (false, true, false) => Action::Pay,   // We are stable provider and below peg, need to pay
+            (false, false, false) => Action::Wait, // We are stable provider and above peg, wait for payment
         }
+    };
+
+    // Act based on the determined action
+    match action {
+        Action::DoNothing => println!("Difference from par under 0.1%. Doing nothing."),
+        Action::Wait => {
+            println!("Waiting 10 seconds and checking on payment...");
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            if let Some(channel) = node.list_channels().iter().find(|c| c.channel_id == sc.channel_id) {
+                sc = update_balances(sc, Some(channel.clone()));
+            }
+        },
+        Action::Pay => {
+            println!("Paying the difference...");
+            let result = node.spontaneous_payment().send(USD::to_msats(dollars_from_par, sc.latest_price)*1000, sc.counterparty);
+            match result {
+                Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
+                Err(e) => println!("Failed to send payment: {}", e),
+            }
+        },
+        Action::HighRisk => {
+            println!("Risk very high! Current risk level: {}", sc.risk_level);
+            // You might want to add additional logic here for handling high-risk scenarios
+        },
     }
 
     sc
-
 }
 
 fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails>) -> StableChannel {
@@ -367,8 +386,6 @@ fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails
 
     sc // Return the modified StableChannel
 }
-
-
 
 // Section 5 - Program initialization and command-line-interface
 fn main() {
