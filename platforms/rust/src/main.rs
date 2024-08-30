@@ -1,24 +1,25 @@
+
 // Contents
-// Section 1 - Dependencies and main data structure
-// Section 2 - LDK set-up and helper functions
+// Section 1 - Dependencies, main data structure. helper functions
+// Section 2 - LDK set-up
 // Section 3 - Price feed config and logic
 // Section 4 - Core stability logic 
 // Section 5 - Program initialization and command-line-interface
 
-use futures::future::UnwrapOrElse;
 // Section 1 - Dependencies and main data structure
+extern crate ldk_node_hack;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
-use ldk_node::lightning::offers::offer::{self, Offer};
-use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder, UserChannelId};
-use ldk_node::bitcoin::{Network};
-use std::ops::{Div, Mul, Sub};
+use ldk_node::lightning::offers::offer::Offer;
+use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
+use ldk_node::bitcoin::Network;
+use std::ops::{Div, Sub};
+use std::str::FromStr;
 use std::{io::{self, Write}, sync::Arc, thread};
 use ldk_node::{ChannelConfig, ChannelDetails};
 use std::time::Duration;
 use serde_json::Value;
 use std::error::Error;
-use std::collections::HashMap;
 use reqwest::blocking::Client;
 use retry::{retry, delay::Fixed};
 
@@ -88,9 +89,9 @@ impl USD {
 
     fn to_msats(self, btcusd_price: f64) -> u64 {
         let btc_value = self.0 / btcusd_price; 
-        let sats = btc_value * Bitcoin::SATS_IN_BTC as f64; 
-        let millisats = sats * 1000.0; 
-        millisats.round() as u64 
+        let sats = btc_value * Bitcoin::SATS_IN_BTC as f64;
+        let millisats = sats * 1000.0;
+        millisats.floor() as u64
     }
 
 
@@ -148,8 +149,12 @@ struct StableChannel {
 }
 
 // Section 2 - LDK set-up and helper functions
-fn make_node(alias: &str, port: u16) -> ldk_node::Node {
-    let mut builder = Builder::new();
+fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
+    let mut builder = ldk_node_hack::Builder::new();
+
+    let promise_secret = [0u8; 32];
+    builder.set_liquidity_provider_lsps2(promise_secret);
+
     builder.set_network(Network::Signet);
     builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
@@ -157,7 +162,33 @@ fn make_node(alias: &str, port: u16) -> ldk_node::Node {
 
     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
 
+    let node = builder.build().unwrap();
+
+    node.start().unwrap();
+
+    println!("Node Public Key: {}", node.node_id());
+
+    return node;
+}
+
+// Section 2 - LDK set-up and helper functions
+fn make_node(alias: &str, port: u16) -> ldk_node::Node {
+    let mut builder = Builder::new();
     
+    if alias == "node2" {
+        let address = "127.0.0.1:9377".parse().unwrap();
+        
+        let node_id = PublicKey::from_str("031e70845c5b522d3271b920b2fcb46b5cf8d50db27dabec24ed8abcd28094dd22").unwrap();
+    
+        builder.set_liquidity_source_lsps2(address, node_id, Some("auth_token".to_owned()));
+    }
+
+    builder.set_network(Network::Signet);
+    builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
+    // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
+    builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
+
+    builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
 
     let node = builder.build().unwrap();
 
@@ -299,7 +330,7 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         sc = update_balances(sc, Some(channel.clone()));
     }
 
-    // Calculate balance information
+    // Calculate how far off 100% par we are 
     let dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
     let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
 
@@ -333,9 +364,9 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         }
     };
 
-    // Act based on the determined action
     match action {
-        Action::DoNothing => println!("Difference from par under 0.1%. Doing nothing."),
+        // update state after each
+        Action::DoNothing => println!("Difference from par less than 0.1%. Doing nothing."),
         Action::Wait => {
             println!("Waiting 10 seconds and checking on payment...");
             std::thread::sleep(std::time::Duration::from_secs(10));
@@ -346,30 +377,35 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             }
         },
         Action::Pay => {
-            // node.connect(sc.counterparty, vec![format!("127.0.0.1:9736")], true);
             println!("Paying the difference...");
             
-            let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+            let mut amt = USD::to_msats(dollars_from_par, sc.latest_price);
             println!("{}", amt.to_string());
-
-            let payer_note = Some("Test payment".to_string());
             
-            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer, payer_note, 4321);
+            // First, ensure we are connected
+            let address = format!("127.0.0.1:9376").parse().unwrap();
+            let result = node.connect(sc.counterparty, address, true);
 
-            match result {
-                Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id),
-                Err(e) => eprintln!("Failed to send payment: {:?}", e),
+            if let Err(e) = result {
+                println!("Failed to connect with node2: {}", e);
+            } else {
+                println!("Successfully connected with node2.");
             }
 
             // let result = node
             //     .spontaneous_payment()
-            //     .send(USD::to_msats(
-            //             dollars_from_par, sc.latest_price), 
-            //             sc.counterparty);
+            //     .send(amt, sc.counterparty);
             // match result {
             //     Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
             //     Err(e) => println!("Failed to send payment: {}", e),
             // }
+
+            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
+            
+            match result {
+                Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id),
+                Err(e) => eprintln!("Failed to send payment: {:?}", e),
+            }
         },
         Action::HighRisk => {
             println!("Risk level high. Current risk level: {}", sc.risk_level);
@@ -408,11 +444,12 @@ fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails
 
 // Section 5 - Program initialization and command-line-interface
 fn main() {
+    // Add more nodes if you need
     let node1 = make_node("node1", 9735);
     let node2 = make_node("node2", 9736);
+    let node3 = make_hack_node("node3", 9737);
 
-    // We store Stable Channels data here
-    let mut stable_channels: HashMap<String, StableChannel> = HashMap::new(); 
+    // node_hack.update_channel_config(user_channel_id, counterparty_node_id, channel_config);
 
     loop {
         let mut input = String::new();
@@ -426,6 +463,8 @@ fn main() {
         let command = parts.next();
         let args: Vec<&str> = parts.collect(); // Collect remaining arguments
 
+        // node1 startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 4.0 0
+
         match (node, command, args.as_slice()) {
             (Some("node1"), Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                 let channel_id = channel_id.to_string();
@@ -433,8 +472,6 @@ fn main() {
                 let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
                 let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                // Get counterparty
-                // One let block to find the counterparty and handle the result
                 let counterparty = node1.list_channels()
                     .iter()
                     .find(|channel| {
@@ -442,28 +479,17 @@ fn main() {
                         channel.channel_id.to_string() == channel_id
                     })
                     .map(|channel| channel.counterparty_node_id)
-                    .expect("Failed to find channel with the specified ID");
-
-                println!("{}", counterparty);
-                
-                // Now you can use the array with the from_bytes function to create a ChannelId
-                // let channel_id = ChannelId::from_bytes(bytes_array);
-
-                let dummy_data: [u8; 32] = [
-                    0x3d, 0xc7, 0x44, 0xaf, 0xc2, 0xf3, 0x75, 0x6e,
-                    0x8f, 0xec, 0xc3, 0x81, 0xeb, 0x08, 0x15, 0x65,
-                    0x08, 0x8f, 0x39, 0x17, 0x7b, 0xb3, 0x9e, 0x46,
-                    0x6a, 0x90, 0xfc, 0xd6, 0xd8, 0xb7, 0xd9, 0x15
-                ];
-
-                // lets set node2's BOLT12 offer
-
-                // let offer = node2.bolt12_payment().receive_variable_amount("thank you").unwrap();
-                let offer = node2.bolt12_payment().receive_variable_amount("thanks").unwrap();
-                println!("{}", offer);
+                    .expect("Failed to find channel with the specified sID");
             
+                let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
+                    .expect("Invalid hex string")
+                    .try_into()
+                    .expect("Decoded channel ID has incorrect length");
+
+                let offer = node2.bolt12_payment().receive_variable_amount("thanks").unwrap();
+
                 let mut stable_channel = StableChannel {
-                    channel_id: ChannelId::from_bytes(dummy_data),
+                    channel_id: ChannelId::from_bytes(channel_id_bytes),
                     is_stable_receiver,  
                     counterparty,
                     expected_usd: USD::from_f64(expected_dollar_amount),
@@ -484,12 +510,7 @@ fn main() {
 
                 println!("Stable Channel created: {:?}", stable_channel.channel_id);
 
-                let key = stable_channel.channel_id.clone();
-                let value = stable_channel.clone();
-                stable_channels.insert(key.to_string(), value); 
-
                 loop {
-                    // print!("{}", node1.list_balances().total_onchain_balance_sats);
                     println!();
                     println!("Checking stability for channel {}...", stable_channel.channel_id);
                     
@@ -500,12 +521,14 @@ fn main() {
             },
             (Some("node1"), Some("openchannel"), []) => {
                 let channel_config: Option<Arc<ChannelConfig>> = None;
+                
+                
                 let announce_channel = true;
 
                 // Extract the first listening address
                 if let Some(listening_addresses) = node2.listening_addresses() {
                     if let Some(node2_addr) = listening_addresses.get(0) {
-                        match node1.connect_open_channel(node2.node_id(), node2_addr.clone(), 10000, Some(0), channel_config, announce_channel) {
+                        match node1.connect_open_channel(node2.node_id(), node2_addr.clone(), 100000, Some(0), channel_config, announce_channel) {
                             Ok(_) => println!("Channel successfully opened between node1 and node2."),
                             Err(e) => println!("Failed to open channel: {}", e),
                         }
@@ -523,6 +546,38 @@ fn main() {
                     Err(e) => println!("Error getting funding address: {}", e),
                 }
             }
+            (Some("node2"), Some("getaddress"), []) => {
+                let funding_address = node2.onchain_payment().new_address();
+                match funding_address {
+                    Ok(fund_addr) => println!("Node 2 Funding Address: {}", fund_addr),
+                    Err(e) => println!("Error getting funding address: {}", e),
+                }
+            }
+            (Some("node3"), Some("getaddress"), []) => {
+                let funding_address = node3.onchain_payment().new_address();
+                match funding_address {
+                    Ok(fund_addr) => println!("Node 3 Funding Address: {}", fund_addr),
+                    Err(e) => println!("Error getting funding address: {}", e),
+                }
+            }
+            (Some("node2"), Some("openchannel"), []) => {
+                let channel_config: Option<Arc<ChannelConfig>> = None;    
+                let announce_channel = true;
+
+                // Extract the first listening address
+                if let Some(listening_addresses) = node3.listening_addresses() {
+                    if let Some(node3_addr) = listening_addresses.get(0) {
+                        match node2.connect_open_channel(node3.node_id(), node3_addr.clone(), 300000, Some(0), channel_config, announce_channel) {
+                            Ok(_) => println!("Channel successfully opened between node2 and node3."),
+                            Err(e) => println!("Failed to open channel: {}", e),
+                        }
+                    } else {
+                        println!("Node3 has no listening addresses.");
+                    }
+                } else {
+                    println!("Failed to get listening addresses for node3.");
+                }
+            },
             (Some("node1"), Some("balance"), []) => {
                 let balances = node1.list_balances();
                 // println!(node1.list_balances().lightning_balances);
@@ -532,6 +587,10 @@ fn main() {
                 let balances = node2.list_balances();
                 println!("Node 2 Wallet Balance: {}", balances.total_onchain_balance_sats + balances.total_lightning_balance_sats);
             },
+            (Some("node3"), Some("balance"), []) => {
+                let balances = node3.list_balances();
+                println!("Node 3 Wallet Balance: {}", balances.total_onchain_balance_sats + balances.total_lightning_balance_sats);
+            },
             (Some("node1"), Some("closeallchannels"), []) => {
                 for channel in node1.list_channels().iter() {
                     let user_channel_id = channel.user_channel_id;
@@ -540,12 +599,36 @@ fn main() {
                 }
             },
             (Some("node1"), Some("listallchannels"), []) => {
+                println!("{}", "channels:");
+                for channel in node1.list_channels().iter() {
+                    let channel_id = channel.channel_id;
+                    println!("{}", channel_id);
+                }
+                println!("{}", "channel details:");
+                let channels = node1.list_channels();
+                println!("{:#?}", channels);
+               
+            },
+            (Some("node2"), Some("listallchannels"), []) => {
+                println!("{}", "channels:");
+                for channel in node2.list_channels().iter() {
+                    let channel_id = channel.channel_id;
+                    println!("{}", channel_id);
+                }
+                println!("{}", "channel details:");
                 let channels = node2.list_channels();
                 println!("{:#?}", channels);
-                // for channel in node1.list_channels().iter() {
-                //     let channel_id = channel.channel_id;
-                //     println!("{}", channel_id);
-                // }
+               
+            },
+            (Some("node1"), Some("getinvoice"), []) => {
+                let bolt11 = node1.bolt11_payment();
+                let invoice = bolt11.receive(10000, "test invoice", 600);
+                match invoice {
+                    Ok(inv) => {
+                        println!("Node 1 Invoice: {}", inv);
+                    },
+                    Err(e) => println!("Error creating invoice: {}", e)
+                }
             },
             (Some("node2"), Some("getinvoice"), []) => {
                 let bolt11 = node2.bolt11_payment();
@@ -592,6 +675,32 @@ fn main() {
                         println!("Error parsing invoice: {}", e);
                     }
                 }
+            },
+            (Some("node3"), Some("payinvoice"), [invoice_str]) => {
+                // node3.bolt11_payment().
+                let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
+                match bolt11_invoice {
+                    Ok(invoice) => {
+                        match node3.bolt11_payment().send(&invoice) {
+                            Ok(payment_id) => {
+                                println!("Payment sent from Node 3 with payment_id: {}", payment_id);
+                            },
+                            Err(e) => {
+                                println!("Error sending payment from Node 3: {}", e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("Error parsing invoice: {}", e);
+                    }
+                }
+            },
+            (Some("node2"), Some("getjitinvoice"), []) => {
+                match node2.bolt11_payment().receive_variable_amount_via_jit_channel("thanks", 3600, Some(1000)) {
+                    Ok(invoice) => println!("Invoice: {:?}", invoice),
+                    Err(e) => println!("Error: {:?}", e),
+                };
+                
             },
             (Some("exit"), _, _) => break,
             _ => println!("Unknown command or incorrect arguments: {}", input),
