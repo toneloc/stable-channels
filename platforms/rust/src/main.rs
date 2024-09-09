@@ -8,11 +8,21 @@
 
 // Section 1 - Dependencies and main data structure
 extern crate ldk_node_hack;
+use lightning_liquidity::events::Event;
+use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
+use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
+use lightning_liquidity::lsps2::msgs::RawOpeningFeeParams;
+use lightning_liquidity::lsps2::service::LSPS2ServiceConfig;
+use lightning_liquidity::lsps2::utils::is_valid_opening_fee_params;
+use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
+use lightning_liquidity::LiquidityManager;
+
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
 use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
 use ldk_node::bitcoin::Network;
+
 use std::ops::{Div, Sub};
 use std::str::FromStr;
 use std::{io::{self, Write}, sync::Arc, thread};
@@ -150,6 +160,7 @@ struct StableChannel {
 
 // Section 2 - LDK set-up and helper functions
 fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
+
     let mut builder = ldk_node_hack::Builder::new();
 
     let promise_secret = [0u8; 32];
@@ -161,6 +172,16 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
 
     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+
+    // let liquidity_service_config = LiquidityServiceConfig {
+    //     lsps2_service_config: Some(LSPS2ServiceConfig {
+    //         // Used to verif the fee parameters you give out
+    //         promise_secret: [0; 32],
+    //         // min_payment_size_msat: 10_000_000,
+    //         // max_payment_size_msat: 1_000_000_000,
+    //     }),
+    //     advertise_service: false
+    // };
 
     let node = builder.build().unwrap();
 
@@ -176,11 +197,13 @@ fn make_node(alias: &str, port: u16) -> ldk_node::Node {
     let mut builder = Builder::new();
     
     if alias == "node2" {
+        
+        println!("herenode2");
         let address = "127.0.0.1:9377".parse().unwrap();
         
         let node_id = PublicKey::from_str("031e70845c5b522d3271b920b2fcb46b5cf8d50db27dabec24ed8abcd28094dd22").unwrap();
     
-        builder.set_liquidity_source_lsps2(address, node_id, Some("auth_token".to_owned()));
+        builder.set_liquidity_source_lsps2(address, node_id, Some("00000000000000000000000000000000".to_owned()));
     }
 
     builder.set_network(Network::Signet);
@@ -519,24 +542,24 @@ fn main() {
                     thread::sleep(Duration::from_secs(20));
                 };
             },
+            // opens to node3
             (Some("node1"), Some("openchannel"), []) => {
                 let channel_config: Option<Arc<ChannelConfig>> = None;
-                
                 
                 let announce_channel = true;
 
                 // Extract the first listening address
-                if let Some(listening_addresses) = node2.listening_addresses() {
-                    if let Some(node2_addr) = listening_addresses.get(0) {
-                        match node1.connect_open_channel(node2.node_id(), node2_addr.clone(), 100000, Some(0), channel_config, announce_channel) {
-                            Ok(_) => println!("Channel successfully opened between node1 and node2."),
+                if let Some(listening_addresses) = node3.listening_addresses() {
+                    if let Some(node3_addr) = listening_addresses.get(0) {
+                        match node1.connect_open_channel(node3.node_id(), node3_addr.clone(), 100000, Some(0), channel_config, announce_channel) {
+                            Ok(_) => println!("Channel successfully opened between node1 and node3."),
                             Err(e) => println!("Failed to open channel: {}", e),
                         }
                     } else {
-                        println!("Node2 has no listening addresses.");
+                        println!("Node3 has no listening addresses.");
                     }
                 } else {
-                    println!("Failed to get listening addresses for node2.");
+                    println!("Failed to get listening addresses for node3.");
                 }
             },
             (Some("node1"), Some("getaddress"), []) => {
@@ -545,7 +568,7 @@ fn main() {
                     Ok(fund_addr) => println!("Node 1 Funding Address: {}", fund_addr),
                     Err(e) => println!("Error getting funding address: {}", e),
                 }
-            }
+            } 
             (Some("node2"), Some("getaddress"), []) => {
                 let funding_address = node2.onchain_payment().new_address();
                 match funding_address {
@@ -591,11 +614,32 @@ fn main() {
                 let balances = node3.list_balances();
                 println!("Node 3 Wallet Balance: {}", balances.total_onchain_balance_sats + balances.total_lightning_balance_sats);
             },
+            (Some("node1"), Some("connecttonode3"), []) => {
+                if let Some(listening_addresses) = node3.listening_addresses() {
+                    if let Some(node3_addr) = listening_addresses.get(0) {
+                        match node2.connect(node3.node_id(), node3_addr.clone(),true) {
+                            Ok(_) => println!("Connected node1 and node3."),
+                            Err(e) => println!("Failed to connect: {}", e),
+                        }
+                    } else {
+                        println!("Node3 has no listening addresses.");
+                    }
+                } else {
+                    println!("Failed to get listening addresses for node3.");
+                }
+            },
             (Some("node1"), Some("closeallchannels"), []) => {
                 for channel in node1.list_channels().iter() {
                     let user_channel_id = channel.user_channel_id;
                     let counterparty_node_id = channel.counterparty_node_id;
                     let _ = node1.close_channel(&user_channel_id, counterparty_node_id);
+                }
+            },
+            (Some("node2"), Some("closeallchannels"), []) => {
+                for channel in node2.list_channels().iter() {
+                    let user_channel_id = channel.user_channel_id;
+                    let counterparty_node_id = channel.counterparty_node_id;
+                    let _ = node2.close_channel(&user_channel_id, counterparty_node_id);
                 }
             },
             (Some("node1"), Some("listallchannels"), []) => {
@@ -620,9 +664,20 @@ fn main() {
                 println!("{:#?}", channels);
                
             },
+            (Some("node3"), Some("listallchannels"), []) => {
+                println!("{}", "channels:");
+                for channel in node3.list_channels().iter() {
+                    let channel_id = channel.channel_id;
+                    println!("{}", channel_id);
+                }
+                println!("{}", "channel details:");
+                let channels = node3.list_channels();
+                println!("{:#?}", channels);
+               
+            },
             (Some("node1"), Some("getinvoice"), []) => {
                 let bolt11 = node1.bolt11_payment();
-                let invoice = bolt11.receive(10000, "test invoice", 600);
+                let invoice = bolt11.receive(10000, "test invoice", 6000);
                 match invoice {
                     Ok(inv) => {
                         println!("Node 1 Invoice: {}", inv);
@@ -632,12 +687,58 @@ fn main() {
             },
             (Some("node2"), Some("getinvoice"), []) => {
                 let bolt11 = node2.bolt11_payment();
-                let invoice = bolt11.receive(10000, "test invoice", 600);
+                let invoice = bolt11.receive(10000, "test invoice", 6000);
                 match invoice {
                     Ok(inv) => {
                         println!("Node 2 Invoice: {}", inv);
                     },
                     Err(e) => println!("Error creating invoice: {}", e)
+                }
+            },
+            (Some("node3"), Some("getinvoice"), []) => {
+                let bolt11 = node3.bolt11_payment();
+                let invoice = bolt11.receive(22222, "test invoice", 6000);
+                match invoice {
+                    Ok(inv) => {
+                        println!("Node 3 Invoice: {}", inv);
+                    },
+                    Err(e) => println!("Error creating invoice: {}", e)
+                }
+            },
+            (Some("node1"), Some("payjitinvoicewithamount"), [invoice_str]) => {
+                let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
+                match bolt11_invoice {
+                    Ok(invoice) => {
+                        match node1.bolt11_payment().send(&invoice) {
+                            Ok(payment_id) => {
+                                println!("Payment sent from Node 1 with payment_id: {}", payment_id);
+                            },
+                            Err(e) => {
+                                println!("Error sending payment from Node 1: {}", e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("Error parsing invoice: {}", e);
+                    }
+                }
+            },
+            (Some("node1"), Some("payjitinvoice"), [invoice_str]) => {
+                let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
+                match bolt11_invoice {
+                    Ok(invoice) => {
+                        match node1.bolt11_payment().send_using_amount(&invoice, 3277979) {
+                            Ok(payment_id) => {
+                                println!("Payment sent from Node 1 with payment_id: {}", payment_id);
+                            },
+                            Err(e) => {
+                                println!("Error sending payment from Node 1: {}", e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("Error parsing invoice: {}", e);
+                    }
                 }
             },
             (Some("node1"), Some("payinvoice"), [invoice_str]) => {
@@ -696,8 +797,9 @@ fn main() {
                 }
             },
             (Some("node2"), Some("getjitinvoice"), []) => {
+             
                 match node2.bolt11_payment().receive_variable_amount_via_jit_channel("thanks", 3600, Some(1000)) {
-                    Ok(invoice) => println!("Invoice: {:?}", invoice),
+                    Ok(invoice) => println!("Invoice: {:?}", invoice.to_string()),
                     Err(e) => println!("Error: {:?}", e),
                 };
                 
