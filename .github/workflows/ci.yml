@@ -137,4 +137,4 @@ jobs:
         export VALGRIND=0
         export PYTEST_TIMEOUT=600
         source venv/bin/activate
-        pytest -n=5 test_stablechannels.py
+        pytest -n=5 /platforms/test_stablechannels.py
