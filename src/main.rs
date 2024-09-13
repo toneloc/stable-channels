@@ -8,14 +8,6 @@
 
 // Section 1 - Dependencies and main data structure
 extern crate ldk_node_hack;
-use lightning_liquidity::events::Event;
-use lightning_liquidity::lsps2::client::LSPS2ClientConfig;
-use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
-use lightning_liquidity::lsps2::msgs::RawOpeningFeeParams;
-use lightning_liquidity::lsps2::service::LSPS2ServiceConfig;
-use lightning_liquidity::lsps2::utils::is_valid_opening_fee_params;
-use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
-use lightning_liquidity::LiquidityManager;
 
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
@@ -192,27 +184,6 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
         let address = "127.0.0.1:9377".parse().unwrap();
         builder.set_liquidity_source_lsps2(address, lsp_pubkey, Some("00000000000000000000000000000000".to_owned()));
     }
-
-    builder.set_network(Network::Signet);
-    builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
-    // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
-    builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-    builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
-
-    let node = builder.build().unwrap();
-
-    node.start().unwrap();
-
-    println!("{} public key: {}", alias, node.node_id());
-
-    return node;
-}
-
-fn make_node_test(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::Node {
-    let mut builder = Builder::new();
-
-    let promise_secret = [0u8; 32];
-    builder.set_liquidity_provider_lsps2(promise_secret);
 
     builder.set_network(Network::Signet);
     builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
