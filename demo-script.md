@@ -1,7 +1,10 @@
 # Stable Channels Rust + LDK + just-in-time channels
 
-## 3 Actors / roles in this demo
-Each actor runs a Lightning Development Kit (LDK) Lightning Node. Each actor remains self-custodial.
+## Actors / roles in this demo
+
+There are three actors. Each actor runs a Lightning Development Kit (LDK) Lightning Node. 
+
+Each actor remains self-custodial.
 
 1. **Exchange**: Lightning-enabled exchange, like Coinbase or Kraken.
 2. **User**: This self-custodial user wants the USD stability, also known as the Stable Receiver.
