@@ -26,7 +26,11 @@ Here's the story: A user has bitcoin on an exchange and wants to hedge his expos
 
 Then an LSP provides this stabiltiy service.
 
-### Step 1 - Get Some test BTC
+## Step 1 - Start the app
+
+``cargo run``
+
+### Step 2 - Get Some test BTC
 Run the following commands to get your test Bitcoin addresses:
 
 ``exchange getaddress``
@@ -43,7 +47,7 @@ and
 
 ``lsp balance``
 
-### Step 2 - Open a routing channel
+### Step 3 - Open a routing channel
 
 Open a channel between the exchange and the LSP. We will use this for routing.
 
@@ -57,13 +61,13 @@ and
 
 ``lsp listallchannels``
 
-### Step 3 - Create a JIT Invoice
+### Step 4 - Create a JIT Invoice
 
 Create a JIT invoice that will route from the exchange, through the Lightning Service Provider, and finally to the user. 
 
 ``user getjitinvoice``
 
-### Step 4 - Pay the JIT Invoice
+### Step 5 - Pay the JIT Invoice
 
 The LSP intercepts the payment, takes out a channel open fee, puts in matching Liquidity, and sends the rest to the user.
 
@@ -77,7 +81,7 @@ And the user has one channel:
 
 ``user listallchannels``
 
-### Step 5 - Start a stable channel 
+### Step 6 - Start a stable channel 
 
 Using the command:
 
