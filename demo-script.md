@@ -1,11 +1,11 @@
-# Stable Channels Rust + LDK Demo
+# Stable Channels Rust + LDK + just-in-time channels
 
-## Actors in this Demo
+## 3 Actors / roles in this demo
 Each actor runs a Lightning Development Kit (LDK) Lightning Node. Each actor remains self-custodial.
 
-- **Exchange**: Lightning-enabled exchange, like Coinbase or Kraken.
-- **User**: This self-custodial user wants the USD stability, also known as the Stable Receiver.
-- **LSP**: "Lightning Service Provider." This actor is the Stable Provider.
+1. **Exchange**: Lightning-enabled exchange, like Coinbase or Kraken.
+2. **User**: This self-custodial user wants the USD stability, also known as the Stable Receiver.
+3. **LSP**: "Lightning Service Provider." This actor is the Stable Provider.
 
 ## Prerequisites:
 1. Install Rust - https://www.rust-lang.org/tools/install
@@ -15,11 +15,13 @@ Each actor runs a Lightning Development Kit (LDK) Lightning Node. Each actor rem
 
 and 
 
-``cd stablechannels``
+``cd stable-channels``
 
 ## Walkthrough:
 
-Here's the story: A user has bitcoin on an exchange and wants to hedge his exposure. He onboards from an exchange to a Stable Channel via a Lightning payment. Then an LSP provides this stabiltiy service.
+Here's the story: A user has bitcoin on an exchange and wants to hedge his exposure. He onboards from an exchange to a Stable Channel via a Lightning payment. 
+
+Then an LSP provides this stabiltiy service.
 
 ### Step 1 - Get Some test BTC
 Run the following commands to get your test Bitcoin addresses:
