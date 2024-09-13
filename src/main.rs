@@ -182,7 +182,6 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
     return node;
 }
 
-// Section 2 - LDK set-up and helper functions
 fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::Node {
     let mut builder = Builder::new();
 
@@ -250,27 +249,27 @@ impl PriceFeed {
 fn set_price_feeds() -> Vec<PriceFeed> {
     vec![
         PriceFeed::new(
-            "bitstamp",
+            "Bitstamp",
             "https://www.bitstamp.net/api/v2/ticker/btcusd/",
             vec!["last"],
         ),
         PriceFeed::new(
-            "coingecko",
+            "CoinGecko",
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
             vec!["bitcoin", "usd"],
         ),
         PriceFeed::new(
-            "coindesk",
+            "Coindesk",
             "https://api.coindesk.com/v1/bpi/currentprice/USD.json",
             vec!["bpi", "USD", "rate_float"],
         ),
         PriceFeed::new(
-            "coinbase",
+            "Coinbase",
             "https://api.coinbase.com/v2/prices/spot?currency=USD",
             vec!["data", "amount"],
         ),
         PriceFeed::new(
-            "blockchain.info",
+            "Blockchain.com",
             "https://blockchain.info/ticker",
             vec!["USD", "last"],
         ),
@@ -335,7 +334,8 @@ fn fetch_prices(client: &Client, price_feeds: &[PriceFeed]) -> Result<Vec<(Strin
 fn calculate_median_price(prices: Vec<(String, f64)>) -> Result<f64, Box<dyn std::error::Error>> {
     // Print all prices
     for (feed_name, price) in &prices {
-        println!("{:<25} ${:>14.2}", feed_name, price);    }
+        println!("{:<25} ${:>1.2}", feed_name, price);
+    }
 
     // Calculate the median price
     let mut price_values: Vec<f64> = prices.iter().map(|(_, price)| *price).collect();
@@ -346,7 +346,8 @@ fn calculate_median_price(prices: Vec<(String, f64)>) -> Result<f64, Box<dyn std
         price_values[price_values.len() / 2]
     };
 
-    println!("Median BTC/USD price : ${:.2}", median_price);
+    println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
+
 
     Ok(median_price)
 }
@@ -368,12 +369,14 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
 
     // Print balance information
-    println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
     println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
     println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
-    println!("{:<25} {:>15}", "Expected BTC:", sc.expected_btc);
+    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
+
+    println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
+    // println!("{:<25} {:>15}", "Expected BTC ():", sc.expected_btc);
     println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
-    println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%", percent_from_par));
+   
 
     enum Action {
         Wait,
@@ -401,7 +404,7 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         // update state after each
         Action::DoNothing => println!("Difference from par less than 0.1%. Doing nothing."),
         Action::Wait => {
-            println!("Waiting 10 seconds and checking on payment...");
+            println!("\nWaiting 10 seconds and checking on payment...\n");
             std::thread::sleep(std::time::Duration::from_secs(10));
             if let Some(channel) = node
                 .list_channels()
@@ -410,20 +413,20 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             }
         },
         Action::Pay => {
-            println!("Paying the difference...");
+            println!("\nPaying the difference...\n");
             
             let mut amt = USD::to_msats(dollars_from_par, sc.latest_price);
             println!("{}", amt.to_string());
             
-            // First, ensure we are connected
-            let address = format!("127.0.0.1:9376").parse().unwrap();
-            let result = node.connect(sc.counterparty, address, true);
+            // // First, ensure we are connected
+            // let address = format!("127.0.0.1:9376").parse().unwrap();
+            // let result = node.connect(sc.counterparty, address, true);
 
-            if let Err(e) = result {
-                println!("Failed to connect with : {}", e);
-            } else {
-                println!("Successfully connected.");
-            }
+            // if let Err(e) = result {
+            //     println!("Failed to connect with : {}", e);
+            // } else {
+            //     println!("Successfully connected.");
+            // }
 
             // let result = node
             //     .spontaneous_payment()
@@ -480,7 +483,6 @@ fn main() {
     // Add more nodes if you need
     let exchange = make_node("exchange", 9735, None);
     
-    // start this one next so we can plugin the pubkey as LSP provider for user
     let lsp = make_hack_node("lsp", 9737);
     let lsp_pubkey = lsp.node_id();
 
@@ -498,9 +500,11 @@ fn main() {
         let command = parts.next();
         let args: Vec<&str> = parts.collect(); // Collect remaining arguments
 
-        // lsp startstablechannel 4073cac457084b37f54465b8329384fdad1e0a5fc5f47c7a6ffd18e17c86e3ae true 33.0 0
+        // Sample start command below:
+        // user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
+        // user startstablechannel 14380d654052c43b3a63f931c3071e4b5dd8ec9458e46cf408925b6322752dea true 170.0 0
         match (node, command, args.as_slice()) {
-            (Some("lsp"), Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
+            (Some("user"), Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                 let channel_id = channel_id.to_string();
                 let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
                 let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
@@ -521,7 +525,7 @@ fn main() {
                     .expect("Decoded channel ID has incorrect length");
 
                 // fix
-                let offer = user.bolt12_payment().receive_variable_amount("thanks").unwrap();
+                let offer = lsp.bolt12_payment().receive_variable_amount("thanks").unwrap();
 
                 let mut stable_channel = StableChannel {
                     channel_id: ChannelId::from_bytes(channel_id_bytes),
@@ -547,9 +551,9 @@ fn main() {
 
                 loop {
                     println!();
-                    println!("Checking stability for channel {}...", stable_channel.channel_id);
+                    println!("\nChecking stability for channel {}...\n", stable_channel.channel_id);
                     
-                    stable_channel = check_stability(&exchange, stable_channel);
+                    stable_channel = check_stability(&user, stable_channel);
 
                     thread::sleep(Duration::from_secs(20));
                 };
@@ -724,25 +728,7 @@ fn main() {
                     },
                     Err(e) => println!("Error creating invoice: {}", e)
                 }
-            },
-            (Some("exchange"), Some("payjitinvoicewithamount"), [invoice_str]) => {
-                let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
-                match bolt11_invoice {
-                    Ok(invoice) => {
-                        match exchange.bolt11_payment().send(&invoice) {
-                            Ok(payment_id) => {
-                                println!("Payment sent from Exchange with payment_id: {}", payment_id);
-                            },
-                            Err(e) => {
-                                println!("Error sending payment from Exchange: {}", e);
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        println!("Error parsing invoice: {}", e);
-                    }
-                }
-            },
+            }, 
             (Some("exchange"), Some("payjitinvoice"), [invoice_str]) => {
                 let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                 match bolt11_invoice {
