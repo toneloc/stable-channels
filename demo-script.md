@@ -1,7 +1,7 @@
 # Stable Channels Rust + LDK Demo
 
 ## Actors in this Demo
-Each actor runs and Lightning Development Kit (LDK) Lightning Node.
+Each actor runs a Lightning Development Kit (LDK) Lightning Node. Each actor remains self-custodial.
 
 - **Exchange**: Lightning-enabled exchange, like Coinbase or Kraken.
 - **User**: This self-custodial user wants the USD stability, also known as the Stable Receiver.
