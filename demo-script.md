@@ -12,6 +12,9 @@ Each actor runs a Lightning Development Kit (LDK) Lightning Node. Each actor rem
 2. Clone the repo:
 
 ``git clone https://github.com/toneloc/stablechannels``
+
+and 
+
 ``cd stablechannels``
 
 ## Walkthrough:
@@ -21,12 +24,18 @@ Here's the story: A user has bitcoin on an exchange and wants to hedge his expos
 ### Step 1 - Get Some test BTC
 Run the following commands to get your test Bitcoin addresses:
 
-exchange getaddress
+``exchange getaddress``
+
+and 
+
 ``lsp getaddress``
 
 Go to https://faucet.mutinynet.com/ and send some test sats to these two addresses. Wait for them to confirm. 
 
 ``exchange balance``
+
+and 
+
 ``lsp balance``
 
 ### Step 2 - Open a routing channel
@@ -38,6 +47,9 @@ Open a channel between the exchange and the LSP. We will use this for routing.
 Let's see if the channel got confirmed on the blockchain. Check if "channel_ready" equals "true."
 
 ``exchange openchannel``
+
+and 
+
 ``lsp listallchannels``
 
 ### Step 3 - Create a JIT Invoice
@@ -65,6 +77,8 @@ And the user has one channel:
 Using the command:
 
 ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT``
+
+or:
 
 ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 4.0 0``
 
