@@ -6,8 +6,15 @@
 // Section 4 - Core stability logic 
 // Section 5 - Program initialization and command-line-interface
 
-// Section 1 - Dependencies and main data structure
+// Section 1 - Dependencies and main data structure found in src/types.rs
+mod types;
+mod price_feeds;
+
+// This is only used for the LSP node
 extern crate ldk_node_hack;
+
+use types::{Bitcoin, USD, StableChannel};
+use price_feeds::{set_price_feeds, fetch_prices, calculate_median_price};
 
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
@@ -15,140 +22,10 @@ use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
 use ldk_node::bitcoin::Network;
 
-use std::ops::{Div, Sub};
-use std::str::FromStr;
 use std::{io::{self, Write}, sync::Arc, thread};
 use ldk_node::{ChannelConfig, ChannelDetails};
 use std::time::Duration;
-use serde_json::Value;
-use std::error::Error;
 use reqwest::blocking::Client;
-use retry::{retry, delay::Fixed};
-
-// Main data structure
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-struct Bitcoin {
-    sats: u64, // Stored in Satoshis for precision
-}
-
-impl Bitcoin {
-    const SATS_IN_BTC: u64 = 100_000_000;
-
-    fn from_sats(sats: u64) -> Self {
-        Self { sats }
-    }
-
-    fn from_btc(btc: f64) -> Self {
-        let sats = (btc * Self::SATS_IN_BTC as f64).round() as u64;
-        Self::from_sats(sats)
-    }
-
-    fn to_btc(self) -> f64 {
-        self.sats as f64 / Self::SATS_IN_BTC as f64
-    }
-
-    fn from_usd(usd: f64, btcusd_price: f64) -> Self {
-        let btc_value = usd / btcusd_price;
-        Self::from_btc(btc_value)
-    }
-}
-
-impl Sub for Bitcoin {
-    type Output = Bitcoin;
-
-    fn sub(self, other: Bitcoin) -> Bitcoin {
-        Bitcoin::from_sats(self.sats.saturating_sub(other.sats))
-    }
-}
-
-impl std::fmt::Display for Bitcoin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let btc_value = self.to_btc();
-
-        // Format the value to 8 decimal places with spaces
-        let formatted_btc = format!("{:.8}", btc_value);
-        let with_spaces = formatted_btc
-            .chars()
-            .enumerate()
-            .map(|(i, c)| if i == 4 || i == 7 { format!(" {}", c) } else { c.to_string() })
-            .collect::<String>();
-
-        write!(f, "{}btc", with_spaces)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-struct USD(f64);
-
-impl USD {
-    fn from_bitcoin(btc: Bitcoin, btcusd_price: f64) -> Self {
-        Self(btc.to_btc() * btcusd_price)
-    }
-
-    fn from_f64(amount: f64) -> Self {
-        Self(amount)
-    }
-
-    fn to_msats(self, btcusd_price: f64) -> u64 {
-        let btc_value = self.0 / btcusd_price; 
-        let sats = btc_value * Bitcoin::SATS_IN_BTC as f64;
-        let millisats = sats * 1000.0;
-        millisats.floor() as u64
-    }
-
-
-}
-
-impl Sub for USD {
-    type Output = USD;
-
-    fn sub(self, other: USD) -> USD {
-        USD(self.0 - other.0)
-    }
-}
-
-impl Div<f64> for USD {
-    type Output = USD;
-
-    fn div(self, scalar: f64) -> USD {
-        USD(self.0 / scalar)
-    }
-}
-
-impl Div for USD {
-    type Output = f64;
-
-    fn div(self, other: USD) -> f64 {
-        self.0 / other.0
-    }
-}
-
-impl std::fmt::Display for USD {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "${:.2}", self.0)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct StableChannel {
-    channel_id: ChannelId, 
-    is_stable_receiver: bool,
-    counterparty: PublicKey, 
-    expected_usd: USD,
-    expected_btc: Bitcoin,
-    stable_receiver_btc: Bitcoin,
-    stable_provider_btc: Bitcoin,   
-    stable_receiver_usd: USD,
-    stable_provider_usd: USD,
-    risk_level: i32,
-    timestamp: i64,
-    formatted_datetime: String,
-    payment_made: bool,
-    sc_dir: String,
-    latest_price: f64,
-    prices: String,
-    counterparty_offer: Offer
-}
 
 // Section 2 - LDK set-up and helper functions
 fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
@@ -200,129 +77,6 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     return node;
 }
 
-// Section 3 - Price feed config and logic
-struct PriceFeed {
-    name: String,
-    urlformat: String,
-    jsonpath: Vec<String>,
-}
-
-impl PriceFeed {
-    fn new(name: &str, urlformat: &str, jsonpath: Vec<&str>) -> PriceFeed {
-        PriceFeed {
-            name: name.to_string(),
-            urlformat: urlformat.to_string(),
-            jsonpath: jsonpath.iter().map(|&s| s.to_string()).collect(),
-        }
-    }
-}
-
-fn set_price_feeds() -> Vec<PriceFeed> {
-    vec![
-        PriceFeed::new(
-            "Bitstamp",
-            "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-            vec!["last"],
-        ),
-        PriceFeed::new(
-            "CoinGecko",
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            vec!["bitcoin", "usd"],
-        ),
-        PriceFeed::new(
-            "Coindesk",
-            "https://api.coindesk.com/v1/bpi/currentprice/USD.json",
-            vec!["bpi", "USD", "rate_float"],
-        ),
-        PriceFeed::new(
-            "Coinbase",
-            "https://api.coinbase.com/v2/prices/spot?currency=USD",
-            vec!["data", "amount"],
-        ),
-        PriceFeed::new(
-            "Blockchain.com",
-            "https://blockchain.info/ticker",
-            vec!["USD", "last"],
-        ),
-    ]
-}
-
-fn fetch_prices(client: &Client, price_feeds: &[PriceFeed]) -> Result<Vec<(String, f64)>, Box<dyn Error>> {
-    let mut prices = Vec::new();
-
-    for price_feed in price_feeds {
-        let url: String = price_feed.urlformat.replace("{currency_lc}", "usd").replace("{currency}", "USD");
-
-        let response = retry(Fixed::from_millis(300).take(3), || {
-            match client.get(&url).send() {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        Ok(resp)
-                    } else {
-                        Err(format!("Received status code: {}", resp.status()))
-                    }
-                },
-                Err(e) => Err(e.to_string()),
-            }
-        }).map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
-
-        let json: Value = response.json()?;
-        let mut data = &json;
-
-        for key in &price_feed.jsonpath {
-            if let Some(inner_data) = data.get(key) {
-                data = inner_data;
-            } else {
-                println!("Key '{}' not found in the response from {}", key, price_feed.name);
-                continue;
-            }
-        }
-
-        if let Some(price) = data.as_f64() {
-            prices.push((price_feed.name.clone(), price));
-        } else if let Some(price_str) = data.as_str() {
-            if let Ok(price) = price_str.parse::<f64>() {
-                prices.push((price_feed.name.clone(), price));
-            } else {
-                println!("Invalid price format for {}: {}", price_feed.name, price_str);
-            }
-        } else {
-            println!("Price data not found or invalid format for {}", price_feed.name);
-        }
-    }
-
-    if prices.len() < 5 {
-        println!("Fewer than 5 fetched.");
-    }
-
-    if prices.is_empty() {
-        return Err("No valid prices fetched.".into());
-    }
-
-    Ok(prices)
-}
-
-fn calculate_median_price(prices: Vec<(String, f64)>) -> Result<f64, Box<dyn std::error::Error>> {
-    // Print all prices
-    for (feed_name, price) in &prices {
-        println!("{:<25} ${:>1.2}", feed_name, price);
-    }
-
-    // Calculate the median price
-    let mut price_values: Vec<f64> = prices.iter().map(|(_, price)| *price).collect();
-    price_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_price = if price_values.len() % 2 == 0 {
-        (price_values[price_values.len() / 2 - 1] + price_values[price_values.len() / 2]) / 2.0
-    } else {
-        price_values[price_values.len() / 2]
-    };
-
-    println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
-
-
-    Ok(median_price)
-}
-
 // Section 4 - Core stability logic 
 fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     // Fetch and update prices
@@ -347,7 +101,6 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
     // println!("{:<25} {:>15}", "Expected BTC ():", sc.expected_btc);
     println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
-   
 
     enum Action {
         Wait,
@@ -473,7 +226,7 @@ fn main() {
 
         // Sample start command below:
         // user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
-        // user startstablechannel 14380d654052c43b3a63f931c3071e4b5dd8ec9458e46cf408925b6322752dea true 170.0 0
+        // user startstablechannel 14380d654052``43b3a63f931c3071e4b5dd8ec9458e46cf408925b6322752dea true 170.0 0
         match (node, command, args.as_slice()) {
             (Some("user"), Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                 let channel_id = channel_id.to_string();
@@ -549,6 +302,25 @@ fn main() {
                     println!("Failed to get listening addresses for lsp.");
                 }
             },
+            (Some("user"), Some("openstablechannel"), []) => {
+                let channel_config: Option<Arc<ChannelConfig>> = None;
+                
+                let announce_channel = true;
+
+                // Extract the first listening address
+                if let Some(listening_addresses) = lsp.listening_addresses() {
+                    if let Some(lsp_addr) = listening_addresses.get(0) {
+                        match exchange.connect_open_channel(lsp.node_id(), lsp_addr.clone(), 500000, Some(250000), channel_config, announce_channel) {
+                            Ok(result) => println!("Successfully opened Stable Channel between User and LSP."),
+                            Err(e) => println!("Failed to open channel: {}", e),
+                        }
+                    } else {
+                        println!("LSP has no listening addresses.");
+                    }
+                } else {
+                    println!("Failed to get listening addresses for LSP.");
+                }
+            },
             (Some("exchange"), Some("getaddress"), []) => {
                 let funding_address = exchange.onchain_payment().new_address();
                 match funding_address {
@@ -600,7 +372,7 @@ fn main() {
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
                 let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                 println!("User On-Chain Balance: {}", onchain_balance);
-                println!("Stabl Receiver Lightning Balance: {}", lightning_balance);
+                println!("Stable Receiver Lightning Balance: {}", lightning_balance);
             },
             (Some("lsp"), Some("balance"), []) => { 
                 let balances = lsp.list_balances();
