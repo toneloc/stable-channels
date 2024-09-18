@@ -1,33 +1,32 @@
 
 // Contents
-// Section 1 - Dependencies, main data structure. helper functions
-// Section 2 - LDK set-up
-// Section 3 - Price feed config and logic
-// Section 4 - Core stability logic 
-// Section 5 - Program initialization and command-line-interface
+// 1 - Main data structure. helper types in types.rs
+// 2 - Price feed config and logic in price_feeds.rs
+// 3 - LDK set-up and initialization
+// 4 - Core stability logic 
+// 5 - Program initialization and command-line-interface
 
-// Section 1 - Dependencies and main data structure found in src/types.rs
+// 1 - Main data structure. helper types in types.rs
 mod types;
+// 2 - Price feed config and logic in price_feeds.rs
 mod price_feeds;
 
-// This is only used for the LSP node
+// This is used for the LSP node only; pulled from https://github.com/tnull/ldk-node-hack
 extern crate ldk_node_hack;
 
 use types::{Bitcoin, USD, StableChannel};
 use price_feeds::{set_price_feeds, fetch_prices, calculate_median_price};
-
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
-use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
 use ldk_node::bitcoin::Network;
 
 use std::{io::{self, Write}, sync::Arc, thread};
 use ldk_node::{ChannelConfig, ChannelDetails};
-use std::time::Duration;
 use reqwest::blocking::Client;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// Section 2 - LDK set-up and helper functions
+// 3 - LDK set-up and initialization
 fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
 
     let mut builder = ldk_node_hack::Builder::new();
@@ -77,7 +76,7 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     return node;
 }
 
-// Section 4 - Core stability logic 
+// 4 - Core stability logic  
 fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     // Fetch and update prices
     sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
@@ -135,35 +134,44 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
                 .iter()
                 .find(|c| c.channel_id == sc.channel_id) {sc = update_balances(sc, Some(channel.clone()));
             }
+
+             // Print balance information
+            println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
+            println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
+            println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
+
+            println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
+            // println!("{:<25} {:>15}", "Expected BTC ():", sc.expected_btc);
+            println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
         },
         Action::Pay => {
             println!("\nPaying the difference...\n");
             
-            let mut amt = USD::to_msats(dollars_from_par, sc.latest_price);
+            let amt = USD::to_msats(dollars_from_par, sc.latest_price);
             println!("{}", amt.to_string());
-            
-            // // First, ensure we are connected
-            // let address = format!("127.0.0.1:9376").parse().unwrap();
-            // let result = node.connect(sc.counterparty, address, true);
 
-            // if let Err(e) = result {
-            //     println!("Failed to connect with : {}", e);
-            // } else {
-            //     println!("Successfully connected.");
-            // }
+            // First, ensure we are connected
+            let address = format!("127.0.0.1:9737").parse().unwrap();
+            let result = node.connect(sc.counterparty, address, true);
 
-            // let result = node
-            //     .spontaneous_payment()
-            //     .send(amt, sc.counterparty);
-            // match result {
-            //     Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
-            //     Err(e) => println!("Failed to send payment: {}", e),
-            // }
+            // let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
 
-            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
-            
+            if let Err(e) = result {
+                println!("Failed to connect with : {}", e);
+            } else {
+                println!("Successfully connected.");
+            }
+
+            let result = node
+                .spontaneous_payment()
+                .send(amt, sc.counterparty);
             match result {
-                Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id),
+                Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
+                Err(e) => println!("Failed to send payment: {}", e),
+            }
+
+            match result {
+                Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id.to_string()),
                 Err(e) => eprintln!("Failed to send payment: {:?}", e),
             }
         },
@@ -202,7 +210,7 @@ fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails
     sc // Return the modified StableChannel
 }
 
-// Section 5 - Program initialization and command-line-interface
+// 5 - Program initialization and command-line-interface
 fn main() {
     // Add more nodes if you need
     let exchange = make_node("exchange", 9735, None);
@@ -226,7 +234,7 @@ fn main() {
 
         // Sample start command below:
         // user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
-        // user startstablechannel 14380d654052``43b3a63f931c3071e4b5dd8ec9458e46cf408925b6322752dea true 170.0 0
+        // user startstablechannel 14380d654052c43b3a63f931c3071e4b5dd8ec9458e46cf408925b6322752dea true 100.0 0
         match (node, command, args.as_slice()) {
             (Some("user"), Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                 let channel_id = channel_id.to_string();
@@ -271,16 +279,35 @@ fn main() {
                     counterparty_offer: offer
                 };
 
-                println!("Stable Channel created: {:?}", stable_channel.channel_id);
+                println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
 
                 loop {
+                    // Get the current time
+                    let now = SystemTime::now();
+                    let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
+                
+                    let now_secs = now_duration.as_secs();
+                
+                    // Calculate the next 10-second mark
+                    let next_10_sec = ((now_secs / 10) + 1) * 10;
+                    let next_10_sec_duration = Duration::from_secs(next_10_sec);
+                
+                    // Calculate the sleep duration
+                    let sleep_duration = next_10_sec_duration
+                        .checked_sub(now_duration)
+                        .unwrap_or_else(|| Duration::from_secs(0));
+                
+                    // Sleep until the next 10-second mark
+                    std::thread::sleep(sleep_duration);
+                
+                    // Run check_stability
                     println!();
-                    println!("\nChecking stability for channel {}...\n", stable_channel.channel_id);
-                    
+                    println!(
+                        "\nChecking stability for channel {}...\n",
+                        stable_channel.channel_id
+                    );
                     stable_channel = check_stability(&user, stable_channel);
-
-                    thread::sleep(Duration::from_secs(20));
-                };
+                }
             },
             // Open to LSP
             (Some("exchange"), Some("openchannel"), []) => {
