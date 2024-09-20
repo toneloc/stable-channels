@@ -3,6 +3,11 @@ name = "stable-channels"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+exchange = []
+user = []
+lsp = []
+
 [dependencies]
 lightning-liquidity = "0.1.0-alpha.4"
 ldk-node="0.3.0"

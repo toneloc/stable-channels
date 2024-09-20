@@ -70,7 +70,7 @@ impl USD {
         let btc_value = self.0 / btcusd_price;
         let sats = btc_value * Bitcoin::SATS_IN_BTC as f64;
         let millisats = sats * 1000.0;
-        millisats.floor() as u64
+        millisats.abs().floor() as u64
     }
 }
 
