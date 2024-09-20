@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# This is the Core Lightning Python plug-in for Stable Channels - https://github.com/ElementsProject/lightning
+
 # Stable Channels: p2p BTCUSD trading on Lightning
 # Contents
 # Section 1 - Dependencies and main data structure
