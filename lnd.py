@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This is the LND Python app for Stable Channels
+
 # Stable Channels: p2p BTCUSD trading on Lightning
 # Contents
 # Section 1 - Dependencies and main data structure
