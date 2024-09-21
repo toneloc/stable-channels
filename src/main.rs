@@ -14,6 +14,7 @@ mod price_feeds;
 // This is used for the LSP node only; pulled from https://github.com/tnull/ldk-node-hack
 extern crate ldk_node_hack;
 
+use ldk_node::lightning::offers::invoice::Bolt12Invoice;
 use types::{Bitcoin, USD, StableChannel};
 use price_feeds::{set_price_feeds, fetch_prices, calculate_median_price};
 use ldk_node::bitcoin::secp256k1::PublicKey;
@@ -92,8 +93,8 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     }
 
     // Calculate how far off 100% par we are 
-    let dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
-    let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
+    let mut dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
+    let mut percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
 
     // Print balance information
     println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
@@ -142,9 +143,12 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
              // Print balance information
             println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
             println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
+
+            dollars_from_par = sc.stable_receiver_usd - sc.expected_usd;
+            percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
+
             println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
 
-            println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
             // println!("{:<25} {:>15}", "Expected BTC ():", sc.expected_btc);
             println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
         },
@@ -383,8 +387,8 @@ fn main() {
                     
                         let now_secs = now_duration.as_secs();
                     
-                        // Calculate the next 10-second mark
-                        let next_10_sec = ((now_secs / 10) + 1) * 10;
+                        // Calculate the next 60-second mark
+                        let next_10_sec = ((now_secs / 60) + 1) * 60;
                         let next_10_sec_duration = Duration::from_secs(next_10_sec);
                     
                         // Calculate the sleep duration
@@ -392,7 +396,7 @@ fn main() {
                             .checked_sub(now_duration)
                             .unwrap_or_else(|| Duration::from_secs(0));
                     
-                        // Sleep until the next 10-second mark
+                        // Sleep until the next 60-second mark
                         std::thread::sleep(sleep_duration);
                     
                         // Run check_stability
@@ -573,10 +577,10 @@ fn main() {
                     
                         let now_secs = now_duration.as_secs();
                     
-                        let next_10_sec = ((now_secs / 10) + 1) * 10;
-                        let next_10_sec_duration = Duration::from_secs(next_10_sec);
+                        let next_60_sec = ((now_secs / 60) + 1) * 60;
+                        let next_60_sec_duration = Duration::from_secs(next_60_sec);
                     
-                        let sleep_duration = next_10_sec_duration
+                        let sleep_duration = next_60_sec_duration
                             .checked_sub(now_duration)
                             .unwrap_or_else(|| Duration::from_secs(0));
                     
