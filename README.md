@@ -47,7 +47,7 @@ Stable Channels works as a plug-in on CLN, which is Blockstream's implementation
 
 Stable Channels also works on LND. 
 
-Stable Channels workflows end-to-end work like this:
+Stable Channels end-to-end workflows work as follows:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
@@ -80,9 +80,10 @@ There are also some in-progress iOS apps, web apps, bash scripts, Python servers
 
 ### Environment and dependencies
 
+- Just Rust is required for the LDK version for developers.
+- Python3 is required for the CLN and LND versions.
 - Terminal access to bitcoind and a CLN node running version `23.05.2` or version `24.02` is required. Other versions may work but `23.08.1` does not work.
 - LND is recently supported and is tested with version `0.17.4-beta`
-- Python3 is also required. 
 
 For CLN, clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py` for CLN. 
 
@@ -158,17 +159,17 @@ Assume that we enter into a stable agreement at a price of $27,500 per bitcoin. 
 Abbreviations:
 - SR = Stable Receiver
 - SP = Stable Provider
-- Δ = Represents change
+- Δ = Delta / Change
 
 | Price Change (%) | New BTC Price | SR (BTC) | SR (USD) | SP (BTC) | SP (USD) | SR Fiat Δ$ | SR BTC Δ | SR Fiat Δ% | SR BTC Δ% | SP Fiat Δ$ | SP BTC Δ | SP Fiat Δ% | SP BTC Δ% |
 |------------------|---------------|----------|----------|----------|----------|------------|----------|------------|----------|------------|----------|------------|----------|
-| -30              | $19,250      | 1.4286   | $27,500  | 0.5714   | $11,000  | $0         | +0.4286  | 0%         | +42.86%  | -$16,500   | -0.4286  | -60%       | -42.86%  |
-| -20              | $22,000      | 1.25     | $27,500  | 0.75     | $16,500  | $0         | +0.25    | 0%         | +25%     | -$11,000   | -0.25    | -40%       | -25%     |
-| -10              | $24,750      | 1.1111   | $27,500  | 0.8889   | $22,000  | $0         | +0.1111  | 0%         | +11.11%  | -$5,500    | -0.1111  | -20%       | -11.11%  |
-| 0                | $27,500      | 1        | $27,500  | 1        | $27,500  | $0         | 0       | 0%         | 0%       | $0         | 0       | 0%         | 0%       |
-| 10               | $30,250      | 0.9091   | $27,500  | 1.0909   | $33,000  | $0         | -0.0909 | 0%         | -9.09%   | +$5,500    | +0.0909 | +20%       | +9.09%   |
-| 20               | $33,000      | 0.8333   | $27,500  | 1.1667   | $38,500  | $0         | -0.1667 | 0%         | -16.67%  | +$11,000   | +0.1667 | +40%       | +16.67%  |
-| 30               | $35,750      | 0.7692   | $27,500  | 1.2308   | $44,000  | $0         | -0.2308 | 0%         | -23.08%  | +$16,500   | +0.2308 | +60%       | +23.08%  |
+| -30              | 42000.0       | 1.4286   | 60000    | 0.5714   | 42000.0  | 0          | +0.4286  | 0%         | +42.86%  | -18000.0   | -0.4286  | -60%       | -42.86%  |
+| -20              | 48000.0       | 1.25     | 60000    | 0.75     | 48000.0  | 0          | +0.25    | 0%         | +25%     | -12000.0   | -0.25    | -40%       | -25%     |
+| -10              | 54000.0       | 1.1111   | 60000    | 0.8889   | 54000.0  | 0          | +0.1111  | 0%         | +11.11%  | -6000.0    | -0.1111  | -20%       | -11.11%  |
+| 0                | 60000.0       | 1        | 60000    | 1        | 60000.0  | 0          | 0        | 0%         | 0%       | 0          | 0        | 0%         | 0%       |
+| 10               | 66000.0       | 0.9091   | 60000    | 1.0909   | 66000.0  | 0          | -0.0909  | 0%         | -9.09%   | +6000.0    | +0.0909  | +20%       | +9.09%   |
+| 20               | 72000.0       | 0.8333   | 60000    | 1.1667   | 72000.0  | 0          | -0.1667  | 0%         | -16.67%  | +12000.0   | +0.1667  | +40%       | +16.67%  |
+| 30               | 78000.0       | 0.7692   | 60000    | 1.2308   | 78000.0  | 0          | -0.2308  | 0%         | -23.08%  | +18000.0   | +0.2308  | +60%       | +23.08%  |
 
 
 ## Roadmap
@@ -186,43 +187,30 @@ Hope to move all this to issues and PRs soon.
 - [x] dual-funded flow
 - [x] mainnet deployment
 - [x] Add native field / partially stable
+- [x] user feedback on CLN plugin
+- [x] LDK version
 
 #### To do:
+- [ ] LSP just-in-time channel integration
+- [ ] read-only iPhone app published in App Store
 - [ ] manage channel creation via `fundchannel` command
 - [ ] monitor channel creation tx, and commence `check_stables` after
 - [ ] move Stable Channels details to conf files (*)
-- [ ] user feedback on CLN plugin
-- [ ] LDK version
 - [ ] use CLN `datastore` command to manage Stable Channel details (?)
 - [ ] accounting commands
 - [ ] Python Greenlight integration
 - [ ] trading web app
 - [ ] VLS integration
-- [ ] mobile <-> RPC Greenlight integration
-- [ ] read-only iPhone app published in App Store
 - [ ] read-only Android app published in App Store
 - [ ] crypto keys on mobile
 - [ ] FinalBoss plugin
 
 ## Rationale and Challenges
 
-The most valuable stablecoins today are Tether and USDC. These stablecoins hold their value in fiat: cash and bonds. This cash and these bonds have fiat custodians. These fiat custodians are centralized companies that may be forced to freeze these assets or revoke banking access. Either of these scenarios mark a liveness failure of that stablecoin to retain its purchasing power, or worse.
-
-Stable Channels intends to provide a more socially scalable solution. Stable Channels, as a solution, is self-custodial, has no token or token issuer, and intends to give a real-time, streaming finance experience for its users. The vision is to create a self-custodial p2p exchange where users can hedge or lever up their bitcoin exposure.
-
-Stable Channels inherit many of the challenges of the Lightning Network. One challenges is that with Lightning, bitcoin is held in an online wallet. Another challenges is that both nodes must always be online. Yet another challenge is getting trustworthy price feeds. Finally, there are various potential cyber and social engineering attacks.
-
-The Stable Channels approach is that while all of these failure modes and attacks are plausible, it is only by building a USD experience on top of <i>only bitcoin</i> that we can, over the long term, give users the best derivatives trading experience. 
-
-For those users who want USD experience and are Americans, we recommend FDIC-insured bank accounts. For those users who want bitcoin exposure, we recommend simply HODLing spot bitcoin.
-
-### Splicing workflow
-
-Stable Channels can use channel splicing to handle "margin calls."
-
+This Delving Bitcoin post goes more in-depth on challenges and opportunities - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
 
 ### Acknowledgements
 
-Thanks to Christian Decker and the Core Lightning team from Blockstream for his help with setting up Greenlight. Thanks to Michael Schmoock (m-schmoock) for writing the "currencyrate" plugin, which I use. Thanks to @jamaljsr for developing the Polar Lightning Network visualization tool. I also used Jamal's code for the Stable Channels.com website. Thanks to Dan Robinson for his work on Rainbow Channels. Thanks to Daywalker90 for his open-source contributions.
+Thanks to Christian Decker and the Core Lightning team from Blockstream for his help with setting up Greenlight. Thanks to Michael Schmoock (m-schmoock) for writing the "currencyrate" plugin, which I use. Thanks to @jamaljsr for developing the Polar Lightning Network visualization tool. I also used Jamal's code for the Stable Channels.com website. Thanks to Dan Robinson for his work on Rainbow Channels. Thanks to Daywalker90 and StarBuilder for open-source contributions.
 
 Thanks to all of the Lightning Network core developers, and all of the bitcoin open-source devs on whose giant shoulders we stand. 
