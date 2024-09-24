@@ -153,7 +153,7 @@ Stable Channel balance results for the Stable Receiver are written to the `stabl
 
 ##  Payout matrix
 
-Assume that we enter into a stable agreement at a price of $27,500 per bitcoin. Each side puts in 1 bitcoin, for a total channel capacity of 2 bitcoin, and a starting USD nominal value of $55,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%. Check out this payout matrix to better understand the mechanics of the trade agreement.
+Assume that we enter into a stable agreement at a price of $60,000 per bitcoin. Each side puts in 1 bitcoin, for a total channel capacity of 2 bitcoin, and a starting USD nominal value of $120,000 total. The below table represents the payouts and percentage change if the bitcoin price increases or decreases by 10%, 20%, or 30%. Check out this payout matrix to better understand the mechanics of the trade agreement.
 
 Abbreviations:
 - SR = Stable Receiver
