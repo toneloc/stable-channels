@@ -2,7 +2,7 @@
 
 #### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
 
-## Stable Channels - Version 30MAY2024
+## Stable Channels - Version 24SEP2024
 
 <b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms. The other side of the channel takes the price upside and downside.  
 
