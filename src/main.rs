@@ -14,6 +14,7 @@ mod price_feeds;
 // This is used for the LSP node only; pulled from https://github.com/tnull/ldk-node-hack
 extern crate ldk_node_hack;
 
+use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::offers::invoice::Bolt12Invoice;
 use types::{Bitcoin, USD, StableChannel};
 use price_feeds::{set_price_feeds, fetch_prices, calculate_median_price};
@@ -21,6 +22,7 @@ use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
 use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
 use ldk_node::bitcoin::Network;
+use std::os::unix::net::SocketAddr;
 use std::str::FromStr;
 
 use ldk_node::lightning::offers::{offer::Offer};
@@ -66,7 +68,10 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     }
 
     builder.set_network(Network::Signet);
-    builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
+    // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
+    // If this doesn't work, try
+    builder.set_esplora_server("https://mutinynet.com/api/".to_string());
+
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
@@ -75,7 +80,21 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
 
     node.start().unwrap();
 
-    println!("{} public key: {}", alias, node.node_id());
+    let public_key: PublicKey = node.node_id();
+
+    // Get the list of listening addresses
+    let listening_addresses: Vec<SocketAddress> = node.listening_addresses().unwrap();
+
+    // Check if there are any listening addresses
+    if let Some(first_address) = listening_addresses.first() {
+        println!("");
+        println!("Actor Role: {}", alias);
+        println!("Public Key: {}", public_key);
+        println!("Internet Address: {}", first_address);
+        println!("");
+    } else {
+        println!("No listening addresses found.");
+    }
 
     return node;
 }
@@ -223,7 +242,7 @@ fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails
 fn main() {
     #[cfg(feature = "exchange")] {
         let exchange = make_node("exchange", 9735, None);
-
+    
         loop {
             let mut input = String::new();
             print!("Enter command for exchange: ");
@@ -260,6 +279,7 @@ fn main() {
                         let counterparty_node_id = channel.counterparty_node_id;
                         let _ = exchange.close_channel(&user_channel_id, counterparty_node_id);
                     }
+                    print!("Closing all channels.")
                 },
                 (Some("listallchannels"), []) => {
                     println!("channels:");
@@ -321,9 +341,6 @@ fn main() {
             match (command, args.as_slice()) {
                 (Some("settheiroffer"), [their_offer_str]) => {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
-                    
-                    // println!("{}", their_offer
-        
                 }
                 (Some("getouroffer"),[]) => {
                     let our_offer: Offer = user.bolt12_payment().receive_variable_amount("thanks").unwrap();
@@ -354,9 +371,6 @@ fn main() {
                         .expect("Invalid hex string")
                         .try_into()
                         .expect("Decoded channel ID has incorrect length");
-
-                    // fix
-                    // let offer = lsp.bolt12_payment().receive_variable_amount("thanks").unwrap();
 
                     let mut stable_channel = StableChannel {
                         channel_id: ChannelId::from_bytes(channel_id_bytes),
@@ -416,8 +430,17 @@ fn main() {
                     }
                 },
                 (Some("openchannel"), []) => {
-                    // Code for opening channel to LSP
-                    // You'll need to have access to the LSP node here
+                    let channel_config: Option<Arc<ChannelConfig>> = None;    
+                    let announce_channel = false; // doublecheck
+
+                    let lsp_node_id = "037cd7e2eadab8b00363cedd2279bd9d40794673ed35effde0b71d39333a3c53b8".parse().unwrap();
+                    let lsp_net_address: SocketAddress = "127.0.0.1:9737".parse().unwrap();
+
+                    match user.connect_open_channel(lsp_node_id, lsp_net_address, 300000, Some(0), channel_config, announce_channel) {
+                        Ok(_) => println!("Channel successfully opened between user and lsp."),
+                        Err(e) => println!("Failed to open channel: {}", e),
+                    }
+                
                 },
                 (Some("balance"), []) => {
                     let balances = user.list_balances();
@@ -436,6 +459,7 @@ fn main() {
                         let counterparty_node_id = channel.counterparty_node_id;
                         let _ = user.close_channel(&user_channel_id, counterparty_node_id);
                     }
+                    print!("Closing all channels.")
                 },
                 (Some("listallchannels"), []) => {
                     println!("channels:");
@@ -507,8 +531,7 @@ fn main() {
         match (command, args.as_slice()) {
             (Some("settheiroffer"), [their_offer_str]) => {
                 their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
-                
-                // println!("{}", their_offer);
+                println!("Offer set.");
     
             },
             (Some("getouroffer"),[]) => {
@@ -544,9 +567,6 @@ fn main() {
                         .expect("Invalid hex string")
                         .try_into()
                         .expect("Decoded channel ID has incorrect length");
-
-                    // fix
-                    // let offer = lsp.bolt12_payment().receive_variable_amount("thanks").unwrap();
 
                     let mut stable_channel = StableChannel {
                         channel_id: ChannelId::from_bytes(channel_id_bytes),
