@@ -4,14 +4,14 @@
 
 ## Stable Channels - Version 30MAY2024
 
-This Twitter thread explains the basics, with an example - https://x.com/tonklaus/status/1729567459579945017
-
-And this Delving Bitcoin post goes more in-depth - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
-
 <b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms, for example $10,000. 
 - These special channels are called <b>Stable Channels</b>. 
 - These node runners are called <b>Stable Receivers</b>.
 - On the other side of the channel are <b>Stable Providers</b>. 
+
+This Twitter thread explains the basics, with an example - https://x.com/tonklaus/status/1729567459579945017
+
+And this Delving Bitcoin post goes more in-depth - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
 
 Stable Providers want to leverage their bitcoin. However, Stable Receivers put their bitcoin at risk by doing so.
 
