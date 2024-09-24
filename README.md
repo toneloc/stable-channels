@@ -1,7 +1,5 @@
 [![main on CLN v24.02.2](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml/badge.svg?branch=main)](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml)
 
-#### Note: Skip to [Getting Started](#getting-started) for technical startup instructions.
-
 ## Stable Channels - Version 24SEP2024
 
 <b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms. The other side of the channel takes the price upside and downside.  
@@ -41,11 +39,16 @@ Stable Channels are non-routing channels. We are working on adding routing and p
 
 Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
-Stable Channels works as a plug-in on CLN, which is Blockstream's implementation of the Lightning Network specification. 
+### Developer demo
 
-Stable Channels also works on LND. 
+You will need Rust installed for this demo. Clone the repo and open it in two windows. 
 
-Stable Channels end-to-end workflows work as follows:
+1. <b>Start up up the app.</b> Run ``cargo --features user`` in one window and ``cargo --features lsp`` in the other.
+2. <b>Get some test BTC</b> Run ``getaddress`` in the user window. Go to https://faucet.mutinynet.com/ and send some test sats to that address. Run ``balance`` in the user window and wait until your BTC shows up in there.
+3. <b>Open the Stable Channel</b> Open a channel ``openchannel``. Let's see if the channel got confirmed on the blockchain. When you run ``listallchannels`` check if "channel_ready" equals "true."
+4. <b>Start the Stable Channel for both users<b> In the user window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 4.0 0``
+   
+## Stable Channels end-to-end workflows work as follows:
 
 <ol>
 <li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
