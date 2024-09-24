@@ -67,14 +67,15 @@ Stable Channels end-to-end workflows work as follows:
 
 ## Getting Started
 
-Currently, this works as a CLN plugin and as a standalone LND app. 
+Currently, this works as a CLN plugin and as a standalone LND app. An LDK app is in development.
 
 <ul>
+    <li>The code for the Rust app is ar `src`</li>
     <li>The code for the CLN plugin is at `stablechannels.py`</li>
     <li>The code for the standalone LND Python app is at `lnd.py`.</li>
 </ul>
 
-There are also some in-progress iOS apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
+There are also some in-progress mobile apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
 
 ### Environment and dependencies
 
