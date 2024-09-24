@@ -22,9 +22,9 @@ and
 
 ## Walkthrough:
 
-Here's the story: A user has bitcoin on an exchange and wants to hedge his exposure. He onboards from an exchange to a Stable Channel via a Lightning payment. 
+In this example, a user onboards to a Stable Channel from an exchange. 
 
-Then an LSP provides this stabiltiy service.
+The user onboards by paying a Lightning invoice. The LSP creates this channel for the user and provides this stabiltiy service.
 
 ## Step 1 - Start the app
 
