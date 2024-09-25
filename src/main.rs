@@ -255,9 +255,45 @@ fn main() {
             let args: Vec<&str> = parts.collect();
 
             match (command, args.as_slice()) {
-                (Some("openchannel"), []) => {
-                    // Code for opening channel to LSP
-                    // You'll need to have access to the LSP node here
+                (Some("connect"), args) => {
+                    if args.len() != 2 {
+                        println!("Error: 'connect' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
+
+                    let node_id_str = args[0];
+                    let listening_address_str = args[1];
+
+                    let lsp_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+
+                    match exchange.connect(lsp_node_id, lsp_net_address, true) {
+                        Ok(_) => println!("Connected to {}", node_id_str),
+                        Err(e) => println!("Failed to connect to {}", e),
+                    }
+                   
+                },
+                (Some("openchannel"), args) => {
+                    if args.len() != 3 {
+                        println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
+
+                    let node_id_str = args[0];
+                    let listening_address_str = args[1];
+                    let sats_str = args[2];
+
+                    let lsp_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                    let sats: u64 = sats_str.parse().unwrap();
+            
+                    let channel_config: Option<Arc<ChannelConfig>> = None;    
+                    let announce_channel = false;
+
+                    match exchange.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                        Ok(_) => println!("Channel successfully opened to {}", node_id_str),
+                        Err(e) => println!("Failed to open channel: {}", e),
+                    }
                 },
                 (Some("getaddress"), []) => {
                     let funding_address = exchange.onchain_payment().new_address();
@@ -340,123 +376,6 @@ fn main() {
             let args: Vec<&str> = parts.collect();
 
             match (command, args.as_slice()) {
-                // Opens and 
-                (Some("demo"), args) => {
-                    // Sample command:
-                    // demo <node_id> <listening_address> <is_stable_receiver> <expected_dollar_amount> <native_amount_sats>
-                    // demo 037cd7e2eadab8b00363cedd2279bd9d40794673ed35effde0b71d39333a3c53b8 127.0.0.1:9737 true 10.0 0
-
-                    if args.len() != 5 {
-                        println!("Usage: demo <node_id> <listening_address> <is_stable_receiver> <expected_dollar_amount> <native_amount_sats>");
-                    } else {
-                        let node_id_str = args[0];
-                        let listening_address_str = args[1];
-                        let is_stable_receiver = args[2].parse::<bool>().unwrap_or(false);
-                        let expected_dollar_amount = args[3].parse::<f64>().unwrap_or(0.0);
-                        let native_amount_sats = args[4].parse::<f64>().unwrap_or(0.0);
-                
-                        // Parse the node ID
-                        match PublicKey::from_str(node_id_str) {
-                            Ok(node_id) => {
-                                // Parse the listening address
-                                match listening_address_str.parse::<SocketAddress>() {
-                                    Ok(listening_address) => {
-                                        // Open channel
-                                        let channel_config: Option<Arc<ChannelConfig>> = None;
-                                        let announce_channel = false; // Adjust if needed
-                
-                                        match user.connect_open_channel(
-                                            node_id,
-                                            listening_address,
-                                            100000 as u64, // Channel amount in satoshis
-                                            Some(50000000),// Push amount in millisatoshis
-                                            channel_config,
-                                            announce_channel,
-                                        ) {
-                                            Ok(_) => {
-                                                println!("Channel successfully opened.");
-                
-                                                std::thread::sleep(std::time::Duration::from_secs(10));
-                
-                                               let mut channel_id: Option<ChannelId> = Some(ChannelId::new_zero());
-                                               let channels = user.list_channels();  // Get the channels directly
-                                               
-                                               // Find the relevant channel by node_id
-                                               if let Some(channel_details) = channels
-                                                   .iter()
-                                                   .find(|channel| channel.counterparty_node_id == node_id) 
-                                               {
-                                                   channel_id = Some(channel_details.channel_id.clone());
-                                               } else {
-                                                   panic!("No channel found with the specified node ID");
-                                               }
-                                                // Create the stable channel
-                                                let counterparty = node_id;
-                
-                                                let mut stable_channel = StableChannel {
-                                                    channel_id: channel_id.unwrap(),
-                                                    is_stable_receiver,
-                                                    counterparty,
-                                                    expected_usd: USD::from_f64(expected_dollar_amount),
-                                                    expected_btc: Bitcoin::from_sats(native_amount_sats as u64),
-                                                    stable_receiver_btc: Bitcoin::from_sats(0),
-                                                    stable_provider_btc: Bitcoin::from_sats(0),
-                                                    stable_receiver_usd: USD::from_f64(0.0),
-                                                    stable_provider_usd: USD::from_f64(0.0),
-                                                    risk_level: 0,
-                                                    timestamp: 0,
-                                                    formatted_datetime: "2021-06-01 12:00:00".to_string(),
-                                                    payment_made: false,
-                                                    sc_dir: "/path/to/sc_dir".to_string(),
-                                                    latest_price: 0.0,
-                                                    prices: "".to_string(),
-                                                    counterparty_offer: their_offer.clone().expect("Expected an Offer but found None"),
-                                                };
-                
-                                                println!(
-                                                    "Stable Channel created: {:?}",
-                                                    stable_channel.channel_id.to_string()
-                                                );
-                
-                                                // Start the stable channel loop
-                                                loop {
-                                                    // Get the current time
-                                                    let now = SystemTime::now();
-                                                    let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
-                
-                                                    let now_secs = now_duration.as_secs();
-                
-                                                    // Calculate the next 60-second mark
-                                                    let next_60_sec = ((now_secs / 60) + 1) * 60;
-                                                    let next_60_sec_duration = Duration::from_secs(next_60_sec);
-                
-                                                    // Calculate the sleep duration
-                                                    let sleep_duration = next_60_sec_duration
-                                                        .checked_sub(now_duration)
-                                                        .unwrap_or_else(|| Duration::from_secs(0));
-                
-                                                    // Sleep until the next 60-second mark
-                                                    std::thread::sleep(sleep_duration);
-                
-                                                    // Run check_stability
-                                                    println!(
-                                                        "\nChecking stability for channel {}...\n",
-                                                        stable_channel.channel_id
-                                                    );
-                                                    stable_channel = check_stability(&user, stable_channel);
-                                                }
-                                            }
-                                            Err(e) => println!("Failed to open channel: {}", e),
-                                        }
-                                    }
-                                    Err(e) => println!("Invalid listening address: {}", e),
-                                }
-                            }
-                            Err(e) => println!("Invalid node ID: {}", e),
-                        }
-                    }
-                },
-                
                 (Some("settheiroffer"), [their_offer_str]) => {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                 }
@@ -547,15 +466,26 @@ fn main() {
                         Err(e) => println!("Error getting funding address: {}", e),
                     }
                 },
-                (Some("openchannel"), []) => {
+                (Some("openchannel"), args) => {
+
+                    if args.len() != 3 {
+                        println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
+
+                    let node_id_str = args[0];
+                    let listening_address_str = args[1];
+                    let sats_str = args[2];
+
+                    let lsp_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                    let sats: u64 = sats_str.parse().unwrap();
+            
                     let channel_config: Option<Arc<ChannelConfig>> = None;    
-                    let announce_channel = false; // doublecheck
+                    let announce_channel = false;
 
-                    let lsp_node_id = "037cd7e2eadab8b00363cedd2279bd9d40794673ed35effde0b71d39333a3c53b8".parse().unwrap();
-                    let lsp_net_address: SocketAddress = "127.0.0.1:9737".parse().unwrap();
-
-                    match user.connect_open_channel(lsp_node_id, lsp_net_address, 300000, Some(150000), channel_config, announce_channel) {
-                        Ok(_) => println!("Channel successfully opened between user and lsp."),
+                    match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                        Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
                 
@@ -566,10 +496,6 @@ fn main() {
                     let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                     println!("User On-Chain Balance: {}", onchain_balance);
                     println!("Stable Receiver Lightning Balance: {}", lightning_balance);
-                },
-                (Some("connecttolsp"), []) => {
-                    // Code for connecting to LSP
-                    // You'll need to have access to the LSP node here
                 },
                 (Some("closeallchannels"), []) => {
                     for channel in user.list_channels().iter() {
@@ -666,7 +592,7 @@ fn main() {
             },
             // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
-                // startstablechannel 569b7829b98de19a86ec7d73079a0b3c5e03686aa923e86669f6ab8397674759 false 172.0 0
+                // startstablechannel 0276cc75b5fc5b877e2157c0d9a80d3f617c4cff4dda1f9f637c1448c66dfa5261 true 10.0 0
                 (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                     let channel_id = channel_id.to_string();
                     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
