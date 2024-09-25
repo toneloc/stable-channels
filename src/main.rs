@@ -255,9 +255,27 @@ fn main() {
             let args: Vec<&str> = parts.collect();
 
             match (command, args.as_slice()) {
-                (Some("openchannel"), []) => {
-                    // Code for opening channel to LSP
-                    // You'll need to have access to the LSP node here
+                (Some("openchannel"), args) => {
+                    if args.len() != 3 {
+                        println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
+
+                    let node_id_str = args[0];
+                    let listening_address_str = args[1];
+                    let sats_str = args[2];
+
+                    let lsp_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                    let sats: u64 = sats_str.parse().unwrap();
+            
+                    let channel_config: Option<Arc<ChannelConfig>> = None;    
+                    let announce_channel = false;
+
+                    match exchange.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                        Ok(_) => println!("Channel successfully opened to {}", node_id_str),
+                        Err(e) => println!("Failed to open channel: {}", e),
+                    }
                 },
                 (Some("getaddress"), []) => {
                     let funding_address = exchange.onchain_payment().new_address();
@@ -429,15 +447,25 @@ fn main() {
                         Err(e) => println!("Error getting funding address: {}", e),
                     }
                 },
-                (Some("openchannel"), []) => {
+                (Some("openchannel"), args) => {
+                    if args.len() != 3 {
+                        println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
+
+                    let node_id_str = args[0];
+                    let listening_address_str = args[1];
+                    let sats_str = args[2];
+
+                    let lsp_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                    let sats: u64 = sats_str.parse().unwrap();
+            
                     let channel_config: Option<Arc<ChannelConfig>> = None;    
-                    let announce_channel = false; // doublecheck
+                    let announce_channel = false;
 
-                    let lsp_node_id = "037cd7e2eadab8b00363cedd2279bd9d40794673ed35effde0b71d39333a3c53b8".parse().unwrap();
-                    let lsp_net_address: SocketAddress = "127.0.0.1:9737".parse().unwrap();
-
-                    match user.connect_open_channel(lsp_node_id, lsp_net_address, 300000, Some(0), channel_config, announce_channel) {
-                        Ok(_) => println!("Channel successfully opened between user and lsp."),
+                    match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                        Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
                 
@@ -450,8 +478,7 @@ fn main() {
                     println!("Stable Receiver Lightning Balance: {}", lightning_balance);
                 },
                 (Some("connecttolsp"), []) => {
-                    // Code for connecting to LSP
-                    // You'll need to have access to the LSP node here
+                
                 },
                 (Some("closeallchannels"), []) => {
                     for channel in user.list_channels().iter() {
