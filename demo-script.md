@@ -2,6 +2,8 @@
 
 ## Actors / roles in this demo
 
+In this demo we'll show some interactions between LDK nodes running Stable Channels software.
+
 There are three actors. Each actor runs a Lightning Development Kit (LDK) Lightning Node. 
 
 Each actor remains self-custodial.
