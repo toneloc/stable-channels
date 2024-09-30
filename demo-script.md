@@ -10,6 +10,11 @@ Each actor remains self-custodial.
 2. **User**: This self-custodial user wants the USD stability, also known as the Stable Receiver.
 3. **LSP**: "Lightning Service Provider." This actor is the Stable Provider.
 
+```mermaid
+graph LR
+    Exchange <---> LSP <---> User
+```
+
 ## Prerequisites:
 1. Install Rust - https://www.rust-lang.org/tools/install
 2. Clone the repo:
