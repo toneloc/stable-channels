@@ -270,7 +270,7 @@ fn main() {
                     let sats: u64 = sats_str.parse().unwrap();
             
                     let channel_config: Option<Arc<ChannelConfig>> = None;    
-                    let announce_channel = false;
+                    let announce_channel = true;
 
                     match exchange.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
@@ -359,6 +359,7 @@ fn main() {
             match (command, args.as_slice()) {
                 (Some("settheiroffer"), [their_offer_str]) => {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
+                    println!("Offer set.")
                 }
                 (Some("getouroffer"),[]) => {
                     let our_offer: Offer = user.bolt12_payment().receive_variable_amount("thanks").unwrap();
@@ -369,7 +370,7 @@ fn main() {
                 },
                 // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
-                // startstablechannel 569b7829b98de19a86ec7d73079a0b3c5e03686aa923e86669f6ab8397674759 true 100.0 0
+                // startstablechannel 44c105c0f12c47ef4f573928448fb1c662fd61289b0baf93537f03075aa99010 true 100.0 0
                 (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                     let channel_id = channel_id.to_string();
                     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
@@ -462,7 +463,7 @@ fn main() {
                     let sats: u64 = sats_str.parse().unwrap();
             
                     let channel_config: Option<Arc<ChannelConfig>> = None;    
-                    let announce_channel = false;
+                    let announce_channel = true;
 
                     match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
