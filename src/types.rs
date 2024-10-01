@@ -23,11 +23,6 @@ impl Bitcoin {
     pub fn to_btc(self) -> f64 {
         self.sats as f64 / Self::SATS_IN_BTC as f64
     }
-
-    pub fn from_usd(usd: f64, btcusd_price: f64) -> Self {
-        let btc_value = usd / btcusd_price;
-        Self::from_btc(btc_value)
-    }
 }
 
 impl Sub for Bitcoin {

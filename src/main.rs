@@ -1,61 +1,35 @@
 
-// Contents
-// 1 - Main data structure. helper types in types.rs
-// 2 - Price feed config and logic in price_feeds.rs
-// 3 - LDK set-up and initialization
-// 4 - Core stability logic 
-// 5 - Program initialization and command-line-interface
+/// Stable Channels + LDK: Contents
+/// Main data structure. Helper types in `types.rs`.
+/// Price feed config and logic in price_feeds.rs.
+/// LDK set-up and initialization.
+/// Core stability logic.
+/// Program initialization and command-line-interface.
 
-// 1 - Main data structure. helper types in types.rs
 mod types;
-// 2 - Price feed config and logic in price_feeds.rs
 mod price_feeds;
 
-// This is used for the LSP node only; pulled from https://github.com/tnull/ldk-node-hack
+/// This is used for advacned LSP features only
+/// pulled from https://github.com/tnull/ldk-node-hack
 extern crate ldk_node_hack;
 
 use ldk_node::lightning::ln::msgs::SocketAddress;
-use ldk_node::lightning::offers::invoice::Bolt12Invoice;
-use types::{Bitcoin, USD, StableChannel};
 use price_feeds::{set_price_feeds, fetch_prices, calculate_median_price};
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::ChannelId;
 use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
 use ldk_node::bitcoin::Network;
-use std::os::unix::net::SocketAddr;
+use ldk_node::lightning::offers::offer::Offer;
+use types::{Bitcoin, StableChannel, USD};
+
 use std::str::FromStr;
-
-use ldk_node::lightning::offers::{offer::Offer};
-
-use std::{io::{self, Write}, sync::Arc, thread};
+use std::io::{self, Write};
+use std::sync::Arc;
 use ldk_node::{ChannelConfig, ChannelDetails};
 use reqwest::blocking::Client;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// 3 - LDK set-up and initialization
-// fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
-
-//     let mut builder = ldk_node_hack::Builder::new();
-
-//     let promise_secret = [0u8; 32];
-//     builder.set_liquidity_provider_lsps2(promise_secret);
-
-//     builder.set_network(Network::Signet);
-//     builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
-//     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
-//     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-
-//     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
-
-//     let node = builder.build().unwrap();
-
-//     node.start().unwrap();
-
-//     println!("{} public key: {}", alias, node.node_id());
-
-//     return node;
-// }
-
+/// LDK set-up and initialization
 fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::Node {
     let mut builder = Builder::new();
 
@@ -68,24 +42,22 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     }
 
     builder.set_network(Network::Signet);
-    // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
-    // If this doesn't work, try
+   
+    // If this doesn't work, try the other one
     builder.set_esplora_server("https://mutinynet.com/api/".to_string());
+     // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
 
+    // Don't need gossip right now. Also interferes with Bolt12 implementation
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-    builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+    let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
 
     let node = builder.build().unwrap();
-
     node.start().unwrap();
-
     let public_key: PublicKey = node.node_id();
 
-    // Get the list of listening addresses
     let listening_addresses: Vec<SocketAddress> = node.listening_addresses().unwrap();
 
-    // Check if there are any listening addresses
     if let Some(first_address) = listening_addresses.first() {
         println!("");
         println!("Actor Role: {}", alias);
@@ -99,29 +71,24 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     return node;
 }
 
-// 4 - Core stability logic  
+/// Core stability logic  
 fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
-    // Fetch and update prices
     sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
         .and_then(|prices| calculate_median_price(prices))
         .unwrap_or(0.0);
 
-    // Update channel balances
-    if let Some(channel) = node.list_channels().iter().find(|c| c.channel_id == sc.channel_id) {
+        if let Some(channel) = node.list_channels().iter().find(|c| c.channel_id == sc.channel_id) {
         sc = update_balances(sc, Some(channel.clone()));
     }
 
-    // Calculate how far off 100% par we are 
     let mut dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
     let mut percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
 
-    // Print balance information
     println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
     println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
     println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
 
     println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
-    // println!("{:<25} {:>15}", "Expected BTC ():", sc.expected_btc);
     println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
 
     enum Action {
@@ -131,7 +98,6 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         HighRisk,
     }
 
-    // Determine action based on channel state and risk level
     let action = if percent_from_par < 0.1 {
         Action::DoNothing
     } else {
@@ -147,8 +113,7 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     };
 
     match action {
-        // update state after each
-        Action::DoNothing => println!("Difference from par less than 0.1%. Doing nothing."),
+        Action::DoNothing => println!("\nDifference from par less than 0.1%. Doing nothing."),
         Action::Wait => {
             println!("\nWaiting 10 seconds and checking on payment...\n");
             std::thread::sleep(std::time::Duration::from_secs(10));
@@ -159,7 +124,6 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
                 .find(|c| c.channel_id == sc.channel_id) {sc = update_balances(sc, Some(channel.clone()));
             }
 
-             // Print balance information
             println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
             println!("{:<25} {:>15}", "User USD:", sc.stable_receiver_usd);
 
@@ -168,7 +132,6 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
 
             println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
 
-            // println!("{:<25} {:>15}", "Expected BTC ():", sc.expected_btc);
             println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
         },
         Action::Pay => {
@@ -177,11 +140,13 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
             println!("{}", amt.to_string());
 
+            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
+
+            // This is keysend / spontaenous payment code you can use if Bolt12 doesn't work
+            
             // First, ensure we are connected
             // let address = format!("127.0.0.1:9737").parse().unwrap();
             // let result = node.connect(sc.counterparty, address, true);
-
-            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
 
             // if let Err(e) = result {
             //     println!("Failed to connect with : {}", e);
@@ -342,7 +307,6 @@ fn main() {
 
     #[cfg(feature = "user")] {
         let user = make_node("user", 9736, None);
-        let mut lsp_node_id: Option<PublicKey> = None;
         let mut their_offer: Option<Offer> = None;
 
         loop {
@@ -365,12 +329,9 @@ fn main() {
                     let our_offer: Offer = user.bolt12_payment().receive_variable_amount("thanks").unwrap();
                     println!("{}", our_offer);
                 },
-                (Some("setcounterpartyid"), [lsp_node_id_str]) => {
-                    lsp_node_id = PublicKey::from_str(lsp_node_id_str).ok();
-                },
                 // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
-                // startstablechannel 44c105c0f12c47ef4f573928448fb1c662fd61289b0baf93537f03075aa99010 true 100.0 0
+                // startstablechannel 44c105c0f12c47ef4f573928448fb1c662fd61289b0baf93537f03075aa99010 true 305.0 0
                 (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                     let channel_id = channel_id.to_string();
                     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
@@ -414,17 +375,14 @@ fn main() {
                     println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
 
                     loop {
-                        // Get the current time
                         let now = SystemTime::now();
                         let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
                     
                         let now_secs = now_duration.as_secs();
                     
-                        // Calculate the next 60-second mark
                         let next_10_sec = ((now_secs / 60) + 1) * 60;
                         let next_10_sec_duration = Duration::from_secs(next_10_sec);
                     
-                        // Calculate the sleep duration
                         let sleep_duration = next_10_sec_duration
                             .checked_sub(now_duration)
                             .unwrap_or_else(|| Duration::from_secs(0));
@@ -432,7 +390,6 @@ fn main() {
                         // Sleep until the next 60-second mark
                         std::thread::sleep(sleep_duration);
                     
-                        // Run check_stability
                         println!();
                         println!(
                             "\nChecking stability for channel {}...\n",
@@ -463,6 +420,7 @@ fn main() {
                     let sats: u64 = sats_str.parse().unwrap();
             
                     let channel_config: Option<Arc<ChannelConfig>> = None;    
+                    
                     let announce_channel = true;
 
                     match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
@@ -573,6 +531,30 @@ fn main() {
                     Err(e) => println!("Error getting funding address: {}", e),
                 }
             },
+            (Some("openchannel"), args) => {
+                if args.len() != 3 {
+                    println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                    return;
+                }
+
+                let node_id_str = args[0];
+                let listening_address_str = args[1];
+                let sats_str = args[2];
+
+                let user_node_id = node_id_str.parse().unwrap();
+                let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                let sats: u64 = sats_str.parse().unwrap();
+        
+                let channel_config: Option<Arc<ChannelConfig>> = None;    
+                
+                let announce_channel = true;
+
+                match lsp.connect_open_channel(user_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                    Ok(_) => println!("Channel successfully opened to {}", node_id_str),
+                    Err(e) => println!("Failed to open channel: {}", e),
+                }
+            
+            },
             // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
                 // startstablechannel 569b7829b98de19a86ec7d73079a0b3c5e03686aa923e86669f6ab8397674759 false 172.0 0
@@ -619,7 +601,6 @@ fn main() {
                     println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
 
                     loop {
-                        // Get the current time
                         let now = SystemTime::now();
                         let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
                     
@@ -688,4 +669,27 @@ fn main() {
         }
     }
 }   
+
 }
+// fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
+
+// /     let mut builder = ldk_node_hack::Builder::new();
+
+// /     let promise_secret = [0u8; 32];
+// /     builder.set_liquidity_provider_lsps2(promise_secret);
+
+// /     builder.set_network(Network::Signet);
+// /     builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
+// /     builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
+// /     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
+
+// /     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+
+// /     let node = builder.build().unwrap();
+
+// /     node.start().unwrap();
+
+// /     println!("{} public key: {}", alias, node.node_id());
+
+// /     return node;
+// / }
