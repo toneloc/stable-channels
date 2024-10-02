@@ -1,10 +1,9 @@
 
-/// Stable Channels + LDK: Contents
-/// Main data structure. Helper types in `types.rs`.
-/// Price feed config and logic in price_feeds.rs.
-/// LDK set-up and initialization.
-/// Core stability logic.
-/// Program initialization and command-line-interface.
+/// Stable Channels + LDK Contents
+/// Main data structure and helper types are in `types.rs`.
+/// The price feed config and logic is in price_feeds.rs.
+/// This file incldues LDK set-up, program initialization,
+/// a command-line interface, and the core stability logic.
 
 mod types;
 mod price_feeds;
@@ -13,21 +12,26 @@ mod price_feeds;
 /// pulled from https://github.com/tnull/ldk-node-hack
 extern crate ldk_node_hack;
 
-use ldk_node::lightning::ln::msgs::SocketAddress;
-use price_feeds::{set_price_feeds, fetch_prices, calculate_median_price};
-use ldk_node::bitcoin::secp256k1::PublicKey;
-use ldk_node::lightning::ln::ChannelId;
-use ldk_node::{lightning_invoice::Bolt11Invoice, Node, Builder};
-use ldk_node::bitcoin::Network;
-use ldk_node::lightning::offers::offer::Offer;
-use types::{Bitcoin, StableChannel, USD};
+use std::{
+    io::{self, Write},
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use std::str::FromStr;
-use std::io::{self, Write};
-use std::sync::Arc;
-use ldk_node::{ChannelConfig, ChannelDetails};
+use ldk_node::{
+    bitcoin::{secp256k1::PublicKey, Network},
+    lightning::{
+        ln::{msgs::SocketAddress, ChannelId},
+        offers::offer::Offer,
+    },
+    lightning_invoice::Bolt11Invoice,
+    Builder, ChannelConfig, ChannelDetails, Node,
+};
+
+use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
 use reqwest::blocking::Client;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use types::{Bitcoin, StableChannel, USD};
 
 /// LDK set-up and initialization
 fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::Node {
@@ -35,7 +39,6 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
 
     // If we pass in an LSP pubkey then set your liquidity source
     if let Some(lsp_pubkey) = lsp_pubkey {
-        println!("j");
         println!("{}", lsp_pubkey.to_string());
         let address = "127.0.0.1:9377".parse().unwrap();
         builder.set_liquidity_source_lsps2(address, lsp_pubkey, Some("00000000000000000000000000000000".to_owned()));
@@ -138,7 +141,6 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             println!("\nPaying the difference...\n");
             
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
-            println!("{}", amt.to_string());
 
             let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
 
@@ -202,33 +204,39 @@ fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails
     sc // Return the modified StableChannel
 }
 
-// 5 - Program initialization and command-line-interface
-// We have three different services: exchange, user, and lsp
+fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
+    let mut input = String::new();
+    print!("{}", prompt);
+    io::stdout().flush().unwrap();
+    io::stdin().read_line(&mut input).unwrap();
+
+    let input = input.trim().to_string();
+
+    let mut parts = input.split_whitespace();
+    let command = parts.next().map(|s| s.to_string());
+    let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
+    (input, command, args)
+}
+/// Program initialization and command-line-interface
+/// We have three different services: exchange, user, and lsp
 fn main() {
     #[cfg(feature = "exchange")] {
         let exchange = make_node("exchange", 9735, None);
     
         loop {
-            let mut input = String::new();
-            print!("Enter command for exchange: ");
-            io::stdout().flush().unwrap();
-            io::stdin().read_line(&mut input).unwrap();
-            let input = input.trim();
+            let (input, command, args) = get_user_input("Enter command for exchange: ");
 
-            let mut parts = input.split_whitespace();
-            let command = parts.next();
-            let args: Vec<&str> = parts.collect();
-
-            match (command, args.as_slice()) {
+            match (command.as_deref(), args.as_slice()) {
                 (Some("openchannel"), args) => {
                     if args.len() != 3 {
                         println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
                         return;
                     }
 
-                    let node_id_str = args[0];
-                    let listening_address_str = args[1];
-                    let sats_str = args[2];
+                    let node_id_str = &args[0];
+                    let listening_address_str = &args[1];
+                    let sats_str = &args[2];
 
                     let lsp_node_id = node_id_str.parse().unwrap();
                     let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
@@ -310,17 +318,9 @@ fn main() {
         let mut their_offer: Option<Offer> = None;
 
         loop {
-            let mut input = String::new();
-            print!("Enter command for user: ");
-            io::stdout().flush().unwrap();
-            io::stdin().read_line(&mut input).unwrap();
-            let input = input.trim();
+            let (_input, command, args) = get_user_input("Enter command for user: ");
 
-            let mut parts = input.split_whitespace();
-            let command = parts.next();
-            let args: Vec<&str> = parts.collect();
-
-            match (command, args.as_slice()) {
+            match (command.as_deref(), args.as_slice()) {
                 (Some("settheiroffer"), [their_offer_str]) => {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                     println!("Offer set.")
@@ -411,19 +411,26 @@ fn main() {
                         return;
                     }
 
-                    let node_id_str = args[0];
-                    let listening_address_str = args[1];
-                    let sats_str = args[2];
+                    // TODO - set zero reserve
+                    // ChannelHandshakeConfig::their_channel_reserve_proportional_millionths
+                    // https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelHandshakeConfig.html#structfield.their_channel_reserve_proportional_millionths
+                    
+                    // https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelHandshakeLimits.html#structfield.max_channel_reserve_satoshis
+
+                    let node_id_str = &args[0];
+                    let listening_address_str = &args[1];
+                    let sats_str = &args[2];
 
                     let lsp_node_id = node_id_str.parse().unwrap();
                     let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
                     let sats: u64 = sats_str.parse().unwrap();
+                    let push_msat = (sats / 2) * 1000;
             
                     let channel_config: Option<Arc<ChannelConfig>> = None;    
                     
                     let announce_channel = true;
 
-                    match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                    match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(push_msat), channel_config, announce_channel) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
@@ -494,7 +501,7 @@ fn main() {
                     }
                 },
                 (Some("exit"), _) => break,
-                _ => println!("Unknown command or incorrect arguments: {}", input),
+                _ => println!("Unknown command or incorrect arguments:"),
             }
         }
     }
@@ -504,17 +511,9 @@ fn main() {
         let mut their_offer: Option<Offer> = None;
 
         loop {
-        let mut input = String::new();
-        print!("Enter command for lsp: ");
-        io::stdout().flush().unwrap();
-        io::stdin().read_line(&mut input).unwrap();
-        let input = input.trim();
+            let (input, command, args) = get_user_input("Enter command for lsp: ");
 
-        let mut parts = input.split_whitespace();
-        let command = parts.next();
-        let args: Vec<&str> = parts.collect();
-
-        match (command, args.as_slice()) {
+        match (command.as_deref(), args.as_slice()) {
             (Some("settheiroffer"), [their_offer_str]) => {
                 their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                 println!("Offer set.");
@@ -537,9 +536,9 @@ fn main() {
                     return;
                 }
 
-                let node_id_str = args[0];
-                let listening_address_str = args[1];
-                let sats_str = args[2];
+                let node_id_str = &args[0];
+                let listening_address_str = &args[1];
+                let sats_str = &args[2];
 
                 let user_node_id = node_id_str.parse().unwrap();
                 let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
