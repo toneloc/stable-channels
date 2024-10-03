@@ -21,10 +21,10 @@ You will need Rust installed for this demo. You must also be connected to the in
 
 Clone the repo and open it in two windows. 
 
-1. <b>Start up up the app.</b> Run ``cargo --features user`` in one window and ``cargo --features lsp`` in the other.
+1. <b>Start up the app.</b> Run ``cargo --features user`` in one window and ``cargo --features lsp`` in the other.
 2. <b>Get some test BTC</b> Run ``getaddress`` in the user window. Go to https://faucet.mutinynet.com/ and send some test sats to that address. Run ``balance`` in the user window and wait until your BTC shows up in there.
 3. <b>Open the Stable Channel</b> Open a channel ``openchannel [NODE_ID] [LISTENING_ADDRESS] [SATS_AMOUNT]``. Then run ``listallchannels`` check if "channel_ready" equals "true." Will take 6 confirmations or a minute or two.
-4. <b>Start the Stable Channel for both users<b> In the user window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 100.0 0`` In the lsp window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 false 100.0 0`` This command means "Make the channel with ID cca0a...  a stable channel with a value of $100.0 and 0 native bitcoin, where it is true (or false) that I am the stable receiver."
+4. <b>Start the Stable Channel for both users</b> In the user window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 100.0 0`` In the lsp window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 false 100.0 0`` This command means "Make the channel with ID cca0a...  a stable channel with a value of $100.0 and 0 native bitcoin, where it is true (or false) that I am the stable receiver."
    
 
 This basic process works as follows:
@@ -76,7 +76,7 @@ Technologically, these are vanilla Lightning channels with no DLCs, and there ar
 Currently, this works as a CLN plugin and as a standalone LND app. An LDK app is in development.
 
 <ul>
-    <li>The code for the Rust app is ar `src`</li>
+    <li>The code for the Rust app is located in `src`</li>
     <li>The code for the CLN plugin is at `stablechannels.py`</li>
     <li>The code for the standalone LND Python app is at `lnd.py`.</li>
 </ul>
@@ -113,7 +113,7 @@ Next, start your CLN node, or modify your config files, to enable dual-funding c
 ```bash
 lightningd --daemon --log-file=/home/ubuntu/cln.log --lightning-dir=/home/ubuntu/lightning --experimental-dual-fund --funder-policy=match --funder-policy-mod=100 --funder-min-their-funding=200000 --funder-per-channel-max=300000 --funder-fuzz-percent=0 --lease-fee-base-sat=2sat --lease-fee-basis=50 --experimental-offers --funder-lease-requests-only=false
 ```
-The "funder" flags instruct CLN on how to handle dual-funded channels. Basically this command is saying: "This node is willing to fund a dual-funded up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
+The "funder" flags instruct CLN on how to handle dual-funded channels. Basically this command is saying: "This node is willing to fund a dual-funded channel up to **300000** sats, a minimum of **200000** sats, plus some other things not relevant for Stable Channels.  
 
 Your counterparty will need to run a similar command. 
 
