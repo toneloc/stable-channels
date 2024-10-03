@@ -15,9 +15,21 @@ Each of these two nodes query 5 price feeds every minute. Then, based on the new
 - Either party may opt out at any time, either by a cooperative on-chain channel close or forced channel close on-chain.
 - This project is in-progress and works as with LND, CLN, or LDK.
 
+### Developer demo
+
+You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet. 
+
+Clone the repo and open it in two windows. 
+
+1. <b>Start up up the app.</b> Run ``cargo --features user`` in one window and ``cargo --features lsp`` in the other.
+2. <b>Get some test BTC</b> Run ``getaddress`` in the user window. Go to https://faucet.mutinynet.com/ and send some test sats to that address. Run ``balance`` in the user window and wait until your BTC shows up in there.
+3. <b>Open the Stable Channel</b> Open a channel ``openchannel [NODE_ID] [LISTENING_ADDRESS] [SATS_AMOUNT]``. Then run ``listallchannels`` check if "channel_ready" equals "true." Will take 6 confirmations or a minute or two.
+4. <b>Start the Stable Channel for both users<b> In the user window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 100.0 0`` In the lsp window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 false 100.0 0`` This command means "Make the channel with ID cca0a...  a stable channel with a value of $100.0 and 0 native bitcoin, where it is true (or false) that I am the stable receiver."
+   
+
 This basic process works as follows:
 
-Every 5 minutes, either the price of bitcoin (a) goes up, (b) goes down, or (c) stays the same:
+Every 1 minute, either the price of bitcoin (a) goes up, (b) goes down, or (c) stays the same:
 <ul>
 <li>(a) If the price of bitcoin goes up:
     <ul>
@@ -39,15 +51,6 @@ Stable Channels are non-routing channels. We are working on adding routing and p
 
 Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
 
-### Developer demo
-
-You will need Rust installed for this demo. Clone the repo and open it in two windows. 
-
-1. <b>Start up up the app.</b> Run ``cargo --features user`` in one window and ``cargo --features lsp`` in the other.
-2. <b>Get some test BTC</b> Run ``getaddress`` in the user window. Go to https://faucet.mutinynet.com/ and send some test sats to that address. Run ``balance`` in the user window and wait until your BTC shows up in there.
-3. <b>Open the Stable Channel</b> Open a channel ``openchannel``. Let's see if the channel got confirmed on the blockchain. When you run ``listallchannels`` check if "channel_ready" equals "true."
-4. <b>Start the Stable Channel for both users<b> In the user window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 4.0 0``
-   
 ## Stable Channels end-to-end workflows work as follows:
 
 <ol>
