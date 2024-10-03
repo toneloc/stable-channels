@@ -1,16 +1,18 @@
 
-/// Stable Channels + LDK Contents
+/// Stable Channels in LDK 
+/// Contents
 /// Main data structure and helper types are in `types.rs`.
 /// The price feed config and logic is in price_feeds.rs.
-/// This file incldues LDK set-up, program initialization,
+/// This present file incldues LDK set-up, program initialization,
 /// a command-line interface, and the core stability logic.
+/// We have three different services: exchange, user, and lsp
 
 mod types;
 mod price_feeds;
 
-/// This is used for advacned LSP features only
+/// This is used for advanced LSP features only
 /// pulled from https://github.com/tnull/ldk-node-hack
-extern crate ldk_node_hack;
+// extern crate ldk_node_hack;
 
 use std::{
     io::{self, Write},
@@ -50,7 +52,7 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     builder.set_esplora_server("https://mutinynet.com/api/".to_string());
      // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
 
-    // Don't need gossip right now. Also interferes with Bolt12 implementation
+    // Don't need gossip right now. Also interferes with Bolt12 implementation.
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
     let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
@@ -219,7 +221,6 @@ fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
     (input, command, args)
 }
 /// Program initialization and command-line-interface
-/// We have three different services: exchange, user, and lsp
 fn main() {
     #[cfg(feature = "exchange")] {
         let exchange = make_node("exchange", 9735, None);
