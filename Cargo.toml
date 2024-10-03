@@ -18,4 +18,3 @@ retry = "1.3"
 futures = "0.3"
 async-trait = "0.1"
 hex = "0.4.3"
-ldk_node_hack = { path = "/Users/t/Desktop/ldk-node-hack" }
