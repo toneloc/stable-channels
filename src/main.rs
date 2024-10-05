@@ -456,14 +456,21 @@ fn main() {
                     print!("Closing all channels.")
                 },
                 (Some("listallchannels"), []) => {
-                    println!("channels:");
-                    for channel in user.list_channels().iter() {
-                        let channel_id = channel.channel_id;
-                        println!("{}", channel_id);
-                    }
-                    println!("channel details:");
                     let channels = user.list_channels();
-                    println!("{:#?}", channels);
+                    if channels.is_empty() {
+                        println!("No channels found.");
+                    } else {
+                        println!("User Channels:");
+                        for channel in channels.iter() {
+                            println!("--------------------------------------------");
+                            println!("Channel ID: {}", channel.channel_id);
+                            println!("Channel Value: {}", Bitcoin::from_sats(channel.channel_value_sats));
+                            // println!("Our Balance: {}", Bitcoin::from_sats(channel.outbound_capacity_msat / 1000));
+                            // println!("Their Balance: {}", Bitcoin::from_sats(channel.inbound_capacity_msat / 1000));
+                            println!("Channel Ready?: {}", channel.is_channel_ready);
+                        }
+                        println!("--------------------------------------------");
+                    }
                 },
                 (Some("getinvoice"), [sats]) => {
                     if let Ok(sats_value) = sats.parse::<u64>() {
