@@ -11,6 +11,7 @@ Both parties remain self-custodial and can opt out anytime via cooperative or fo
 Links with examples:
 - **Basics with example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
 - **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
+- **Project website:** [StableChannels.com](https://www.stablechannels.com)
 
 ### Developer Demo
 
