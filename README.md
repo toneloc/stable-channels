@@ -6,7 +6,7 @@ Stable Channels allow Lightning Network node operators to maintain one side of a
 
 Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 in bitcoin).
 
-Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in progress and compatible with LND, CLN, or LDK.
+Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in progress and compatible with LND, CLN, or LDK. The LND and CLN inmplmentations use Python; LDK uses Rust.
 
 Links with examples:
 - **Basics with example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
