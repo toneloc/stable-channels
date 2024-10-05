@@ -2,22 +2,22 @@
 
 ## Stable Channels - Version 24SEP2024
 
-<b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms. The other side of the channel takes the price upside and downside.  
+<b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms.
 
 - These special channels are called <b>Stable Channels</b>. 
 - These node runners receiving the stability are called <b>Stable Receivers</b>.
-- On the other side of the channel are <b>Stable Providers</b>.
+- On the other side of the channel are <b>Stable Providers</b>. They take the price upside and downside.  
 - This Twitter thread explains the basics, with an example - https://x.com/tonklaus/status/1729567459579945017
-- And this Delving Bitcoin post goes more in-depth - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
+- For a more in-depth discussion - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
 
 Each of these two nodes query 5 price feeds every minute. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at, for example, $10,000 of bitcoin. 
 - Each party remains self-custodial.
-- Either party may opt out at any time, either by a cooperative on-chain channel close or forced channel close on-chain.
+- Either party may opt out at any time, either by a cooperative on-chain channel close or an on-chain forced channel close.
 - This project is in-progress and works as with LND, CLN, or LDK.
 
 ### Developer demo
 
-You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet. 
+You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet for testing. 
 
 Clone the repo and open it in two windows. 
 
