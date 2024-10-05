@@ -15,18 +15,90 @@ Each of these two nodes query 5 price feeds every minute. Then, based on the new
 - Either party may opt out at any time, either by a cooperative on-chain channel close or an on-chain forced channel close.
 - This project is in-progress and works as with LND, CLN, or LDK.
 
-### Developer demo
+### Developer Demo
 
-You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet for testing. 
+You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet for testing.
 
-Clone the repo and open it in two windows. 
+Clone the repo and open it in **two windows**.
 
-1. <b>Start up the app.</b> Run ``cargo --features user`` in one window and ``cargo --features lsp`` in the other.
-2. <b>Get some test BTC</b> Run ``getaddress`` in the user window. Go to https://faucet.mutinynet.com/ and send some test sats to that address. Run ``balance`` in the user window and wait until your BTC shows up in there.
-3. <b>Open the Stable Channel</b> Open a channel ``openchannel [NODE_ID] [LISTENING_ADDRESS] [SATS_AMOUNT]``. Then run ``listallchannels`` check if "channel_ready" equals "true." Will take 6 confirmations or a minute or two.
-4. We need to set Bolt12 offers for each side so they can pay each other. In both windows, run ``getouroffer``. Then copy that and run ``settheiroffer [OFFER]`` in both windows. 
-5. <b>Start the Stable Channel for both users</b> In the user window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 true 100.0 0`` In the lsp window, run the command: ``user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`` or: ``user startstablechannel cca0a4c065e678ad8aecec3ae9a6d694d1b5c7512290da69b32c72b6c209f6e2 false 100.0 0`` This command means "Make the channel with ID cca0a...  a stable channel with a value of $100.0 and 0 native bitcoin, where it is true (or false) that I am the stable receiver."
-   
+#### Steps:
+
+1. **Start up the app.**
+
+   - In one window, run:
+
+     ```bash
+     cargo run --features user
+     ```
+
+   - In the other window, run:
+
+     ```bash
+     cargo run --features lsp
+     ```
+
+2. **Get some test BTC**
+
+   - In the **user window**, run:
+
+     ```bash
+     getaddress
+     ```
+
+   - Go to [Mutinynet Faucet](https://faucet.mutinynet.com/) and send some test sats to the address you obtained.
+
+   - In the **user window**, run:
+
+     ```bash
+     balance
+     ```
+
+     Wait until your BTC shows up there.
+
+3. **Open the Stable Channel**
+
+   - Open a channel by running in either window:
+
+     ```bash
+     openchannel [NODE_ID] [LISTENING_ADDRESS] [SATS_AMOUNT]
+     ```
+
+   - Then, run:
+
+     ```bash
+     listallchannels
+     ```
+
+     Check if `"channel_ready"` equals `"true"`. This will take 6 confirmations or a minute or two.
+
+4. **Set Bolt12 Offers**
+
+   - In **both windows**, run:
+
+     ```bash
+     getouroffer
+     ```
+
+   - Copy the offer from each window.
+
+   - In **both windows**, run:
+
+     ```bash
+     settheiroffer [OFFER]
+     ```
+
+     Replace `[OFFER]` with the offer you copied from the other window.
+
+5. **Start the Stable Channel for Both Users**
+
+   | Window           | Command                                                                                                                          | Example Command                                                                                                                                        |
+   |------------------|----------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+   | **User Window**  | `user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`                                | `user startstablechannel cca0a... true 100.0 0`                                                                                                        |
+   | **LSP Window**   | `user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`                                | `user startstablechannel cca0a... false 100.0 0`                                                                                                       |
+
+   - This command means:
+
+     > Make the channel with ID `cca0a...` a stable channel with a value of $100.0 and 0 native bitcoin, where it is `true` (or `false`) that I am the stable receiver.
 
 This basic process works as follows:
 
