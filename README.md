@@ -2,18 +2,15 @@
 
 ## Stable Channels - Version 24SEP2024
 
-<b>Stable Channels</b> lets Lightning Network node runners keep one side of a Lightning channel balance stable in dollar terms.
+Stable Channels allow Lightning Network node operators to maintain one side of a channel balance stable in dollar terms. The nodes receiving stability are called Stable Receivers, while the counterparts are Stable Providers, who assume the price volatility.
 
-- These special channels are called <b>Stable Channels</b>. 
-- These node runners receiving the stability are called <b>Stable Receivers</b>.
-- On the other side of the channel are <b>Stable Providers</b>. They take the price upside and downside.  
-- This Twitter thread explains the basics, with an example - https://x.com/tonklaus/status/1729567459579945017
-- For a more in-depth discussion - https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning
+Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 in bitcoin).
 
-Each of these two nodes query 5 price feeds every minute. Then, based on the new price, they update their channel balance with their counterparty to keep the Stable Receiver stable at, for example, $10,000 of bitcoin. 
-- Each party remains self-custodial.
-- Either party may opt out at any time, either by a cooperative on-chain channel close or an on-chain forced channel close.
-- This project is in-progress and works as with LND, CLN, or LDK.
+Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in progress and compatible with LND, CLN, or LDK.
+
+Links with examples:
+- **Basics with example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
+- **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
 
 ### Developer Demo
 
