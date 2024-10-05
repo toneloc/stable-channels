@@ -13,7 +13,7 @@ Links with examples:
 - **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
 - **Project website:** [StableChannels.com](https://www.stablechannels.com)
 
-### Developer Demo
+### Developer Demo (LDK + Rust)
 
 You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet for testing.
 
@@ -98,78 +98,52 @@ Clone the repo and open it in **two windows**.
 
      > Make the channel with ID `cca0a...` a stable channel with a value of $100.0 and 0 native bitcoin, where it is `true` (or `false`) that I am the stable receiver.
 
-This basic process works as follows:
+### Stable Channels Process
 
-Every 1 minute, either the price of bitcoin (a) goes up, (b) goes down, or (c) stays the same:
-<ul>
-<li>(a) If the price of bitcoin goes up:
-    <ul>
-      <li>the Stable Receiver loses bitcoin. 
-      <li>This is because it takes less bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Receiver pays the Stable Provider. 
-    </ul>
-<li>(b) If the price of bitcoin goes down:
-    <ul>
-      <li>the Stable Receiver gets more bitcoin. 
-      <li>This is because it takes more bitcoin to keep the Stable Receiver stable in dollar terms, so the Stable Provider pays the Stable Receiver.
-    </ul>
-<li>(c) the price of bitcoin stays the same:
-  <ul>
-    <li>nobody needs to do anything
-  </ul>
-</ul>
+Every 1 minute, the price of bitcoin:
 
-Stable Channels are non-routing channels. We are working on adding routing and payments in and out.
+- **(a) Goes up:**
+  - **Stable Receiver loses bitcoin.**
+    - Less bitcoin is needed to maintain the dollar value.
+    - The Stable Receiver pays the Stable Provider.
+  
+- **(b) Goes down:**
+  - **Stable Receiver gains bitcoin.**
+    - More bitcoin is needed to maintain the dollar value.
+    - The Stable Provider pays the Stable Receiver.
+  
+- **(c) Stays the same:**
+  - **No action required.**
 
-Technologically, these are vanilla Lightning channels with no DLCs, and there are no tokens or fiat on-ramps involved.
+*Note: Stable Channels are currently non-routing channels. Work is ongoing to add routing and payment capabilities.*
 
-## Stable Channels end-to-end workflows work as follows:
+## Getting Started with LND and CLN
 
-<ol>
-<li>Match with a counterparty and come to an agreement on the parameters of the Stable Channel. 
-<li>Select the price feeds. By default, Stable Channels takes the median of five price feeds: BitStamp, CoinGecko, CoinDesk, Coinbase, and Blockchain.info
-<li>Create a channel with the counterparty, each putting in the amount of the Stable Channel. 
-<ul>
-    <li>This can be dual-funded
-    <li>Or you can attach the Stable Channel software to an existing channel.
-<li> <i>Example: If the Stable Channel is for $10,000, each side of the channel puts in $10,000, for a total channel capacity of $20,000 at the time of channel creation</i>
-</ul>
-<li>Query the five price feeds' APIs and update the Stable Channel balance accordingly:
-<ul>
-<li>If the price went down, the Stable Provider needs to pay the Stable Receiver. 
-<li>If the price went up, the Stable Receiver needs to pay the Stable Provider.
-<li>If the price stayed the same or moved only a tiny amount, no payment is required
-<li>Continue until either party wants to close
-</ul>
-</ol>
+- **Supported Implementations:**
+  - **CLN Plugin:** `stablechannels.py`
+  - **Standalone LND App:** `lnd.py`
+  - **Rust App (LDK):** Located in `src` (in development)
+- **Additional Resources:** Explore `/platforms` for mobile apps, web apps, scripts, and servers.
 
-## Getting Started
-
-Currently, this works as a CLN plugin and as a standalone LND app. An LDK app is in development.
-
-<ul>
-    <li>The code for the Rust app is located in `src`</li>
-    <li>The code for the CLN plugin is at `stablechannels.py`</li>
-    <li>The code for the standalone LND Python app is at `lnd.py`.</li>
-</ul>
-
-There are also some in-progress mobile apps, web apps, bash scripts, Python servers and other knick-knacks. Check that stuff out, as you wish, in `/platforms`.
+There are also some in-progress web apps, bash scripts, Python servers and such Check it out in `/platforms`.
 
 ### Environment and dependencies
 
-- Just Rust is required for the LDK version for developers.
-- Python3 is required for the CLN and LND versions.
-- Terminal access to bitcoind and a CLN node running version `23.05.2` or version `24.02` is required. Other versions may work but `23.08.1` does not work.
-- LND is recently supported and is tested with version `0.17.4-beta`
+- **LDK Version:**
+  - Requires Rust.
+- **CLN and LND Versions:**
+  - Requires Python 3.
+  - **CLN Node:** Versions 23.05.2 or 24.02 recommended.
+    - Version 23.08.1 is not supported.
+  - **LND Node:** Tested with version 0.17.4-beta.
+- **Dependencies Installation:**
+  - Run `pip3 install -r requirements.txt` or install individually.
+- **Balance Logs:**
+  - **Stable Receiver:** `stablelog1.json`
+  - **Stable Provider:** `stablelog2.json`
+  - Located in `~/.lightning/bitcoin/stablechannels/`
 
 For CLN, clone this repo, or create a `stablechannels.py` file with the contents of `stablechannels.py` for CLN. 
-
-Copy the contents of `lnd.py` to a working directory for LND.
-
-Stable Channels has a few dependencies. 
-- Either copy the `requirements.txt` file and run `pip3 install -r requirements.txt`.
-- Or: `python3 install` each of the five dependencies listed in `requirements.txt`.
-
-Stable Channel balance results are written to either `stablelog1.json` if you are the Stable Receiver or `stablelog2.json` if you are the Stable Provider. These are in the `stablechannels` directory inside your network directory, e.g. `~/.lightning/bitcoin/stablechannels/stablelog1.json`.
 
 ### Connecting and creating a dual-funded channel (for CLN)
 
