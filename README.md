@@ -1,6 +1,6 @@
 [![main on CLN v24.02.2](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml/badge.svg?branch=main)](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml)
 
-## Stable Channels - Version 24SEP2024
+## Stable Channels
 
 Stable Channels allow Lightning Network node operators to maintain one side of a channel balance stable in dollar terms. The nodes receiving stability are called Stable Receivers, while the counterparts are Stable Providers, who assume the price volatility.
 
