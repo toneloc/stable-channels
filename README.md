@@ -2,20 +2,20 @@
 
 ## Stable Channels
 
-Stable Channels allow Lightning Network node operators to maintain one side of a channel balance stable in dollar terms. The nodes receiving stability are called Stable Receivers, while the counterparts are Stable Providers, who assume the price volatility.
+Stable Channels allow Lightning Network node operators to maintain one side of a channel balance stable in dollar terms. The nodes receiving stability are called Stable Receivers, while their counterparts are Stable Providers, who assume the price volatility.
 
-Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 in bitcoin).
+Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 of bitcoin).
 
-Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in progress and compatible with LND, CLN, or LDK. The LND and CLN inmplmentations use Python; LDK uses Rust.
+Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in-progress and is compatible with LND, CLN, or LDK. The LND and CLN implementations use Python. The LDK one uses Rust.
 
 Links with examples:
-- **Basics with example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
+- **Basic example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
 - **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
 - **Project website:** [StableChannels.com](https://www.stablechannels.com)
 
 ### Developer Demo (LDK + Rust)
 
-You will need Rust installed for this demo. You must also be connected to the internet to use Mutinynet for testing.
+To run this demo,  you will need Rust installed. You must also be connected to the internet to use Mutinynet for testing.
 
 Clone the repo and open it in **two windows**.
 
@@ -51,7 +51,7 @@ Clone the repo and open it in **two windows**.
      balance
      ```
 
-     Wait until your BTC shows up there.
+     Wait until your BTC shows up there. For testing, we'll go ahead and use this to fund both sides of the channel.
 
 3. **Open the Stable Channel**
 
@@ -59,6 +59,7 @@ Clone the repo and open it in **two windows**.
 
      ```bash
      openchannel [NODE_ID] [LISTENING_ADDRESS] [SATS_AMOUNT]
+     openchannel 02a4b5670f4c756e8dd541a4966e1f68183eafacdb14e2e58d03f4d47b8ca72222 127.0.0.1:9737 320000
      ```
 
    - Then, run:
