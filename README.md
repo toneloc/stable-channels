@@ -92,8 +92,8 @@ Clone the repo and open it in **two windows**.
 
    | Window           | Command                                                                                                                          | Example Command                                                                                                                                        |
    |------------------|----------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-   | **User Window**  | `user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`                                | `user startstablechannel cca0a... true 100.0 0`                                                                                                        |
-   | **LSP Window**   | `user startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`                                | `user startstablechannel cca0a... false 100.0 0`                                                                                                       |
+   | **User Window**  | `startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`                                | ` startstablechannel cca0a... true 100.0 0`                                                                                                        |
+   | **LSP Window**   | `startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT`                                | ` startstablechannel cca0a... false 100.0 0`                                                                                                       |
 
    - This command means:
 
