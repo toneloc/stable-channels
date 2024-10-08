@@ -126,8 +126,6 @@ Every 1 minute, the price of bitcoin:
   - **Rust App (LDK):** Located in `src` (in development)
 - **Additional Resources:** Explore `/platforms` for mobile apps, web apps, scripts, and servers.
 
-There are also some in-progress web apps, bash scripts, Python servers and such Check it out in `/platforms`.
-
 ### Environment and dependencies
 
 - **LDK Version:**
