@@ -1,10 +1,8 @@
-# Stable Channels Rust + LDK + just-in-time channels
+# Stable Channels + Rust + LDK + just-in-time channels
 
 ## Actors / roles in this demo
 
-In this demo we'll show some interactions between LDK nodes running Stable Channels software.
-
-There are three actors. Each actor runs a Lightning Development Kit (LDK) Lightning Node. 
+Each of these three actor runs a Lightning Development Kit (LDK) Lightning Node. 
 
 Each actor remains self-custodial.
 
@@ -17,44 +15,56 @@ graph LR
     Exchange <---> LSP <---> User
 ```
 
-## Prerequisites:
-1. Install Rust - https://www.rust-lang.org/tools/install
-2. Clone the repo:
+## Prerequisites
 
-``git clone https://github.com/toneloc/stablechannels``
+To run this demo, you will need Rust installed. You must also be connected to the internet to use Mutinynet for testing.
 
-and 
+Clone the repo and open it in two windows.
 
-``cd stable-channels``
-
-## Walkthrough:
+## Walkthrough
 
 In this example, a user onboards to a Stable Channel from an exchange. 
 
-The user onboards by paying a Lightning invoice. The LSP creates this channel for the user and provides this stabiltiy service.
+The user onboards by paying himselg via a Bolt11 Lightning invoice. The LSP creates this channel for the user and provides this stabiltiy service.
 
 ## Step 1 - Start the app
 
-``cargo run``
+- In one window, run:
 
-### Step 2 - Get Some test BTC
-Run the following commands to get your test Bitcoin addresses:
+ ```bash
+ cargo run --features user
+ ```
 
-``exchange getaddress``
+- In the other window, run:
 
-and 
+ ```bash
+ cargo run --features lsp
+ ```
+
+- In a third window, run:
+
+ ```bash
+ cargo run --features exchange
+ ```
+
+
+then 
 
 ``lsp getaddress``
 
-Go to https://faucet.mutinynet.com/ and send some test sats to these two addresses. Wait for them to confirm. 
-
-``exchange balance``
-
 and 
+
+``exchange getaddress``
+
+Go to https://faucet.mutinynet.com/ and send some test sats to these two addresses. Wait for them to confirm. 
 
 ``lsp balance``
 
-### Step 3 - Open a routing channel
+and 
+
+``exchange balance``
+
+### Step 2 - Open a routing channel
 
 Open a channel between the exchange and the LSP. We will use this for routing.
 
@@ -62,19 +72,19 @@ Open a channel between the exchange and the LSP. We will use this for routing.
 
 Let's see if the channel got confirmed on the blockchain. Check if "channel_ready" equals "true."
 
-``exchange openchannel``
-
-and 
-
 ``lsp listallchannels``
 
-### Step 4 - Create a JIT Invoice
+or
+
+``exchange listallchannels``
+
+### Step 3 - Create a JIT Invoice
 
 Create a JIT invoice that will route from the exchange, through the Lightning Service Provider, and finally to the user. 
 
 ``user getjitinvoice``
 
-### Step 5 - Pay the JIT Invoice
+### Step 4 - Pay the JIT Invoice
 
 The LSP intercepts the payment, takes out a channel open fee, puts in matching Liquidity, and sends the rest to the user.
 
@@ -88,7 +98,7 @@ And the user has one channel:
 
 ``user listallchannels``
 
-### Step 6 - Start a stable channel 
+### Step 5 - Start a stable channel 
 
 Using the command:
 
