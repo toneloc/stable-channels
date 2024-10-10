@@ -76,6 +76,33 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     return node;
 }
 
+fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
+
+     let mut builder = ldk_node_hack::Builder::new();
+
+     let promise_secret = [0u8; 32];
+     builder.set_liquidity_provider_lsps2(promise_secret);
+
+     builder.set_network(Network::Signet);
+
+    // If this doesn't work, try the other one
+    builder.set_esplora_server("https://mutinynet.com/api/".to_string());
+    // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
+
+    // Don't need gossip right now. Also interferes with Bolt12 implementation.
+    // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
+    builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
+    let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+
+    let node = builder.build().unwrap();
+
+    node.start().unwrap();
+
+    println!("{} public key: {}", alias, node.node_id());
+
+    return node;
+}
+
 /// Core stability logic  
 fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
@@ -220,6 +247,7 @@ fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
 
     (input, command, args)
 }
+
 /// Program initialization and command-line-interface
 fn main() {
     #[cfg(feature = "exchange")] {
@@ -274,14 +302,21 @@ fn main() {
                     print!("Closing all channels.")
                 },
                 (Some("listallchannels"), []) => {
-                    println!("channels:");
-                    for channel in exchange.list_channels().iter() {
-                        let channel_id = channel.channel_id;
-                        println!("{}", channel_id);
-                    }
-                    println!("channel details:");
                     let channels = exchange.list_channels();
-                    println!("{:#?}", channels);
+                    if channels.is_empty() {
+                        println!("No channels found.");
+                    } else {
+                        println!("User Channels:");
+                        for channel in channels.iter() {
+                            println!("--------------------------------------------");
+                            println!("Channel ID: {}", channel.channel_id);
+                            println!("Channel Value: {}", Bitcoin::from_sats(channel.channel_value_sats));
+                            // println!("Our Balance: {}", Bitcoin::from_sats(channel.outbound_capacity_msat / 1000));
+                            // println!("Their Balance: {}", Bitcoin::from_sats(channel.inbound_capacity_msat / 1000));
+                            println!("Channel Ready?: {}", channel.is_channel_ready);
+                        }
+                        println!("--------------------------------------------");
+                    }
                 },
                 (Some("getinvoice"), [sats]) => {
                     if let Ok(sats_value) = sats.parse::<u64>() {
@@ -295,6 +330,37 @@ fn main() {
                     } else {
                         println!("Invalid sats value provided");
                     }
+                },
+                (Some("openchannel"), args) => {
+                    if args.len() != 3 {
+                        println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
+
+                    // TODO - set zero reserve
+                    // ChannelHandshakeConfig::their_channel_reserve_proportional_millionths
+                    // https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelHandshakeConfig.html#structfield.their_channel_reserve_proportional_millionths
+                    
+                    // https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelHandshakeLimits.html#structfield.max_channel_reserve_satoshis
+
+                    let node_id_str = &args[0];
+                    let listening_address_str = &args[1];
+                    let sats_str = &args[2];
+
+                    let lsp_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                    let sats: u64 = sats_str.parse().unwrap();
+                    let push_msat = (sats / 2) * 1000;
+            
+                    let channel_config: Option<Arc<ChannelConfig>> = None;    
+                    
+                    let announce_channel = true;
+
+                    match exchange.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(push_msat), channel_config, announce_channel) {
+                        Ok(_) => println!("Channel successfully opened to {}", node_id_str),
+                        Err(e) => println!("Failed to open channel: {}", e),
+                    }
+                
                 },
                 (Some("payjitinvoice"), [invoice_str]) | (Some("payinvoice"), [invoice_str]) => {
                     let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
@@ -315,7 +381,9 @@ fn main() {
     }
 
     #[cfg(feature = "user")] {
-        let user = make_node("user", 9736, None);
+        let lsp_pubkey_str = "03ebdb4d14e3101c1d63e3d5555db2d15bc50d32bc30919b7dfd3d35609b978ff4";
+        let lsp_pubkey = PublicKey::from_str(lsp_pubkey_str).ok();
+        let user = make_node("user", 9736, lsp_pubkey);
         let mut their_offer: Option<Offer> = None;
 
         loop {
@@ -445,7 +513,9 @@ fn main() {
                     println!("Stable Receiver Lightning Balance: {}", lightning_balance);
                 },
                 (Some("connecttolsp"), []) => {
-                
+                    let lsp_pubkey = PublicKey::from_str(lsp_pubkey_str).unwrap();
+                    let address: SocketAddress = SocketAddress::from_str("127.0.0.1:9737").unwrap();
+                    user.connect(lsp_pubkey,address , true).unwrap();
                 },
                 (Some("closeallchannels"), []) => {
                     for channel in user.list_channels().iter() {
@@ -499,10 +569,10 @@ fn main() {
                 },
                 (Some("getjitinvoice"), []) => {
                     match user.bolt11_payment().receive_via_jit_channel(
-                        50000000, 
+                        16700000, 
                         "Stable Channel", 
                         3600, 
-                        Some(10000000)
+                        Some(10000000000000)
                     ) {
                         Ok(invoice) => println!("Invoice: {:?}", invoice.to_string()),
                         Err(e) => println!("Error: {:?}", e),
@@ -515,7 +585,7 @@ fn main() {
     }
 
     #[cfg(feature = "lsp")] {
-        let lsp = make_node("lsp", 9737, None);
+        let lsp = make_hack_node("lsp", 9737);
         let mut their_offer: Option<Offer> = None;
 
         loop {
@@ -538,97 +608,98 @@ fn main() {
                     Err(e) => println!("Error getting funding address: {}", e),
                 }
             },
-            (Some("openchannel"), args) => {
-                if args.len() != 3 {
-                    println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
-                    return;
-                }
+            // (Some("openchannel"), args) => {
+            //     if args.len() != 3 {
+            //         println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+            //         return;
+            //     }
 
-                let node_id_str = &args[0];
-                let listening_address_str = &args[1];
-                let sats_str = &args[2];
+            //     let node_id_str = &args[0];
+            //     let listening_address_str = &args[1];
+            //     let sats_str = &args[2];
 
-                let user_node_id = node_id_str.parse().unwrap();
-                let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
-                let sats: u64 = sats_str.parse().unwrap();
+            //     let user_node_id = node_id_str.parse().unwrap();
+            //     let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+            //     let sats: u64 = sats_str.parse().unwrap();
         
-                let channel_config: Option<Arc<ChannelConfig>> = None;    
+            //     let channel_config: Option<Arc<ChannelConfig>> = None;    
                 
-                let announce_channel = true;
+            //     let announce_channel = true;
 
-                match lsp.connect_open_channel(user_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
-                    Ok(_) => println!("Channel successfully opened to {}", node_id_str),
-                    Err(e) => println!("Failed to open channel: {}", e),
-                }
+            //     match lsp.connect_open_channel(user_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+            //         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
+            //         Err(e) => println!("Failed to open channel: {}", e),
+            //     }
             
-            },
+            // },
             // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
                 // startstablechannel 569b7829b98de19a86ec7d73079a0b3c5e03686aa923e86669f6ab8397674759 false 172.0 0
-                (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
-                    let channel_id = channel_id.to_string();
-                    let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
-                    let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
-                    let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
+                // (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
+                //     let channel_id = channel_id.to_string();
+                //     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
+                //     let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
+                //     let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                    let counterparty = lsp.list_channels()
-                        .iter()
-                        .find(|channel| {
-                            println!("channel_id: {}", channel.channel_id);
-                            channel.channel_id.to_string() == channel_id
-                        })
-                        .map(|channel| channel.counterparty_node_id)
-                        .expect("Failed to find channel with the specified sID");
+                //     let counterparty = lsp.list_channels()
+                //         .iter()
+                //         .find(|channel| {
+                //             println!("channel_id: {}", channel.channel_id);
+                //             channel.channel_id.to_string() == channel_id
+                //         })
+                //         .map(|channel| channel.counterparty_node_id)
+                //         .expect("Failed to find channel with the specified sID");
                 
-                    let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
-                        .expect("Invalid hex string")
-                        .try_into()
-                        .expect("Decoded channel ID has incorrect length");
+                //     let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
+                //         .expect("Invalid hex string")
+                //         .try_into()
+                //         .expect("Decoded channel ID has incorrect length");
 
-                    let mut stable_channel = StableChannel {
-                        channel_id: ChannelId::from_bytes(channel_id_bytes),
-                        is_stable_receiver,  
-                        counterparty,
-                        expected_usd: USD::from_f64(expected_dollar_amount),
-                        expected_btc: Bitcoin::from_btc(native_amount_sats),
-                        stable_receiver_btc: Bitcoin::from_btc(0.0),
-                        stable_provider_btc: Bitcoin::from_btc(0.0),  
-                        stable_receiver_usd: USD::from_f64(0.0),
-                        stable_provider_usd: USD::from_f64(0.0),
-                        risk_level: 0, 
-                        timestamp: 0,
-                        formatted_datetime: "2021-06-01 12:00:00".to_string(), 
-                        payment_made: false,
-                        sc_dir: "/path/to/sc_dir".to_string(),
-                        latest_price: 0.0, 
-                        prices: "".to_string(),
-                        counterparty_offer: their_offer.expect("Expected an Offer but found None"),
-                    };
+                //     let mut stable_channel = StableChannel {
+                //         channel_id: ChannelId::from_bytes(channel_id_bytes),
+                //         is_stable_receiver,  
+                //         counterparty,
+                //         expected_usd: USD::from_f64(expected_dollar_amount),
+                //         expected_btc: Bitcoin::from_btc(native_amount_sats),
+                //         stable_receiver_btc: Bitcoin::from_btc(0.0),
+                //         stable_provider_btc: Bitcoin::from_btc(0.0),  
+                //         stable_receiver_usd: USD::from_f64(0.0),
+                //         stable_provider_usd: USD::from_f64(0.0),
+                //         risk_level: 0, 
+                //         timestamp: 0,
+                //         formatted_datetime: "2021-06-01 12:00:00".to_string(), 
+                //         payment_made: false,
+                //         sc_dir: "/path/to/sc_dir".to_string(),
+                //         latest_price: 0.0, 
+                //         prices: "".to_string(),
+                //         counterparty_offer: their_offer.expect("Expected an Offer but found None"),
+                //     };
 
-                    println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
+                //     println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
 
-                    loop {
-                        let now = SystemTime::now();
-                        let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
+                //     loop {
+                //         let now = SystemTime::now();
+                //         let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
                     
-                        let now_secs = now_duration.as_secs();
+                //         let now_secs = now_duration.as_secs();
                     
-                        let next_60_sec = ((now_secs / 60) + 1) * 60;
-                        let next_60_sec_duration = Duration::from_secs(next_60_sec);
+                //         let next_60_sec = ((now_secs / 60) + 1) * 60;
+                //         let next_60_sec_duration = Duration::from_secs(next_60_sec);
                     
-                        let sleep_duration = next_60_sec_duration
-                            .checked_sub(now_duration)
-                            .unwrap_or_else(|| Duration::from_secs(0));
+                //         let sleep_duration = next_60_sec_duration
+                //             .checked_sub(now_duration)
+                //             .unwrap_or_else(|| Duration::from_secs(0));
                     
-                        std::thread::sleep(sleep_duration);
-                                            println!();
-                        println!(
-                            "\nChecking stability for channel {}...\n",
-                            stable_channel.channel_id
-                        );
-                        stable_channel = check_stability(&lsp, stable_channel);
-                    }
-                },
+                //         std::thread::sleep(sleep_duration);
+                //                             println!();
+                //         println!(
+                //             "\nChecking stability for channel {}...\n",
+                //             stable_channel.channel_id
+                //         );
+                        
+                //         stable_channel = check_stability(&lsp, stable_channel);
+                //     }
+                // },
             (Some("balance"), []) => {
                 let balances = lsp.list_balances();
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
@@ -637,20 +708,27 @@ fn main() {
                 println!("LSP Lightning Balance: {}", lightning_balance);
             },
             (Some("listallchannels"), []) => {
-                println!("channels:");
-                for channel in lsp.list_channels().iter() {
-                    let channel_id = channel.channel_id;
-                    println!("{}", channel_id);
-                }
-                println!("channel details:");
                 let channels = lsp.list_channels();
-                println!("{:#?}", channels);
+                if channels.is_empty() {
+                    println!("No channels found.");
+                } else {
+                    println!("User Channels:");
+                    for channel in channels.iter() {
+                        println!("--------------------------------------------");
+                        println!("Channel ID: {}", channel.channel_id);
+                        println!("Channel Value: {}", Bitcoin::from_sats(channel.channel_value_sats));
+                        // println!("Our Balance: {}", Bitcoin::from_sats(channel.outbound_capacity_msat / 1000));
+                        // println!("Their Balance: {}", Bitcoin::from_sats(channel.inbound_capacity_msat / 1000));
+                        println!("Channel Ready?: {}", channel.is_channel_ready);
+                    }
+                    println!("--------------------------------------------");
+                }
             },
             (Some("getinvoice"), [sats]) => {
                 if let Ok(sats_value) = sats.parse::<u64>() {
                     let msats = sats_value * 1000;
                     let bolt11 = lsp.bolt11_payment();
-                    let invoice = bolt11.receive(msats, "test invoice", 6000);
+                    let invoice = bolt11.receive(msats, "test invoice", 3600);
                     match invoice {
                         Ok(inv) => println!("LSP Invoice: {}", inv),
                         Err(e) => println!("Error creating invoice: {}", e)
@@ -678,25 +756,3 @@ fn main() {
 }   
 
 }
-// fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
-
-// /     let mut builder = ldk_node_hack::Builder::new();
-
-// /     let promise_secret = [0u8; 32];
-// /     builder.set_liquidity_provider_lsps2(promise_secret);
-
-// /     builder.set_network(Network::Signet);
-// /     builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
-// /     builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
-// /     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-
-// /     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
-
-// /     let node = builder.build().unwrap();
-
-// /     node.start().unwrap();
-
-// /     println!("{} public key: {}", alias, node.node_id());
-
-// /     return node;
-// / }

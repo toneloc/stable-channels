@@ -9,6 +9,7 @@ user = []
 lsp = []
 
 [dependencies]
+ldk_node_hack = { path = "/Users/t/Desktop/ldk-node-hack" }
 ldk-node = "0.3.0"
 lightning-liquidity = "=0.1.0-alpha.4"
 lightning = "=0.0.123"
