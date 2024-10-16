@@ -12,7 +12,7 @@ Each actor remains self-custodial.
 
 ```mermaid
 graph LR
-    Exchange <---> LSP <---> User
+    Exchange <---> LSP (Server) <---> User (Mobile)
 ```
 
 ## Prerequisites
