@@ -17,20 +17,21 @@ mod price_feeds;
 use std::{
     io::{self, Write},
     str::FromStr,
-    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use ldk_node::{
     bitcoin::{secp256k1::PublicKey, Network},
+    config::ChannelConfig,
     lightning::{
-        ln::{msgs::SocketAddress, ChannelId},
+        ln::msgs::SocketAddress,
         offers::offer::Offer,
     },
     lightning_invoice::Bolt11Invoice,
-    Builder, ChannelConfig, ChannelDetails, Node,
+    Builder, ChannelDetails, Node,
 };
 
+use lightning::ln::types::ChannelId;
 use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
 use reqwest::blocking::Client;
 use types::{Bitcoin, StableChannel, USD};
@@ -49,7 +50,7 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     builder.set_network(Network::Signet);
    
     // If this doesn't work, try the other one
-    builder.set_esplora_server("https://mutinynet.com/api/".to_string());
+    builder.set_chain_source_esplora("https://mutinynet.com/api/".to_string(), None);
      // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
 
     // Don't need gossip right now. Also interferes with Bolt12 implementation.
@@ -144,7 +145,7 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
 
-            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
+            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,amt, None,Some("here ya go".to_string()));
 
             // This is keysend / spontaenous payment code you can use if Bolt12 doesn't work
             
@@ -243,10 +244,9 @@ fn main() {
                     let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
                     let sats: u64 = sats_str.parse().unwrap();
             
-                    let channel_config: Option<Arc<ChannelConfig>> = None;    
-                    let announce_channel = true;
+                    let channel_config: Option<ChannelConfig> = None;    
 
-                    match exchange.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                    match exchange.open_announced_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
@@ -300,7 +300,7 @@ fn main() {
                     let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                     match bolt11_invoice {
                         Ok(invoice) => {
-                            match exchange.bolt11_payment().send(&invoice) {
+                            match exchange.bolt11_payment().send(&invoice,None) {
                                 Ok(payment_id) => println!("Payment sent from Exchange with payment_id: {}", payment_id),
                                 Err(e) => println!("Error sending payment from Exchange: {}", e)
                             }
@@ -327,7 +327,7 @@ fn main() {
                     println!("Offer set.")
                 }
                 (Some("getouroffer"),[]) => {
-                    let our_offer: Offer = user.bolt12_payment().receive_variable_amount("thanks").unwrap();
+                    let our_offer: Offer = user.bolt12_payment().receive_variable_amount("thanks", None).unwrap();
                     println!("{}", our_offer);
                 },
                 // Sample start command below:
@@ -427,11 +427,9 @@ fn main() {
                     let sats: u64 = sats_str.parse().unwrap();
                     let push_msat = (sats / 2) * 1000;
             
-                    let channel_config: Option<Arc<ChannelConfig>> = None;    
+                    let channel_config: Option<ChannelConfig> = None;    
                     
-                    let announce_channel = true;
-
-                    match user.connect_open_channel(lsp_node_id, lsp_net_address, sats, Some(push_msat), channel_config, announce_channel) {
+                    match user.open_announced_channel(lsp_node_id, lsp_net_address, sats, Some(push_msat), channel_config) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
@@ -489,7 +487,7 @@ fn main() {
                     let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                     match bolt11_invoice {
                         Ok(invoice) => {
-                            match user.bolt11_payment().send(&invoice) {
+                            match user.bolt11_payment().send(&invoice, None) {
                                 Ok(payment_id) => println!("Payment sent from User with payment_id: {}", payment_id),
                                 Err(e) => println!("Error sending payment from User: {}", e)
                             }
@@ -528,7 +526,7 @@ fn main() {
     
             },
             (Some("getouroffer"),[]) => {
-                let our_offer: Offer = lsp.bolt12_payment().receive_variable_amount("thanks").unwrap();
+                let our_offer: Offer = lsp.bolt12_payment().receive_variable_amount("thanks", None).unwrap();
                 println!("{}", our_offer);
             },
             (Some("getaddress"), []) => {
@@ -552,11 +550,9 @@ fn main() {
                 let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
                 let sats: u64 = sats_str.parse().unwrap();
         
-                let channel_config: Option<Arc<ChannelConfig>> = None;    
+                let channel_config: Option<ChannelConfig> = None;    
                 
-                let announce_channel = true;
-
-                match lsp.connect_open_channel(user_node_id, lsp_net_address, sats, Some(sats/2), channel_config, announce_channel) {
+                match lsp.open_announced_channel(user_node_id, lsp_net_address, sats, Some(sats/2), channel_config) {
                     Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                     Err(e) => println!("Failed to open channel: {}", e),
                 }
@@ -663,7 +659,7 @@ fn main() {
                 let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                 match bolt11_invoice {
                     Ok(invoice) => {
-                        match lsp.bolt11_payment().send(&invoice) {
+                        match lsp.bolt11_payment().send(&invoice, None) {
                             Ok(payment_id) => println!("Payment sent from LSP with payment_id: {}", payment_id),
                             Err(e) => println!("Error sending payment from LSP: {}", e)
                         }

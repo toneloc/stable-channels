@@ -1,5 +1,5 @@
 use ldk_node::bitcoin::secp256k1::PublicKey;
-use ldk_node::lightning::ln::ChannelId;
+use lightning::ln::types::ChannelId;
 use ldk_node::lightning::offers::offer::Offer;
 use std::ops::{Div, Sub};
 
