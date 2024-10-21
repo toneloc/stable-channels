@@ -57,6 +57,7 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
     let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+    let _ = builder.set_node_alias("some_alias".to_string()); // needed to open announced channel since LDK 0.4.0
 
     let node = builder.build().unwrap();
     node.start().unwrap();
@@ -322,6 +323,8 @@ fn main() {
             let (_input, command, args) = get_user_input("Enter command for user: ");
 
             match (command.as_deref(), args.as_slice()) {
+                (Some("opreturn"), [their_offer_str]) => {
+                }
                 (Some("settheiroffer"), [their_offer_str]) => {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                     println!("Offer set.")
