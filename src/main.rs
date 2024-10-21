@@ -323,8 +323,6 @@ fn main() {
             let (_input, command, args) = get_user_input("Enter command for user: ");
 
             match (command.as_deref(), args.as_slice()) {
-                (Some("opreturn"), [their_offer_str]) => {
-                }
                 (Some("settheiroffer"), [their_offer_str]) => {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                     println!("Offer set.")
