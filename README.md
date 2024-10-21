@@ -17,6 +17,8 @@ Links with examples:
 
 To run this demo,  you will need Rust installed. You must also be connected to the internet to use Mutinynet for testing.
 
+Using a fresh Ubuntu? You may need to install OpenSSL libraries. `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
+
 Clone the repo and open it in **two windows**.
 
 #### Steps:
