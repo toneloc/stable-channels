@@ -15,11 +15,11 @@ Links with examples:
 
 ### Developer Demo (LDK + Rust)
 
-To run this demo,  you will need Rust installed. You must also be connected to the internet to use Mutinynet for testing.
+To run this demo,  you will need Rust installed on a Unix-like OS. You must also be connected to the internet to use Mutinynet for testing.
 
 Using a fresh Ubuntu? You may need to install OpenSSL libraries. `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
 
-Clone the repo and open it in **two windows**.
+Clone the repo and `cd` into the directory in **two windows**.
 
 #### Steps:
 
