@@ -19,7 +19,7 @@ To run this demo,  you will need Rust installed on a Unix-like OS. You must also
 
 Using a fresh Ubuntu? You may need to install OpenSSL libraries. `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
 
-Clone the repo and `cd` into the directory in **two windows**.
+Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` into the directory in **two windows**.
 
 #### Steps:
 
