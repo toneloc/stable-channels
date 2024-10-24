@@ -2,7 +2,7 @@
 
 ## Stable Channels
 
-Stable Channels allow Lightning Network node operators to keep one side of a channel stable in dollar terms. The nodes receiving stability are called Stable Receivers, while their counterparts are Stable Providers, who assume the price volatility.
+Stable Channels allows Lightning Network node operators to keep one side of a channel stable in dollar terms. The nodes receiving stability are called Stable Receivers, while their counterparts are Stable Providers, who assume the price volatility.
 
 Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 of bitcoin).
 
