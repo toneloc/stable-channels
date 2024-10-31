@@ -35,6 +35,8 @@ use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
 use reqwest::blocking::Client;
 use types::{Bitcoin, StableChannel, USD};
 
+extern crate ldk_node_hack;
+
 /// LDK set-up and initialization
 fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::Node {
     let mut builder = Builder::new();
@@ -92,7 +94,7 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
     // Don't need gossip right now. Also interferes with Bolt12 implementation.
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-    let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+    let _ = builder.set_listening_addresses(vec![format!("0.0.0.0:{}", port).parse().unwrap()]);
 
     let node = builder.build().unwrap();
 
