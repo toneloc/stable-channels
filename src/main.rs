@@ -709,6 +709,16 @@ fn main() {
                 println!("LSP On-Chain Balance: {}", onchain_balance);
                 println!("LSP Lightning Balance: {}", lightning_balance);
             },
+            (Some("listchannels"), []) => {
+                println!("{}", "channels:");
+                for channel in lsp.list_channels().iter() {
+                    let channel_id = channel.channel_id;
+                    println!("{}", channel_id);
+                }
+                println!("{}", "channel details:");
+                let channels = exchange.list_channels();
+                println!("{:#?}", channels);
+            },
             (Some("listallchannels"), []) => {
                 let channels = lsp.list_channels();
                 if channels.is_empty() {
