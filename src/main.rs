@@ -716,7 +716,7 @@ fn main() {
                     println!("{}", channel_id);
                 }
                 println!("{}", "channel details:");
-                let channels = exchange.list_channels();
+                let channels = lsp.list_channels();
                 println!("{:#?}", channels);
             },
             (Some("listallchannels"), []) => {
