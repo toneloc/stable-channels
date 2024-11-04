@@ -106,7 +106,7 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
 }
 
 /// Core stability logic  
-fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
+fn check_stability(node: &ldk_node_hack::Node, mut sc: StableChannel) -> StableChannel {
     sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
         .and_then(|prices| calculate_median_price(prices))
         .unwrap_or(0.0);
