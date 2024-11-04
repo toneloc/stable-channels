@@ -637,71 +637,71 @@ fn main() {
             // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
                 // startstablechannel 569b7829b98de19a86ec7d73079a0b3c5e03686aa923e86669f6ab8397674759 false 172.0 0
-                // (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
-                //     let channel_id = channel_id.to_string();
-                //     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
-                //     let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
-                //     let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
+                (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
+                    let channel_id = channel_id.to_string();
+                    let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
+                    let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
+                    let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                //     let counterparty = lsp.list_channels()
-                //         .iter()
-                //         .find(|channel| {
-                //             println!("channel_id: {}", channel.channel_id);
-                //             channel.channel_id.to_string() == channel_id
-                //         })
-                //         .map(|channel| channel.counterparty_node_id)
-                //         .expect("Failed to find channel with the specified sID");
+                    let counterparty = lsp.list_channels()
+                        .iter()
+                        .find(|channel| {
+                            println!("channel_id: {}", channel.channel_id);
+                            channel.channel_id.to_string() == channel_id
+                        })
+                        .map(|channel| channel.counterparty_node_id)
+                        .expect("Failed to find channel with the specified sID");
                 
-                //     let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
-                //         .expect("Invalid hex string")
-                //         .try_into()
-                //         .expect("Decoded channel ID has incorrect length");
+                    let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
+                        .expect("Invalid hex string")
+                        .try_into()
+                        .expect("Decoded channel ID has incorrect length");
 
-                //     let mut stable_channel = StableChannel {
-                //         channel_id: ChannelId::from_bytes(channel_id_bytes),
-                //         is_stable_receiver,  
-                //         counterparty,
-                //         expected_usd: USD::from_f64(expected_dollar_amount),
-                //         expected_btc: Bitcoin::from_btc(native_amount_sats),
-                //         stable_receiver_btc: Bitcoin::from_btc(0.0),
-                //         stable_provider_btc: Bitcoin::from_btc(0.0),  
-                //         stable_receiver_usd: USD::from_f64(0.0),
-                //         stable_provider_usd: USD::from_f64(0.0),
-                //         risk_level: 0, 
-                //         timestamp: 0,
-                //         formatted_datetime: "2021-06-01 12:00:00".to_string(), 
-                //         payment_made: false,
-                //         sc_dir: "/path/to/sc_dir".to_string(),
-                //         latest_price: 0.0, 
-                //         prices: "".to_string(),
-                //         counterparty_offer: their_offer.expect("Expected an Offer but found None"),
-                //     };
+                    let mut stable_channel = StableChannel {
+                        channel_id: ChannelId::from_bytes(channel_id_bytes),
+                        is_stable_receiver,  
+                        counterparty,
+                        expected_usd: USD::from_f64(expected_dollar_amount),
+                        expected_btc: Bitcoin::from_btc(native_amount_sats),
+                        stable_receiver_btc: Bitcoin::from_btc(0.0),
+                        stable_provider_btc: Bitcoin::from_btc(0.0),  
+                        stable_receiver_usd: USD::from_f64(0.0),
+                        stable_provider_usd: USD::from_f64(0.0),
+                        risk_level: 0, 
+                        timestamp: 0,
+                        formatted_datetime: "2021-06-01 12:00:00".to_string(), 
+                        payment_made: false,
+                        sc_dir: "/path/to/sc_dir".to_string(),
+                        latest_price: 0.0, 
+                        prices: "".to_string(),
+                        counterparty_offer: their_offer.expect("Expected an Offer but found None"),
+                    };
 
-                //     println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
+                    println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
 
-                //     loop {
-                //         let now = SystemTime::now();
-                //         let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
+                    loop {
+                        let now = SystemTime::now();
+                        let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
                     
-                //         let now_secs = now_duration.as_secs();
+                        let now_secs = now_duration.as_secs();
                     
-                //         let next_60_sec = ((now_secs / 60) + 1) * 60;
-                //         let next_60_sec_duration = Duration::from_secs(next_60_sec);
+                        let next_60_sec = ((now_secs / 60) + 1) * 60;
+                        let next_60_sec_duration = Duration::from_secs(next_60_sec);
                     
-                //         let sleep_duration = next_60_sec_duration
-                //             .checked_sub(now_duration)
-                //             .unwrap_or_else(|| Duration::from_secs(0));
+                        let sleep_duration = next_60_sec_duration
+                            .checked_sub(now_duration)
+                            .unwrap_or_else(|| Duration::from_secs(0));
                     
-                //         std::thread::sleep(sleep_duration);
-                //                             println!();
-                //         println!(
-                //             "\nChecking stability for channel {}...\n",
-                //             stable_channel.channel_id
-                //         );
+                        std::thread::sleep(sleep_duration);
+                                            println!();
+                        println!(
+                            "\nChecking stability for channel {}...\n",
+                            stable_channel.channel_id
+                        );
                         
-                //         stable_channel = check_stability(&lsp, stable_channel);
-                //     }
-                // },
+                        stable_channel = check_stability(&lsp, stable_channel);
+                    }
+                },
             (Some("balance"), []) => {
                 let balances = lsp.list_balances();
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
