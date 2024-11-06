@@ -57,7 +57,7 @@ Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` i
 
 3. **Open the Stable Channel**
 
-   - Open a channel by running in either window:
+   - Open a channel by running in the user window:
 
      ```bash
      openchannel [NODE_ID] [LISTENING_ADDRESS] [SATS_AMOUNT]
