@@ -28,7 +28,7 @@ use ldk_node::{
         offers::offer::Offer,
     },
     lightning_invoice::Bolt11Invoice,
-    Builder, ChannelConfig, ChannelDetails, Node,
+    Builder, ChannelConfig, Node,
 };
 
 use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
