@@ -672,9 +672,7 @@ fn main() {
                         payment_made: false,
                         sc_dir: "/path/to/sc_dir".to_string(),
                         latest_price: 0.0, 
-                        prices: "".to_string(),
-                        counterparty_offer: their_offer.expect("Expected an Offer but found None"),
-                    };
+                        prices: "".to_string()                    };
 
                     println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
 
