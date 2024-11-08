@@ -173,7 +173,7 @@ fn check_stability(node: &ldk_node_hack::Node, mut sc: StableChannel) -> StableC
             
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
 
-            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
+            // let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,Some("here ya go".to_string()),amt);
 
             // This is keysend / spontaenous payment code you can use if Bolt12 doesn't work
             
@@ -187,13 +187,13 @@ fn check_stability(node: &ldk_node_hack::Node, mut sc: StableChannel) -> StableC
             //     println!("Successfully connected.");
             // }
 
-            // let result = node
-            //     .spontaneous_payment()
-            //     .send(amt, sc.counterparty);
-            // match result {
-            //     Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
-            //     Err(e) => println!("Failed to send payment: {}", e),
-            // }
+            let result = node
+                .spontaneous_payment()
+                .send(amt, sc.counterparty);
+            match result {
+                Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
+                Err(e) => println!("Failed to send payment: {}", e),
+            }
 
             match result {
                 Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id.to_string()),
@@ -439,8 +439,7 @@ fn main() {
                         payment_made: false,
                         sc_dir: "/path/to/sc_dir".to_string(),
                         latest_price: 0.0, 
-                        prices: "".to_string(),
-                        counterparty_offer: their_offer.expect("Expected an Offer but found None"),
+                        prices: "".to_string()
                     };
 
                     println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());

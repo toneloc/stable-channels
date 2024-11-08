@@ -117,5 +117,5 @@ pub struct StableChannel {
     pub sc_dir: String,
     pub latest_price: f64,
     pub prices: String,
-    pub counterparty_offer: Offer,
+    // pub counterparty_offer: Offer,
 }
