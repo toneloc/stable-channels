@@ -208,7 +208,7 @@ fn check_stability(node: &ldk_node_hack::Node, mut sc: StableChannel) -> StableC
     sc
 }
 
-fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails>) -> StableChannel {
+fn update_balances(mut sc: StableChannel, channel_details: Option<ldk_node_hack::ChannelDetails>) -> StableChannel {
     let (our_balance, their_balance) = match channel_details {
         Some(channel) => {
             let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
