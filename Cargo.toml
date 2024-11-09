@@ -12,7 +12,7 @@ lsp = []
 ldk-node = "0.4.0"
 lightning-liquidity = "=0.1.0-alpha.6"
 lightning = { version = "0.0.125", features = ["std"] }
-reqwest = { version = "0.11", features = ["blocking", "json"] }
+ureq = { version = "2.10.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 retry = "1.3"

@@ -1,9 +1,8 @@
-
 /// Stable Channels in LDK 
 /// Contents
 /// Main data structure and helper types are in `types.rs`.
 /// The price feed config and logic is in price_feeds.rs.
-/// This present file incldues LDK set-up, program initialization,
+/// This present file includes LDK set-up, program initialization,
 /// a command-line interface, and the core stability logic.
 /// We have three different services: exchange, user, and lsp
 
@@ -33,25 +32,29 @@ use ldk_node::{
 
 use lightning::ln::types::ChannelId;
 use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
-use reqwest::blocking::Client;
+use ureq::Agent;
 use types::{Bitcoin, StableChannel, USD};
 
 /// LDK set-up and initialization
-fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::Node {
+fn make_node(alias: &str, port: u16, lsp_pubkey: Option<PublicKey>) -> ldk_node::Node {
     let mut builder = Builder::new();
 
     // If we pass in an LSP pubkey then set your liquidity source
     if let Some(lsp_pubkey) = lsp_pubkey {
         println!("{}", lsp_pubkey.to_string());
         let address = "127.0.0.1:9377".parse().unwrap();
-        builder.set_liquidity_source_lsps2(address, lsp_pubkey, Some("00000000000000000000000000000000".to_owned()));
+        builder.set_liquidity_source_lsps2(
+            address,
+            lsp_pubkey,
+            Some("00000000000000000000000000000000".to_owned()),
+        );
     }
 
     builder.set_network(Network::Signet);
-   
+
     // If this doesn't work, try the other one
     builder.set_chain_source_esplora("https://mutinynet.com/api/".to_string(), None);
-     // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
+    // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
 
     // Don't need gossip right now. Also interferes with Bolt12 implementation.
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
@@ -78,13 +81,17 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
     return node;
 }
 
-/// Core stability logic  
+/// Core stability logic
 fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
-    sc.latest_price = fetch_prices(&Client::new(), &set_price_feeds())
+    sc.latest_price = fetch_prices(&Agent::new(), &set_price_feeds())
         .and_then(|prices| calculate_median_price(prices))
         .unwrap_or(0.0);
 
-        if let Some(channel) = node.list_channels().iter().find(|c| c.channel_id == sc.channel_id) {
+    if let Some(channel) = node
+        .list_channels()
+        .iter()
+        .find(|c| c.channel_id == sc.channel_id)
+    {
         sc = update_balances(sc, Some(channel.clone()));
     }
 
@@ -109,7 +116,7 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         Action::DoNothing
     } else {
         let is_receiver_below_expected: bool = sc.stable_receiver_usd < sc.expected_usd;
-        
+
         match (sc.is_stable_receiver, is_receiver_below_expected, sc.risk_level > 100) {
             (_, _, true) => Action::HighRisk, // High risk scenario
             (true, true, false) => Action::Wait,   // We are User and below peg, wait for payment
@@ -128,7 +135,9 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             if let Some(channel) = node
                 .list_channels()
                 .iter()
-                .find(|c| c.channel_id == sc.channel_id) {sc = update_balances(sc, Some(channel.clone()));
+                .find(|c| c.channel_id == sc.channel_id)
+            {
+                sc = update_balances(sc, Some(channel.clone()));
             }
 
             println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
@@ -137,19 +146,28 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             dollars_from_par = sc.stable_receiver_usd - sc.expected_usd;
             percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
 
-            println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
+            println!(
+                "{:<25} {:>5}",
+                "Percent from par:",
+                format!("{:.2}%\n", percent_from_par)
+            );
 
             println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
-        },
+        }
         Action::Pay => {
             println!("\nPaying the difference...\n");
-            
+
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
 
-            let result = node.bolt12_payment().send_using_amount(&sc.counterparty_offer,amt, None,Some("here ya go".to_string()));
+            let result = node.bolt12_payment().send_using_amount(
+                &sc.counterparty_offer,
+                amt,
+                None,
+                Some("here ya go".to_string()),
+            );
 
-            // This is keysend / spontaenous payment code you can use if Bolt12 doesn't work
-            
+            // This is keysend / spontaneous payment code you can use if Bolt12 doesn't work
+
             // First, ensure we are connected
             // let address = format!("127.0.0.1:9737").parse().unwrap();
             // let result = node.connect(sc.counterparty, address, true);
@@ -172,20 +190,24 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
                 Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id.to_string()),
                 Err(e) => eprintln!("Failed to send payment: {:?}", e),
             }
-        },
+        }
         Action::HighRisk => {
             println!("Risk level high. Current risk level: {}", sc.risk_level);
-        },
+        }
     }
 
     sc
 }
 
-fn update_balances(mut sc: StableChannel, channel_details: Option<ChannelDetails>) -> StableChannel {
+fn update_balances(
+    mut sc: StableChannel,
+    channel_details: Option<ChannelDetails>,
+) -> StableChannel {
     let (our_balance, their_balance) = match channel_details {
         Some(channel) => {
             let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
-            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
+            let our_balance_sats =
+                (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
             let their_balance_sats = channel.channel_value_sats - our_balance_sats;
             (our_balance_sats, their_balance_sats)
         }
@@ -224,9 +246,10 @@ fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
 }
 /// Program initialization and command-line-interface
 fn main() {
-    #[cfg(feature = "exchange")] {
+    #[cfg(feature = "exchange")]
+    {
         let exchange = make_node("exchange", 9735, None);
-    
+
         loop {
             let (input, command, args) = get_user_input("Enter command for exchange: ");
 
@@ -244,28 +267,35 @@ fn main() {
                     let lsp_node_id = node_id_str.parse().unwrap();
                     let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
                     let sats: u64 = sats_str.parse().unwrap();
-            
-                    let channel_config: Option<ChannelConfig> = None;    
 
-                    match exchange.open_announced_channel(lsp_node_id, lsp_net_address, sats, Some(sats/2), channel_config) {
+                    let channel_config: Option<ChannelConfig> = None;
+
+                    match exchange.open_announced_channel(
+                        lsp_node_id,
+                        lsp_net_address,
+                        sats,
+                        Some(sats / 2),
+                        channel_config,
+                    ) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
-                },
+                }
                 (Some("getaddress"), []) => {
                     let funding_address = exchange.onchain_payment().new_address();
                     match funding_address {
                         Ok(fund_addr) => println!("Exchange Funding Address: {}", fund_addr),
                         Err(e) => println!("Error getting funding address: {}", e),
                     }
-                },
+                }
                 (Some("balance"), []) => {
                     let balances = exchange.list_balances();
                     let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
-                    let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                    let lightning_balance =
+                        Bitcoin::from_sats(balances.total_lightning_balance_sats);
                     println!("Exchange On-Chain Balance: {}", onchain_balance);
                     println!("Exchange Lightning Balance: {}", lightning_balance);
-                },
+                }
                 (Some("closeallchannels"), []) => {
                     for channel in exchange.list_channels().iter() {
                         let user_channel_id = channel.user_channel_id;
@@ -273,7 +303,7 @@ fn main() {
                         let _ = exchange.close_channel(&user_channel_id, counterparty_node_id);
                     }
                     print!("Closing all channels.")
-                },
+                }
                 (Some("listallchannels"), []) => {
                     println!("channels:");
                     for channel in exchange.list_channels().iter() {
@@ -283,7 +313,7 @@ fn main() {
                     println!("channel details:");
                     let channels = exchange.list_channels();
                     println!("{:#?}", channels);
-                },
+                }
                 (Some("getinvoice"), [sats]) => {
                     if let Ok(sats_value) = sats.parse::<u64>() {
                         let msats = sats_value * 1000;
@@ -291,31 +321,32 @@ fn main() {
                         let invoice = bolt11.receive(msats, "test invoice", 6000);
                         match invoice {
                             Ok(inv) => println!("Exchange Invoice: {}", inv),
-                            Err(e) => println!("Error creating invoice: {}", e)
+                            Err(e) => println!("Error creating invoice: {}", e),
                         }
                     } else {
                         println!("Invalid sats value provided");
                     }
-                },
+                }
                 (Some("payjitinvoice"), [invoice_str]) | (Some("payinvoice"), [invoice_str]) => {
                     let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                     match bolt11_invoice {
-                        Ok(invoice) => {
-                            match exchange.bolt11_payment().send(&invoice,None) {
-                                Ok(payment_id) => println!("Payment sent from Exchange with payment_id: {}", payment_id),
-                                Err(e) => println!("Error sending payment from Exchange: {}", e)
+                        Ok(invoice) => match exchange.bolt11_payment().send(&invoice, None) {
+                            Ok(payment_id) => {
+                                println!("Payment sent from Exchange with payment_id: {}", payment_id)
                             }
+                            Err(e) => println!("Error sending payment from Exchange: {}", e),
                         },
                         Err(e) => println!("Error parsing invoice: {}", e),
                     }
-                },
+                }
                 (Some("exit"), _) => break,
                 _ => println!("Unknown command or incorrect arguments: {}", input),
             }
         }
     }
 
-    #[cfg(feature = "user")] {
+    #[cfg(feature = "user")]
+    {
         let user = make_node("user", 9736, None);
         let mut their_offer: Option<Offer> = None;
 
@@ -327,20 +358,26 @@ fn main() {
                     their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                     println!("Offer set.")
                 }
-                (Some("getouroffer"),[]) => {
-                    let our_offer: Offer = user.bolt12_payment().receive_variable_amount("thanks", None).unwrap();
+                (Some("getouroffer"), []) => {
+                    let our_offer: Offer = user
+                        .bolt12_payment()
+                        .receive_variable_amount("thanks", None)
+                        .unwrap();
                     println!("{}", our_offer);
-                },
+                }
                 // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
                 // startstablechannel 44c105c0f12c47ef4f573928448fb1c662fd61289b0baf93537f03075aa99010 true 305.0 0
-                (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
+                (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) =>
+                {
                     let channel_id = channel_id.to_string();
                     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
-                    let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
+                    let expected_dollar_amount =
+                        expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
                     let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                    let counterparty = user.list_channels()
+                    let counterparty = user
+                        .list_channels()
                         .iter()
                         .find(|channel| {
                             println!("channel_id: {}", channel.channel_id);
@@ -348,7 +385,7 @@ fn main() {
                         })
                         .map(|channel| channel.counterparty_node_id)
                         .expect("Failed to find channel with the specified sID");
-                
+
                     let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
                         .expect("Invalid hex string")
                         .try_into()
@@ -356,42 +393,45 @@ fn main() {
 
                     let mut stable_channel = StableChannel {
                         channel_id: ChannelId::from_bytes(channel_id_bytes),
-                        is_stable_receiver,  
+                        is_stable_receiver,
                         counterparty,
                         expected_usd: USD::from_f64(expected_dollar_amount),
                         expected_btc: Bitcoin::from_btc(native_amount_sats),
                         stable_receiver_btc: Bitcoin::from_btc(0.0),
-                        stable_provider_btc: Bitcoin::from_btc(0.0),  
+                        stable_provider_btc: Bitcoin::from_btc(0.0),
                         stable_receiver_usd: USD::from_f64(0.0),
                         stable_provider_usd: USD::from_f64(0.0),
-                        risk_level: 0, 
+                        risk_level: 0,
                         timestamp: 0,
-                        formatted_datetime: "2021-06-01 12:00:00".to_string(), 
+                        formatted_datetime: "2021-06-01 12:00:00".to_string(),
                         payment_made: false,
                         sc_dir: "/path/to/sc_dir".to_string(),
-                        latest_price: 0.0, 
+                        latest_price: 0.0,
                         prices: "".to_string(),
                         counterparty_offer: their_offer.expect("Expected an Offer but found None"),
                     };
 
-                    println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
+                    println!(
+                        "Stable Channel created: {:?}",
+                        stable_channel.channel_id.to_string()
+                    );
 
                     loop {
                         let now = SystemTime::now();
                         let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
-                    
+
                         let now_secs = now_duration.as_secs();
-                    
+
                         let next_10_sec = ((now_secs / 60) + 1) * 60;
                         let next_10_sec_duration = Duration::from_secs(next_10_sec);
-                    
+
                         let sleep_duration = next_10_sec_duration
                             .checked_sub(now_duration)
                             .unwrap_or_else(|| Duration::from_secs(0));
-                    
+
                         // Sleep until the next 60-second mark
                         std::thread::sleep(sleep_duration);
-                    
+
                         println!();
                         println!(
                             "\nChecking stability for channel {}...\n",
@@ -399,14 +439,14 @@ fn main() {
                         );
                         stable_channel = check_stability(&user, stable_channel);
                     }
-                },
+                }
                 (Some("getaddress"), []) => {
                     let funding_address = user.onchain_payment().new_address();
                     match funding_address {
                         Ok(fund_addr) => println!("User Funding Address: {}", fund_addr),
                         Err(e) => println!("Error getting funding address: {}", e),
                     }
-                },
+                }
                 (Some("openchannel"), args) => {
                     if args.len() != 3 {
                         println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
@@ -416,7 +456,7 @@ fn main() {
                     // TODO - set zero reserve
                     // ChannelHandshakeConfig::their_channel_reserve_proportional_millionths
                     // https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelHandshakeConfig.html#structfield.their_channel_reserve_proportional_millionths
-                    
+
                     // https://docs.rs/lightning/latest/lightning/util/config/struct.ChannelHandshakeLimits.html#structfield.max_channel_reserve_satoshis
 
                     let node_id_str = &args[0];
@@ -427,25 +467,29 @@ fn main() {
                     let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
                     let sats: u64 = sats_str.parse().unwrap();
                     let push_msat = (sats / 2) * 1000;
-            
-                    let channel_config: Option<ChannelConfig> = None;    
-                    
-                    match user.open_announced_channel(lsp_node_id, lsp_net_address, sats, Some(push_msat), channel_config) {
+
+                    let channel_config: Option<ChannelConfig> = None;
+
+                    match user.open_announced_channel(
+                        lsp_node_id,
+                        lsp_net_address,
+                        sats,
+                        Some(push_msat),
+                        channel_config,
+                    ) {
                         Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
-                
-                },
+                }
                 (Some("balance"), []) => {
                     let balances = user.list_balances();
                     let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
-                    let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                    let lightning_balance =
+                        Bitcoin::from_sats(balances.total_lightning_balance_sats);
                     println!("User On-Chain Balance: {}", onchain_balance);
                     println!("Stable Receiver Lightning Balance: {}", lightning_balance);
-                },
-                (Some("connecttolsp"), []) => {
-                
-                },
+                }
+                (Some("connecttolsp"), []) => {}
                 (Some("closeallchannels"), []) => {
                     for channel in user.list_channels().iter() {
                         let user_channel_id = channel.user_channel_id;
@@ -453,7 +497,7 @@ fn main() {
                         let _ = user.close_channel(&user_channel_id, counterparty_node_id);
                     }
                     print!("Closing all channels.")
-                },
+                }
                 (Some("listallchannels"), []) => {
                     let channels = user.list_channels();
                     if channels.is_empty() {
@@ -463,14 +507,17 @@ fn main() {
                         for channel in channels.iter() {
                             println!("--------------------------------------------");
                             println!("Channel ID: {}", channel.channel_id);
-                            println!("Channel Value: {}", Bitcoin::from_sats(channel.channel_value_sats));
+                            println!(
+                                "Channel Value: {}",
+                                Bitcoin::from_sats(channel.channel_value_sats)
+                            );
                             // println!("Our Balance: {}", Bitcoin::from_sats(channel.outbound_capacity_msat / 1000));
                             // println!("Their Balance: {}", Bitcoin::from_sats(channel.inbound_capacity_msat / 1000));
                             println!("Channel Ready?: {}", channel.is_channel_ready);
                         }
                         println!("--------------------------------------------");
                     }
-                },
+                }
                 (Some("getinvoice"), [sats]) => {
                     if let Ok(sats_value) = sats.parse::<u64>() {
                         let msats = sats_value * 1000;
@@ -478,97 +525,108 @@ fn main() {
                         let invoice = bolt11.receive(msats, "test invoice", 6000);
                         match invoice {
                             Ok(inv) => println!("User Invoice: {}", inv),
-                            Err(e) => println!("Error creating invoice: {}", e)
+                            Err(e) => println!("Error creating invoice: {}", e),
                         }
                     } else {
                         println!("Invalid sats value provided");
                     }
-                },
+                }
                 (Some("payinvoice"), [invoice_str]) => {
                     let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                     match bolt11_invoice {
-                        Ok(invoice) => {
-                            match user.bolt11_payment().send(&invoice, None) {
-                                Ok(payment_id) => println!("Payment sent from User with payment_id: {}", payment_id),
-                                Err(e) => println!("Error sending payment from User: {}", e)
+                        Ok(invoice) => match user.bolt11_payment().send(&invoice, None) {
+                            Ok(payment_id) => {
+                                println!("Payment sent from User with payment_id: {}", payment_id)
                             }
+                            Err(e) => println!("Error sending payment from User: {}", e),
                         },
                         Err(e) => println!("Error parsing invoice: {}", e),
                     }
-                },
+                }
                 (Some("getjitinvoice"), []) => {
                     match user.bolt11_payment().receive_via_jit_channel(
-                        50000000, 
-                        "Stable Channel", 
-                        3600, 
-                        Some(10000000)
+                        50000000,
+                        "Stable Channel",
+                        3600,
+                        Some(10000000),
                     ) {
                         Ok(invoice) => println!("Invoice: {:?}", invoice.to_string()),
                         Err(e) => println!("Error: {:?}", e),
                     }
-                },
+                }
                 (Some("exit"), _) => break,
                 _ => println!("Unknown command or incorrect arguments:"),
             }
         }
     }
 
-    #[cfg(feature = "lsp")] {
+    #[cfg(feature = "lsp")]
+    {
         let lsp = make_node("lsp", 9737, None);
         let mut their_offer: Option<Offer> = None;
 
         loop {
             let (input, command, args) = get_user_input("Enter command for lsp: ");
 
-        match (command.as_deref(), args.as_slice()) {
-            (Some("settheiroffer"), [their_offer_str]) => {
-                their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
-                println!("Offer set.");
-    
-            },
-            (Some("getouroffer"),[]) => {
-                let our_offer: Offer = lsp.bolt12_payment().receive_variable_amount("thanks", None).unwrap();
-                println!("{}", our_offer);
-            },
-            (Some("getaddress"), []) => {
-                let funding_address = lsp.onchain_payment().new_address();
-                match funding_address {
-                    Ok(fund_addr) => println!("LSP Funding Address: {}", fund_addr),
-                    Err(e) => println!("Error getting funding address: {}", e),
+            match (command.as_deref(), args.as_slice()) {
+                (Some("settheiroffer"), [their_offer_str]) => {
+                    their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
+                    println!("Offer set.");
                 }
-            },
-            (Some("openchannel"), args) => {
-                if args.len() != 3 {
-                    println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
-                    return;
+                (Some("getouroffer"), []) => {
+                    let our_offer: Offer = lsp
+                        .bolt12_payment()
+                        .receive_variable_amount("thanks", None)
+                        .unwrap();
+                    println!("{}", our_offer);
                 }
+                (Some("getaddress"), []) => {
+                    let funding_address = lsp.onchain_payment().new_address();
+                    match funding_address {
+                        Ok(fund_addr) => println!("LSP Funding Address: {}", fund_addr),
+                        Err(e) => println!("Error getting funding address: {}", e),
+                    }
+                }
+                (Some("openchannel"), args) => {
+                    if args.len() != 3 {
+                        println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
+                        return;
+                    }
 
-                let node_id_str = &args[0];
-                let listening_address_str = &args[1];
-                let sats_str = &args[2];
+                    let node_id_str = &args[0];
+                    let listening_address_str = &args[1];
+                    let sats_str = &args[2];
 
-                let user_node_id = node_id_str.parse().unwrap();
-                let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
-                let sats: u64 = sats_str.parse().unwrap();
-        
-                let channel_config: Option<ChannelConfig> = None;    
-                
-                match lsp.open_announced_channel(user_node_id, lsp_net_address, sats, Some(sats/2), channel_config) {
-                    Ok(_) => println!("Channel successfully opened to {}", node_id_str),
-                    Err(e) => println!("Failed to open channel: {}", e),
+                    let user_node_id = node_id_str.parse().unwrap();
+                    let lsp_net_address: SocketAddress = listening_address_str.parse().unwrap();
+                    let sats: u64 = sats_str.parse().unwrap();
+
+                    let channel_config: Option<ChannelConfig> = None;
+
+                    match lsp.open_announced_channel(
+                        user_node_id,
+                        lsp_net_address,
+                        sats,
+                        Some(sats / 2),
+                        channel_config,
+                    ) {
+                        Ok(_) => println!("Channel successfully opened to {}", node_id_str),
+                        Err(e) => println!("Failed to open channel: {}", e),
+                    }
                 }
-            
-            },
-            // Sample start command below:
+                // Sample start command below:
                 // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
                 // startstablechannel 569b7829b98de19a86ec7d73079a0b3c5e03686aa923e86669f6ab8397674759 false 172.0 0
-                (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
+                (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) =>
+                {
                     let channel_id = channel_id.to_string();
                     let is_stable_receiver = is_stable_receiver.parse::<bool>().unwrap_or(false);
-                    let expected_dollar_amount = expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
+                    let expected_dollar_amount =
+                        expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
                     let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                    let counterparty = lsp.list_channels()
+                    let counterparty = lsp
+                        .list_channels()
                         .iter()
                         .find(|channel| {
                             println!("channel_id: {}", channel.channel_id);
@@ -576,7 +634,7 @@ fn main() {
                         })
                         .map(|channel| channel.counterparty_node_id)
                         .expect("Failed to find channel with the specified sID");
-                
+
                     let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
                         .expect("Invalid hex string")
                         .try_into()
@@ -584,116 +642,97 @@ fn main() {
 
                     let mut stable_channel = StableChannel {
                         channel_id: ChannelId::from_bytes(channel_id_bytes),
-                        is_stable_receiver,  
+                        is_stable_receiver,
                         counterparty,
                         expected_usd: USD::from_f64(expected_dollar_amount),
                         expected_btc: Bitcoin::from_btc(native_amount_sats),
                         stable_receiver_btc: Bitcoin::from_btc(0.0),
-                        stable_provider_btc: Bitcoin::from_btc(0.0),  
+                        stable_provider_btc: Bitcoin::from_btc(0.0),
                         stable_receiver_usd: USD::from_f64(0.0),
                         stable_provider_usd: USD::from_f64(0.0),
-                        risk_level: 0, 
+                        risk_level: 0,
                         timestamp: 0,
-                        formatted_datetime: "2021-06-01 12:00:00".to_string(), 
+                        formatted_datetime: "2021-06-01 12:00:00".to_string(),
                         payment_made: false,
                         sc_dir: "/path/to/sc_dir".to_string(),
-                        latest_price: 0.0, 
+                        latest_price: 0.0,
                         prices: "".to_string(),
                         counterparty_offer: their_offer.expect("Expected an Offer but found None"),
                     };
 
-                    println!("Stable Channel created: {:?}", stable_channel.channel_id.to_string());
+                    println!(
+                        "Stable Channel created: {:?}",
+                        stable_channel.channel_id.to_string()
+                    );
 
                     loop {
                         let now = SystemTime::now();
                         let now_duration = now.duration_since(UNIX_EPOCH).unwrap();
-                    
+
                         let now_secs = now_duration.as_secs();
-                    
+
                         let next_60_sec = ((now_secs / 60) + 1) * 60;
                         let next_60_sec_duration = Duration::from_secs(next_60_sec);
-                    
+
                         let sleep_duration = next_60_sec_duration
                             .checked_sub(now_duration)
                             .unwrap_or_else(|| Duration::from_secs(0));
-                    
+
                         std::thread::sleep(sleep_duration);
-                                            println!();
+                        println!();
                         println!(
                             "\nChecking stability for channel {}...\n",
                             stable_channel.channel_id
                         );
                         stable_channel = check_stability(&lsp, stable_channel);
                     }
-                },
-            (Some("balance"), []) => {
-                let balances = lsp.list_balances();
-                let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
-                let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
-                println!("LSP On-Chain Balance: {}", onchain_balance);
-                println!("LSP Lightning Balance: {}", lightning_balance);
-            },
-            (Some("listallchannels"), []) => {
-                println!("channels:");
-                for channel in lsp.list_channels().iter() {
-                    let channel_id = channel.channel_id;
-                    println!("{}", channel_id);
                 }
-                println!("channel details:");
-                let channels = lsp.list_channels();
-                println!("{:#?}", channels);
-            },
-            (Some("getinvoice"), [sats]) => {
-                if let Ok(sats_value) = sats.parse::<u64>() {
-                    let msats = sats_value * 1000;
-                    let bolt11 = lsp.bolt11_payment();
-                    let invoice = bolt11.receive(msats, "test invoice", 6000);
-                    match invoice {
-                        Ok(inv) => println!("LSP Invoice: {}", inv),
-                        Err(e) => println!("Error creating invoice: {}", e)
+                (Some("balance"), []) => {
+                    let balances = lsp.list_balances();
+                    let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
+                    let lightning_balance =
+                        Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                    println!("LSP On-Chain Balance: {}", onchain_balance);
+                    println!("LSP Lightning Balance: {}", lightning_balance);
+                }
+                (Some("listallchannels"), []) => {
+                    println!("channels:");
+                    for channel in lsp.list_channels().iter() {
+                        let channel_id = channel.channel_id;
+                        println!("{}", channel_id);
                     }
-                } else {
-                    println!("Invalid sats value provided");
+                    println!("channel details:");
+                    let channels = lsp.list_channels();
+                    println!("{:#?}", channels);
                 }
-            },
-            (Some("payinvoice"), [invoice_str]) => {
-                let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
-                match bolt11_invoice {
-                    Ok(invoice) => {
-                        match lsp.bolt11_payment().send(&invoice, None) {
-                            Ok(payment_id) => println!("Payment sent from LSP with payment_id: {}", payment_id),
-                            Err(e) => println!("Error sending payment from LSP: {}", e)
+                (Some("getinvoice"), [sats]) => {
+                    if let Ok(sats_value) = sats.parse::<u64>() {
+                        let msats = sats_value * 1000;
+                        let bolt11 = lsp.bolt11_payment();
+                        let invoice = bolt11.receive(msats, "test invoice", 6000);
+                        match invoice {
+                            Ok(inv) => println!("LSP Invoice: {}", inv),
+                            Err(e) => println!("Error creating invoice: {}", e),
                         }
-                    },
-                    Err(e) => println!("Error parsing invoice: {}", e),
+                    } else {
+                        println!("Invalid sats value provided");
+                    }
                 }
-            },
-            (Some("exit"), _) => break,
-            _ => println!("Unknown command or incorrect arguments: {}", input),
+                (Some("payinvoice"), [invoice_str]) => {
+                    let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
+                    match bolt11_invoice {
+                        Ok(invoice) => match lsp.bolt11_payment().send(&invoice, None) {
+                            Ok(payment_id) => {
+                                println!("Payment sent from LSP with payment_id: {}", payment_id)
+                            }
+                            Err(e) => println!("Error sending payment from LSP: {}", e),
+                        },
+                        Err(e) => println!("Error parsing invoice: {}", e),
+                    }
+                }
+                (Some("exit"), _) => break,
+                _ => println!("Unknown command or incorrect arguments: {}", input),
+            }
         }
     }
-}   
-
 }
-// fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
-
-// /     let mut builder = ldk_node_hack::Builder::new();
-
-// /     let promise_secret = [0u8; 32];
-// /     builder.set_liquidity_provider_lsps2(promise_secret);
-
-// /     builder.set_network(Network::Signet);
-// /     builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
-// /     builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
-// /     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-
-// /     builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
-
-// /     let node = builder.build().unwrap();
-
-// /     node.start().unwrap();
-
-// /     println!("{} public key: {}", alias, node.node_id());
-
-// /     return node;
-// / }

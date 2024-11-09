@@ -1,4 +1,4 @@
-use reqwest::blocking::Client;
+use ureq::Agent;
 use serde_json::Value;
 use std::error::Error;
 use retry::{retry, delay::Fixed};
@@ -50,7 +50,7 @@ pub fn set_price_feeds() -> Vec<PriceFeed> {
 }
 
 pub fn fetch_prices(
-    client: &Client,
+    agent: &Agent,
     price_feeds: &[PriceFeed],
 ) -> Result<Vec<(String, f64)>, Box<dyn Error>> {
     let mut prices = Vec::new();
@@ -62,9 +62,9 @@ pub fn fetch_prices(
             .replace("{currency}", "USD");
 
         let response = retry(Fixed::from_millis(300).take(3), || {
-            match client.get(&url).send() {
+            match agent.get(&url).call() {
                 Ok(resp) => {
-                    if resp.status().is_success() {
+                    if resp.status() >= 200 && resp.status() < 300 {
                         Ok(resp)
                     } else {
                         Err(format!("Received status code: {}", resp.status()))
@@ -77,7 +77,7 @@ pub fn fetch_prices(
             Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
         })?;
 
-        let json: Value = response.json()?;
+        let json: Value = response.into_json()?;
         let mut data = &json;
 
         for key in &price_feed.jsonpath {
