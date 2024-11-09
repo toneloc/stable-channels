@@ -20,14 +20,10 @@ use std::{
 };
 
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network},
-    config::ChannelConfig,
-    lightning::{
+    bitcoin::{secp256k1::PublicKey, Network}, config::ChannelConfig, lightning::{
         ln::msgs::SocketAddress,
         offers::offer::Offer,
-    },
-    lightning_invoice::Bolt11Invoice,
-    Builder, ChannelDetails, Node,
+    }, lightning_invoice::Bolt11Invoice, payment::SendingParameters, Builder, ChannelDetails, Node
 };
 
 use lightning::ln::types::ChannelId;
@@ -159,18 +155,17 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
 
             let amt = USD::to_msats(dollars_from_par, sc.latest_price);
 
-            let result = node.bolt12_payment().send_using_amount(
-                &sc.counterparty_offer,
-                amt,
-                None,
-                Some("here ya go".to_string()),
-            );
+            // let result = node.bolt12_payment().send_using_amount(
+            //     &sc.counterparty_offer,
+            //     amt,
+            //     None,
+            //     Some("here ya go".to_string()),
+            // );
 
             // This is keysend / spontaneous payment code you can use if Bolt12 doesn't work
 
             // First, ensure we are connected
-            // let address = format!("127.0.0.1:9737").parse().unwrap();
-            // let result = node.connect(sc.counterparty, address, true);
+            // let result = node.connect(sc.counterparty, sc.counterparty_net_address, true);
 
             // if let Err(e) = result {
             //     println!("Failed to connect with : {}", e);
@@ -178,18 +173,14 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             //     println!("Successfully connected.");
             // }
 
-            // let result = node
-            //     .spontaneous_payment()
-            //     .send(amt, sc.counterparty);
-            // match result {
-            //     Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
-            //     Err(e) => println!("Failed to send payment: {}", e),
-            // }
-
+            let result = node
+                .spontaneous_payment()
+                .send(amt, sc.counterparty,None);
             match result {
-                Ok(payment_id) => println!("Payment sent successfully with ID: {:?}", payment_id.to_string()),
-                Err(e) => eprintln!("Failed to send payment: {:?}", e),
+                Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
+                Err(e) => println!("Failed to send payment: {}", e),
             }
+
         }
         Action::HighRisk => {
             println!("Risk level high. Current risk level: {}", sc.risk_level);
@@ -391,6 +382,8 @@ fn main() {
                         .try_into()
                         .expect("Decoded channel ID has incorrect length");
 
+                    // let mut their_offer: Option<Offer> = None;
+
                     let mut stable_channel = StableChannel {
                         channel_id: ChannelId::from_bytes(channel_id_bytes),
                         is_stable_receiver,
@@ -408,7 +401,7 @@ fn main() {
                         sc_dir: "/path/to/sc_dir".to_string(),
                         latest_price: 0.0,
                         prices: "".to_string(),
-                        counterparty_offer: their_offer.expect("Expected an Offer but found None"),
+                        // counterparty_offer: their_offer,
                     };
 
                     println!(
@@ -657,7 +650,7 @@ fn main() {
                         sc_dir: "/path/to/sc_dir".to_string(),
                         latest_price: 0.0,
                         prices: "".to_string(),
-                        counterparty_offer: their_offer.expect("Expected an Offer but found None"),
+                        // counterparty_offer: their_offer.expect("Expected an Offer but found None"),
                     };
 
                     println!(

@@ -104,6 +104,7 @@ pub struct StableChannel {
     pub channel_id: ChannelId,
     pub is_stable_receiver: bool,
     pub counterparty: PublicKey,
+    pub counterparty_net_address: String,
     pub expected_usd: USD,
     pub expected_btc: Bitcoin,
     pub stable_receiver_btc: Bitcoin,
@@ -117,5 +118,5 @@ pub struct StableChannel {
     pub sc_dir: String,
     pub latest_price: f64,
     pub prices: String,
-    pub counterparty_offer: Offer,
+    pub counterparty_offer: Option<Offer>,
 }
