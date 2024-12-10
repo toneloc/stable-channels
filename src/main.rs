@@ -80,15 +80,18 @@ fn make_node(alias: &str, port: u16, lsp_pubkey:Option<PublicKey>) -> ldk_node::
 
 fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
 
-     let mut builder = ldk_node_hack::Builder::new();
+    let mut builder = ldk_node_hack::Builder::new();
 
-     let promise_secret = [0u8; 32];
-     builder.set_liquidity_provider_lsps2(promise_secret);
+    let promise_secret = [0u8; 32];
+    builder.set_liquidity_provider_lsps2(promise_secret);
 
-     builder.set_network(Network::Signet);
+    builder.set_network(Network::Bitcoin);
 
     // If this doesn't work, try the other one
-    builder.set_esplora_server("https://mutinynet.com/api/".to_string());
+   
+    builder.set_esplora_server("https://mempool.emzy.de/api".to_string());
+    
+    // builder.set_esplora_server("https://mutinynet.com/api/".to_string());
     // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
 
     // Don't need gossip right now. Also interferes with Bolt12 implementation.
@@ -705,6 +708,7 @@ fn main() {
                 let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                 println!("LSP On-Chain Balance: {}", onchain_balance);
                 println!("LSP Lightning Balance: {}", lightning_balance);
+                // println!("All: {}", balances.);
             },
             (Some("listchannels"), []) => {
                 println!("{}", "channels:");
