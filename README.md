@@ -72,25 +72,7 @@ Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` i
 
      Check if `"channel_ready"` equals `"true"`. This will take 6 confirmations or a minute or two.
 
-4. **Set Bolt12 Offers**
-
-   - In **both windows**, run:
-
-     ```bash
-     getouroffer
-     ```
-
-   - Copy the offer from each window.
-
-   - In **both windows**, run:
-
-     ```bash
-     settheiroffer [OFFER]
-     ```
-
-     Replace `[OFFER]` with the offer you copied from the other window.
-
-5. **Start the Stable Channel for Both Users**
+4. **Start the Stable Channel for Both Users**
 
    | Window           | Command                                                                                                                          | Example Command                                                                                                                                        |
    |------------------|----------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
