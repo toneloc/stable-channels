@@ -22,15 +22,16 @@ use std::{
 };
 
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network},
+    bitcoin::{self, secp256k1::PublicKey, Network},
     lightning::{
         ln::{msgs::SocketAddress, ChannelId},
         offers::offer::Offer,
     },
-    lightning_invoice::Bolt11Invoice,
+    lightning_invoice::{payment, Bolt11Invoice},
     Builder, ChannelConfig, Node,
 };
 
+use ldk_node::bitcoin::Address;
 use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
 use reqwest::blocking::Client;
 use types::{Bitcoin, StableChannel, USD};
@@ -379,9 +380,10 @@ fn main() {
                         Err(e) => println!("Error parsing invoice: {}", e),
                     }
                 },
+                
                 (Some("exit"), _) => break,
                 _ => println!("Unknown command or incorrect arguments: {}", input),
-            }
+                }
         }
     }
 
@@ -762,9 +764,31 @@ fn main() {
                     Err(e) => println!("Error parsing invoice: {}", e),
                 }
             },
+            (Some("onchainsend"), [address_str]) => {
+                match Address::from_str(address_str) {
+                    Ok(addr) => match addr.require_network(lsp.config().network) {
+                        Ok(addr_checked) => {
+                            match lsp.onchain_payment().send_all_to_address(&addr_checked) {
+                                Ok(txid) => println!("{}", txid),
+                                Err(e) => eprintln!("Error: {}", e),
+                            }
+                        }
+                        Err(_) => eprintln!("Invalid address for network"),
+                    }
+                    Err(_) => eprintln!("Invalid address"),
+                }                
+            },
             (Some("exit"), _) => break,
             _ => println!("Unknown command or incorrect arguments: {}", input),
+            // lsp.payment.onchain_payment.send_all_to_address("bc1pe2yt0wtdsyuuagaz2dpc0v0084gqfryx860t5d32qsxdjg84tc0qqu29r8",false);
+            
+         
+
+
+
+
         }
+    
     }
 }   
 
