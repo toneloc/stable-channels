@@ -401,7 +401,6 @@ fn main() {
                         sc_dir: "/path/to/sc_dir".to_string(),
                         latest_price: 0.0,
                         prices: "".to_string(),
-                        // counterparty_offer: their_offer,
                     };
 
                     println!(
