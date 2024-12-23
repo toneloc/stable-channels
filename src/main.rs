@@ -86,26 +86,36 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
     let promise_secret = [0u8; 32];
     builder.set_liquidity_provider_lsps2(promise_secret);
 
-    builder.set_network(Network::Bitcoin);
+    builder.set_network(Network::Signet);
 
     // If this doesn't work, try the other one
    
-    builder.set_esplora_server("https://mempool.emzy.de/api".to_string());
+    // builder.set_esplora_server("https://mempool.emzy.de/api".to_string());
     
-    // builder.set_esplora_server("https://mutinynet.com/api/".to_string());
+    builder.set_esplora_server("https://mutinynet.com/api/".to_string());
     // builder.set_esplora_server("https://mutinynet.ltbl.io/api".to_string());
 
     // Don't need gossip right now. Also interferes with Bolt12 implementation.
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-    let _ = builder.set_listening_addresses(vec![format!("0.0.0.0:{}", port).parse().unwrap()]);
+    let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
 
     let node = builder.build().unwrap();
 
     node.start().unwrap();
+    let public_key: PublicKey = node.node_id();
 
-    println!("{} public key: {}", alias, node.node_id());
+    let listening_addresses: Vec<SocketAddress> = node.listening_addresses().unwrap();
 
+    if let Some(first_address) = listening_addresses.first() {
+        println!("");
+        println!("Actor Role: {}", alias);
+        println!("Public Key: {}", public_key);
+        println!("Internet Address: {}", first_address);
+        println!("");
+    } else {
+        println!("No listening addresses found.");
+    }
     return node;
 }
 
