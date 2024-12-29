@@ -295,6 +295,20 @@ fn main() {
                         Err(e) => println!("Failed to open channel: {}", e),
                     }
                 },
+                (Some("onchainsend"), [address_str]) => {
+                    match Address::from_str(address_str) {
+                        Ok(addr) => match addr.require_network(exchange.config().network) {
+                            Ok(addr_checked) => {
+                                match exchange.onchain_payment().send_all_to_address(&addr_checked) {
+                                    Ok(txid) => println!("{}", txid),
+                                    Err(e) => eprintln!("Error: {}", e),
+                                }
+                            }
+                            Err(_) => eprintln!("Invalid address for network"),
+                        }
+                        Err(_) => eprintln!("Invalid address"),
+                    }                
+                },
                 (Some("getaddress"), []) => {
                     let funding_address = exchange.onchain_payment().new_address();
                     match funding_address {
