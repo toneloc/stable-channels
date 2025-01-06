@@ -112,6 +112,7 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
         println!("Actor Role: {}", alias);
         println!("Public Key: {}", public_key);
         println!("Internet Address: {}", first_address);
+        // println!("Network: {}", node.network());
         println!("");
     } else {
         println!("No listening addresses found.");
