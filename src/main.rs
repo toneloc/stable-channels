@@ -98,7 +98,7 @@ fn make_hack_node(alias: &str, port: u16) -> ldk_node_hack::Node {
     // Don't need gossip right now. Also interferes with Bolt12 implementation.
     // builder.set_gossip_source_rgs("https://mutinynet.ltbl.io/snapshot".to_string());
     builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
-    let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()]);
+    let _ = builder.set_listening_addresses(vec![format!("0.0.0.1:{}", port).parse().unwrap()]);
 
     let node = builder.build().unwrap();
 
