@@ -623,6 +623,14 @@ fn main() {
             let (input, command, args) = get_user_input("Enter command for lsp: ");
 
         match (command.as_deref(), args.as_slice()) {
+             (Some("closeallchannels"), []) => {
+                for channel in lsp.list_channels().iter() {
+                    let user_channel_id = channel.user_channel_id;
+                    let counterparty_node_id = channel.counterparty_node_id;
+                    let _ = lsp.close_channel(&user_channel_id, counterparty_node_id);
+                }
+                print!("Closing all channels.")
+            },
             (Some("settheiroffer"), [their_offer_str]) => {
                 their_offer = Some(Offer::from_str(&their_offer_str).unwrap());
                 println!("Offer set.");
