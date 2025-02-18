@@ -31,11 +31,11 @@ pub fn set_price_feeds() -> Vec<PriceFeed> {
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
             vec!["bitcoin", "usd"],
         ),
-        PriceFeed::new(
-            "Coindesk",
-            "https://api.coindesk.com/v1/bpi/currentprice/USD.json",
-            vec!["bpi", "USD", "rate_float"],
-        ),
+        // PriceFeed::new(
+        //     "Coindesk",
+        //     "https://api.coindesk.com/v1/bpi/currentprice/USD.json",
+        //     vec!["bpi", "USD", "rate_float"],
+        // ),
         PriceFeed::new(
             "Coinbase",
             "https://api.coinbase.com/v2/prices/spot?currency=USD",
@@ -109,7 +109,7 @@ pub fn fetch_prices(
     }
 
     if prices.len() < 5 {
-        println!("Fewer than 5 prices fetched.");
+        // println!("Fewer than 5 prices fetched.");
     }
 
     if prices.is_empty() {

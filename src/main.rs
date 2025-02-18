@@ -99,7 +99,12 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
     println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
 
     println!("{:<25} {:>15}", "User BTC:", sc.stable_receiver_btc);
+    println!("");
+    println!("");
+
     println!("{:<25} {:>15}", "LSP USD:", sc.stable_provider_usd);
+    println!("{:<25} {:>15}", "LSP BTC:", sc.stable_provider_btc);
+
 
     enum Action {
         Wait,
