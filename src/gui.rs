@@ -16,7 +16,7 @@ use crate::state::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
 
 // Enum to track the application state
-enum AppState {
+enum UIState {
     OnboardingScreen,
     WaitingForPayment,
     MainScreen,
@@ -25,7 +25,7 @@ enum AppState {
 
 // Main application structure
 pub struct StableChannelsApp {
-    state: AppState,
+    state: UIState,
     last_stability_check: Instant,
     invoice_result: String,
     state_manager: StateManager,
@@ -83,15 +83,13 @@ impl StableChannelsApp {
         // Create LDK node
         let user = Self::make_node(&config, lsp_pubkey);
         
-        // Create the state manager
         let state_manager = StateManager::new(user);
 
-        // Determine initial app state
         let channels = state_manager.node().list_channels();
         let state = if channels.is_empty() {
-            AppState::OnboardingScreen
+            UIState::OnboardingScreen
         } else {
-            AppState::MainScreen
+            UIState::MainScreen
         }; 
 
         Self {
@@ -325,7 +323,7 @@ impl StableChannelsApp {
     
                 if ui.add(create_channel_button).clicked() {
                     self.get_jit_invoice(ctx);
-                    self.state = AppState::WaitingForPayment;
+                    self.state = UIState::WaitingForPayment;
                 }
             });
         });
@@ -391,7 +389,7 @@ impl StableChannelsApp {
                     .fill(egui::Color32::from_gray(220))
                     .rounding(6.0), 
                 ).clicked() {
-                    self.state = AppState::OnboardingScreen;
+                    self.state = UIState::OnboardingScreen;
                 }
                 
                 ui.add_space(8.0); 
@@ -514,16 +512,16 @@ impl StableChannelsApp {
                         }
                     }
                     self.check_stability();
-                    self.state = AppState::MainScreen;
+                    self.state = UIState::MainScreen;
                 }
                 
                 Event::PaymentReceived { .. } => {
-                    self.state = AppState::MainScreen;
+                    self.state = UIState::MainScreen;
                     println!("Payment received");
                 }
 
                 Event::ChannelClosed { .. } => {
-                    self.state = AppState::ClosingScreen;
+                    self.state = UIState::ClosingScreen;
                     println!("Channel closed");
                 }
                 _ => {}
@@ -557,7 +555,7 @@ impl StableChannelsApp {
                         match self.state_manager.node().onchain_payment().send_all_to_address(&addr_checked, false, None) {
                             Ok(txid) => {
                                 self.status_message = format!("Withdrawal transaction sent: {}", txid);
-                                self.state = AppState::ClosingScreen;
+                                self.state = UIState::ClosingScreen;
                             },
                             Err(e) => self.status_message = format!("Error sending withdrawal: {}", e),
                         }
@@ -580,10 +578,10 @@ impl App for StableChannelsApp {
         }
 
         match self.state {
-            AppState::OnboardingScreen => self.show_onboarding_screen(ctx),
-            AppState::WaitingForPayment => self.show_waiting_for_payment_screen(ctx),
-            AppState::MainScreen => self.show_main_screen(ctx),
-            AppState::ClosingScreen => self.show_closing_screen(ctx),
+            UIState::OnboardingScreen => self.show_onboarding_screen(ctx),
+            UIState::WaitingForPayment => self.show_waiting_for_payment_screen(ctx),
+            UIState::MainScreen => self.show_main_screen(ctx),
+            UIState::ClosingScreen => self.show_closing_screen(ctx),
         }
 
         self.poll_for_events();

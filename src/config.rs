@@ -41,7 +41,7 @@ impl Config {
     pub fn default() -> Self {
         Config {
             lsp: LspConfig {
-                pubkey: "02f66757a6204814d0996bf819a47024de6f18c3878e7797938d13a69a54d3791b".to_string(),
+                pubkey: "02d6dad61ed43d855ff947d1000a3bb9072a88a7cffed109de9984d09a180f926d".to_string(),
                 address: "127.0.0.1:9737".to_string(),
                 auth: "00000000000000000000000000000000".to_string(),
             },
