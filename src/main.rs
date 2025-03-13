@@ -9,9 +9,11 @@
 mod types;
 mod price_feeds;
 
-/// This is used for advanced LSP features only
-/// pulled from https://github.com/tnull/ldk-node-hack
-// extern crate ldk_node_hack;
+#[cfg(feature = "user")]
+mod config;
+
+#[cfg(feature = "user")]
+mod gui;
 
 use std::{
     io::{self, Write},
@@ -20,13 +22,20 @@ use std::{
 };
 
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network}, config::ChannelConfig, lightning::{
+    bitcoin::{secp256k1::PublicKey, Network}, 
+    config::ChannelConfig, 
+    lightning::{
         ln::msgs::SocketAddress,
         offers::offer::Offer,
-    }, lightning_invoice::Bolt11Invoice, payment::SendingParameters, Builder, ChannelDetails, Node
+    }, 
+    lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description}, 
+    payment::SendingParameters, 
+    Builder, 
+    ChannelDetails, 
+    Node
 };
 
-use lightning::ln::types::ChannelId;
+use ldk_node::lightning::ln::types::ChannelId;
 use price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
 use ureq::Agent;
 use types::{Bitcoin, StableChannel, USD};
@@ -40,8 +49,8 @@ fn make_node(alias: &str, port: u16, lsp_pubkey: Option<PublicKey>) -> ldk_node:
         println!("{}", lsp_pubkey.to_string());
         let address = "127.0.0.1:9377".parse().unwrap();
         builder.set_liquidity_source_lsps2(
+            lsp_pubkey,  // Changed order to match the updated API
             address,
-            lsp_pubkey,
             Some("00000000000000000000000000000000".to_owned()),
         );
     }
@@ -83,12 +92,19 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
         .and_then(|prices| calculate_median_price(prices))
         .unwrap_or(0.0);
 
-    if let Some(channel) = node
-        .list_channels()
-        .iter()
-        .find(|c| c.channel_id == sc.channel_id)
-    {
-        sc = update_balances(sc, Some(channel.clone()));
+    // Using string comparison to handle different versions of ChannelId
+    let mut matching_channel = None;
+    let sc_channel_id_str = sc.channel_id.to_string();
+    
+    for channel in node.list_channels() {
+        if channel.channel_id.to_string() == sc_channel_id_str {
+            matching_channel = Some(channel.clone());
+            break;
+        }
+    }
+
+    if let Some(channel) = matching_channel {
+        sc = update_balances(sc, Some(channel));
     }
 
     let mut dollars_from_par: USD = sc.stable_receiver_usd - sc.expected_usd;
@@ -133,12 +149,17 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
             println!("\nWaiting 10 seconds and checking on payment...\n");
             std::thread::sleep(std::time::Duration::from_secs(10));
 
-            if let Some(channel) = node
+            // Using string comparison again
+            let sc_channel_id_str = sc.channel_id.to_string();
+            
+            let matching_channel = node
                 .list_channels()
                 .iter()
-                .find(|c| c.channel_id == sc.channel_id)
-            {
-                sc = update_balances(sc, Some(channel.clone()));
+                .find(|c| c.channel_id.to_string() == sc_channel_id_str)
+                .cloned();
+                
+            if let Some(channel) = matching_channel {
+                sc = update_balances(sc, Some(channel));
             }
 
             println!("{:<25} {:>15}", "Expected USD:", sc.expected_usd);
@@ -180,7 +201,7 @@ fn check_stability(node: &Node, mut sc: StableChannel) -> StableChannel {
 
             let result = node
                 .spontaneous_payment()
-                .send(amt, sc.counterparty,None);
+                .send(amt, sc.counterparty, None);
             match result {
                 Ok(payment_id) => println!("Payment sent successfully with payment ID: {}", payment_id),
                 Err(e) => println!("Failed to send payment: {}", e),
@@ -226,6 +247,7 @@ fn update_balances(
     sc // Return the modified StableChannel
 }
 
+#[allow(dead_code)]
 fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
     let mut input = String::new();
     print!("{}", prompt);
@@ -240,6 +262,7 @@ fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
 
     (input, command, args)
 }
+
 /// Program initialization and command-line-interface
 fn main() {
     #[cfg(feature = "exchange")]
@@ -314,7 +337,10 @@ fn main() {
                     if let Ok(sats_value) = sats.parse::<u64>() {
                         let msats = sats_value * 1000;
                         let bolt11 = exchange.bolt11_payment();
-                        let invoice = bolt11.receive(msats, "test invoice", 6000);
+                        let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                            ldk_node::lightning_invoice::Description::new("Invoice".to_string()).unwrap()
+                        );
+                        let invoice = bolt11.receive(msats, &description, 6000);
                         match invoice {
                             Ok(inv) => println!("Exchange Invoice: {}", inv),
                             Err(e) => println!("Error creating invoice: {}", e),
@@ -342,6 +368,18 @@ fn main() {
     }
 
     #[cfg(feature = "user")]
+    {
+        // Launch egui application when in user mode
+        gui::launch_app();
+    }
+
+    #[cfg(all(feature = "user", not(any(feature = "lsp", feature = "exchange"))))]
+    {
+        // This block is intentionally left empty as the GUI handles everything
+    }
+
+    // Original CLI user app - will only run if user feature is enabled AND egui app exits
+    #[cfg(all(feature = "user", not(any(feature = "gui"))))]
     {
         let user = make_node("user", 9736, None);
         let mut their_offer: Option<Offer> = None;
@@ -372,15 +410,17 @@ fn main() {
                         expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
                     let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                    let counterparty = user
-                        .list_channels()
-                        .iter()
-                        .find(|channel| {
-                            println!("channel_id: {}", channel.channel_id);
-                            channel.channel_id.to_string() == channel_id
-                        })
-                        .map(|channel| channel.counterparty_node_id)
-                        .expect("Failed to find channel with the specified sID");
+                    // Used string matching to find the channel
+                    let mut counterparty = None;
+                    for channel in user.list_channels() {
+                        println!("channel_id: {}", channel.channel_id);
+                        if channel.channel_id.to_string() == channel_id {
+                            counterparty = Some(channel.counterparty_node_id);
+                            break;
+                        }
+                    }
+                    
+                    let counterparty = counterparty.expect("Failed to find channel with the specified ID");
 
                     let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
                         .expect("Invalid hex string")
@@ -390,7 +430,7 @@ fn main() {
                     // let mut their_offer: Option<Offer> = None;
 
                     let mut stable_channel = StableChannel {
-                        channel_id: ChannelId::from_bytes(channel_id_bytes),
+                        channel_id: ChannelId(channel_id_bytes),
                         is_stable_receiver,
                         counterparty,
                         expected_usd: USD::from_f64(expected_dollar_amount),
@@ -519,7 +559,10 @@ fn main() {
                     if let Ok(sats_value) = sats.parse::<u64>() {
                         let msats = sats_value * 1000;
                         let bolt11: ldk_node::payment::Bolt11Payment = user.bolt11_payment();
-                        let invoice = bolt11.receive(msats, "test invoice", 6000);
+                        let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                            ldk_node::lightning_invoice::Description::new("Invoice".to_string()).unwrap()
+                        );
+                        let invoice = bolt11.receive(msats, &description, 6000);
                         match invoice {
                             Ok(inv) => println!("User Invoice: {}", inv),
                             Err(e) => println!("Error creating invoice: {}", e),
@@ -541,9 +584,12 @@ fn main() {
                     }
                 }
                 (Some("getjitinvoice"), []) => {
+                    let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                        ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
+                    );
                     match user.bolt11_payment().receive_via_jit_channel(
                         50000000,
-                        "Stable Channel",
+                        &description,
                         3600,
                         Some(10000000),
                     ) {
@@ -622,15 +668,17 @@ fn main() {
                         expected_dollar_amount.parse::<f64>().unwrap_or(0.0);
                     let native_amount_sats = native_amount_sats.parse::<f64>().unwrap_or(0.0);
 
-                    let counterparty = lsp
-                        .list_channels()
-                        .iter()
-                        .find(|channel| {
-                            println!("channel_id: {}", channel.channel_id);
-                            channel.channel_id.to_string() == channel_id
-                        })
-                        .map(|channel| channel.counterparty_node_id)
-                        .expect("Failed to find channel with the specified sID");
+                    // Used string matching to find the channel
+                    let mut counterparty = None;
+                    for channel in lsp.list_channels() {
+                        println!("channel_id: {}", channel.channel_id);
+                        if channel.channel_id.to_string() == channel_id {
+                            counterparty = Some(channel.counterparty_node_id);
+                            break;
+                        }
+                    }
+                    
+                    let counterparty = counterparty.expect("Failed to find channel with the specified ID");
 
                     let channel_id_bytes: [u8; 32] = hex::decode(channel_id)
                         .expect("Invalid hex string")
@@ -638,7 +686,7 @@ fn main() {
                         .expect("Decoded channel ID has incorrect length");
 
                     let mut stable_channel = StableChannel {
-                        channel_id: ChannelId::from_bytes(channel_id_bytes),
+                        channel_id: ChannelId(channel_id_bytes),
                         is_stable_receiver,
                         counterparty,
                         expected_usd: USD::from_f64(expected_dollar_amount),
@@ -654,7 +702,6 @@ fn main() {
                         sc_dir: "/path/to/sc_dir".to_string(),
                         latest_price: 0.0,
                         prices: "".to_string(),
-                        // counterparty_offer: their_offer.expect("Expected an Offer but found None"),
                     };
 
                     println!(
@@ -706,7 +753,8 @@ fn main() {
                     if let Ok(sats_value) = sats.parse::<u64>() {
                         let msats = sats_value * 1000;
                         let bolt11 = lsp.bolt11_payment();
-                        let invoice = bolt11.receive(msats, "test invoice", 6000);
+                        let description = Description::from_string(String::from("test invoice")).unwrap();
+                        let invoice = bolt11.receive(msats, &description, 6000);
                         match invoice {
                             Ok(inv) => println!("LSP Invoice: {}", inv),
                             Err(e) => println!("Error creating invoice: {}", e),
