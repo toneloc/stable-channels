@@ -12,10 +12,8 @@ use ldk_node::{
 use ldk_node::lightning_invoice::Bolt11InvoiceDescription;
 
 use crate::config::Config;
+use crate::state::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
-use crate::price_feeds::set_price_feeds;
-use crate::price_feeds::{fetch_prices, calculate_median_price};
-use ureq::Agent;
 
 // Enum to track the application state
 enum AppState {
@@ -30,11 +28,10 @@ pub struct StableChannelsApp {
     state: AppState,
     last_stability_check: Instant,
     invoice_result: String,
-    user: Node,
+    state_manager: StateManager,
     qr_texture: Option<TextureHandle>,
     status_message: String,
     close_channel_address: String,
-    stable_channel: StableChannel,
     config: Config,
 }
 
@@ -86,53 +83,25 @@ impl StableChannelsApp {
         // Create LDK node
         let user = Self::make_node(&config, lsp_pubkey);
         
-        // Create initial stable channel configuration
-        let default_pubkey = lsp_pubkey.unwrap_or_else(|| {
-            PublicKey::from_slice(&[
-                0x02, 0x50, 0x86, 0x3A, 0xD6, 0x4A, 0x87, 0xAE, 0x8A, 0x2F, 0xE8, 0x3C, 0x1A,
-                0xF1, 0xA8, 0x40, 0x3C, 0xB5, 0x3F, 0x53, 0xE4, 0x86, 0xD8, 0x51, 0x1D, 0xAD,
-                0x8A, 0x04, 0x88, 0x7E, 0x5B, 0x23, 0x52,
-            ]).unwrap()
-        });
-
-        let stable_channel = StableChannel {
-            channel_id: ChannelId::from_bytes([0; 32]),
-            is_stable_receiver: true,
-            counterparty: default_pubkey,
-            expected_usd: USD::from_f64(config.stable_channel_defaults.expected_usd),
-            expected_btc: Bitcoin::from_btc(0.0),
-            stable_receiver_btc: Bitcoin::from_btc(0.0),
-            stable_provider_btc: Bitcoin::from_btc(0.0),
-            stable_receiver_usd: USD::from_f64(0.0),
-            stable_provider_usd: USD::from_f64(0.0),
-            risk_level: 0,
-            timestamp: 0,
-            formatted_datetime: "".to_string(),
-            payment_made: false,
-            sc_dir: config.stable_channel_defaults.sc_dir.clone(),
-            latest_price: Self::get_latest_price(),
-            prices: "".to_string(),
-        };
-
-        println!("Initial stable channel created");
+        // Create the state manager
+        let state_manager = StateManager::new(user);
 
         // Determine initial app state
-        let channels = user.list_channels();
+        let channels = state_manager.node().list_channels();
         let state = if channels.is_empty() {
             AppState::OnboardingScreen
         } else {
             AppState::MainScreen
-        };
+        }; 
 
         Self {
             state,
             last_stability_check: Instant::now() - Duration::from_secs(60),
             invoice_result: String::new(),
-            user,
+            state_manager,
             qr_texture: None,
             status_message: String::new(),
             close_channel_address: String::new(),
-            stable_channel,
             config,
         }
     }
@@ -198,102 +167,20 @@ impl StableChannelsApp {
         node
     }
 
-    fn get_latest_price() -> f64 {
-        match fetch_prices(&Agent::new(), &set_price_feeds())
-            .and_then(|prices| calculate_median_price(prices)) {
-            Ok(price) => price,
-            Err(e) => {
-                eprintln!("Error fetching price: {:?}", e);
-                60000.0 // Default fallback price
-            }
-        }
-    }
-
     fn check_stability(&mut self) {
-        self.stable_channel.latest_price = Self::get_latest_price();
-
-        let mut matching_channel_found = false;
+        let action = self.state_manager.check_stability();
         
-        // Find a matching channel
-        for channel in self.user.list_channels() {
-            // Compare channel IDs as strings to avoid type issues
-            let channel_id_str = channel.channel_id.to_string();
-            let our_id_str = self.stable_channel.channel_id.to_string();
-            let matches_id = channel_id_str == our_id_str;
-            let is_default = self.stable_channel.channel_id == ChannelId::from_bytes([0; 32]);
-                
-            if matches_id || is_default {
-                matching_channel_found = true;
-                
-                // If this is our first channel and we haven't set a channel ID yet
-                if is_default {
-                    self.stable_channel.channel_id = channel.channel_id;
-                    println!("Set active channel ID to: {}", self.stable_channel.channel_id);
-                }
-
-                self.update_balances(Some(channel.clone()));
-                break;
-            }
-        }
-
-        if !matching_channel_found {
-            println!("No matching channel found");
-            return;
-        }
-
-        // Calculate difference from expected value
-        let dollars_from_par: USD = self.stable_channel.stable_receiver_usd - self.stable_channel.expected_usd;
-        let percent_from_par = ((dollars_from_par / self.stable_channel.expected_usd) * 100.0).abs();
-
-        println!("{:<25} {:>15}", "Expected USD:", self.stable_channel.expected_usd);
-        println!("{:<25} {:>15}", "User USD:", self.stable_channel.stable_receiver_usd);
-        println!("{:<25} {:>5}", "Percent from par:", format!("{:.2}%\n", percent_from_par));
-        println!("{:<25} {:>15}", "User BTC:", self.stable_channel.stable_receiver_btc);
-        println!("{:<25} {:>15}", "LSP USD:", self.stable_channel.stable_provider_usd);
-
-        // Define action based on conditions
-        enum Action {
-            Wait,
-            Pay,
-            DoNothing,
-            HighRisk,
-        }
-
-        let action = if percent_from_par < 0.1 {
-            Action::DoNothing
-        } else {
-            let is_receiver_below_expected = self.stable_channel.stable_receiver_usd < self.stable_channel.expected_usd;
-
-            match (self.stable_channel.is_stable_receiver, is_receiver_below_expected, self.stable_channel.risk_level > 100) {
-                (_, _, true) => Action::HighRisk, // High risk scenario
-                (true, true, false) => Action::Wait,   // We are User and below peg, wait for payment
-                (true, false, false) => Action::Pay,   // We are User and above peg, need to pay
-                (false, true, false) => Action::Pay,   // We are LSP and below peg, need to pay
-                (false, false, false) => Action::Wait, // We are LSP and above peg, wait for payment
-            }
-        };
-
-        // Take action based on determined strategy
         match action {
-            Action::DoNothing => {
+            StabilityAction::DoNothing => {
                 self.status_message = "Difference from par less than 0.1%. Stable.".to_string();
-                println!("\nDifference from par less than 0.1%. Doing nothing.");
             },
-            Action::Wait => {
+            StabilityAction::Wait => {
                 self.status_message = "Waiting for payment from counterparty...".to_string();
-                println!("\nWaiting for payment from counterparty...");
             },
-            Action::Pay => {
+            StabilityAction::Pay(amt) => {
                 self.status_message = "Paying the difference...".to_string();
-                println!("\nPaying the difference...\n");
-
-                let amt = USD::to_msats(dollars_from_par, self.stable_channel.latest_price);
-
-                let result = self.user
-                    .spontaneous_payment()
-                    .send(amt, self.stable_channel.counterparty, None);
                 
-                match result {
+                match self.state_manager.execute_payment(amt) {
                     Ok(payment_id) => {
                         self.status_message = format!("Payment sent successfully with ID: {}", payment_id);
                         println!("Payment sent successfully with payment ID: {}", payment_id);
@@ -303,36 +190,15 @@ impl StableChannelsApp {
                         println!("Failed to send payment: {}", e);
                     }
                 }
-            }
-            Action::HighRisk => {
-                self.status_message = format!("Risk level high: {}", self.stable_channel.risk_level);
-                println!("Risk level high. Current risk level: {}", self.stable_channel.risk_level);
-            }
-        }
-    }
+            },
+            StabilityAction::HighRisk(risk_level) => {
+                self.status_message = format!("Risk level high: {}", risk_level);
+            },
 
-    fn update_balances(&mut self, channel_details: Option<ldk_node::ChannelDetails>) {
-        let (our_balance, their_balance) = match channel_details {
-            Some(channel) => {
-                let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
-                let our_balance_sats =
-                    (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-                let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-                (our_balance_sats, their_balance_sats)
+            StabilityAction::NotInitialized => {
+                self.status_message = "Channel not properly initialized. Please create a channel first.".to_string();
+                println!("Channel not properly initialized. Please create a channel first.");
             }
-            None => (0, 0),
-        };
-
-        if self.stable_channel.is_stable_receiver {
-            self.stable_channel.stable_receiver_btc = Bitcoin::from_sats(our_balance);
-            self.stable_channel.stable_receiver_usd = USD::from_bitcoin(self.stable_channel.stable_receiver_btc, self.stable_channel.latest_price);
-            self.stable_channel.stable_provider_btc = Bitcoin::from_sats(their_balance);
-            self.stable_channel.stable_provider_usd = USD::from_bitcoin(self.stable_channel.stable_provider_btc, self.stable_channel.latest_price);
-        } else {
-            self.stable_channel.stable_provider_btc = Bitcoin::from_sats(our_balance);
-            self.stable_channel.stable_provider_usd = USD::from_bitcoin(self.stable_channel.stable_provider_btc, self.stable_channel.latest_price);
-            self.stable_channel.stable_receiver_btc = Bitcoin::from_sats(their_balance);
-            self.stable_channel.stable_receiver_usd = USD::from_bitcoin(self.stable_channel.stable_receiver_btc, self.stable_channel.latest_price);
         }
     }
 
@@ -341,9 +207,11 @@ impl StableChannelsApp {
             ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
         );
         
+        // Use the amount from the config
+        let amount_msats = (self.config.stable_channel_defaults.expected_usd * 1_000_000.0) as u64;
 
-        let result = self.user.bolt11_payment().receive_via_jit_channel(
-            20_779_000,
+        let result = self.state_manager.node().bolt11_payment().receive_via_jit_channel(
+            amount_msats,
             &description,
             3600,
             Some(10_000_000),
@@ -538,9 +406,10 @@ impl StableChannelsApp {
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         // --- Existing Balance UI ---
-                        let balances = self.user.list_balances();
+                        let balances = self.state_manager.node().list_balances();
+                        let sc = self.state_manager.get_stable_channel();
                         let lightning_balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
-                        let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, self.stable_channel.latest_price);
+                        let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, sc.latest_price);
               
                         ui.add_space(30.0);
 
@@ -552,7 +421,7 @@ impl StableChannelsApp {
                                     .size(36.0)
                                     .strong(),
                             ));
-                            ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
+                            ui.label(format!("Agreed Peg USD: {}", sc.expected_usd));
                             ui.label(format!("Bitcoin: {}", lightning_balance_btc.to_string()));
                             ui.add_space(20.0);
                         });
@@ -562,7 +431,7 @@ impl StableChannelsApp {
                         ui.group(|ui| {
                             ui.add_space(20.0);
                             ui.heading("Bitcoin Price");
-                            ui.label(format!("${:.2}", self.stable_channel.latest_price));
+                            ui.label(format!("${:.2}", sc.latest_price));
                             ui.add_space(20.0);
 
                             let last_updated = self.last_stability_check.elapsed().as_secs();
@@ -628,9 +497,22 @@ impl StableChannelsApp {
     }
 
     fn poll_for_events(&mut self) {
-        while let Some(event) = self.user.next_event() {
+        while let Some(event) = self.state_manager.node().next_event() {
             match event {
                 Event::ChannelReady { .. } => {
+                    // Once we have a channel, initialize the stable channel
+                    let channels = self.state_manager.node().list_channels();
+                    if let Some(channel) = channels.first() {
+                        // Use the first channel we find
+                        if let Err(e) = self.state_manager.initialize_stable_channel(
+                            &channel.channel_id.to_string(),
+                            true, // default to stable receiver
+                            self.config.stable_channel_defaults.expected_usd,
+                            0.0, // no native bitcoin amount
+                        ) {
+                            eprintln!("Error initializing stable channel: {:?}", e);
+                        }
+                    }
                     self.check_stability();
                     self.state = AppState::MainScreen;
                 }
@@ -646,7 +528,7 @@ impl StableChannelsApp {
                 }
                 _ => {}
             }
-            self.user.event_handled();
+            self.state_manager.node().event_handled();
         }
     }
 
@@ -656,10 +538,10 @@ impl StableChannelsApp {
             return;
         }
 
-        for channel in self.user.list_channels().iter() {
+        for channel in self.state_manager.node().list_channels().iter() {
             let user_channel_id = channel.user_channel_id.clone();
             let counterparty_node_id = channel.counterparty_node_id;
-            match self.user.close_channel(&user_channel_id, counterparty_node_id) {
+            match self.state_manager.node().close_channel(&user_channel_id, counterparty_node_id) {
                 Ok(_) => self.status_message = "Closing channel...".to_string(),
                 Err(e) => self.status_message = format!("Error closing channel: {}", e),
             }
@@ -668,11 +550,11 @@ impl StableChannelsApp {
         // Withdraw everything to address
         match ldk_node::bitcoin::Address::from_str(&self.close_channel_address) {
             Ok(addr) => {
-                let balances = self.user.list_balances();
+                let network = Network::Signet;
                 
-                match addr.require_network(Network::Signet) {
+                match addr.require_network(network) {
                     Ok(addr_checked) => {
-                        match self.user.onchain_payment().send_all_to_address(&addr_checked, false, None) {
+                        match self.state_manager.node().onchain_payment().send_all_to_address(&addr_checked, false, None) {
                             Ok(txid) => {
                                 self.status_message = format!("Withdrawal transaction sent: {}", txid);
                                 self.state = AppState::ClosingScreen;

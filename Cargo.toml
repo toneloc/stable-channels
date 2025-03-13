@@ -1,17 +1,16 @@
-# egui dependencies (only for user feature)
-eframe = { version = "0.30.0", optional = true }
-egui = { version = "0.30.0", default-features = false, features = ["color-hex"], optional = true }
-egui_extras = { version = "0.30.0", features = ["default"], optional = true }
-qrcode = { version = "0.14", optional = true }
-image = { version = "0.24", optional = true }
-tray-icon = { version = "0.19.2", optional = true }
-dirs-next = { version = "2.0", optional = true }
-toml = "0.8"
-
 [package]
 name = "stable-channels"
 version = "0.1.0"
 edition = "2021"
+
+# Define both a library and binary target
+[lib]
+name = "stable_channels"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stable-channels"
+path = "src/main.rs"
 
 [features]
 exchange = []
