@@ -946,7 +946,7 @@ fn main() {
                             their_offer = Some(offer);
                             println!("Offer set.");
                         },
-                        Err(e) => println!("Error parsing offer: {}", e),
+                        Err(e) => println!("Error parsing offer"),
                     }
                 }
                 (Some("getouroffer"), []) => {
@@ -1090,6 +1090,10 @@ fn main() {
                                     },
                                     StabilityAction::HighRisk(risk) => {
                                         println!("Risk level high: {}", risk);
+                                    },
+                                    StabilityAction::NotInitialized => {
+                                        println!("Channel not properly initialized or may have been closed. Exiting stability loop.");
+                                        // Exit the loop if the channel is not initialized
                                     }
                                 }
                             }
@@ -1146,6 +1150,10 @@ fn main() {
                         StabilityAction::Wait => println!("Action: Wait for counterparty payment"),
                         StabilityAction::DoNothing => println!("Action: Do nothing, channel is stable"),
                         StabilityAction::HighRisk(risk) => println!("Action: High risk level ({})", risk),
+                        StabilityAction::NotInitialized => {
+                            println!("Channel not properly initialized or may have been closed. Exiting stability loop.");
+                            break; // Exit the loop if the channel is not initialized
+                        }
                     }
                 }
                 (Some("listallchannels"), []) => {
