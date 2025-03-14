@@ -1,12 +1,10 @@
 use crate::price_feeds::{calculate_median_price, fetch_prices, set_price_feeds};
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::{
-    bitcoin::secp256k1::PublicKey,
-    lightning::ln::types::ChannelId,
-    ChannelDetails, Node,
+    lightning::ln::types::ChannelId, Node,
 };
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, Duration};
 use ureq::Agent;
 
 /// Represents the action to take after a stability check
