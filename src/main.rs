@@ -24,7 +24,7 @@ mod gui;
 use std::io::{self, Write};
 
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network}, config::ChannelConfig, lightning::ln::msgs::SocketAddress, Builder 
+    bitcoin::{secp256k1::PublicKey, Network}, config::ChannelConfig, lightning::ln::msgs::SocketAddress, liquidity::LSPS2ServiceConfig, Builder 
 };
 
 use state::StateManager;
@@ -47,6 +47,21 @@ fn make_node(alias: &str, port: u16, lsp_pubkey: Option<PublicKey>) -> ldk_node:
             Some("00000000000000000000000000000000".to_owned()),
         );
     }
+
+    let service_config = LSPS2ServiceConfig {
+        require_token: None,
+        advertise_service: true,
+        channel_opening_fee_ppm: 10_000,
+        channel_over_provisioning_ppm: 100_000,
+        min_channel_opening_fee_msat: 0,
+        min_channel_lifetime: 100,
+        max_client_to_self_delay: 1024,
+        min_payment_size_msat: 0,
+        max_payment_size_msat: 1_000_000_000,
+    };
+
+    // The old compare snippet used set_liquidity_provider_lsps2():
+    builder.set_liquidity_provider_lsps2(service_config);
 
     builder.set_network(Network::Signet);
 
@@ -110,16 +125,20 @@ fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
 
 /// Program initialization and command-line-interface
 fn main() {
+    #[allow(dead_code)]
     #[cfg(feature = "exchange")]
     exchange::run();
 
+    #[allow(dead_code)]
     #[cfg(feature = "user")]
     gui::launch_app();
 
+    #[allow(dead_code)]
     #[cfg(feature = "lsp")]
     lsp::run();
 
     // CLI user app - will only run if user feature is enabled AND egui app exits
+    #[allow(dead_code)]
     #[cfg(all(feature = "user", not(any(feature = "gui"))))]
     {
         user::run();
