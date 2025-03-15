@@ -5,10 +5,15 @@ use stable_channels::{Bitcoin, StateManager};
 
 use crate::{get_user_input, make_node};
 
-use crate::config::Config;
+use crate::config::{ComponentType, Config};
 
 pub fn run() {
-    let config = Config::from_file("config.toml").unwrap_or_else(|_| Config::default());
+    let config = Config::get_or_create_for_component(ComponentType::Lsp);
+    
+    // Ensure directories exist
+    if let Err(e) = config.ensure_directories_exist() {
+        println!("Warning: Failed to create directories: {}", e);
+    }
 
     let lsp_node = make_node(&config, None, true);
     let lsp = StateManager::new(lsp_node);

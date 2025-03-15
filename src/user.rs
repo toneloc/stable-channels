@@ -14,10 +14,15 @@ use stable_channels::{StabilityAction, StateManager};
 use crate::types::Bitcoin;
 use crate::{get_user_input, make_node};
 
-use crate::config::Config;
+use crate::config::{ComponentType, Config};
 
 pub fn run() {
-    let config = Config::from_file("config.toml").unwrap_or_else(|_| Config::default());
+    let config = Config::get_or_create_for_component(ComponentType::User);
+    
+    // Ensure directories exist
+    if let Err(e) = config.ensure_directories_exist() {
+        println!("Warning: Failed to create directories: {}", e);
+    }
 
     let lsp_pubkey_bytes = hex::decode(&config.lsp.pubkey).unwrap();
     let lsp_pubkey = PublicKey::from_slice(&lsp_pubkey_bytes).unwrap();

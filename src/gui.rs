@@ -16,6 +16,8 @@ use crate::state::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
 use crate::make_node;
 
+use crate::config::{ComponentType};
+
 // Enum to track the application state
 enum UIState {
     OnboardingScreen,
@@ -38,32 +40,13 @@ pub struct StableChannelsApp {
 
 impl StableChannelsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Try to load configuration file
-        let config_path = match dirs::home_dir() {
-            Some(mut path) => {
-                path.push(".stable-channels");
-                path.push("config.toml");
-                if !path.exists() {
-                    // Create default config file if it doesn't exist
-                    fs::create_dir_all(path.parent().unwrap()).unwrap_or_default();
-                    let default_config = include_str!("../default_config.toml");
-                    fs::write(&path, default_config).unwrap_or_default();
-                }
-                path
-            },
-            None => PathBuf::from("config.toml"),
-        };
-
-        println!("Using config file: {:?}", config_path);
-
-        let config = match Config::from_file(config_path.to_str().unwrap_or("config.toml")) {
-            Ok(config) => config,
-            Err(e) => {
-                eprintln!("Error loading config: {:?}", e);
-                Config::default() // Fallback to default config
-            }
-        };
-
+        let config = Config::get_or_create_for_component(ComponentType::Gui);
+    
+        // Ensure directories exist
+        if let Err(e) = config.ensure_directories_exist() {
+            eprintln!("Warning: Failed to create directories: {}", e);
+        }
+    
         // Parse LSP pubkey
         let lsp_pubkey_bytes = match hex::decode(&config.lsp.pubkey) {
             Ok(bytes) => bytes,
@@ -72,7 +55,7 @@ impl StableChannelsApp {
                 vec![0; 33] // Fallback to empty pubkey
             }
         };
-
+    
         let lsp_pubkey = match PublicKey::from_slice(&lsp_pubkey_bytes) {
             Ok(key) => Some(key),
             Err(e) => {
@@ -80,9 +63,8 @@ impl StableChannelsApp {
                 None
             }
         };
-
-        // Create LDK node
-        let is_service = false; // GUI acts as a client/user
+    
+        let is_service = false; 
         let user = make_node(&config, lsp_pubkey, is_service);
         
         let state_manager = StateManager::new(user);

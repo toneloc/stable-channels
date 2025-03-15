@@ -63,6 +63,18 @@ impl StateManager {
         self.stable_channel.lock().unwrap().clone()
     }
 
+    fn ensure_data_directories(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let sc = self.stable_channel.lock().unwrap();
+        let data_dir = std::path::Path::new(&sc.sc_dir);
+        
+        if !data_dir.exists() {
+            println!("Creating stable channel data directory: {:?}", data_dir);
+            std::fs::create_dir_all(data_dir)?;
+        }
+        
+        Ok(())
+    }
+
     /// Initialize a stable channel with the given parameters
     pub fn initialize_stable_channel(
         &self,
@@ -71,6 +83,8 @@ impl StateManager {
         expected_dollar_amount: f64,
         native_amount_sats: f64,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.ensure_data_directories()?;
+        
         let mut sc = self.stable_channel.lock().unwrap();
         
         // Check if the channel_id is provided as hex string or full channel id

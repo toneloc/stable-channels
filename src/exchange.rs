@@ -3,14 +3,20 @@ use stable_channels::StateManager;
 
 use crate::{get_user_input, make_node, types::Bitcoin};
 
-use crate::config::Config;
+use crate::config::{ComponentType, Config};
 
 
 pub fn run() {
-    let config = Config::from_file("config.toml").unwrap_or_else(|_| Config::default());
+    let config = Config::get_or_create_for_component(ComponentType::Exchange);
+    
+    // Ensure directories exist
+    if let Err(e) = config.ensure_directories_exist() {
+        println!("Warning: Failed to create directories: {}", e);
+    }
+
     let exchange_node = make_node(&config, None, false);
     let exchange = StateManager::new(exchange_node);
-
+    
     loop {
         let (input, command, args) = get_user_input("Enter command for exchange: ");
 

@@ -20,7 +20,7 @@ mod gui;
 
 use crate::config::Config;
 
-use std::io::{self, Write};
+use std::{io::{self, Write}, path::PathBuf};
 
 use ldk_node::{
     bitcoin::{secp256k1::PublicKey, Address, Network}, config::ChannelConfig, lightning::ln::msgs::SocketAddress, liquidity::LSPS2ServiceConfig, Builder, Node 
@@ -50,7 +50,7 @@ fn make_node(config: &Config, lsp_pubkey: Option<PublicKey>, is_service: bool) -
     println!("Network set to: {:?}", network);
 
     // If the node is offering a service, build this.
-    if (is_service) {
+    if is_service {
         let service_config = LSPS2ServiceConfig {
             require_token: None,
             advertise_service: true,
@@ -63,26 +63,26 @@ fn make_node(config: &Config, lsp_pubkey: Option<PublicKey>, is_service: bool) -
             max_payment_size_msat: 1_000_000_000,
         };
     
-        // The old compare snippet used set_liquidity_provider_lsps2():
         builder.set_liquidity_provider_lsps2(service_config);
-    
     }
     
     builder.set_network(network);
     builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
 
-    let mut dir = home_dir().unwrap();
-    dir.push(&config.node.data_dir);
-    dir.push(&config.node.alias);
-    println!("Storage directory: {:?}", dir);
-
-    if !dir.exists() {
-        println!("ERROR: Data directory {:?} does not exist!", dir);
+    // FIX: Use the node.data_dir directly without appending anything
+    let data_dir = &config.node.data_dir;
+    println!("Storage directory: {:?}", data_dir);
+    
+    if !std::path::Path::new(data_dir).exists() {
+        println!("Creating data directory: {:?}", data_dir);
+        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
+            println!("WARNING: Failed to create data directory: {}. Error: {}", data_dir, e);
+        });
     } else {
-        println!("Data directory exists: {:?}", dir);
+        println!("Data directory exists: {:?}", data_dir);
     }
 
-    builder.set_storage_dir_path(dir.to_string_lossy().to_string());
+    builder.set_storage_dir_path(data_dir.clone());
 
     builder
         .set_listening_addresses(vec![format!("127.0.0.1:{}", config.node.port)
@@ -107,9 +107,12 @@ fn make_node(config: &Config, lsp_pubkey: Option<PublicKey>, is_service: bool) -
     }
     
     println!("Node started with ID: {:?}", node.node_id());
+    
+    // Print connection info
+    config.print_connection_info(&node);
+    
     node
 }
-
 #[allow(dead_code)]
 fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
     let mut input = String::new();
