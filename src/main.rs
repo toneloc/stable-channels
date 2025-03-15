@@ -13,97 +13,100 @@ mod state;
 mod lsp;
 mod exchange;
 mod user;
-
-
-#[cfg(feature = "user")]
 mod config;
 
 #[cfg(feature = "user")]
 mod gui;
 
+use crate::config::Config;
+
 use std::io::{self, Write};
 
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Network}, config::ChannelConfig, lightning::ln::msgs::SocketAddress, liquidity::LSPS2ServiceConfig, Builder 
+    bitcoin::{secp256k1::PublicKey, Address, Network}, config::ChannelConfig, lightning::ln::msgs::SocketAddress, liquidity::LSPS2ServiceConfig, Builder, Node 
 };
 
 use state::StateManager;
+use dirs_next::home_dir;
 
 /// LDK set-up and initialization
-fn make_node(alias: &str, port: u16, lsp_pubkey: Option<PublicKey>) -> ldk_node::Node {
-    let mut builder = Builder::new();
+fn make_node(config: &Config, lsp_pubkey: Option<PublicKey>, is_service: bool) -> Node {
+    println!("Config used for make_node: {:?}", config);
 
-    // If we pass in an LSP pubkey then set your liquidity source
+    let mut builder = Builder::new();
+    
     if let Some(lsp_pubkey) = lsp_pubkey {
-        println!("{}", lsp_pubkey.to_string());
-        let address: SocketAddress = "127.0.0.1:9377".parse().unwrap_or_else(|_| {
-            eprintln!("Failed to parse default address, using fallback");
-            "127.0.0.1:9737".parse().unwrap()
-        });
-        
-        builder.set_liquidity_source_lsps2(
-            lsp_pubkey,
-            address,
-            Some("00000000000000000000000000000000".to_owned()),
-        );
+        let address = config.lsp.address.parse().unwrap();
+        println!("Setting LSP with address: {} and pubkey: {:?}", address, lsp_pubkey);
+        builder.set_liquidity_source_lsps2(lsp_pubkey, address, Some(config.lsp.auth.clone()));
     }
 
-    let service_config = LSPS2ServiceConfig {
-        require_token: None,
-        advertise_service: true,
-        channel_opening_fee_ppm: 10_000,
-        channel_over_provisioning_ppm: 100_000,
-        min_channel_opening_fee_msat: 0,
-        min_channel_lifetime: 100,
-        max_client_to_self_delay: 1024,
-        min_payment_size_msat: 0,
-        max_payment_size_msat: 1_000_000_000,
+    let network = match config.node.network.to_lowercase().as_str() {
+        "signet" => Network::Signet,
+        "testnet" => Network::Testnet,
+        "bitcoin" => Network::Bitcoin,
+        _ => Network::Signet,
     };
+    println!("Network set to: {:?}", network);
 
-    // The old compare snippet used set_liquidity_provider_lsps2():
-    builder.set_liquidity_provider_lsps2(service_config);
-
-    builder.set_network(Network::Signet);
-
-    // Configure chain source
-    builder.set_chain_source_esplora("https://mutinynet.com/api/".to_string(), None);
-
-    // Don't need gossip right now. Also interferes with Bolt12 implementation.
-    builder.set_storage_dir_path(("./data/".to_owned() + alias).to_string());
+    // If the node is offering a service, build this.
+    if (is_service) {
+        let service_config = LSPS2ServiceConfig {
+            require_token: None,
+            advertise_service: true,
+            channel_opening_fee_ppm: 10_000,
+            channel_over_provisioning_ppm: 100_000,
+            min_channel_opening_fee_msat: 0,
+            min_channel_lifetime: 100,
+            max_client_to_self_delay: 1024,
+            min_payment_size_msat: 0,
+            max_payment_size_msat: 1_000_000_000,
+        };
     
-    let _ = builder.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap_or_else(|_| {
-        eprintln!("Failed to parse listening address, using fallback");
-        "127.0.0.1:9999".parse().unwrap()
-    })]);
+        // The old compare snippet used set_liquidity_provider_lsps2():
+        builder.set_liquidity_provider_lsps2(service_config);
     
-    let _ = builder.set_node_alias("some_alias".to_string());
+    }
+    
+    builder.set_network(network);
+    builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
+
+    let mut dir = home_dir().unwrap();
+    dir.push(&config.node.data_dir);
+    dir.push(&config.node.alias);
+    println!("Storage directory: {:?}", dir);
+
+    if !dir.exists() {
+        println!("ERROR: Data directory {:?} does not exist!", dir);
+    } else {
+        println!("Data directory exists: {:?}", dir);
+    }
+
+    builder.set_storage_dir_path(dir.to_string_lossy().to_string());
+
+    builder
+        .set_listening_addresses(vec![format!("127.0.0.1:{}", config.node.port)
+        .parse()
+        .unwrap()])
+        .unwrap();
+
+    builder.set_node_alias(config.node.alias.clone());
 
     let node = match builder.build() {
-        Ok(node) => node,
+        Ok(node) => {
+            println!("Node built successfully.");
+            node
+        }
         Err(e) => {
-            eprintln!("Failed to build node: {}", e);
-            panic!("Node creation failed");
+            panic!("Node build failed: {:?}", e);
         }
     };
-    
+
     if let Err(e) = node.start() {
-        eprintln!("Failed to start node: {}", e);
-        panic!("Node start failed");
+        panic!("Node start failed: {:?}", e);
     }
     
-    let public_key: PublicKey = node.node_id();
-    let listening_addresses: Vec<SocketAddress> = node.listening_addresses().unwrap_or_default();
-
-    if let Some(first_address) = listening_addresses.first() {
-        println!("");
-        println!("Actor Role: {}", alias);
-        println!("Public Key: {}", public_key);
-        println!("Internet Address: {}", first_address);
-        println!("");
-    } else {
-        println!("No listening addresses found.");
-    } 
-
+    println!("Node started with ID: {:?}", node.node_id());
     node
 }
 

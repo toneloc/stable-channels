@@ -1,6 +1,7 @@
 
 use std::str::FromStr;
 
+use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::config::ChannelConfig;
 use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::lightning_invoice::{
@@ -13,10 +14,17 @@ use stable_channels::{StabilityAction, StateManager};
 use crate::types::Bitcoin;
 use crate::{get_user_input, make_node};
 
-pub fn run() {
-    let user_node = make_node("user", 9736, None);
-    let user = StateManager::new(user_node);
+use crate::config::Config;
 
+pub fn run() {
+    let config = Config::from_file("config.toml").unwrap_or_else(|_| Config::default());
+
+    let lsp_pubkey_bytes = hex::decode(&config.lsp.pubkey).unwrap();
+    let lsp_pubkey = PublicKey::from_slice(&lsp_pubkey_bytes).unwrap();
+    println!("{}", lsp_pubkey);
+
+    let user_node = make_node(&config, Some(lsp_pubkey), false);
+    let user = StateManager::new(user_node);
 
     loop {
         let (_input, command, args) = get_user_input("Enter command for user: ");

@@ -5,8 +5,12 @@ use stable_channels::{Bitcoin, StateManager};
 
 use crate::{get_user_input, make_node};
 
+use crate::config::Config;
+
 pub fn run() {
-    let lsp_node = make_node("lsp", 9737, None);
+    let config = Config::from_file("config.toml").unwrap_or_else(|_| Config::default());
+
+    let lsp_node = make_node(&config, None, true);
     let lsp = StateManager::new(lsp_node);
     let mut their_offer: Option<Offer> = None;
 

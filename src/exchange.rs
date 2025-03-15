@@ -3,8 +3,12 @@ use stable_channels::StateManager;
 
 use crate::{get_user_input, make_node, types::Bitcoin};
 
+use crate::config::Config;
+
+
 pub fn run() {
-    let exchange_node = make_node("exchange", 9735, None);
+    let config = Config::from_file("config.toml").unwrap_or_else(|_| Config::default());
+    let exchange_node = make_node(&config, None, false);
     let exchange = StateManager::new(exchange_node);
 
     loop {

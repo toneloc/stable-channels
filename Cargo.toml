@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [features]
 exchange = []
-user = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:image", "dep:qrcode", "dep:tray-icon", "dep:dirs-next"]
+user = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:image", "dep:qrcode", "dep:tray-icon"]
 lsp = []
 
 [dependencies]
@@ -28,6 +28,7 @@ futures = "0.3"
 async-trait = "0.1"
 hex = "0.4.3"
 toml = "0.8"
+dirs-next = "2.0"
 
 # egui dependencies (only for user feature)
 eframe = { version = "0.30.0", optional = true }
@@ -36,4 +37,3 @@ egui_extras = { version = "0.30.0", features = ["default"], optional = true }
 qrcode = { version = "0.14", optional = true }
 image = { version = "0.24", optional = true }
 tray-icon = { version = "0.19.2", optional = true }
-dirs-next = { version = "2.0", optional = true }

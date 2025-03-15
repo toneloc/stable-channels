@@ -14,6 +14,7 @@ use ldk_node::lightning_invoice::Bolt11InvoiceDescription;
 use crate::config::Config;
 use crate::state::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
+use crate::make_node;
 
 // Enum to track the application state
 enum UIState {
@@ -81,7 +82,8 @@ impl StableChannelsApp {
         };
 
         // Create LDK node
-        let user = Self::make_node(&config, lsp_pubkey);
+        let is_service = false; // GUI acts as a client/user
+        let user = make_node(&config, lsp_pubkey, is_service);
         
         let state_manager = StateManager::new(user);
 
@@ -102,67 +104,6 @@ impl StableChannelsApp {
             close_channel_address: String::new(),
             config,
         }
-    }
-
-    fn make_node(config: &Config, lsp_pubkey: Option<PublicKey>) -> Node {
-        println!("Config used for make_node: {:?}", config);
-
-        let mut builder = ldk_node::Builder::new();
-        if let Some(lsp_pubkey) = lsp_pubkey {
-            let address: SocketAddress = match config.lsp.address.parse() {
-                Ok(addr) => addr,
-                Err(e) => {
-                    eprintln!("Error parsing LSP address: {:?}", e);
-                    "127.0.0.1:9737".parse().unwrap()
-                }
-            };
-            println!("Setting LSP with address: {} and pubkey: {:?}", address, lsp_pubkey);
-            builder.set_liquidity_source_lsps2(lsp_pubkey, address, Some(config.lsp.auth.clone()));
-        }
-
-        let network = match config.node.network.to_lowercase().as_str() {
-            "signet" => Network::Signet,
-            "testnet" => Network::Testnet,
-            "bitcoin" => Network::Bitcoin,
-            _ => Network::Signet,
-        };
-        println!("Network set to: {:?}", network);
-
-        builder.set_network(network);
-        builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
-
-        let mut dir = dirs::home_dir().unwrap_or_default();
-        dir.push(&config.node.data_dir);
-        dir.push(&config.node.alias);
-        println!("Storage directory: {:?}", dir);
-
-        if !dir.exists() {
-            println!("Creating data directory: {:?}", dir);
-            fs::create_dir_all(&dir).unwrap_or_default();
-        }
-
-        builder.set_storage_dir_path(dir.to_string_lossy().to_string());
-
-        let port_str = format!("127.0.0.1:{}", config.node.port);
-        builder.set_listening_addresses(vec![port_str.parse().unwrap()]).unwrap();
-        builder.set_node_alias(config.node.alias.clone());
-
-        let node = match builder.build() {
-            Ok(node) => {
-                println!("Node built successfully.");
-                node
-            }
-            Err(e) => {
-                panic!("Node build failed: {:?}", e);
-            }
-        };
-
-        if let Err(e) = node.start() {
-            panic!("Node start failed: {:?}", e);
-        }
-        
-        println!("Node started with ID: {:?}", node.node_id());
-        node
     }
 
     fn check_stability(&mut self) {
