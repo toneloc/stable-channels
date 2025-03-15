@@ -1,3 +1,7 @@
+use std::str::FromStr;
+
+use ldk_node::bitcoin::{Address, FeeRate, Network};
+use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::{config::ChannelConfig, lightning::ln::msgs::SocketAddress};
 use stable_channels::StateManager;
 
@@ -76,6 +80,53 @@ pub fn run() {
                 let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                 println!("Exchange On-Chain Balance: {}", onchain_balance);
                 println!("Exchange Lightning Balance: {}", lightning_balance);
+            }
+            (Some("payjitinvoice"), [invoice_str]) | (Some("payinvoice"), [invoice_str]) => {
+                let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
+                match bolt11_invoice {
+                    Ok(invoice) => match exchange.node().bolt11_payment().send(&invoice, None) {
+                        Ok(payment_id) => {
+                            println!("Payment sent from Exchange with payment_id: {}", payment_id)
+                        }
+                        Err(e) => println!("Error sending payment from Exchange: {}", e),
+                    },
+                    Err(e) => println!("Error parsing invoice: {}", e),
+                }
+            }
+            (Some("onchainsend"), [address_str, amount_str, fee_rate_str]) => {
+                let amount_sats = match amount_str.parse::<u64>() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        eprintln!("Invalid amount format. Please enter a valid integer.");
+                        continue;
+                    }
+                };
+            
+                // Parse the fee rate if provided, otherwise use `None`
+                let fee_rate = if fee_rate_str == "default" {
+                    None
+                } else {
+                    match fee_rate_str.parse::<u32>() {
+                        Ok(rate) => Some(FeeRate::from_sat_per_kwu(rate.into())), // Adjust as needed
+                        Err(_) => {
+                            eprintln!("Invalid fee rate format. Please enter a valid number or 'default'.");
+                            continue;
+                        }
+                    }
+                };
+            
+                match Address::from_str(address_str) {
+                    Ok(addr) => match addr.require_network(Network::Signet) {
+                        Ok(addr_checked) => {
+                            match exchange.node().onchain_payment().send_to_address(&addr_checked, amount_sats, fee_rate) {
+                                Ok(txid) => println!("Transaction broadcasted successfully: {}", txid),
+                                Err(e) => eprintln!("Error broadcasting transaction: {}", e),
+                            }
+                        }
+                        Err(_) => eprintln!("Invalid address for this network."),
+                    },
+                    Err(_) => eprintln!("Invalid Bitcoin address."),
+                }
             }
             (Some("exit"), _) => break,
             _ => println!("Unknown command or incorrect arguments: {}", input),
