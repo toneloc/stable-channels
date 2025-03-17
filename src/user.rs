@@ -17,7 +17,7 @@ use crate::{get_user_input, make_node};
 use crate::config::{ComponentType, Config};
 
 pub fn run() {
-    let config = Config::get_or_create_for_component(ComponentType::User);
+    let config = Config::get_or_create_for_component(ComponentType::Gui);
     
     // Ensure directories exist
     if let Err(e) = config.ensure_directories_exist() {
@@ -73,8 +73,7 @@ pub fn run() {
             // Sample start command below:
             // startstablechannel CHANNEL_ID IS_STABLE_RECEIVER EXPECTED_DOLLAR_AMOUNT EXPECTED_BTC_AMOUNT
             // startstablechannel 44c105c0f12c47ef4f573928448fb1c662fd61289b0baf93537f03075aa99010 true 305.0 0
-            (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) =>
-            {
+            (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
                 let channel_id = channel_id.to_string();
                 let is_stable_receiver = match is_stable_receiver.parse::<bool>() {
                     Ok(val) => val,

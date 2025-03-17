@@ -108,7 +108,7 @@ impl Config {
             },
             stable_channel_defaults: StableChannelConfig {
                 expected_usd: 20.0,
-                sc_dir: "data/stable-channel".to_string(),
+                sc_dir: "data".to_string(),
             },
         }
     }
@@ -155,8 +155,7 @@ impl Config {
                     config.node.alias = component.as_str().to_string();
                     config.node.port = component.default_port();
                     config.node.data_dir = config_dir.to_string_lossy().to_string();
-                    config.stable_channel_defaults.sc_dir = 
-                        format!("{}/stable-channel", config_dir.to_string_lossy());
+                    config.stable_channel_defaults.sc_dir = config_dir.to_string_lossy().to_string();
                     config
                 },
                 Err(e) => {
@@ -185,9 +184,7 @@ impl Config {
         config.node.alias = component_name.to_string();
         config.node.port = component_type.default_port();
         
-        // Also update stable channel directory
-        config.stable_channel_defaults.sc_dir = 
-            format!("{}/stable-channel", config_dir.to_string_lossy());
+        config.stable_channel_defaults.sc_dir = config_dir.to_string_lossy().to_string();
         
         config
     }

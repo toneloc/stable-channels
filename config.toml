@@ -6,7 +6,7 @@ auth = "00000000000000000000000000000000"
 [node]
 network = "signet"
 chain_source_url = "https://mutinynet.com/api/"
-data_dir = "data"  # Changed from .stable-channels to data
+data_dir = "data" 
 alias = "user"
 port = 9736
 

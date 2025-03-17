@@ -444,8 +444,13 @@ impl StableChannelsApp {
                 }
 
                 Event::ChannelClosed { .. } => {
-                    self.state = UIState::ClosingScreen;
-                    println!("Channel closed");
+                    if self.state_manager.node().list_channels().is_empty() {
+                        println!("All channels closed, returning to onboarding screen");
+                        self.state = UIState::OnboardingScreen;
+                    } else {
+                        self.state = UIState::ClosingScreen;
+                        println!("Channel closed, but other channels still exist");
+                    }
                 }
                 _ => {}
             }

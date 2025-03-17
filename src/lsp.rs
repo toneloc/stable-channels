@@ -133,6 +133,15 @@ pub fn run() {
                 println!("LSP On-Chain Balance: {}", onchain_balance);
                 println!("LSP Lightning Balance: {}", lightning_balance);
             }
+            (Some("closeallchannels"), []) => {
+                for channel in lsp.node().list_channels().iter() {
+                    let user_channel_id = channel.user_channel_id;
+                    let counterparty_node_id = channel.counterparty_node_id;
+                    let _ = lsp.node().close_channel(&user_channel_id, counterparty_node_id);
+                }
+                print!("Closing all channels.")
+            }
+            
             (Some("exit"), _) => break,
             _ => println!("Unknown command or incorrect arguments"),
         }
