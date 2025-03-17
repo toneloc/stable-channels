@@ -15,9 +15,6 @@ mod exchange;
 mod user;
 mod config;
 
-#[cfg(feature = "user")]
-mod gui;
-
 use crate::config::Config;
 
 use std::{io::{self, Write}, path::PathBuf};
@@ -131,23 +128,39 @@ fn get_user_input(prompt: &str) -> (String, Option<String>, Vec<String>) {
 
 /// Program initialization and command-line-interface
 fn main() {
+    println!("Features enabled:");
+    
+    #[cfg(feature = "exchange")]
+    println!("- exchange");
+    
+    #[cfg(feature = "user")]
+    println!("- user");
+    
+    #[cfg(feature = "gui")]
+    println!("- gui");
+    
+    #[cfg(feature = "lsp")]
+    println!("- lsp");
+
     #[allow(dead_code)]
     #[cfg(feature = "exchange")]
     exchange::run();
 
     #[allow(dead_code)]
     #[cfg(feature = "user")]
-    gui::launch_app();
+    {
+        println!("Starting user module...");
+        #[cfg(feature = "gui")]
+        println!("GUI feature is enabled, should launch GUI app");
+        
+        #[cfg(not(feature = "gui"))]
+        println!("GUI feature is NOT enabled, should launch CLI");
+        
+        user::run();
+    }
 
     #[allow(dead_code)]
     #[cfg(feature = "lsp")]
     lsp::run();
-
-    // CLI user app - will only run if user feature is enabled AND egui app exits
-    #[allow(dead_code)]
-    #[cfg(all(feature = "user", not(any(feature = "gui"))))]
-    {
-        user::run();
-    }
 
 }

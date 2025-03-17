@@ -16,6 +16,7 @@ path = "src/main.rs"
 exchange = []
 user = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:image", "dep:qrcode", "dep:tray-icon"]
 lsp = []
+gui = ["user"]
 
 [dependencies]
 ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "22cb1df03ff071c5a7f6b01ce4654874e2996c2a" }
