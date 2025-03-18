@@ -5,11 +5,85 @@ use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::{config::ChannelConfig, lightning::ln::msgs::SocketAddress};
 use stable_channels::StateManager;
 
-use crate::{get_user_input, make_node, types::Bitcoin};
+use crate::{get_user_input, types::Bitcoin};
 
 use crate::config::{ComponentType, Config};
+use ldk_node::Node;
+use ldk_node::{Builder};
 
 
+#[cfg(feature = "exchange")]
+fn make_exchange_node(config: &Config) -> Node {
+
+    println!("Initializing exchange node with config: {:?}", config);
+
+    let mut builder = Builder::new();
+    
+    // Configure the network based on config
+    let network = match config.node.network.to_lowercase().as_str() {
+        "signet" => Network::Signet,
+        "testnet" => Network::Testnet,
+        "bitcoin" => Network::Bitcoin,
+        _ => {
+            println!("Warning: Unknown network in config, defaulting to Signet");
+            Network::Signet
+        }
+    };
+    
+    println!("Setting network to: {:?}", network);
+    builder.set_network(network);
+    
+    // Set up Esplora chain source
+    println!("Setting Esplora API URL: {}", config.node.chain_source_url);
+    builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
+    
+    // Set up data directory
+    let data_dir = &config.node.data_dir;
+    println!("Setting storage directory: {}", data_dir);
+    
+    // Ensure the data directory exists
+    if !std::path::Path::new(data_dir).exists() {
+        println!("Creating data directory: {}", data_dir);
+        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
+            println!("WARNING: Failed to create data directory: {}. Error: {}", data_dir, e);
+        });
+    }
+    
+    builder.set_storage_dir_path(data_dir.clone());
+    
+    // Set up listening address for the exchange node
+    let listen_addr = format!("127.0.0.1:{}", config.node.port).parse().unwrap();
+    println!("Setting listening address: {}", listen_addr);
+    builder.set_listening_addresses(vec![listen_addr]).unwrap();
+    
+    // Set node alias
+    builder.set_node_alias(config.node.alias.clone());
+    
+    // Build the node
+    let node = match builder.build() {
+        Ok(node) => {
+            println!("Exchange node built successfully");
+            node
+        },
+        Err(e) => {
+            panic!("Failed to build exchange node: {:?}", e);
+        }
+    };
+    
+    // Start the node
+    if let Err(e) = node.start() {
+        panic!("Failed to start exchange node: {:?}", e);
+    }
+    
+    println!("Exchange node started with ID: {}", node.node_id());
+    
+    // Print connection info
+    config.print_connection_info(&node);
+    
+    node
+}
+
+#[cfg(feature = "exchange")]
 pub fn run() {
     let config = Config::get_or_create_for_component(ComponentType::Exchange);
     
@@ -18,7 +92,7 @@ pub fn run() {
         println!("Warning: Failed to create directories: {}", e);
     }
 
-    let exchange_node = make_node(&config, None, false);
+    let exchange_node = make_exchange_node(&config);
     let exchange = StateManager::new(exchange_node);
     
     loop {
@@ -142,6 +216,27 @@ pub fn run() {
                         Err(_) => eprintln!("Invalid address for this network."),
                     },
                     Err(_) => eprintln!("Invalid Bitcoin address."),
+                }
+            }
+            (Some("getinvoice"), [sats]) => {
+                if let Ok(sats_value) = sats.parse::<u64>() {
+                    let msats = sats_value * 1000;
+                    let bolt11 = exchange.node().bolt11_payment();
+                    
+                    // Create a proper invoice description
+                    let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                        ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap_or_else(|_| {
+                            println!("Failed to create description, using fallback");
+                            ldk_node::lightning_invoice::Description::new("Fallback Invoice".to_string()).unwrap()
+                        })
+                    );
+                    
+                    match bolt11.receive(msats, &description, 6000) {
+                        Ok(inv) => println!("Exchange Invoice: {}", inv),
+                        Err(e) => println!("Error creating invoice: {}", e),
+                    }
+                } else {
+                    println!("Invalid sats value provided");
                 }
             }
             (Some("exit"), _) => break,

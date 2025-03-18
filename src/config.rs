@@ -34,14 +34,11 @@ pub struct Config {
 }
 
 // Define ComponentType enum to replace string literals
-// Remove Copy trait and make it Clone only
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComponentType {
     User,
     Lsp,
     Exchange,
-    Gui,
-    Custom(String),
 }
 
 impl ComponentType {
@@ -49,26 +46,14 @@ impl ComponentType {
         match self {
             ComponentType::User => "user",
             ComponentType::Lsp => "lsp",
-            ComponentType::Exchange => "exchange",
-            ComponentType::Gui => "gui",
-            ComponentType::Custom(name) => name,
-        }
+            ComponentType::Exchange => "exchange"        }
     }
     
     pub fn default_port(&self) -> u16 {
         match self {
             ComponentType::User => 9736,
             ComponentType::Lsp => 9737,
-            ComponentType::Exchange => 9738,
-            ComponentType::Gui => 9739,
-            ComponentType::Custom(_) => {
-                // Use a random port between 10000 and 65000
-                let random_port = 10000 + (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() % 55000) as u16;
-                random_port
-            }
+            ComponentType::Exchange => 9738
         }
     }
     
@@ -95,7 +80,7 @@ impl Config {
     pub fn default() -> Self {
         Config {
             lsp: LspConfig {
-                pubkey: "02d6dad61ed43d855ff947d1000a3bb9072a88a7cffed109de9984d09a180f926d".to_string(),
+                pubkey: "022814b30dc90b3c53312c250021165644fdf1650aa7ba4be5d6cd51302b2f31bb".to_string(),
                 address: "127.0.0.1:9737".to_string(),
                 auth: "00000000000000000000000000000000".to_string(),
             },

@@ -10,25 +10,130 @@ use ldk_node::lightning::offers::offer::Offer;
 use ldk_node::lightning_invoice::{
     Bolt11Invoice, Bolt11InvoiceDescription, Description
 };
-use ldk_node::{Node, Event};
+use ldk_node::{Node, Event, Builder};
 
 use stable_channels::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
-use crate::{get_user_input, make_node};
+use crate::{get_user_input};
 use crate::config::{ComponentType, Config};
 
 // GUI-specific imports
-#[cfg(feature = "gui")]
 use eframe::{egui, App, Frame};
-#[cfg(feature = "gui")]
 use egui::{epaint::{self, Margin}, TextureHandle, TextureOptions};
-#[cfg(feature = "gui")]
 use image::{GrayImage, Luma};
-#[cfg(feature = "gui")]
 use qrcode::{Color, QrCode};
 
-// Enum to track the application state in GUI mode
-#[cfg(feature = "gui")]
+#[cfg(feature = "user")]
+fn make_user_node(config: &Config) -> Node {
+    println!("Initializing user node with config: {:?}", config);
+
+    let mut builder = Builder::new();
+    
+    // Parse LSP pubkey if available
+    let lsp_pubkey = if !config.lsp.pubkey.is_empty() {
+        match hex::decode(&config.lsp.pubkey) {
+            Ok(bytes) => {
+                match PublicKey::from_slice(&bytes) {
+                    Ok(key) => {
+                        println!("Setting LSP pubkey: {}", key);
+                        Some(key)
+                    },
+                    Err(e) => {
+                        println!("Error parsing LSP pubkey: {:?}", e);
+                        None
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Error decoding LSP pubkey: {:?}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    
+    // Configure LSP if pubkey is available
+    if let Some(lsp_pubkey) = lsp_pubkey {
+        let lsp_address = match config.lsp.address.parse() {
+            Ok(addr) => addr,
+            Err(e) => {
+                println!("Error parsing LSP address: {:?}, using default", e);
+                "127.0.0.1:9737".parse().unwrap()
+            }
+        };
+        builder.set_liquidity_source_lsps2(
+            lsp_pubkey,
+            lsp_address, 
+            Some(config.lsp.auth.clone())
+        );
+    }
+    
+    // Configure the network based on config
+    let network = match config.node.network.to_lowercase().as_str() {
+        "signet" => Network::Signet,
+        "testnet" => Network::Testnet,
+        "bitcoin" => Network::Bitcoin,
+        _ => {
+            println!("Warning: Unknown network in config, defaulting to Signet");
+            Network::Signet
+        }
+    };
+    
+    println!("Setting network to: {:?}", network);
+    builder.set_network(network);
+    
+    // Set up Esplora chain source
+    println!("Setting Esplora API URL: {}", config.node.chain_source_url);
+    builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
+    
+    // Set up data directory
+    let data_dir = &config.node.data_dir;
+    println!("Setting storage directory: {}", data_dir);
+    
+    // Ensure the data directory exists
+    if !std::path::Path::new(data_dir).exists() {
+        println!("Creating data directory: {}", data_dir);
+        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
+            println!("WARNING: Failed to create data directory: {}. Error: {}", data_dir, e);
+        });
+    }
+    
+    builder.set_storage_dir_path(data_dir.clone());
+    
+    // Set up listening address for the user node
+    let listen_addr = format!("127.0.0.1:{}", config.node.port).parse().unwrap();
+    println!("Setting listening address: {}", listen_addr);
+    builder.set_listening_addresses(vec![listen_addr]).unwrap();
+    
+    // Set node alias
+    builder.set_node_alias(config.node.alias.clone());
+    
+    // Build the node
+    let node = match builder.build() {
+        Ok(node) => {
+            println!("User node built successfully");
+            node
+        },
+        Err(e) => {
+            panic!("Failed to build user node: {:?}", e);
+        }
+    };
+    
+    // Start the node
+    if let Err(e) = node.start() {
+        panic!("Failed to start user node: {:?}", e);
+    }
+    
+    println!("User node started with ID: {}", node.node_id());
+    
+    // Print connection info
+    config.print_connection_info(&node);
+    
+    node
+}
+
+// Enum to track the application state
 enum UIState {
     OnboardingScreen,
     WaitingForPayment,
@@ -37,7 +142,6 @@ enum UIState {
 }
 
 // Main application structure for GUI
-#[cfg(feature = "gui")]
 pub struct StableChannelsApp {
     state: UIState,
     last_stability_check: Instant,
@@ -49,7 +153,6 @@ pub struct StableChannelsApp {
     config: Config,
 }
 
-#[cfg(feature = "gui")]
 impl StableChannelsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = Config::get_or_create_for_component(ComponentType::User);
@@ -77,7 +180,7 @@ impl StableChannelsApp {
         };
     
         let is_service = false; 
-        let user = make_node(&config, lsp_pubkey, is_service);
+        let user = make_user_node(&config);
         
         let state_manager = StateManager::new(user);
 
@@ -450,20 +553,20 @@ impl StableChannelsApp {
                     self.state = UIState::MainScreen;
                 }
                 
-                // Event::PaymentReceived { .. } => {
-                //     self.state = UIState::MainScreen;
-                //     println!("Payment received");
-                // }
+                Event::PaymentReceived { .. } => {
+                    self.state = UIState::MainScreen;
+                    println!("Payment received");
+                }
 
-                // Event::ChannelClosed { .. } => {
-                //     if self.state_manager.node().list_channels().is_empty() {
-                //         println!("All channels closed, returning to onboarding screen");
-                //         self.state = UIState::OnboardingScreen;
-                //     } else {
-                //         self.state = UIState::ClosingScreen;
-                //         println!("Channel closed, but other channels still exist");
-                //     }
-                // }
+                Event::ChannelClosed { .. } => {
+                    if self.state_manager.node().list_channels().is_empty() {
+                        println!("All channels closed, returning to onboarding screen");
+                        self.state = UIState::OnboardingScreen;
+                    } else {
+                        self.state = UIState::ClosingScreen;
+                        println!("Channel closed, but other channels still exist");
+                    }
+                }
                 _ => {}
             }
             self.state_manager.node().event_handled();
@@ -508,7 +611,6 @@ impl StableChannelsApp {
     }
 }
 
-#[cfg(feature = "gui")]
 impl eframe::App for StableChannelsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         let now = Instant::now();
@@ -529,75 +631,64 @@ impl eframe::App for StableChannelsApp {
     }
 }
 
-// Main function to launch the GUI app
-#[cfg(feature = "gui")]
-pub fn launch_app() {
-    let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 700.0]),
-        ..Default::default()
-    };
-    
-    eframe::run_native(
-        "Stable Channels",
-        native_options,
-        Box::new(|cc| {
-            Ok(Box::new(StableChannelsApp::new(cc)))
-        }),
-    ).unwrap_or_else(|e| {
-        eprintln!("Error running application: {:?}", e);
-    });
-}
-
-// Main user entry function to launch either GUI or CLI 
-pub fn run() {
-    let config = Config::get_or_create_for_component(ComponentType::User);
-    
-    // Ensure directories exist
-    if let Err(e) = config.ensure_directories_exist() {
-        println!("Warning: Failed to create directories: {}", e);
-    }
-
-    // Parse LSP pubkey
-    let lsp_pubkey_bytes = match hex::decode(&config.lsp.pubkey) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("Error decoding LSP pubkey: {:?}", e);
-            vec![0; 33] // Fallback to empty pubkey
-        }
-    };
-
-    let lsp_pubkey = match PublicKey::from_slice(&lsp_pubkey_bytes) {
-        Ok(key) => Some(key),
-        Err(e) => {
-            eprintln!("Error parsing LSP pubkey: {:?}", e);
-            None
-        }
-    };
-
-    let user_node = make_node(&config, lsp_pubkey, false);
-    let user = StateManager::new(user_node);
-
-    // Check if GUI feature is enabled first
-    #[cfg(feature = "gui")]
-    {
-        // Launch GUI
-        launch_app();
-    }
-    
-    // If GUI is not enabled or if GUI has exited, run the CLI
-    #[cfg(not(feature = "gui"))]
-    {
-        run_cli(user);
-    }
-}
-
 // Command-line interface implementation
 fn run_cli(user: StateManager) {
+    println!("\n=== Stable Channels User Interface ===");
+    println!("Type 'help' for available commands");
+    
     loop {
+        // Process any pending events
+        while let Some(event) = user.node().next_event() {
+            match event {
+                Event::ChannelReady { channel_id, .. } => {
+                    println!("Channel {} is now ready", channel_id);
+                    
+                    // Try to initialize the stable channel if none was initialized before
+                    if !user.is_initialized() {
+                        let channels = user.node().list_channels();
+                        if let Some(channel) = channels.first() {
+                            // Use the first channel we find
+                            if let Err(e) = user.initialize_stable_channel(
+                                &channel.channel_id.to_string(),
+                                true, // default to stable receiver
+                                20.0, // Default expected USD amount
+                                0.0,  // no native bitcoin amount
+                            ) {
+                                eprintln!("Error initializing stable channel: {:?}", e);
+                            } else {
+                                println!("Automatically initialized stable channel with ID: {}", channel.channel_id);
+                            }
+                        }
+                    }
+                },
+                Event::PaymentReceived { payment_hash, amount_msat, .. } => {
+                    println!("Received payment: {} msat (hash: {})", amount_msat, payment_hash);
+                },
+                Event::ChannelClosed { channel_id, .. } => {
+                    println!("Channel {} has been closed", channel_id);
+                },
+                _ => {}
+            }
+            user.node().event_handled();
+        }
+        
         let (_input, command, args) = get_user_input("Enter command for user: ");
 
         match (command.as_deref(), args.as_slice()) {
+            (Some("help"), []) => {
+                println!("\nAvailable commands:");
+                println!("  getaddress                        - Get a new Bitcoin address for deposits");
+                println!("  balance                           - Show current balances");
+                println!("  checkstability                    - Check stability and take action if needed");
+                println!("  listallchannels                   - List all available channels");
+                println!("  openchannel <node_id> <address> <sats> - Open a new channel");
+                println!("  startstablechannel <channel_id> <is_receiver> <usd_amount> [<btc_amount>] - Initialize stable channel");
+                println!("  getinvoice <sats>                 - Create a payment invoice");
+                println!("  getjitinvoice                     - Create a JIT channel payment invoice");
+                println!("  payinvoice <bolt11>               - Pay a BOLT11 invoice");
+                println!("  closeallchannels                  - Close all channels");
+                println!("  exit                              - Exit the application");
+            },
             (Some("settheiroffer"), [their_offer_str]) => {
                 match Offer::from_str(their_offer_str) {
                     Ok(_offer) => {
@@ -761,7 +852,7 @@ fn run_cli(user: StateManager) {
             }
             (Some("closeallchannels"), []) => {
                 for channel in user.node().list_channels().iter() {
-                    let user_channel_id = channel.user_channel_id;
+                    let mut user_channel_id = channel.user_channel_id;
                     let counterparty_node_id = channel.counterparty_node_id;
                     let _ = user.node().close_channel(&user_channel_id, counterparty_node_id);
                 }
@@ -839,7 +930,62 @@ fn run_cli(user: StateManager) {
                 }
             }
             (Some("exit"), _) => break,
-            _ => println!("Unknown command or incorrect arguments"),
+            (None, _) => {}, // Empty input, just loop
+            _ => println!("Unknown command or incorrect arguments. Type 'help' for available commands."),
         }
     }
+}
+
+// Main function to launch the app
+pub fn run() {
+    let config = Config::get_or_create_for_component(ComponentType::User);
+    
+    // Ensure directories exist
+    if let Err(e) = config.ensure_directories_exist() {
+        println!("Warning: Failed to create directories: {}", e);
+    }
+
+    // Default to starting the graphical app
+    let native_options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([460.0, 700.0]),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Stable Channels",
+        native_options,
+        Box::new(|cc| {
+            Ok(Box::new(StableChannelsApp::new(cc)))
+        }),
+    ).unwrap_or_else(|e| {
+        eprintln!("Error running application: {:?}", e);
+        
+        // If GUI fails to start, fall back to CLI
+        println!("GUI could not be started, falling back to CLI mode");
+        
+        // Parse LSP pubkey
+        let lsp_pubkey_bytes = match hex::decode(&config.lsp.pubkey) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("Error decoding LSP pubkey: {:?}", e);
+                vec![0; 33] // Fallback to empty pubkey
+            }
+        };
+
+        let lsp_pubkey = match PublicKey::from_slice(&lsp_pubkey_bytes) {
+            Ok(key) => Some(key),
+            Err(e) => {
+                eprintln!("Error parsing LSP pubkey: {:?}", e);
+                None
+            }
+        };
+
+        let is_service = false; 
+        let user_node = make_user_node(&config);
+        let user = StateManager::new(user_node);
+        
+        // Run CLI as fallback
+        run_cli(user);
+    });
 }

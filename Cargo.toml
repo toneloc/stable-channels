@@ -13,10 +13,10 @@ name = "stable-channels"
 path = "src/main.rs"
 
 [features]
+default = ["exchange", "user", "lsp"]
 exchange = []
-user = ["dep:eframe", "dep:egui", "dep:egui_extras", "dep:image", "dep:qrcode", "dep:tray-icon"]
+user = []
 lsp = []
-gui = ["user"]
 
 [dependencies]
 ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "22cb1df03ff071c5a7f6b01ce4654874e2996c2a" }
@@ -30,11 +30,12 @@ async-trait = "0.1"
 hex = "0.4.3"
 toml = "0.8"
 dirs-next = "2.0"
+chrono = "0.4"
 
-# egui dependencies (only for user feature)
-eframe = { version = "0.30.0", optional = true }
-egui = { version = "0.30.0", default-features = false, features = ["color-hex"], optional = true }
-egui_extras = { version = "0.30.0", features = ["default"], optional = true }
-qrcode = { version = "0.14", optional = true }
-image = { version = "0.24", optional = true }
-tray-icon = { version = "0.19.2", optional = true }
+# Adding all GUI dependencies directly
+eframe = "0.30.0"
+egui = { version = "0.30.0", default-features = false, features = ["color-hex"] }
+egui_extras = { version = "0.30.0", features = ["default"] }
+qrcode = "0.14"
+image = "0.24"
+tray-icon = "0.19.2"
