@@ -354,13 +354,42 @@ impl StateManager {
             return Err("Stable channel not initialized".into());
         }
         
-        let sc = self.stable_channel.lock().unwrap();
-        
-        // Verify the counterparty exists
-        if !self.node.list_channels().iter().any(|c| c.counterparty_node_id == sc.counterparty) {
-            return Err("Counterparty not found in available channels".into());
+        // Avoid sending zero-amount payments which could trigger assertion failures
+        if amount_msats == 0 {
+            return Err("Cannot send a payment with zero amount".into());
         }
         
+        // Get stable channel state
+        let sc = self.stable_channel.lock().unwrap();
+        
+        // Make sure the amount is reasonable (less than channel capacity)
+        let channels = self.node.list_channels();
+        let channel = channels.iter().find(|c| c.channel_id == sc.channel_id);
+        
+        // Verify channel exists
+        if channel.is_none() {
+            return Err("Channel not found".into());
+        }
+        
+        let channel = channel.unwrap();
+        
+        // Check if channel is ready
+        if !channel.is_channel_ready {
+            return Err("Channel is not ready for payments".into());
+        }
+        
+        // Check if we have sufficient outbound capacity
+        if channel.outbound_capacity_msat < amount_msats {
+            return Err(format!("Insufficient outbound capacity: have {}msat, need {}msat", 
+                              channel.outbound_capacity_msat, amount_msats).into());
+        }
+        
+        // Verify the counterparty exists and matches our stable channel
+        if channel.counterparty_node_id != sc.counterparty {
+            return Err("Counterparty mismatch".into());
+        }
+        
+        // Perform the payment
         let result = self.node
             .spontaneous_payment()
             .send(amount_msats, sc.counterparty, None)?;

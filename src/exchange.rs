@@ -81,6 +81,22 @@ pub fn run() {
                 println!("Exchange On-Chain Balance: {}", onchain_balance);
                 println!("Exchange Lightning Balance: {}", lightning_balance);
             }
+            (Some("listallchannels"), []) => {
+                println!("Channels:");
+                
+                let channels = exchange.node().list_channels();
+                
+                for channel in &channels {
+                    println!("-----------------------------------");
+                    println!("Channel ID: {}", channel.channel_id);
+                    println!("Counterparty: {}", channel.counterparty_node_id);
+                    println!("Amount (Sats): {}", channel.channel_value_sats);
+                    println!("Ours (Msats): {}", channel.outbound_capacity_msat);
+                    println!("Theirs (Msats): {}", channel.inbound_capacity_msat);
+                    println!("Ready: {}", channel.is_channel_ready);
+                    println!("-----------------------------------");
+                }
+            }
             (Some("payjitinvoice"), [invoice_str]) | (Some("payinvoice"), [invoice_str]) => {
                 let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                 match bolt11_invoice {

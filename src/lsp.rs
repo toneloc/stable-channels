@@ -1,10 +1,11 @@
 use std::{net::SocketAddr, str::FromStr};
 
+use ldk_node::bitcoin::{Address, FeeRate, Network};
 use ldk_node::UserChannelId;
 use ldk_node::{config::ChannelConfig, lightning::offers::offer::Offer};
 use stable_channels::{Bitcoin, StateManager};
 
-use crate::{get_user_input, make_node};
+use crate::{exchange, get_user_input, make_node};
 
 use crate::config::{ComponentType, Config};
 
@@ -133,6 +134,27 @@ pub fn run() {
                 println!("LSP On-Chain Balance: {}", onchain_balance);
                 println!("LSP Lightning Balance: {}", lightning_balance);
             }
+            (Some("getinvoice"), [sats]) => {
+                if let Ok(sats_value) = sats.parse::<u64>() {
+                    let msats = sats_value * 1000;
+                    let bolt11 = lsp.node().bolt11_payment();
+                    
+                    // Create a proper invoice description
+                    let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+                        ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap_or_else(|_| {
+                            println!("Failed to create description, using fallback");
+                            ldk_node::lightning_invoice::Description::new("Fallback Invoice".to_string()).unwrap()
+                        })
+                    );
+                    
+                    match bolt11.receive(msats, &description, 6000) {
+                        Ok(inv) => println!("LSP Invoice: {}", inv),
+                        Err(e) => println!("Error creating invoice: {}", e),
+                    }
+                } else {
+                    println!("Invalid sats value provided");
+                }
+            }
             (Some("closeallchannels"), []) => {
                 for channel in lsp.node().list_channels().iter() {
                     let user_channel_id = channel.user_channel_id;
@@ -141,9 +163,53 @@ pub fn run() {
                 }
                 print!("Closing all channels.")
             }
+            (Some("closechannel"), [channel_id]) => {
+                if let Some(channel) = lsp.node().list_channels().iter().find(|c| format!("{:?}", c.user_channel_id) == *channel_id) {
+                    let _ = lsp.node().close_channel(&channel.user_channel_id, channel.counterparty_node_id);
+                    println!("Closing channel with ID: {:?}", channel.user_channel_id);
+                } else {
+                    println!("Channel with ID {:?} not found.", channel_id);
+                }
+            }
+            (Some("onchainsend"), [address_str, amount_str, fee_rate_str]) => {
+                let amount_sats = match amount_str.parse::<u64>() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        eprintln!("Invalid amount format. Please enter a valid integer.");
+                        continue;
+                    }
+                };
             
+                // Parse the fee rate if provided, otherwise use `None`
+                let fee_rate = if fee_rate_str == "default" {
+                    None
+                } else {
+                    match fee_rate_str.parse::<u32>() {
+                        Ok(rate) => Some(FeeRate::from_sat_per_kwu(rate.into())), // Adjust as needed
+                        Err(_) => {
+                            eprintln!("Invalid fee rate format. Please enter a valid number or 'default'.");
+                            continue;
+                        }
+                    }
+                };
+
+                match Address::from_str(address_str) {
+                    Ok(addr) => match addr.require_network(Network::Signet) {
+                        Ok(addr_checked) => {
+                            match lsp.node().onchain_payment().send_to_address(&addr_checked, amount_sats, fee_rate) {
+                                Ok(txid) => println!("Transaction broadcasted successfully: {}", txid),
+                                Err(e) => eprintln!("Error broadcasting transaction: {}", e),
+                            }
+                        }
+                        Err(_) => eprintln!("Invalid address for this network."),
+                    },
+                    Err(_) => eprintln!("Invalid Bitcoin address."),
+                }
+            }
             (Some("exit"), _) => break,
             _ => println!("Unknown command or incorrect arguments"),
         }
     }
 }
+
+

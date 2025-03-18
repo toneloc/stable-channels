@@ -52,7 +52,7 @@ pub struct StableChannelsApp {
 #[cfg(feature = "gui")]
 impl StableChannelsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let config = Config::get_or_create_for_component(ComponentType::Gui);
+        let config = Config::get_or_create_for_component(ComponentType::User);
     
         // Ensure directories exist
         if let Err(e) = config.ensure_directories_exist() {
@@ -450,20 +450,20 @@ impl StableChannelsApp {
                     self.state = UIState::MainScreen;
                 }
                 
-                Event::PaymentReceived { .. } => {
-                    self.state = UIState::MainScreen;
-                    println!("Payment received");
-                }
+                // Event::PaymentReceived { .. } => {
+                //     self.state = UIState::MainScreen;
+                //     println!("Payment received");
+                // }
 
-                Event::ChannelClosed { .. } => {
-                    if self.state_manager.node().list_channels().is_empty() {
-                        println!("All channels closed, returning to onboarding screen");
-                        self.state = UIState::OnboardingScreen;
-                    } else {
-                        self.state = UIState::ClosingScreen;
-                        println!("Channel closed, but other channels still exist");
-                    }
-                }
+                // Event::ChannelClosed { .. } => {
+                //     if self.state_manager.node().list_channels().is_empty() {
+                //         println!("All channels closed, returning to onboarding screen");
+                //         self.state = UIState::OnboardingScreen;
+                //     } else {
+                //         self.state = UIState::ClosingScreen;
+                //         println!("Channel closed, but other channels still exist");
+                //     }
+                // }
                 _ => {}
             }
             self.state_manager.node().event_handled();
