@@ -10,9 +10,16 @@
 mod types;
 mod price_feeds;
 mod state;
-mod lsp;
-mod exchange;
+
+#[cfg(feature = "user")]
 mod user;
+
+#[cfg(feature = "lsp")]
+mod lsp;
+
+#[cfg(feature = "exchange")]
+mod exchange;
+
 mod config;
 
 use crate::config::Config;

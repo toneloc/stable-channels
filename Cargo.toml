@@ -13,7 +13,6 @@ name = "stable-channels"
 path = "src/main.rs"
 
 [features]
-default = ["exchange", "user", "lsp"]
 exchange = []
 user = []
 lsp = []
