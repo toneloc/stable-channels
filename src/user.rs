@@ -177,13 +177,6 @@ impl StableChannelsApp {
     
         let user = make_user_node();
 
-        let user_state = UserState {
-            node: user_node,
-            stable_channel: StableChannel::default(),
-            last_check: SystemTime::now(),
-            initialized: false,
-        };
-
         let channels = state_manager.node().list_channels();
         let state = if channels.is_empty() {
             UIState::OnboardingScreen
@@ -245,7 +238,7 @@ impl StableChannelsApp {
         // Use the default expected USD amount
         let amount_msats = (DEFAULT_EXPECTED_USD * 1_000_000.0) as u64;
 
-        let result = self.state_manager.node().bolt11_payment().receive_via_jit_channel(
+        let result = user.bolt11_payment().receive_via_jit_channel(
             amount_msats,
             &description,
             3600,
@@ -441,7 +434,7 @@ impl StableChannelsApp {
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         // --- Existing Balance UI ---
-                        let balances = self.state_manager.node().list_balances();
+                        let balances = user.list_balances();
                         let sc = self.state_manager.get_stable_channel();
                         let lightning_balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                         let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, sc.latest_price);
@@ -532,11 +525,11 @@ impl StableChannelsApp {
     }
 
     fn poll_for_events(&mut self) {
-        while let Some(event) = self.state_manager.node().next_event() {
+        while let Some(event) = user.next_event() {
             match event {
                 Event::ChannelReady { .. } => {
                     // Once we have a channel, initialize the stable channel
-                    let channels = self.state_manager.node().list_channels();
+                    let channels = user.list_channels();
                     if let Some(channel) = channels.first() {
                         // Use the first channel we find
                         if let Err(e) = self.state_manager.initialize_stable_channel(
@@ -558,7 +551,7 @@ impl StableChannelsApp {
                 }
 
                 Event::ChannelClosed { .. } => {
-                    if self.state_manager.node().list_channels().is_empty() {
+                    if user.list_channels().is_empty() {
                         println!("All channels closed, returning to onboarding screen");
                         self.state = UIState::OnboardingScreen;
                     } else {
@@ -568,7 +561,7 @@ impl StableChannelsApp {
                 }
                 _ => {}
             }
-            self.state_manager.node().event_handled();
+            user.event_handled();
         }
     }
 
@@ -578,10 +571,10 @@ impl StableChannelsApp {
             return;
         }
 
-        for channel in self.state_manager.node().list_channels().iter() {
+        for channel in user.list_channels().iter() {
             let user_channel_id = channel.user_channel_id.clone();
             let counterparty_node_id = channel.counterparty_node_id;
-            match self.state_manager.node().close_channel(&user_channel_id, counterparty_node_id) {
+            match user.close_channel(&user_channel_id, counterparty_node_id) {
                 Ok(_) => self.status_message = "Closing channel...".to_string(),
                 Err(e) => self.status_message = format!("Error closing channel: {}", e),
             }
@@ -594,7 +587,7 @@ impl StableChannelsApp {
                 
                 match addr.require_network(network) {
                     Ok(addr_checked) => {
-                        match self.state_manager.node().onchain_payment().send_all_to_address(&addr_checked, false, None) {
+                        match user.onchain_payment().send_all_to_address(&addr_checked, false, None) {
                             Ok(txid) => {
                                 self.status_message = format!("Withdrawal transaction sent: {}", txid);
                                 self.state = UIState::ClosingScreen;
@@ -631,20 +624,20 @@ impl eframe::App for StableChannelsApp {
 }
 
 // Command-line interface implementation
-fn run_cli(user: StateManager) {
+fn run_cli(user: Node) {
     println!("\n=== Stable Channels User Interface ===");
     println!("Type 'help' for available commands");
     
     loop {
         // Process any pending events
-        while let Some(event) = user.node().next_event() {
+        while let Some(event) = user.next_event() {
             match event {
                 Event::ChannelReady { channel_id, .. } => {
                     println!("Channel {} is now ready", channel_id);
                     
                     // Try to initialize the stable channel if none was initialized before
                     if !user.is_initialized() {
-                        let channels = user.node().list_channels();
+                        let channels = user.list_channels();
                         if let Some(channel) = channels.first() {
                             // Use the first channel we find
                             if let Err(e) = user.initialize_stable_channel(
@@ -668,7 +661,7 @@ fn run_cli(user: StateManager) {
                 },
                 _ => {}
             }
-            user.node().event_handled();
+            user.event_handled();
         }
         
         let (_input, command, args) = get_user_input("Enter command for user: ");
@@ -697,7 +690,7 @@ fn run_cli(user: StateManager) {
                 }
             }
             (Some("getouroffer"), []) => {
-                match user.node().bolt12_payment().receive_variable_amount("thanks", None) {
+                match user.bolt12_payment().receive_variable_amount("thanks", None) {
                     Ok(our_offer) => println!("{}", our_offer),
                     Err(e) => println!("Error creating offer: {}", e),
                 }
@@ -759,7 +752,7 @@ fn run_cli(user: StateManager) {
                 }
             }
             (Some("getaddress"), []) => {
-                let funding_address = user.node().onchain_payment().new_address();
+                let funding_address = user.onchain_payment().new_address();
                 match funding_address {
                     Ok(fund_addr) => println!("User Funding Address: {}", fund_addr),
                     Err(e) => println!("Error getting funding address: {}", e),
@@ -802,7 +795,7 @@ fn run_cli(user: StateManager) {
                 let push_msat = (sats / 2) * 1000;
                 let channel_config: Option<ChannelConfig> = None;
 
-                match user.node().open_announced_channel(
+                match user.open_announced_channel(
                     lsp_node_id,
                     lsp_net_address,
                     sats,
@@ -814,7 +807,7 @@ fn run_cli(user: StateManager) {
                 }
             }
             (Some("balance"), []) => {
-                let balances = user.node().list_balances();
+                let balances = user.list_balances();
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
                 let lightning_balance =
                     Bitcoin::from_sats(balances.total_lightning_balance_sats);
@@ -850,15 +843,15 @@ fn run_cli(user: StateManager) {
                 }
             }
             (Some("closeallchannels"), []) => {
-                for channel in user.node().list_channels().iter() {
+                for channel in user.list_channels().iter() {
                     let mut user_channel_id = channel.user_channel_id;
                     let counterparty_node_id = channel.counterparty_node_id;
-                    let _ = user.node().close_channel(&user_channel_id, counterparty_node_id);
+                    let _ = user.close_channel(&user_channel_id, counterparty_node_id);
                 }
                 println!("Closing all channels.")
             }
             (Some("listallchannels"), []) => {
-                let channels = user.node().list_channels();
+                let channels = user.list_channels();
                 if channels.is_empty() {
                     println!("No channels found.");
                 } else {
@@ -878,7 +871,7 @@ fn run_cli(user: StateManager) {
             (Some("getinvoice"), [sats]) => {
                 if let Ok(sats_value) = sats.parse::<u64>() {
                     let msats = sats_value * 1000;
-                    let bolt11 = user.node().bolt11_payment();
+                    let bolt11 = user.bolt11_payment();
                     let description = Bolt11InvoiceDescription::Direct(
                         Description::new("Invoice".to_string()).unwrap_or_else(|_| {
                             println!("Failed to create description, using fallback");
@@ -903,7 +896,7 @@ fn run_cli(user: StateManager) {
                     }
                 };
                 
-                match user.node().bolt11_payment().send(&bolt11_invoice, None) {
+                match user.bolt11_payment().send(&bolt11_invoice, None) {
                     Ok(payment_id) => {
                         println!("Payment sent from User with payment_id: {}", payment_id)
                     }
@@ -918,7 +911,7 @@ fn run_cli(user: StateManager) {
                     })
                 );
                 
-                match user.node().bolt11_payment().receive_via_jit_channel(
+                match user.bolt11_payment().receive_via_jit_channel(
                     50000000,
                     &description,
                     3600,
@@ -974,10 +967,8 @@ pub fn run() {
         };
 
         let is_service = false; 
-        let user_node = make_user_node();
-        let user = StateManager::new(user_node);
+        let user = make_user_node();
         
-        // Run CLI as fallback
-        run_cli(user);
+        // run_cli(user);
     });
 }

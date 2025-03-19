@@ -20,7 +20,6 @@ const DEFAULT_NETWORK: &str = "signet";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
 struct ExchangeState {
-    node: Node,
     stable_channel: StableChannel,
     last_check: SystemTime,
     initialized: bool,
@@ -106,7 +105,6 @@ pub fn run() {
     let exchange = make_exchange_node();
     
     let exchange_state = ExchangeState {
-        node: exchange,
         stable_channel: StableChannel::default(),
         last_check: SystemTime::now(),
         initialized: false,
@@ -147,7 +145,7 @@ pub fn run() {
 
                 let channel_config: Option<ChannelConfig> = None;
 
-                match exchange_state.node.open_announced_channel(
+                match exchange.open_announced_channel(
                     lsp_node_id,
                     lsp_net_address,
                     sats,
@@ -159,14 +157,14 @@ pub fn run() {
                 }
             }
             (Some("getaddress"), []) => {
-                let funding_address = exchange_state.node.onchain_payment().new_address();
+                let funding_address = exchange.onchain_payment().new_address();
                 match funding_address {
                     Ok(fund_addr) => println!("Exchange Funding Address: {}", fund_addr),
                     Err(e) => println!("Error getting funding address: {}", e),
                 }
             }
             (Some("balance"), []) => {
-                let balances = exchange_state.node.list_balances();
+                let balances = exchange.list_balances();
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
                 let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                 println!("Exchange On-Chain Balance: {}", onchain_balance);
@@ -175,7 +173,7 @@ pub fn run() {
             (Some("listallchannels"), []) => {
                 println!("Channels:");
                 
-                let channels = exchange_state.node.list_channels();
+                let channels = exchange.list_channels();
                 
                 for channel in &channels {
                     println!("-----------------------------------");
@@ -191,7 +189,7 @@ pub fn run() {
             (Some("payjitinvoice"), [invoice_str]) | (Some("payinvoice"), [invoice_str]) => {
                 let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                 match bolt11_invoice {
-                    Ok(invoice) => match exchange_state.node.bolt11_payment().send(&invoice, None) {
+                    Ok(invoice) => match exchange.bolt11_payment().send(&invoice, None) {
                         Ok(payment_id) => {
                             println!("Payment sent from Exchange with payment_id: {}", payment_id)
                         }
@@ -225,7 +223,7 @@ pub fn run() {
                 match Address::from_str(address_str) {
                     Ok(addr) => match addr.require_network(Network::Signet) {
                         Ok(addr_checked) => {
-                            match exchange_state.node.onchain_payment().send_to_address(&addr_checked, amount_sats, fee_rate) {
+                            match exchange.onchain_payment().send_to_address(&addr_checked, amount_sats, fee_rate) {
                                 Ok(txid) => println!("Transaction broadcasted successfully: {}", txid),
                                 Err(e) => eprintln!("Error broadcasting transaction: {}", e),
                             }
@@ -238,7 +236,7 @@ pub fn run() {
             (Some("getinvoice"), [sats]) => {
                 if let Ok(sats_value) = sats.parse::<u64>() {
                     let msats = sats_value * 1000;
-                    let bolt11 = exchange_state.node.bolt11_payment();
+                    let bolt11 = exchange.bolt11_payment();
                     
                     // Create a proper invoice description
                     let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
@@ -257,10 +255,10 @@ pub fn run() {
                 }
             }
             (Some("closeallchannels"), []) => {
-                for channel in exchange_state.node.list_channels().iter() {
+                for channel in exchange.list_channels().iter() {
                     let user_channel_id = channel.user_channel_id;
                     let counterparty_node_id = channel.counterparty_node_id;
-                    let _ = exchange_state.node.close_channel(&user_channel_id, counterparty_node_id);
+                    let _ = exchange.close_channel(&user_channel_id, counterparty_node_id);
                 }
                 println!("Closing all channels.")
             }
