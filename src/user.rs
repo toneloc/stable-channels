@@ -12,26 +12,23 @@ use ldk_node::lightning_invoice::{
 };
 use ldk_node::{Node, Event, Builder};
 
-use stable_channels::{StateManager, StabilityAction};
-use crate::types::{Bitcoin, StableChannel, USD};
+use stable_channels::{Bitcoin, StableChannel, USD};
+use stable_channels::stable::{
+    StabilityAction, check_stability, update_balances, initialize_stable_channel,
+    execute_payment, get_latest_price, channel_exists
+};
 use crate::get_user_input;
+use ureq::Agent;
 
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
 const DEFAULT_NETWORK: &str = "signet";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
-const DEFAULT_LSP_PUBKEY: &str = "022814b30dc90b3c53312c250021165644fdf1650aa7ba4be5d6cd51302b2f31bb";
+const DEFAULT_LSP_PUBKEY: &str = "037fae42b0e40e771bb576250a15dba529777d22532643ac77faf470ea9d862b5f";
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
-const DEFAULT_EXPECTED_USD: f64 = 20.0;
-
-struct UserState {
-    node: Node,
-    stable_channel: StableChannel,
-    last_check: SystemTime,
-    initialized: bool,
-}
+const DEFAULT_EXPECTED_USD: f64 = 5.0;
 
 // GUI-specific imports
 use eframe::{egui, App, Frame};
@@ -79,8 +76,8 @@ fn make_user_node() -> Node {
             }
         };
         builder.set_liquidity_source_lsps2(
-            lsp_pubkey,
-            lsp_address, 
+            lsp_pubkey, 
+            lsp_address,
             Some(DEFAULT_LSP_AUTH.to_string())
         );
     }
@@ -160,10 +157,12 @@ pub struct StableChannelsApp {
     state: UIState,
     last_stability_check: Instant,
     invoice_result: String,
-    state_manager: StateManager,
+    node: Node,
     qr_texture: Option<TextureHandle>,
     status_message: String,
     close_channel_address: String,
+    stable_channel: StableChannel,
+    is_initialized: bool,
 }
 
 impl StableChannelsApp {
@@ -175,9 +174,11 @@ impl StableChannelsApp {
             });
         }
     
-        let user = make_user_node();
+        let node = make_user_node();
+        let stable_channel = StableChannel::default();
+        let is_initialized = false;
 
-        let channels = state_manager.node().list_channels();
+        let channels = node.list_channels();
         let state = if channels.is_empty() {
             UIState::OnboardingScreen
         } else {
@@ -188,15 +189,25 @@ impl StableChannelsApp {
             state,
             last_stability_check: Instant::now() - Duration::from_secs(60),
             invoice_result: String::new(),
-            state_manager,
+            node,
             qr_texture: None,
             status_message: String::new(),
             close_channel_address: String::new(),
+            stable_channel,
+            is_initialized,
         }
     }
 
     fn check_stability(&mut self) {
-        let action = self.state_manager.check_stability();
+        // Get the latest action based on current state
+        let (action, updated_channel) = check_stability(
+            &self.node, 
+            self.stable_channel.clone(), 
+            self.is_initialized
+        );
+        
+        // Update our stored channel state
+        self.stable_channel = updated_channel;
         
         match action {
             StabilityAction::DoNothing => {
@@ -208,7 +219,7 @@ impl StableChannelsApp {
             StabilityAction::Pay(amt) => {
                 self.status_message = "Paying the difference...".to_string();
                 
-                match self.state_manager.execute_payment(amt) {
+                match execute_payment(&self.node, amt, &self.stable_channel) {
                     Ok(payment_id) => {
                         self.status_message = format!("Payment sent successfully with ID: {}", payment_id);
                         println!("Payment sent successfully with payment ID: {}", payment_id);
@@ -222,10 +233,37 @@ impl StableChannelsApp {
             StabilityAction::HighRisk(risk_level) => {
                 self.status_message = format!("Risk level high: {}", risk_level);
             },
-
             StabilityAction::NotInitialized => {
+                // Update status to show we need initialization
                 self.status_message = "Channel not properly initialized. Please create a channel first.".to_string();
                 println!("Channel not properly initialized. Please create a channel first.");
+                
+                // If we're on the main screen but not initialized, try to initialize with the first available channel
+                if matches!(self.state, UIState::MainScreen) && !self.is_initialized {
+                    let channels = self.node.list_channels();
+                    if let Some(channel) = channels.first() {
+                        // Try to initialize with the first channel
+                        match initialize_stable_channel(
+                            &self.node,
+                            self.stable_channel.clone(),
+                            &channel.channel_id.to_string(),
+                            true, // default to stable receiver
+                            DEFAULT_EXPECTED_USD,
+                            0.0, // no native bitcoin amount
+                        ) {
+                            Ok(updated_channel) => {
+                                self.stable_channel = updated_channel;
+                                self.is_initialized = true;
+                                self.status_message = format!("Auto-initialized with channel {}", channel.channel_id);
+                                println!("Auto-initialized with channel {}", channel.channel_id);
+                            },
+                            Err(e) => {
+                                self.status_message = format!("Failed to auto-initialize: {}", e);
+                                println!("Failed to auto-initialize: {}", e);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -238,7 +276,7 @@ impl StableChannelsApp {
         // Use the default expected USD amount
         let amount_msats = (DEFAULT_EXPECTED_USD * 1_000_000.0) as u64;
 
-        let result = user.bolt11_payment().receive_via_jit_channel(
+        let result = self.node.bolt11_payment().receive_via_jit_channel(
             amount_msats,
             &description,
             3600,
@@ -434,10 +472,10 @@ impl StableChannelsApp {
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         // --- Existing Balance UI ---
-                        let balances = user.list_balances();
-                        let sc = self.state_manager.get_stable_channel();
+                        let balances = self.node.list_balances();
                         let lightning_balance_btc = Bitcoin::from_sats(balances.total_lightning_balance_sats);
-                        let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, sc.latest_price);
+                        let latest_price = get_latest_price(&Agent::new());
+                        let lightning_balance_usd = USD::from_bitcoin(lightning_balance_btc, latest_price);
               
                         ui.add_space(30.0);
 
@@ -449,7 +487,7 @@ impl StableChannelsApp {
                                     .size(36.0)
                                     .strong(),
                             ));
-                            ui.label(format!("Agreed Peg USD: {}", sc.expected_usd));
+                            ui.label(format!("Agreed Peg USD: {}", self.stable_channel.expected_usd));
                             ui.label(format!("Bitcoin: {}", lightning_balance_btc.to_string()));
                             ui.add_space(20.0);
                         });
@@ -459,7 +497,7 @@ impl StableChannelsApp {
                         ui.group(|ui| {
                             ui.add_space(20.0);
                             ui.heading("Bitcoin Price");
-                            ui.label(format!("${:.2}", sc.latest_price));
+                            ui.label(format!("${:.2}", latest_price));
                             ui.add_space(20.0);
 
                             let last_updated = self.last_stability_check.elapsed().as_secs();
@@ -525,33 +563,56 @@ impl StableChannelsApp {
     }
 
     fn poll_for_events(&mut self) {
-        while let Some(event) = user.next_event() {
+        while let Some(event) = self.node.next_event() {
             match event {
-                Event::ChannelReady { .. } => {
-                    // Once we have a channel, initialize the stable channel
-                    let channels = user.list_channels();
-                    if let Some(channel) = channels.first() {
-                        // Use the first channel we find
-                        if let Err(e) = self.state_manager.initialize_stable_channel(
-                            &channel.channel_id.to_string(),
-                            true, // default to stable receiver
-                            DEFAULT_EXPECTED_USD,
-                            0.0, // no native bitcoin amount
-                        ) {
-                            eprintln!("Error initializing stable channel: {:?}", e);
+                Event::ChannelReady { channel_id, .. } => {
+                    println!("Channel {} is now ready", channel_id);
+                    
+                    // If we're not initialized, try to initialize with the first available channel
+                    if !self.is_initialized {
+                        let channels = self.node.list_channels();
+                        if let Some(channel) = channels.first() {
+                            match initialize_stable_channel(
+                                &self.node,
+                                self.stable_channel.clone(),
+                                &channel.channel_id.to_string(),
+                                true, // default to stable receiver
+                                DEFAULT_EXPECTED_USD,
+                                0.0, // no native bitcoin amount
+                            ) {
+                                Ok(updated_channel) => {
+                                    self.stable_channel = updated_channel;
+                                    self.is_initialized = true;
+                                    self.status_message = format!("Initialized with channel {}", channel.channel_id);
+                                    println!("Initialized stable channel with channel {}", channel.channel_id);
+                                    self.check_stability();
+                                    self.state = UIState::MainScreen;
+                                },
+                                Err(e) => {
+                                    self.status_message = format!("Failed to initialize: {}", e);
+                                    println!("Failed to initialize stable channel: {:?}", e);
+                                }
+                            }
                         }
                     }
-                    self.check_stability();
-                    self.state = UIState::MainScreen;
                 }
                 
-                Event::PaymentReceived { .. } => {
+                Event::PaymentReceived { payment_hash, amount_msat, .. } => {
+                    println!("Received payment: {} msat (hash: {})", amount_msat, payment_hash);
                     self.state = UIState::MainScreen;
-                    println!("Payment received");
                 }
 
-                Event::ChannelClosed { .. } => {
-                    if user.list_channels().is_empty() {
+                Event::ChannelClosed { channel_id, .. } => {
+                    println!("Channel {} has been closed", channel_id);
+                    
+                    // Check if this was our stable channel
+                    if channel_id == self.stable_channel.channel_id {
+                        self.is_initialized = false;
+                        self.stable_channel = StableChannel::default();
+                    }
+                    
+                    // Update the state based on remaining channels
+                    if self.node.list_channels().is_empty() {
                         println!("All channels closed, returning to onboarding screen");
                         self.state = UIState::OnboardingScreen;
                     } else {
@@ -561,7 +622,7 @@ impl StableChannelsApp {
                 }
                 _ => {}
             }
-            user.event_handled();
+            self.node.event_handled();
         }
     }
 
@@ -571,10 +632,10 @@ impl StableChannelsApp {
             return;
         }
 
-        for channel in user.list_channels().iter() {
+        for channel in self.node.list_channels().iter() {
             let user_channel_id = channel.user_channel_id.clone();
             let counterparty_node_id = channel.counterparty_node_id;
-            match user.close_channel(&user_channel_id, counterparty_node_id) {
+            match self.node.close_channel(&user_channel_id, counterparty_node_id) {
                 Ok(_) => self.status_message = "Closing channel...".to_string(),
                 Err(e) => self.status_message = format!("Error closing channel: {}", e),
             }
@@ -587,7 +648,7 @@ impl StableChannelsApp {
                 
                 match addr.require_network(network) {
                     Ok(addr_checked) => {
-                        match user.onchain_payment().send_all_to_address(&addr_checked, false, None) {
+                        match self.node.onchain_payment().send_all_to_address(&addr_checked, false, None) {
                             Ok(txid) => {
                                 self.status_message = format!("Withdrawal transaction sent: {}", txid);
                                 self.state = UIState::ClosingScreen;
@@ -623,32 +684,67 @@ impl eframe::App for StableChannelsApp {
     }
 }
 
+// Main function to launch the app
+pub fn run() {    
+    // Default to starting the graphical app
+    let native_options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([460.0, 700.0]),
+        ..Default::default()
+    };
+    
+    eframe::run_native(
+        "Stable Channels",
+        native_options,
+        Box::new(|cc| {
+            Ok(Box::new(StableChannelsApp::new(cc)))
+        }),
+    ).unwrap_or_else(|e| {
+        eprintln!("Error running application: {:?}", e);
+        
+        // If GUI fails to start, fall back to CLI mode
+        println!("GUI could not be started, falling back to CLI mode");
+        let node = make_user_node();
+        run_cli(node);
+    });
+}
+
 // Command-line interface implementation
-fn run_cli(user: Node) {
+fn run_cli(node: Node) {
     println!("\n=== Stable Channels User Interface ===");
     println!("Type 'help' for available commands");
     
+    let mut stable_channel = StableChannel::default();
+    let mut is_initialized = false;
+    
     loop {
         // Process any pending events
-        while let Some(event) = user.next_event() {
+        while let Some(event) = node.next_event() {
             match event {
                 Event::ChannelReady { channel_id, .. } => {
                     println!("Channel {} is now ready", channel_id);
                     
-                    // Try to initialize the stable channel if none was initialized before
-                    if !user.is_initialized() {
-                        let channels = user.list_channels();
+                    // If we're not initialized, try to initialize with the first available channel
+                    if !is_initialized {
+                        let channels = node.list_channels();
                         if let Some(channel) = channels.first() {
                             // Use the first channel we find
-                            if let Err(e) = user.initialize_stable_channel(
+                            match initialize_stable_channel(
+                                &node,
+                                stable_channel.clone(),
                                 &channel.channel_id.to_string(),
                                 true, // default to stable receiver
-                                20.0, // Default expected USD amount
-                                0.0,  // no native bitcoin amount
+                                DEFAULT_EXPECTED_USD,
+                                0.0, // no native bitcoin amount
                             ) {
-                                eprintln!("Error initializing stable channel: {:?}", e);
-                            } else {
-                                println!("Automatically initialized stable channel with ID: {}", channel.channel_id);
+                                Ok(updated_channel) => {
+                                    stable_channel = updated_channel;
+                                    is_initialized = true;
+                                    println!("Automatically initialized stable channel with ID: {}", channel.channel_id);
+                                },
+                                Err(e) => {
+                                    eprintln!("Error initializing stable channel: {:?}", e);
+                                }
                             }
                         }
                     }
@@ -658,10 +754,15 @@ fn run_cli(user: Node) {
                 },
                 Event::ChannelClosed { channel_id, .. } => {
                     println!("Channel {} has been closed", channel_id);
+                    
+                    // If this was our stable channel, mark as uninitialized
+                    if channel_id == stable_channel.channel_id {
+                        is_initialized = false;
+                    }
                 },
                 _ => {}
             }
-            user.event_handled();
+            node.event_handled();
         }
         
         let (_input, command, args) = get_user_input("Enter command for user: ");
@@ -688,19 +789,23 @@ fn run_cli(user: Node) {
                     },
                     Err(_) => println!("Error parsing offer"),
                 }
-            }
+            },
             (Some("getouroffer"), []) => {
-                match user.bolt12_payment().receive_variable_amount("thanks", None) {
+                match node.bolt12_payment().receive_variable_amount("thanks", None) {
                     Ok(our_offer) => println!("{}", our_offer),
                     Err(e) => println!("Error creating offer: {}", e),
                 }
-            }
+            },
             (Some("checkstability"), []) => {
-                let action = user.check_stability();
+                let (action, updated_channel) = check_stability(&node, stable_channel.clone(), is_initialized);
+                
+                // Update our stored channel state
+                stable_channel = updated_channel;
+                
                 match action {
                     StabilityAction::Pay(amount) => {
                         println!("Action: Pay {} msats", amount);
-                        match user.execute_payment(amount) {
+                        match execute_payment(&node, amount, &stable_channel) {
                             Ok(payment_id) => println!("Payment sent with ID: {}", payment_id),
                             Err(e) => println!("Failed to send payment: {}", e),
                         }
@@ -710,12 +815,34 @@ fn run_cli(user: Node) {
                     StabilityAction::HighRisk(risk) => println!("Action: High risk level ({})", risk),
                     StabilityAction::NotInitialized => {
                         println!("Channel not properly initialized or may have been closed.");
+                        
+                        // Try to initialize with first available channel
+                        if !is_initialized {
+                            let channels = node.list_channels();
+                            if let Some(channel) = channels.first() {
+                                match initialize_stable_channel(
+                                    &node,
+                                    stable_channel.clone(),
+                                    &channel.channel_id.to_string(),
+                                    true, // default to stable receiver
+                                    DEFAULT_EXPECTED_USD,
+                                    0.0, // no native bitcoin amount
+                                ) {
+                                    Ok(updated_channel) => {
+                                        stable_channel = updated_channel;
+                                        is_initialized = true;
+                                        println!("Auto-initialized with channel {}", channel.channel_id);
+                                    },
+                                    Err(e) => println!("Failed to auto-initialize: {}", e)
+                                }
+                            }
+                        }
                     }
                 }
-            }
-            (Some("startstablechannel"), [channel_id, is_stable_receiver, expected_dollar_amount, native_amount_sats]) => {
-                let channel_id = channel_id.to_string();
-                let is_stable_receiver = match is_stable_receiver.parse::<bool>() {
+            },
+            (Some("startstablechannel"), args) if args.len() >= 3 => {
+                let channel_id = args[0].to_string();
+                let is_stable_receiver = match args[1].parse::<bool>() {
                     Ok(val) => val,
                     Err(_) => {
                         println!("Error: is_stable_receiver must be 'true' or 'false'");
@@ -723,7 +850,7 @@ fn run_cli(user: Node) {
                     }
                 };
                 
-                let expected_dollar_amount = match expected_dollar_amount.parse::<f64>() {
+                let expected_dollar_amount = match args[2].parse::<f64>() {
                     Ok(val) => val,
                     Err(_) => {
                         println!("Error: expected_dollar_amount must be a valid number");
@@ -731,33 +858,41 @@ fn run_cli(user: Node) {
                     }
                 };
                 
-                let native_amount_sats = match native_amount_sats.parse::<f64>() {
-                    Ok(val) => val,
-                    Err(_) => {
-                        println!("Error: native_amount_sats must be a valid number");
-                        continue;
+                let native_amount_sats = if args.len() > 3 {
+                    match args[3].parse::<f64>() {
+                        Ok(val) => val,
+                        Err(_) => {
+                            println!("Error: native_amount_sats must be a valid number");
+                            continue;
+                        }
                     }
+                } else {
+                    0.0 // Default to zero if not provided
                 };
 
-                match user.initialize_stable_channel(
+                match initialize_stable_channel(
+                    &node,
+                    stable_channel.clone(), 
                     &channel_id, 
                     is_stable_receiver, 
                     expected_dollar_amount, 
                     native_amount_sats
                 ) {
-                    Ok(()) => {
+                    Ok(updated_channel) => {
+                        stable_channel = updated_channel;
+                        is_initialized = true;
                         println!("Stable Channel initialized: {}", channel_id);
                     },
                     Err(e) => println!("Failed to initialize stable channel: {}", e),
                 }
-            }
+            },
             (Some("getaddress"), []) => {
-                let funding_address = user.onchain_payment().new_address();
+                let funding_address = node.onchain_payment().new_address();
                 match funding_address {
                     Ok(fund_addr) => println!("User Funding Address: {}", fund_addr),
                     Err(e) => println!("Error getting funding address: {}", e),
                 }
-            }
+            },
             (Some("openchannel"), args) => {
                 if args.len() != 3 {
                     println!("Error: 'openchannel' command requires three parameters: <node_id>, <listening_address>, and <sats>");
@@ -795,7 +930,7 @@ fn run_cli(user: Node) {
                 let push_msat = (sats / 2) * 1000;
                 let channel_config: Option<ChannelConfig> = None;
 
-                match user.open_announced_channel(
+                match node.open_announced_channel(
                     lsp_node_id,
                     lsp_net_address,
                     sats,
@@ -805,53 +940,58 @@ fn run_cli(user: Node) {
                     Ok(_) => println!("Channel successfully opened to {}", node_id_str),
                     Err(e) => println!("Failed to open channel: {}", e),
                 }
-            }
+            },
             (Some("balance"), []) => {
-                let balances = user.list_balances();
+                let balances = node.list_balances();
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
-                let lightning_balance =
-                    Bitcoin::from_sats(balances.total_lightning_balance_sats);
+                let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                 
-                // Get stable channel info if initialized
-                let sc = user.get_stable_channel();
-                if sc.latest_price > 0.0 {
-                    println!("User On-Chain Balance: {}", onchain_balance);
-                    println!("User Lightning Balance: {}", lightning_balance);
-                    println!("Current BTC/USD Price: ${:.2}", sc.latest_price);
-                    
+                // Get price info
+                let latest_price = get_latest_price(&Agent::new());
+                let lightning_balance_usd = USD::from_bitcoin(lightning_balance, latest_price);
+                
+                println!("User On-Chain Balance: {}", onchain_balance);
+                println!("User Lightning Balance: {}", lightning_balance);
+                println!("Lightning Balance in USD: {}", lightning_balance_usd);
+                println!("Current BTC/USD Price: ${:.2}", latest_price);
+                
+                if is_initialized {
                     // Print stable channel balances
-                    if sc.is_stable_receiver {
+                    if stable_channel.is_stable_receiver {
                         // User is the receiver
                         println!("User Receiver Balance: {} (${:.2})",
-                            sc.stable_receiver_btc,
-                            sc.stable_receiver_usd.0);
+                            stable_channel.stable_receiver_btc,
+                            stable_channel.stable_receiver_usd.0);
                         println!("LSP Provider Balance: {} (${:.2})",
-                            sc.stable_provider_btc,
-                            sc.stable_provider_usd.0);
+                            stable_channel.stable_provider_btc,
+                            stable_channel.stable_provider_usd.0);
                     } else {
                         // User is the provider
                         println!("User Provider Balance: {} (${:.2})",
-                            sc.stable_provider_btc,
-                            sc.stable_provider_usd.0);
+                            stable_channel.stable_provider_btc,
+                            stable_channel.stable_provider_usd.0);
                         println!("LSP Receiver Balance: {} (${:.2})",
-                            sc.stable_receiver_btc,
-                            sc.stable_receiver_usd.0);
+                            stable_channel.stable_receiver_btc,
+                            stable_channel.stable_receiver_usd.0);
                     }
-                } else {
-                    println!("User On-Chain Balance: {}", onchain_balance);
-                    println!("User Lightning Balance: {}", lightning_balance);
                 }
-            }
+            },
             (Some("closeallchannels"), []) => {
-                for channel in user.list_channels().iter() {
-                    let mut user_channel_id = channel.user_channel_id;
+                for channel in node.list_channels().iter() {
+                    let user_channel_id = channel.user_channel_id.clone();
                     let counterparty_node_id = channel.counterparty_node_id;
-                    let _ = user.close_channel(&user_channel_id, counterparty_node_id);
+                    match node.close_channel(&user_channel_id, counterparty_node_id) {
+                        Ok(_) => println!("Closing channel {}...", channel.channel_id),
+                        Err(e) => println!("Error closing channel {}: {}", channel.channel_id, e),
+                    }
                 }
-                println!("Closing all channels.")
-            }
+                
+                // Reset initialization status
+                is_initialized = false;
+                stable_channel = StableChannel::default();
+            },
             (Some("listallchannels"), []) => {
-                let channels = user.list_channels();
+                let channels = node.list_channels();
                 if channels.is_empty() {
                     println!("No channels found.");
                 } else {
@@ -859,19 +999,28 @@ fn run_cli(user: Node) {
                     for channel in channels.iter() {
                         println!("--------------------------------------------");
                         println!("Channel ID: {}", channel.channel_id);
+                        println!("Counterparty: {}", channel.counterparty_node_id);
                         println!(
                             "Channel Value: {}",
                             Bitcoin::from_sats(channel.channel_value_sats)
                         );
                         println!("Channel Ready?: {}", channel.is_channel_ready);
+                        
+                        // Show if this is the active stable channel
+                        if is_initialized && channel.channel_id == stable_channel.channel_id {
+                            println!("Stable Channel: Yes ({})", 
+                                if stable_channel.is_stable_receiver { "Receiver" } else { "Provider" });
+                        } else {
+                            println!("Stable Channel: No");
+                        }
                     }
                     println!("--------------------------------------------");
                 }
-            }
+            },
             (Some("getinvoice"), [sats]) => {
                 if let Ok(sats_value) = sats.parse::<u64>() {
                     let msats = sats_value * 1000;
-                    let bolt11 = user.bolt11_payment();
+                    let bolt11 = node.bolt11_payment();
                     let description = Bolt11InvoiceDescription::Direct(
                         Description::new("Invoice".to_string()).unwrap_or_else(|_| {
                             println!("Failed to create description, using fallback");
@@ -886,7 +1035,32 @@ fn run_cli(user: Node) {
                 } else {
                     println!("Invalid sats value provided");
                 }
-            }
+            },
+            (Some("getjitinvoice"), []) => {
+                let description = Bolt11InvoiceDescription::Direct(
+                    Description::new("Stable Channel JIT payment".to_string()).unwrap_or_else(|_| {
+                        println!("Failed to create description, using fallback");
+                        Description::new("Fallback JIT Invoice".to_string()).unwrap()
+                    })
+                );
+                
+                // Use the default expected USD amount or use a hardcoded value
+                let amount_msats = if is_initialized && stable_channel.expected_usd.0 > 0.0 {
+                    (stable_channel.expected_usd.0 * 1_000_000.0) as u64
+                } else {
+                    50_000_000 // Default to 50000 sats if not initialized
+                };
+                
+                match node.bolt11_payment().receive_via_jit_channel(
+                    amount_msats,
+                    &description,
+                    3600,
+                    Some(10_000_000),
+                ) {
+                    Ok(invoice) => println!("Invoice: {}", invoice.to_string()),
+                    Err(e) => println!("Error: {}", e),
+                }
+            },
             (Some("payinvoice"), [invoice_str]) => {
                 let bolt11_invoice = match invoice_str.parse::<Bolt11Invoice>() {
                     Ok(invoice) => invoice,
@@ -896,79 +1070,16 @@ fn run_cli(user: Node) {
                     }
                 };
                 
-                match user.bolt11_payment().send(&bolt11_invoice, None) {
+                match node.bolt11_payment().send(&bolt11_invoice, None) {
                     Ok(payment_id) => {
                         println!("Payment sent from User with payment_id: {}", payment_id)
                     }
                     Err(e) => println!("Error sending payment from User: {}", e),
                 }
-            }
-            (Some("getjitinvoice"), []) => {
-                let description = Bolt11InvoiceDescription::Direct(
-                    Description::new("Stable Channel JIT payment".to_string()).unwrap_or_else(|_| {
-                        println!("Failed to create description, using fallback");
-                        Description::new("Fallback JIT Invoice".to_string()).unwrap()
-                    })
-                );
-                
-                match user.bolt11_payment().receive_via_jit_channel(
-                    50000000,
-                    &description,
-                    3600,
-                    Some(10000000),
-                ) {
-                    Ok(invoice) => println!("Invoice: {}", invoice.to_string()),
-                    Err(e) => println!("Error: {}", e),
-                }
-            }
+            },
             (Some("exit"), _) => break,
             (None, _) => {}, // Empty input, just loop
             _ => println!("Unknown command or incorrect arguments. Type 'help' for available commands."),
         }
     }
-}
-
-// Main function to launch the app
-pub fn run() {    
-    // Default to starting the graphical app
-    let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 700.0]),
-        ..Default::default()
-    };
-    
-    eframe::run_native(
-        "Stable Channels",
-        native_options,
-        Box::new(|cc| {
-            Ok(Box::new(StableChannelsApp::new(cc)))
-        }),
-    ).unwrap_or_else(|e| {
-        eprintln!("Error running application: {:?}", e);
-        
-        // If GUI fails to start, fall back to CLI
-        println!("GUI could not be started, falling back to CLI mode");
-        
-        // Parse LSP pubkey
-        let lsp_pubkey_bytes = match hex::decode(DEFAULT_LSP_PUBKEY) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("Error decoding LSP pubkey: {:?}", e);
-                vec![0; 33] // Fallback to empty pubkey
-            }
-        };
-
-        let lsp_pubkey = match PublicKey::from_slice(&lsp_pubkey_bytes) {
-            Ok(key) => Some(key),
-            Err(e) => {
-                eprintln!("Error parsing LSP pubkey: {:?}", e);
-                None
-            }
-        };
-
-        let is_service = false; 
-        let user = make_user_node();
-        
-        // run_cli(user);
-    });
 }

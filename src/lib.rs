@@ -1,5 +1,5 @@
 pub mod price_feeds;
-pub mod stable; // New module
+pub mod stable; 
 pub mod types;
 
 pub use stable::StabilityAction;
