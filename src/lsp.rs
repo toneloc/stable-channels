@@ -1,9 +1,12 @@
 use std::{net::SocketAddr, str::FromStr};
 
+use std::time::SystemTime;
+
 use ldk_node::bitcoin::{Address, FeeRate, Network};
 use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::{config::ChannelConfig, lightning::offers::offer::Offer};
-use stable_channels::{Bitcoin, StateManager};
+use stable_channels::{Bitcoin};
+use crate::types::StableChannel;
 
 use crate::get_user_input;
 
@@ -13,6 +16,13 @@ const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
 const DEFAULT_NETWORK: &str = "signet";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+
+struct LSPState {
+    node: Node,
+    stable_channel: StableChannel,
+    last_check: SystemTime,
+    initialized: bool,
+}
 
 use ldk_node::Node;
 use ldk_node::{Builder};
@@ -105,7 +115,6 @@ fn make_lsp_node() -> Node {
     node
 }
 
-
 #[cfg(feature = "lsp")]
 pub fn run() {
     // Ensure LSP directory exists
@@ -115,8 +124,15 @@ pub fn run() {
         });
     }
 
-    let lsp_node = make_lsp_node();
-    let lsp = StateManager::new(lsp_node);
+    let lsp = make_lsp_node();
+
+    let lsp_state = LSPState {
+        node: lsp,
+        stable_channel: StableChannel::default(),
+        last_check: SystemTime::now(),
+        initialized: false,
+    };
+
     let mut their_offer: Option<Offer> = None;
 
     loop {
@@ -124,7 +140,7 @@ pub fn run() {
 
         match (command.as_deref(), args.as_slice()) {
             (Some("getaddress"), []) => {
-                let funding_address = lsp.node().onchain_payment().new_address();
+                let funding_address = lsp_state.node.onchain_payment().new_address();
                 match funding_address {
                     Ok(fund_addr) => println!("LSP Funding Address: {}", fund_addr),
                     Err(e) => println!("Error getting funding address: {}", e),
@@ -140,19 +156,19 @@ pub fn run() {
                 }
             }
             (Some("getouroffer"), []) => {
-                match lsp.node().bolt12_payment().receive_variable_amount("thanks", None) {
+                match lsp_state.node.bolt12_payment().receive_variable_amount("thanks", None) {
                     Ok(our_offer) => println!("{}", our_offer),
                     Err(e) => println!("Error creating offer: {}", e),
                 }
             }
             (Some("listallchannels"), []) => {
                 println!("channels:");
-                for channel in lsp.node().list_channels().iter() {
+                for channel in lsp_state.node.list_channels().iter() {
                     let channel_id = channel.channel_id;
                     println!("{}", channel_id);
                 }
                 println!("channel details:");
-                let channels = lsp.node().list_channels();
+                let channels = lsp_state.node.list_channels();
                 println!("{:#?}", channels);
             }
             (Some("closechannel"), [channel_id_str]) => {
@@ -166,13 +182,13 @@ pub fn run() {
                 };
             
                 let mut found = false;
-                for channel in lsp.node().list_channels().iter() {
+                for channel in lsp_state.node.list_channels().iter() {
                     // Convert stored channel_id to a comparable format
                     let stored_channel_id = channel.channel_id.0.to_vec(); // Ensure it is a Vec<u8> for comparison
             
                     if stored_channel_id == channel_id_bytes {
                         let counterparty_node_id = channel.counterparty_node_id;
-                        let _ = lsp.node().close_channel(&channel.user_channel_id, counterparty_node_id);
+                        let _ = lsp_state.node.close_channel(&channel.user_channel_id, counterparty_node_id);
                         println!("Closing channel with ID: {:?}", channel_id_str);
                         found = true;
                         break;
@@ -214,7 +230,7 @@ pub fn run() {
 
                 let channel_config: Option<ChannelConfig> = None;
 
-                match lsp.node().open_announced_channel(
+                match lsp_state.node.open_announced_channel(
                     user_node_id,
                     lsp_net_address.into(),
                     sats,
@@ -226,7 +242,7 @@ pub fn run() {
                 }
             }
             (Some("balance"), []) => {
-                let balances = lsp.node().list_balances();
+                let balances = lsp_state.node.list_balances();
                 let onchain_balance = Bitcoin::from_sats(balances.total_onchain_balance_sats);
                 let lightning_balance = Bitcoin::from_sats(balances.total_lightning_balance_sats);
                 println!("LSP On-Chain Balance: {}", onchain_balance);
@@ -235,7 +251,7 @@ pub fn run() {
             (Some("getinvoice"), [sats]) => {
                 if let Ok(sats_value) = sats.parse::<u64>() {
                     let msats = sats_value * 1000;
-                    let bolt11 = lsp.node().bolt11_payment();
+                    let bolt11 = lsp_state.node.bolt11_payment();
                     
                     // Create a proper invoice description
                     let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
@@ -254,10 +270,10 @@ pub fn run() {
                 }
             }
             (Some("closeallchannels"), []) => {
-                for channel in lsp.node().list_channels().iter() {
+                for channel in lsp_state.node.list_channels().iter() {
                     let user_channel_id = channel.user_channel_id;
                     let counterparty_node_id = channel.counterparty_node_id;
-                    let _ = lsp.node().close_channel(&user_channel_id, counterparty_node_id);
+                    let _ = lsp_state.node.close_channel(&user_channel_id, counterparty_node_id);
                 }
                 println!("Closing all channels.")
             }
@@ -286,7 +302,7 @@ pub fn run() {
                 match Address::from_str(address_str) {
                     Ok(addr) => match addr.require_network(Network::Signet) {
                         Ok(addr_checked) => {
-                            match lsp.node().onchain_payment().send_to_address(&addr_checked, amount_sats, fee_rate) {
+                            match lsp_state.node.onchain_payment().send_to_address(&addr_checked, amount_sats, fee_rate) {
                                 Ok(txid) => println!("Transaction broadcasted successfully: {}", txid),
                                 Err(e) => eprintln!("Error broadcasting transaction: {}", e),
                             }
@@ -299,7 +315,7 @@ pub fn run() {
             (Some("payjitinvoice"), [invoice_str]) | (Some("payinvoice"), [invoice_str]) => {
                 let bolt11_invoice = invoice_str.parse::<Bolt11Invoice>();
                 match bolt11_invoice {
-                    Ok(invoice) => match lsp.node().bolt11_payment().send(&invoice, None) {
+                    Ok(invoice) => match lsp_state.node.bolt11_payment().send(&invoice, None) {
                         Ok(payment_id) => {
                             println!("Payment sent from LSP with payment_id: {}", payment_id)
                         }

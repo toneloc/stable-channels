@@ -16,7 +16,6 @@ use stable_channels::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
 use crate::get_user_input;
 
-// Configuration constants
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
@@ -26,6 +25,13 @@ const DEFAULT_LSP_PUBKEY: &str = "022814b30dc90b3c53312c250021165644fdf1650aa7ba
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
 const DEFAULT_EXPECTED_USD: f64 = 20.0;
+
+struct UserState {
+    node: Node,
+    stable_channel: StableChannel,
+    last_check: SystemTime,
+    initialized: bool,
+}
 
 // GUI-specific imports
 use eframe::{egui, App, Frame};
@@ -170,7 +176,13 @@ impl StableChannelsApp {
         }
     
         let user = make_user_node();
-        let state_manager = StateManager::new(user);
+
+        let user_state = UserState {
+            node: user_node,
+            stable_channel: StableChannel::default(),
+            last_check: SystemTime::now(),
+            initialized: false,
+        };
 
         let channels = state_manager.node().list_channels();
         let state = if channels.is_empty() {

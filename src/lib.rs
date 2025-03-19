@@ -1,7 +1,6 @@
 pub mod price_feeds;
-pub mod state;
+pub mod stable; // New module
 pub mod types;
 
-pub use state::StabilityAction;
-pub use state::StateManager;
+pub use stable::StabilityAction;
 pub use types::{Bitcoin, USD, StableChannel};
