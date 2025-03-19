@@ -7,20 +7,24 @@ use stable_channels::StateManager;
 
 use crate::{get_user_input, types::Bitcoin};
 
-use crate::config::{ComponentType, Config};
+// Configuration constants
+const EXCHANGE_DATA_DIR: &str = "data/exchange";
+const EXCHANGE_NODE_ALIAS: &str = "exchange";
+const EXCHANGE_PORT: u16 = 9735;
+const DEFAULT_NETWORK: &str = "signet";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+
 use ldk_node::Node;
 use ldk_node::{Builder};
 
-
 #[cfg(feature = "exchange")]
-fn make_exchange_node(config: &Config) -> Node {
-
-    println!("Initializing exchange node with config: {:?}", config);
+fn make_exchange_node() -> Node {
+    println!("Initializing exchange node...");
 
     let mut builder = Builder::new();
     
     // Configure the network based on config
-    let network = match config.node.network.to_lowercase().as_str() {
+    let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
         "signet" => Network::Signet,
         "testnet" => Network::Testnet,
         "bitcoin" => Network::Bitcoin,
@@ -34,30 +38,29 @@ fn make_exchange_node(config: &Config) -> Node {
     builder.set_network(network);
     
     // Set up Esplora chain source
-    println!("Setting Esplora API URL: {}", config.node.chain_source_url);
-    builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
+    println!("Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
+    builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
     
     // Set up data directory
-    let data_dir = &config.node.data_dir;
-    println!("Setting storage directory: {}", data_dir);
+    println!("Setting storage directory: {}", EXCHANGE_DATA_DIR);
     
     // Ensure the data directory exists
-    if !std::path::Path::new(data_dir).exists() {
-        println!("Creating data directory: {}", data_dir);
-        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
-            println!("WARNING: Failed to create data directory: {}. Error: {}", data_dir, e);
+    if !std::path::Path::new(EXCHANGE_DATA_DIR).exists() {
+        println!("Creating data directory: {}", EXCHANGE_DATA_DIR);
+        std::fs::create_dir_all(EXCHANGE_DATA_DIR).unwrap_or_else(|e| {
+            println!("WARNING: Failed to create data directory: {}. Error: {}", EXCHANGE_DATA_DIR, e);
         });
     }
     
-    builder.set_storage_dir_path(data_dir.clone());
+    builder.set_storage_dir_path(EXCHANGE_DATA_DIR.to_string());
     
     // Set up listening address for the exchange node
-    let listen_addr = format!("127.0.0.1:{}", config.node.port).parse().unwrap();
+    let listen_addr = format!("127.0.0.1:{}", EXCHANGE_PORT).parse().unwrap();
     println!("Setting listening address: {}", listen_addr);
     builder.set_listening_addresses(vec![listen_addr]).unwrap();
     
     // Set node alias
-    builder.set_node_alias(config.node.alias.clone());
+    builder.set_node_alias(EXCHANGE_NODE_ALIAS.to_string());
     
     // Build the node
     let node = match builder.build() {
@@ -76,23 +79,22 @@ fn make_exchange_node(config: &Config) -> Node {
     }
     
     println!("Exchange node started with ID: {}", node.node_id());
-    
-    // Print connection info
-    config.print_connection_info(&node);
+    println!("To connect to this node, use:");
+    println!("  openchannel {} 127.0.0.1:{} [SATS_AMOUNT]", node.node_id(), EXCHANGE_PORT);
     
     node
 }
 
 #[cfg(feature = "exchange")]
 pub fn run() {
-    let config = Config::get_or_create_for_component(ComponentType::Exchange);
-    
-    // Ensure directories exist
-    if let Err(e) = config.ensure_directories_exist() {
-        println!("Warning: Failed to create directories: {}", e);
+    // Ensure exchange directory exists
+    if !std::path::Path::new(EXCHANGE_DATA_DIR).exists() {
+        std::fs::create_dir_all(EXCHANGE_DATA_DIR).unwrap_or_else(|e| {
+            println!("Warning: Failed to create directories: {}", e);
+        });
     }
 
-    let exchange_node = make_exchange_node(&config);
+    let exchange_node = make_exchange_node();
     let exchange = StateManager::new(exchange_node);
     
     loop {
@@ -225,7 +227,7 @@ pub fn run() {
                     
                     // Create a proper invoice description
                     let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
-                        ldk_node::lightning_invoice::Description::new("LSP Invoice".to_string()).unwrap_or_else(|_| {
+                        ldk_node::lightning_invoice::Description::new("Exchange Invoice".to_string()).unwrap_or_else(|_| {
                             println!("Failed to create description, using fallback");
                             ldk_node::lightning_invoice::Description::new("Fallback Invoice".to_string()).unwrap()
                         })
@@ -238,6 +240,14 @@ pub fn run() {
                 } else {
                     println!("Invalid sats value provided");
                 }
+            }
+            (Some("closeallchannels"), []) => {
+                for channel in exchange.node().list_channels().iter() {
+                    let user_channel_id = channel.user_channel_id;
+                    let counterparty_node_id = channel.counterparty_node_id;
+                    let _ = exchange.node().close_channel(&user_channel_id, counterparty_node_id);
+                }
+                println!("Closing all channels.")
             }
             (Some("exit"), _) => break,
             _ => println!("Unknown command or incorrect arguments: {}", input),

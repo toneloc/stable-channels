@@ -14,8 +14,18 @@ use ldk_node::{Node, Event, Builder};
 
 use stable_channels::{StateManager, StabilityAction};
 use crate::types::{Bitcoin, StableChannel, USD};
-use crate::{get_user_input};
-use crate::config::{ComponentType, Config};
+use crate::get_user_input;
+
+// Configuration constants
+const USER_DATA_DIR: &str = "data/user";
+const USER_NODE_ALIAS: &str = "user";
+const USER_PORT: u16 = 9736;
+const DEFAULT_NETWORK: &str = "signet";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+const DEFAULT_LSP_PUBKEY: &str = "022814b30dc90b3c53312c250021165644fdf1650aa7ba4be5d6cd51302b2f31bb";
+const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
+const DEFAULT_LSP_AUTH: &str = "00000000000000000000000000000000";
+const DEFAULT_EXPECTED_USD: f64 = 20.0;
 
 // GUI-specific imports
 use eframe::{egui, App, Frame};
@@ -24,14 +34,14 @@ use image::{GrayImage, Luma};
 use qrcode::{Color, QrCode};
 
 #[cfg(feature = "user")]
-fn make_user_node(config: &Config) -> Node {
-    println!("Initializing user node with config: {:?}", config);
+fn make_user_node() -> Node {
+    println!("Initializing user node...");
 
     let mut builder = Builder::new();
     
     // Parse LSP pubkey if available
-    let lsp_pubkey = if !config.lsp.pubkey.is_empty() {
-        match hex::decode(&config.lsp.pubkey) {
+    let lsp_pubkey = if !DEFAULT_LSP_PUBKEY.is_empty() {
+        match hex::decode(DEFAULT_LSP_PUBKEY) {
             Ok(bytes) => {
                 match PublicKey::from_slice(&bytes) {
                     Ok(key) => {
@@ -55,7 +65,7 @@ fn make_user_node(config: &Config) -> Node {
     
     // Configure LSP if pubkey is available
     if let Some(lsp_pubkey) = lsp_pubkey {
-        let lsp_address = match config.lsp.address.parse() {
+        let lsp_address = match DEFAULT_LSP_ADDRESS.parse() {
             Ok(addr) => addr,
             Err(e) => {
                 println!("Error parsing LSP address: {:?}, using default", e);
@@ -65,12 +75,12 @@ fn make_user_node(config: &Config) -> Node {
         builder.set_liquidity_source_lsps2(
             lsp_pubkey,
             lsp_address, 
-            Some(config.lsp.auth.clone())
+            Some(DEFAULT_LSP_AUTH.to_string())
         );
     }
     
-    // Configure the network based on config
-    let network = match config.node.network.to_lowercase().as_str() {
+    // Configure the network
+    let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
         "signet" => Network::Signet,
         "testnet" => Network::Testnet,
         "bitcoin" => Network::Bitcoin,
@@ -84,30 +94,29 @@ fn make_user_node(config: &Config) -> Node {
     builder.set_network(network);
     
     // Set up Esplora chain source
-    println!("Setting Esplora API URL: {}", config.node.chain_source_url);
-    builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
+    println!("Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
+    builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
     
     // Set up data directory
-    let data_dir = &config.node.data_dir;
-    println!("Setting storage directory: {}", data_dir);
+    println!("Setting storage directory: {}", USER_DATA_DIR);
     
     // Ensure the data directory exists
-    if !std::path::Path::new(data_dir).exists() {
-        println!("Creating data directory: {}", data_dir);
-        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
-            println!("WARNING: Failed to create data directory: {}. Error: {}", data_dir, e);
+    if !std::path::Path::new(USER_DATA_DIR).exists() {
+        println!("Creating data directory: {}", USER_DATA_DIR);
+        std::fs::create_dir_all(USER_DATA_DIR).unwrap_or_else(|e| {
+            println!("WARNING: Failed to create data directory: {}. Error: {}", USER_DATA_DIR, e);
         });
     }
     
-    builder.set_storage_dir_path(data_dir.clone());
+    builder.set_storage_dir_path(USER_DATA_DIR.to_string());
     
     // Set up listening address for the user node
-    let listen_addr = format!("127.0.0.1:{}", config.node.port).parse().unwrap();
+    let listen_addr = format!("127.0.0.1:{}", USER_PORT).parse().unwrap();
     println!("Setting listening address: {}", listen_addr);
     builder.set_listening_addresses(vec![listen_addr]).unwrap();
     
     // Set node alias
-    builder.set_node_alias(config.node.alias.clone());
+    builder.set_node_alias(USER_NODE_ALIAS.to_string());
     
     // Build the node
     let node = match builder.build() {
@@ -126,9 +135,8 @@ fn make_user_node(config: &Config) -> Node {
     }
     
     println!("User node started with ID: {}", node.node_id());
-    
-    // Print connection info
-    config.print_connection_info(&node);
+    println!("To connect to this node, use:");
+    println!("  openchannel {} 127.0.0.1:{} [SATS_AMOUNT]", node.node_id(), USER_PORT);
     
     node
 }
@@ -150,38 +158,18 @@ pub struct StableChannelsApp {
     qr_texture: Option<TextureHandle>,
     status_message: String,
     close_channel_address: String,
-    config: Config,
 }
 
 impl StableChannelsApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let config = Config::get_or_create_for_component(ComponentType::User);
-    
-        // Ensure directories exist
-        if let Err(e) = config.ensure_directories_exist() {
-            eprintln!("Warning: Failed to create directories: {}", e);
+        // Ensure user directory exists
+        if !std::path::Path::new(USER_DATA_DIR).exists() {
+            std::fs::create_dir_all(USER_DATA_DIR).unwrap_or_else(|e| {
+                eprintln!("Warning: Failed to create directories: {}", e);
+            });
         }
     
-        // Parse LSP pubkey
-        let lsp_pubkey_bytes = match hex::decode(&config.lsp.pubkey) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("Error decoding LSP pubkey: {:?}", e);
-                vec![0; 33] // Fallback to empty pubkey
-            }
-        };
-    
-        let lsp_pubkey = match PublicKey::from_slice(&lsp_pubkey_bytes) {
-            Ok(key) => Some(key),
-            Err(e) => {
-                eprintln!("Error parsing LSP pubkey: {:?}", e);
-                None
-            }
-        };
-    
-        let is_service = false; 
-        let user = make_user_node(&config);
-        
+        let user = make_user_node();
         let state_manager = StateManager::new(user);
 
         let channels = state_manager.node().list_channels();
@@ -199,7 +187,6 @@ impl StableChannelsApp {
             qr_texture: None,
             status_message: String::new(),
             close_channel_address: String::new(),
-            config,
         }
     }
 
@@ -243,8 +230,8 @@ impl StableChannelsApp {
             ldk_node::lightning_invoice::Description::new("Stable Channel JIT payment".to_string()).unwrap()
         );
         
-        // Use the amount from the config
-        let amount_msats = (self.config.stable_channel_defaults.expected_usd * 1_000_000.0) as u64;
+        // Use the default expected USD amount
+        let amount_msats = (DEFAULT_EXPECTED_USD * 1_000_000.0) as u64;
 
         let result = self.state_manager.node().bolt11_payment().receive_via_jit_channel(
             amount_msats,
@@ -543,7 +530,7 @@ impl StableChannelsApp {
                         if let Err(e) = self.state_manager.initialize_stable_channel(
                             &channel.channel_id.to_string(),
                             true, // default to stable receiver
-                            self.config.stable_channel_defaults.expected_usd,
+                            DEFAULT_EXPECTED_USD,
                             0.0, // no native bitcoin amount
                         ) {
                             eprintln!("Error initializing stable channel: {:?}", e);
@@ -937,14 +924,7 @@ fn run_cli(user: StateManager) {
 }
 
 // Main function to launch the app
-pub fn run() {
-    let config = Config::get_or_create_for_component(ComponentType::User);
-    
-    // Ensure directories exist
-    if let Err(e) = config.ensure_directories_exist() {
-        println!("Warning: Failed to create directories: {}", e);
-    }
-
+pub fn run() {    
     // Default to starting the graphical app
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -965,7 +945,7 @@ pub fn run() {
         println!("GUI could not be started, falling back to CLI mode");
         
         // Parse LSP pubkey
-        let lsp_pubkey_bytes = match hex::decode(&config.lsp.pubkey) {
+        let lsp_pubkey_bytes = match hex::decode(DEFAULT_LSP_PUBKEY) {
             Ok(bytes) => bytes,
             Err(e) => {
                 eprintln!("Error decoding LSP pubkey: {:?}", e);
@@ -982,7 +962,7 @@ pub fn run() {
         };
 
         let is_service = false; 
-        let user_node = make_user_node(&config);
+        let user_node = make_user_node();
         let user = StateManager::new(user_node);
         
         // Run CLI as fallback

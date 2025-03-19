@@ -5,25 +5,28 @@ use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::{config::ChannelConfig, lightning::offers::offer::Offer};
 use stable_channels::{Bitcoin, StateManager};
 
-use crate::{get_user_input};
+use crate::get_user_input;
 
-use crate::config::{ComponentType, Config};
+// Configuration constants
+const LSP_DATA_DIR: &str = "data/lsp";
+const LSP_NODE_ALIAS: &str = "lsp";
+const LSP_PORT: u16 = 9737;
+const DEFAULT_NETWORK: &str = "signet";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
 use ldk_node::Node;
-
 use ldk_node::{Builder};
 
-
 #[cfg(feature = "lsp")]
-fn make_lsp_node(config: &Config) -> Node {
+fn make_lsp_node() -> Node {
     use ldk_node::{liquidity::LSPS2ServiceConfig, Node};
 
-    println!("Initializing LSP node with config: {:?}", config);
+    println!("Initializing LSP node...");
 
     let mut builder = Builder::new();
     
     // Configure the network based on config
-    let network = match config.node.network.to_lowercase().as_str() {
+    let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
         "signet" => Network::Signet,
         "testnet" => Network::Testnet,
         "bitcoin" => Network::Bitcoin,
@@ -52,30 +55,29 @@ fn make_lsp_node(config: &Config) -> Node {
     builder.set_liquidity_provider_lsps2(service_config);
     
     // Set up Esplora chain source
-    println!("Setting Esplora API URL: {}", config.node.chain_source_url);
-    builder.set_chain_source_esplora(config.node.chain_source_url.clone(), None);
+    println!("Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
+    builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
     
     // Set up data directory
-    let data_dir = &config.node.data_dir;
-    println!("Setting storage directory: {}", data_dir);
+    println!("Setting storage directory: {}", LSP_DATA_DIR);
     
     // Ensure the data directory exists
-    if !std::path::Path::new(data_dir).exists() {
-        println!("Creating data directory: {}", data_dir);
-        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
-            println!("WARNING: Failed to create data directory: {}. Error: {}", data_dir, e);
+    if !std::path::Path::new(LSP_DATA_DIR).exists() {
+        println!("Creating data directory: {}", LSP_DATA_DIR);
+        std::fs::create_dir_all(LSP_DATA_DIR).unwrap_or_else(|e| {
+            println!("WARNING: Failed to create data directory: {}. Error: {}", LSP_DATA_DIR, e);
         });
     }
     
-    builder.set_storage_dir_path(data_dir.clone());
+    builder.set_storage_dir_path(LSP_DATA_DIR.to_string());
     
     // Set up listening address for the LSP node
-    let listen_addr = format!("127.0.0.1:{}", config.node.port).parse().unwrap();
+    let listen_addr = format!("127.0.0.1:{}", LSP_PORT).parse().unwrap();
     println!("Setting listening address: {}", listen_addr);
     builder.set_listening_addresses(vec![listen_addr]).unwrap();
     
     // Set node alias
-    builder.set_node_alias(config.node.alias.clone());
+    builder.set_node_alias(LSP_NODE_ALIAS.to_string());
     
     // Build the node
     let node = match builder.build() {
@@ -94,9 +96,8 @@ fn make_lsp_node(config: &Config) -> Node {
     }
     
     println!("LSP node started with ID: {}", node.node_id());
-    
-    // Print connection info
-    config.print_connection_info(&node);
+    println!("To connect to this node, use:");
+    println!("  openchannel {} 127.0.0.1:{} [SATS_AMOUNT]", node.node_id(), LSP_PORT);
     
     // Final delay to ensure stability
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -107,14 +108,14 @@ fn make_lsp_node(config: &Config) -> Node {
 
 #[cfg(feature = "lsp")]
 pub fn run() {
-    let config = Config::get_or_create_for_component(ComponentType::Lsp);
-    
-    // Ensure directories exist
-    if let Err(e) = config.ensure_directories_exist() {
-        println!("Warning: Failed to create directories: {}", e);
+    // Ensure LSP directory exists
+    if !std::path::Path::new(LSP_DATA_DIR).exists() {
+        std::fs::create_dir_all(LSP_DATA_DIR).unwrap_or_else(|e| {
+            println!("Warning: Failed to create directories: {}", e);
+        });
     }
 
-    let lsp_node = make_lsp_node(&config);
+    let lsp_node = make_lsp_node();
     let lsp = StateManager::new(lsp_node);
     let mut their_offer: Option<Offer> = None;
 
@@ -160,7 +161,7 @@ pub fn run() {
                     Ok(b) if b.len() == 32 => b,
                     _ => {
                         eprintln!("Invalid channel ID format. Ensure it's a 32-byte hex string.");
-                        return;
+                        continue;
                     }
                 };
             
@@ -258,15 +259,7 @@ pub fn run() {
                     let counterparty_node_id = channel.counterparty_node_id;
                     let _ = lsp.node().close_channel(&user_channel_id, counterparty_node_id);
                 }
-                print!("Closing all channels.")
-            }
-            (Some("closechannel"), [channel_id]) => {
-                if let Some(channel) = lsp.node().list_channels().iter().find(|c| format!("{:?}", c.user_channel_id) == *channel_id) {
-                    let _ = lsp.node().close_channel(&channel.user_channel_id, channel.counterparty_node_id);
-                    println!("Closing channel with ID: {:?}", channel.user_channel_id);
-                } else {
-                    println!("Channel with ID {:?} not found.", channel_id);
-                }
+                println!("Closing all channels.")
             }
             (Some("onchainsend"), [address_str, amount_str, fee_rate_str]) => {
                 let amount_sats = match amount_str.parse::<u64>() {
@@ -308,9 +301,9 @@ pub fn run() {
                 match bolt11_invoice {
                     Ok(invoice) => match lsp.node().bolt11_payment().send(&invoice, None) {
                         Ok(payment_id) => {
-                            println!("Payment sent from Exchange with payment_id: {}", payment_id)
+                            println!("Payment sent from LSP with payment_id: {}", payment_id)
                         }
-                        Err(e) => println!("Error sending payment from Exchange: {}", e),
+                        Err(e) => println!("Error sending payment from LSP: {}", e),
                     },
                     Err(e) => println!("Error parsing invoice: {}", e),
                 }
@@ -320,5 +313,3 @@ pub fn run() {
         }
     }
 }
-
-

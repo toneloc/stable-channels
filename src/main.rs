@@ -20,10 +20,6 @@ mod lsp;
 #[cfg(feature = "exchange")]
 mod exchange;
 
-mod config;
-
-use crate::config::Config;
-
 use std::{io::{self, Write}, path::PathBuf};
 
 use ldk_node::{
