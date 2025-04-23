@@ -27,8 +27,8 @@ const EXCHANGE_DATA_DIR: &str = "data/exchange";
 const EXCHANGE_NODE_ALIAS: &str = "exchange";
 const EXCHANGE_PORT: u16 = 9735;
 
-const DEFAULT_NETWORK: &str = "signet";
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+const DEFAULT_NETWORK: &str = "bitcoin";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
 const EXPECTED_USD: f64 = 50.0;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -86,7 +86,7 @@ impl ServerApp {
             "bitcoin" => Network::Bitcoin,
             _ => {
                 println!("Warning: Unknown network in config, defaulting to Signet");
-                Network::Signet
+                Network::Bitcoin
             }
         };
 
@@ -322,7 +322,7 @@ impl ServerApp {
     pub fn send_onchain(&mut self) -> bool {
         if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
             match Address::from_str(&self.on_chain_address) {
-                Ok(addr) => match addr.require_network(Network::Signet) {
+                Ok(addr) => match addr.require_network(Network::Bitcoin) {
                     Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
                         Ok(txid) => {
                             self.status_message = format!("Transaction sent: {}", txid);
