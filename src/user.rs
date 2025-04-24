@@ -453,10 +453,18 @@ impl UserApp {
         while let Some(event) = self.node.next_event() {
             match event {
                 Event::ChannelReady { channel_id, .. } => {
+                    let txid_str = self.node
+                        .list_channels()
+                        .iter()
+                        .find(|ch| ch.channel_id == channel_id)
+                        .and_then(|ch| ch.funding_txo.as_ref())
+                        .map(|outpoint| outpoint.txid.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    
                     audit_event("CHANNEL_READY", json!({
                         "channel_id": channel_id.to_string()
                     }));
-                    self.status_message = format!("Channel {channel_id} is now ready");
+                    self.status_message = format!("Channel {channel_id} is now ready\nTXID: {txid_str}");
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
@@ -484,7 +492,7 @@ impl UserApp {
                         }),
                     );
                 
-                    self.status_message = format!("Channel {} is pending confirmation", channel_id);
+                    self.status_message = format!("Channel {channel_id} is now ready\nTXID: {funding_str}");
                 }
                 
                 Event::PaymentReceived { amount_msat, payment_hash, .. } => {
