@@ -468,35 +468,127 @@ impl ServerApp {
         });
     }
 
+    pub fn update_channel_info(&mut self) -> String {
+        let channels = self.node.list_channels();
+        if channels.is_empty() {
+            return "No channels found.".to_string();
+        }
+    
+        let mut info = String::new();
+        info.push_str("[Channel Information Table]\n");
+    
+        for (i, channel) in channels.iter().enumerate() {
+            let is_stable = self.stable_channels.iter().any(|sc| sc.channel_id == channel.channel_id);
+    
+            let id_str = hex::encode(channel.channel_id.0);
+            let peer_str = channel.counterparty_node_id.to_string();
+            let txid_str = channel.funding_txo
+                .as_ref()
+                .map(|o| format!("{}:{}", o.txid, o.vout))
+                .unwrap_or("-".to_string());
+    
+            let value = channel.channel_value_sats;
+            let outbound = channel.outbound_capacity_msat / 1000;
+            let inbound = channel.inbound_capacity_msat / 1000;
+            let usable = channel.is_usable;
+    
+            info.push_str(&format!(
+                "{} | ID: {} | Peer: {} | TXID: {} | Value: {} sats | Outbound: {} | Inbound: {} | Usable: {} | Stable: {}\n",
+                i + 1,
+                id_str,
+                peer_str,
+                txid_str,
+                value,
+                outbound,
+                inbound,
+                usable,
+                is_stable
+            ));
+        }
+    
+        info
+    }
+
     pub fn show_channels_section(&mut self, ui: &mut egui::Ui, channel_info: &mut String) {
+        use egui::{RichText, ScrollArea};
+    
+        // helper ─ shorten for display
+        fn short(s: &str, n: usize) -> String {
+            if s.len() > n { format!("{}…", &s[..n]) } else { s.to_owned() }
+        }
+    
         ui.group(|ui| {
             ui.heading("Lightning Channels");
             if ui.button("Refresh Channel List").clicked() {
                 *channel_info = self.update_channel_info();
             }
-            ui.text_edit_multiline(channel_info);
+    
+            ScrollArea::both()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    egui::Grid::new("channel_table")
+                        .striped(true)
+                        .min_col_width(80.0)
+                        .show(ui, |ui| {
+                            for h in [
+                                "ID", "Peer", "TXID",
+                                "Value", "Out", "In",
+                                "Ready", "Usable", "Stable",
+                            ] {
+                                ui.label(RichText::new(h).strong().small());
+                            }
+                            ui.end_row();
+    
+                            for ch in self.node.list_channels() {
+                                let is_stable = self
+                                    .stable_channels
+                                    .iter()
+                                    .any(|sc| sc.channel_id == ch.channel_id);
+    
+                                let id      = hex::encode(ch.channel_id.0);
+                                let peer    = ch.counterparty_node_id.to_string();
+                                let txid    = ch
+                                    .funding_txo
+                                    .as_ref()
+                                    .map(|o| format!("{}:{}", o.txid, o.vout))
+                                    .unwrap_or_else(|| "-".into());
+    
+                                // ID cell ─ truncated + copy button
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(short(&id, 8)).monospace());
+                                    if ui.small_button("⧉").on_hover_text("Copy full ID").clicked() {
+                                        ui.output_mut(|o| o.copied_text = id.clone());
+                                    }
+                                });
+    
+                                // Peer cell
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(short(&peer, 8)).monospace());
+                                    if ui.small_button("⧉").on_hover_text("Copy full peer key").clicked() {
+                                        ui.output_mut(|o| o.copied_text = peer.clone());
+                                    }
+                                });
+    
+                                // TXID cell
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(short(&txid, 10)).monospace());
+                                    if ui.small_button("⧉").on_hover_text("Copy full TXID").clicked() {
+                                        ui.output_mut(|o| o.copied_text = txid.clone());
+                                    }
+                                });
+    
+                                ui.label(ch.channel_value_sats.to_string());
+                                ui.label((ch.outbound_capacity_msat / 1000).to_string());
+                                ui.label((ch.inbound_capacity_msat / 1000).to_string());
+                                ui.label(ch.is_channel_ready.to_string());
+                                ui.label(ch.is_usable.to_string());
+                                ui.label(if is_stable { "Yes" } else { "No" });
+    
+                                ui.end_row();
+                            }
+                        });
+                });
         });
-    }
-
-    pub fn update_channel_info(&mut self) -> String {
-        let channels = self.node.list_channels();
-        if channels.is_empty() {
-            return "No channels found.".to_string();
-        } else {
-            let mut info = String::new();
-            for (i, channel) in channels.iter().enumerate() {
-                let is_stable = self.stable_channels.iter().any(|sc| sc.channel_id == channel.channel_id);
-                info.push_str(&format!(
-                    "Channel {}: ID: {}, Value: {} sats, Ready: {}{}\n",
-                    i + 1,
-                    channel.channel_id,
-                    channel.channel_value_sats,
-                    channel.is_channel_ready,
-                    if is_stable { " [STABLE]" } else { "" }
-                ));
-            }
-            info
-        }
     }
 
     pub fn open_channel(&mut self) -> bool {
@@ -794,7 +886,6 @@ impl ServerApp {
                 });
          });
     }
-
 
     pub fn save_stable_channels(&mut self) {
         let entries: Vec<StableChannelEntry> = self.stable_channels.iter().map(|sc| StableChannelEntry {
