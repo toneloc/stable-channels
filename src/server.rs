@@ -493,7 +493,7 @@ impl ServerApp {
             let usable = channel.is_usable;
     
             info.push_str(&format!(
-                "{} | ID: {} | Peer: {} | TXID: {} | Value: {} sats | Outbound: {} | Inbound: {} | Usable: {} | Stable: {}\n",
+                "{} | ID: {} | Peer: {} | TXID: {} | Capacity: {} sats | Ours: {} | Theirs: {} | Usable: {} | Stable: {}\n",
                 i + 1,
                 id_str,
                 peer_str,
@@ -512,7 +512,6 @@ impl ServerApp {
     pub fn show_channels_section(&mut self, ui: &mut egui::Ui, channel_info: &mut String) {
         use egui::{RichText, ScrollArea};
     
-        // helper ─ shorten for display
         fn short(s: &str, n: usize) -> String {
             if s.len() > n { format!("{}…", &s[..n]) } else { s.to_owned() }
         }
@@ -520,40 +519,43 @@ impl ServerApp {
         ui.group(|ui| {
             ui.heading("Lightning Channels");
             if ui.button("Refresh Channel List").clicked() {
+                self.load_stable_channels();
                 *channel_info = self.update_channel_info();
             }
     
             ScrollArea::both()
+                .max_height(150.0)
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     egui::Grid::new("channel_table")
                         .striped(true)
                         .min_col_width(80.0)
                         .show(ui, |ui| {
+                            // ── headers ──────────────────────────────────────────────
                             for h in [
                                 "ID", "Peer", "TXID",
                                 "Value", "Out", "In",
-                                "Ready", "Usable", "Stable",
+                                "Ready", "Usable", "Stable", "Target USD",
                             ] {
                                 ui.label(RichText::new(h).strong().small());
                             }
                             ui.end_row();
     
+                            // ── rows ─────────────────────────────────────────────────
                             for ch in self.node.list_channels() {
-                                let is_stable = self
+                                let stable_opt = self
                                     .stable_channels
                                     .iter()
-                                    .any(|sc| sc.channel_id == ch.channel_id);
+                                    .find(|sc| sc.channel_id == ch.channel_id);
     
-                                let id      = hex::encode(ch.channel_id.0);
-                                let peer    = ch.counterparty_node_id.to_string();
-                                let txid    = ch
-                                    .funding_txo
+                                let id   = hex::encode(ch.channel_id.0);
+                                let peer = ch.counterparty_node_id.to_string();
+                                let txid = ch.funding_txo
                                     .as_ref()
                                     .map(|o| format!("{}:{}", o.txid, o.vout))
                                     .unwrap_or_else(|| "-".into());
     
-                                // ID cell ─ truncated + copy button
+                                // ID cell
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(short(&id, 8)).monospace());
                                     if ui.small_button("⧉").on_hover_text("Copy full ID").clicked() {
@@ -582,7 +584,13 @@ impl ServerApp {
                                 ui.label((ch.inbound_capacity_msat / 1000).to_string());
                                 ui.label(ch.is_channel_ready.to_string());
                                 ui.label(ch.is_usable.to_string());
-                                ui.label(if is_stable { "Yes" } else { "No" });
+                                ui.label(if stable_opt.is_some() { "Yes" } else { "No" });
+    
+                                // Target USD column
+                                ui.label(match stable_opt {
+                                    Some(sc) => format!("{:.2}", sc.expected_usd.0),
+                                    None => "n/a".into(),
+                                });
     
                                 ui.end_row();
                             }
@@ -590,7 +598,7 @@ impl ServerApp {
                 });
         });
     }
-
+    
     pub fn open_channel(&mut self) -> bool {
         match PublicKey::from_str(&self.open_channel_node_id) {
             Ok(node_id) => match SocketAddress::from_str(&self.open_channel_address) {
@@ -787,6 +795,8 @@ impl ServerApp {
                 });
 
                 ui.add_space(10.0);
+                self.show_channels_section(ui, &mut channel_info);
+                ui.add_space(10.0);
 
                 ui.group(|ui| {
                     ui.heading("Stable Channels");
@@ -844,10 +854,6 @@ impl ServerApp {
                         }
                     });
                 });
-
-                ui.add_space(10.0);
-                self.show_channels_section(ui, &mut channel_info);
-                ui.add_space(10.0);
 
                 if ui.button("View Logs").clicked() {
                     self.show_log_window = true;
