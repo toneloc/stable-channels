@@ -229,6 +229,30 @@ impl ServerApp {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.update_balances();
                 }
+                Event::ChannelPending {
+                    channel_id,
+                    user_channel_id,
+                    former_temporary_channel_id,
+                    counterparty_node_id,
+                    funding_txo,
+                } => {
+                    let temp_id_str = hex::encode(former_temporary_channel_id.0);
+                
+                    let funding_str = funding_txo.txid.as_raw_hash().to_string();
+                
+                    audit_event(
+                        "CHANNEL_PENDING",
+                        json!({
+                            "channel_id":            channel_id.to_string(),
+                            "user_channel_id":       format!("{:?}", user_channel_id),
+                            "temp_channel_id":       temp_id_str,
+                            "counterparty_node_id":  counterparty_node_id.to_string(),
+                            "funding_txo":           funding_str,
+                        }),
+                    );
+                
+                    self.status_message = format!("Channel {} is pending confirmation", channel_id);
+                }
                 Event::PaymentSuccessful { payment_hash, .. } => {
                     audit_event("PAYMENT_SUCCESSFUL", json!({"payment_hash": format!("{}", payment_hash)}));
                     self.status_message = format!("Sent payment {}", payment_hash);
@@ -772,6 +796,10 @@ impl ServerApp {
                 self.show_balance_section(ui);
                 ui.add_space(10.0);
 
+                ui.add_space(10.0);
+                self.show_channels_section(ui, &mut channel_info);
+                ui.add_space(10.0);
+
                 ui.group(|ui| {
                     ui.heading("Open Channel");
                     ui.horizontal(|ui| {
@@ -793,10 +821,6 @@ impl ServerApp {
                         }
                     }
                 });
-
-                ui.add_space(10.0);
-                self.show_channels_section(ui, &mut channel_info);
-                ui.add_space(10.0);
 
                 ui.group(|ui| {
                     ui.heading("Stable Channels");

@@ -2,7 +2,7 @@
 use eframe::{egui, App, Frame};
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning_invoice::Bolt11Invoice;
-use ldk_node::{Builder, Node};
+use ldk_node::{Builder, Event, Node};
 use ldk_node::{
     bitcoin::secp256k1::PublicKey,
     lightning::ln::msgs::SocketAddress,
@@ -26,13 +26,13 @@ use crate::stable;
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str = "022fa9c538690c29360e43d71c52bc5276d40b696fba497e2a437091bfb6906584";
-// const DEFAULT_LSP_ADDRESS: &str = "9737";
-const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
+const DEFAULT_LSP_PUBKEY: &str = "";
+const DEFAULT_LSP_ADDRESS: &str = ":9737";
+// const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const EXPECTED_USD: f64 = 10.0;
 const DEFAULT_GATEWAY_PUBKEY: &str = "034df820dd8f504e5bd0083bbd4fa6c8052dcb49702eaa47cc60d5d98e2a3350c4";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
 
 pub struct UserApp {
     pub node: Arc<Node>,
@@ -75,7 +75,7 @@ impl UserApp {
         set_audit_log_path(&audit_log_path);
 
         let mut builder = Builder::new();
-        builder.set_network(Network::Signet);
+        builder.set_network(Network::Bitcoin);
         builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
         builder.set_storage_dir_path(user_data_dir.to_string());
         builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
@@ -452,7 +452,7 @@ impl UserApp {
     fn process_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             match event {
-                ldk_node::Event::ChannelReady { channel_id, .. } => {
+                Event::ChannelReady { channel_id, .. } => {
                     audit_event("CHANNEL_READY", json!({
                         "channel_id": channel_id.to_string()
                     }));
@@ -460,8 +460,34 @@ impl UserApp {
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
-    
-                ldk_node::Event::PaymentReceived { amount_msat, payment_hash, .. } => {
+
+                Event::ChannelPending {
+                    channel_id,
+                    user_channel_id,
+                    former_temporary_channel_id,
+                    counterparty_node_id,
+                    funding_txo,
+                } => {
+                    // stringify auxiliary fields without relying on `Serialize` impls
+                    let temp_id_str = hex::encode(former_temporary_channel_id.0);
+                
+                    let funding_str = funding_txo.txid.as_raw_hash().to_string();
+                
+                    audit_event(
+                        "CHANNEL_PENDING",
+                        json!({
+                            "channel_id":            channel_id.to_string(),
+                            "user_channel_id":       format!("{:?}", user_channel_id),
+                            "temp_channel_id":       temp_id_str,
+                            "counterparty_node_id":  counterparty_node_id.to_string(),
+                            "funding_txo":           funding_str,
+                        }),
+                    );
+                
+                    self.status_message = format!("Channel {} is pending confirmation", channel_id);
+                }
+                
+                Event::PaymentReceived { amount_msat, payment_hash, .. } => {
                     audit_event("PAYMENT_RECEIVED", json!({
                         "amount_msat": amount_msat,
                         "payment_hash": format!("{payment_hash}")
@@ -472,8 +498,9 @@ impl UserApp {
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
-    
-                ldk_node::Event::PaymentSuccessful { payment_id: _, payment_hash, payment_preimage: _, fee_paid_msat: _ } => {
+                
+                
+                Event::PaymentSuccessful { payment_id: _, payment_hash, payment_preimage: _, fee_paid_msat: _ } => {
                     audit_event("PAYMENT_SUCCESSFUL", json!({
                         "payment_hash": format!("{payment_hash}"),
                     }));
@@ -482,7 +509,7 @@ impl UserApp {
                     update_balances(&self.node, &mut sc);
                 }
     
-                ldk_node::Event::ChannelClosed { channel_id, reason, .. } => {
+                Event::ChannelClosed { channel_id, reason, .. } => {
                     audit_event("CHANNEL_CLOSED", json!({
                         "channel_id": format!("{channel_id}"),
                         "reason": format!("{:?}", reason)

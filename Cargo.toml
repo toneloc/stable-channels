@@ -9,11 +9,6 @@ user = []
 lsp = []
 exchange = []
 
-[alias]
-user = "run --quiet"
-lsp = "run --quiet"
-exchange = "run --quiet"
-
 [dependencies]
 chrono = "0.4"
 ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "1525255222cd7a48de3a9301a3053e8a4e3d1a86" }
