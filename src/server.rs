@@ -1,4 +1,5 @@
 use eframe::{egui, App, Frame};
+use egui::CollapsingHeader;
 use ldk_node::{
     bitcoin::{Network, Address, secp256k1::PublicKey},
     lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
@@ -800,89 +801,90 @@ impl ServerApp {
                 self.show_channels_section(ui, &mut channel_info);
                 ui.add_space(10.0);
 
-                ui.group(|ui| {
-                    ui.heading("Open Channel");
-                    ui.horizontal(|ui| {
-                        ui.label("Node ID:");
-                        ui.text_edit_singleline(&mut self.open_channel_node_id);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Net Address:");
-                        ui.text_edit_singleline(&mut self.open_channel_address);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Amount (sats):");
-                        ui.text_edit_singleline(&mut self.open_channel_amount);
-                    });
-                    if ui.button("Open Channel").clicked() {
-                        if self.open_channel() {
-                            self.open_channel_node_id.clear();
-                            self.open_channel_amount = "100000".to_string();
-                        }
-                    }
-                });
-
-                ui.group(|ui| {
-                    ui.heading("Stable Channels");
-                    if self.stable_channels.is_empty() {
-                        ui.label("No stable channels configured");
-                    } else {
-                        for (i, sc) in self.stable_channels.iter().enumerate() {
+                CollapsingHeader::new("Show advanced features")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.group(|ui| {
+                            ui.heading("Open Channel");
                             ui.horizontal(|ui| {
-                                ui.label(format!("{}. Channel: {}", i + 1, sc.channel_id));
-                                ui.label(format!("Target: ${:.2}", sc.expected_usd.0));
+                                ui.label("Node ID:");
+                                ui.text_edit_singleline(&mut self.open_channel_node_id);
                             });
                             ui.horizontal(|ui| {
-                                ui.label("    User balance:");
-                                ui.label(format!("{:.8} BTC (${:.2})", sc.stable_receiver_btc.to_btc(), sc.stable_receiver_usd.0));
+                                ui.label("Net Address:");
+                                ui.text_edit_singleline(&mut self.open_channel_address);
                             });
                             ui.horizontal(|ui| {
-                                ui.label("    LSP balance:");
-                                ui.label(format!("{:.8} BTC (${:.2})", sc.stable_provider_btc.to_btc(), sc.stable_provider_usd.0));
+                                ui.label("Amount (sats):");
+                                ui.text_edit_singleline(&mut self.open_channel_amount);
                             });
-                            ui.add_space(5.0);
+                            if ui.button("Open Channel").clicked() {
+                                if self.open_channel() {
+                                    self.open_channel_node_id.clear();
+                                    self.open_channel_amount = "100000".to_string();
+                                }
+                            }
+                        });
+
+                        ui.group(|ui| {
+                            ui.heading("Stable Channels");
+                            if self.stable_channels.is_empty() {
+                                ui.label("No stable channels configured");
+                            } else {
+                                for (i, sc) in self.stable_channels.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("{}. Channel: {}", i + 1, sc.channel_id));
+                                        ui.label(format!("Target: ${:.2}", sc.expected_usd.0));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("    User balance:");
+                                        ui.label(format!("{:.8} BTC (${:.2})", sc.stable_receiver_btc.to_btc(), sc.stable_receiver_usd.0));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("    LSP balance:");
+                                        ui.label(format!("{:.8} BTC (${:.2})", sc.stable_provider_btc.to_btc(), sc.stable_provider_usd.0));
+                                    });
+                                    ui.add_space(5.0);
+                                }
+                            }
+                            ui.label("Designate Stable Channel:");
+                            ui.horizontal(|ui| {
+                                ui.label("Channel ID:");
+                                ui.text_edit_singleline(&mut self.selected_channel_id);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Target USD amount:");
+                                ui.text_edit_singleline(&mut self.stable_channel_amount);
+                            });
+                            if ui.button("Designate as Stable").clicked() {
+                                self.designate_stable_channel();
+                            }
+                        });
+
+                        self.show_invoice_section(ui);
+                        ui.add_space(10.0);
+                        self.show_pay_invoice_section(ui);
+                        ui.add_space(10.0);
+                        self.show_onchain_address_section(ui);
+                        ui.add_space(10.0);
+                        self.show_onchain_send_section(ui);
+                        ui.add_space(10.0);
+
+                        ui.group(|ui| {
+                            ui.heading("Close Specific Channel");
+                            ui.horizontal(|ui| {
+                                ui.label("Channel ID:");
+                                ui.text_edit_singleline(&mut self.channel_id_to_close);
+                                if ui.button("Close Channel").clicked() {
+                                    self.close_specific_channel();
+                                }
+                            });
+                        });
+
+                        if ui.button("View Logs").clicked() {
+                            self.show_log_window = true;
                         }
-                    }
-
-                    ui.label("Designate Stable Channel:");
-                    ui.horizontal(|ui| {
-                        ui.label("Channel ID:");
-                        ui.text_edit_singleline(&mut self.selected_channel_id);
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Target USD amount:");
-                        ui.text_edit_singleline(&mut self.stable_channel_amount);
-                    });
-                    if ui.button("Designate as Stable").clicked() {
-                        self.designate_stable_channel();
-                    }
-                });
-
-                ui.add_space(10.0);
-                self.show_invoice_section(ui);
-                ui.add_space(10.0);
-                self.show_pay_invoice_section(ui);
-                ui.add_space(10.0);
-                self.show_onchain_address_section(ui);
-                ui.add_space(10.0);
-                self.show_onchain_send_section(ui);
-                ui.add_space(10.0);
-
-                ui.group(|ui| {
-                    ui.heading("Close Specific Channel");
-                    ui.horizontal(|ui| {
-                        ui.label("Channel ID:");
-                        ui.text_edit_singleline(&mut self.channel_id_to_close);
-                        if ui.button("Close Channel").clicked() {
-                            self.close_specific_channel();
-                        }
-                    });
-                });
-
-                if ui.button("View Logs").clicked() {
-                    self.show_log_window = true;
-                }
-
             });
         });
     }
