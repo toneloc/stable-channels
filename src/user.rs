@@ -22,16 +22,21 @@ use crate::types::*;
 use crate::price_feeds::{get_cached_price, get_latest_price};
 use crate::stable;
 
+const DEFAULT_NETWORK: &str = "signet";
+
+// Data will be placed at "current-directory/data/user"
 const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
-const DEFAULT_LSP_PUBKEY: &str = "";
-const DEFAULT_LSP_ADDRESS: &str = ":9737";
-// const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
-const EXPECTED_USD: f64 = 1.0;
-const DEFAULT_GATEWAY_PUBKEY: &str = "034df820dd8f504e5bd0083bbd4fa6c8052dcb49702eaa47cc60d5d98e2a3350c4";
+
+// Populate the below two parameters to run locally
+const DEFAULT_LSP_PUBKEY: &str = "0359c163120d7e729c60ff57ab43c620d1074e1729ada017054ee41efe5095399a";
+const DEFAULT_GATEWAY_PUBKEY: &str = "";
+
+const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+const EXPECTED_USD: f64 = 100.0;
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
 pub struct UserApp {
     pub node: Arc<Node>,
@@ -66,17 +71,31 @@ pub struct UserApp {
 }
 
 impl UserApp {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, String> {
         println!("Initializing user node...");
 
         let user_data_dir = USER_DATA_DIR;
-        let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY).unwrap();
-        
+        let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY)
+            .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
+
         let audit_log_path = format!("{}/audit_log.txt", USER_DATA_DIR);
         set_audit_log_path(&audit_log_path);
 
         let mut builder = Builder::new();
-        builder.set_network(Network::Bitcoin);
+        
+        let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
+            "signet" => Network::Signet,
+            "testnet" => Network::Testnet,
+            "bitcoin" => Network::Bitcoin,
+            _ => {
+                println!("Warning: Unknown network in config, defaulting to Signet");
+                Network::Bitcoin
+            }
+        };
+
+        println!("[Init] Setting network to: {:?}", network);
+        builder.set_network(network);
+
         builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
         builder.set_storage_dir_path(user_data_dir.to_string());
         builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
@@ -212,7 +231,7 @@ impl UserApp {
             }
         });
 
-        app
+        Ok(app)
     }
     // fn get_app_data_dir(component: &str) -> PathBuf {
     //     let mut path = dirs::data_local_dir()
@@ -626,7 +645,7 @@ impl UserApp {
                 ui.add_space(30.0);
                 
                 ui.label(
-                    egui::RichText::new("Get started in 3 easy steps")
+                    egui::RichText::new("Get started in 3 steps")
                         .italics()
                         .size(16.0)
                         .color(egui::Color32::LIGHT_GRAY),
@@ -665,7 +684,7 @@ impl UserApp {
                 let subtle_orange =
                     egui::Color32::from_rgba_premultiplied(247, 147, 26, 200);
                 let btn = egui::Button::new(
-                    egui::RichText::new("Make stable")
+                    egui::RichText::new("Stabilize")
                         .color(egui::Color32::WHITE)
                         .strong()
                         .size(18.0),
@@ -968,10 +987,20 @@ pub fn run() {
             .with_inner_size([460.0, 700.0]),
         ..Default::default()
     };
-    eframe::run_native(
-        "Stable Channels",
-        native_options,
-        Box::new(|_| Ok(Box::new(UserApp::new()))),
-    )
-    .unwrap();
+
+    let app_result = UserApp::new();
+    match app_result {
+        Ok(app) => {
+            eframe::run_native(
+                "Stable Channels",
+                native_options,
+                Box::new(|_| Ok(Box::new(app))),
+            ).unwrap();
+        }
+        Err(e) => {
+            eprintln!("Failed to initialize app: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
+

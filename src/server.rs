@@ -28,8 +28,8 @@ const EXCHANGE_DATA_DIR: &str = "data/exchange";
 const EXCHANGE_NODE_ALIAS: &str = "exchange";
 const EXCHANGE_PORT: u16 = 9735;
 
-const DEFAULT_NETWORK: &str = "bitcoin";
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+const DEFAULT_NETWORK: &str = "signet";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 const EXPECTED_USD: f64 = 50.0;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
