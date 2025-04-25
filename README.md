@@ -2,24 +2,24 @@
 
 ## Stable Channels
 
-Stable Channels allows Lightning Network node operators to keep one side of a channel stable in dollar terms. The nodes receiving stability are called Stable Receivers, while their counterparts are Stable Providers, who assume the price volatility.
+Stable Channels allows Lightning Network node operators to keep one side of a channel stable in dollar terms. The nodes receiving stability are called Stable Receivers, while their counterparts, who assume the extra price volatility, are called Stable Providers.
 
-Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 of bitcoin).
+Each node queries four price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 of bitcoin).
 
-Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in-progress and is compatible with LND, CLN, or LDK. The LND and CLN implementations use Python. The LDK one uses Rust.
+Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is designed for LDK, but also is compatible with LND and CLN. The LND and CLN implementations use Python. The LDK one uses Rust and has server and client front-end based on the Rust egui package.
 
 Links with examples:
 - **Basic example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
 - **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
 - **Project website:** [StableChannels.com](https://www.stablechannels.com)
 
-### Developer Demo (LDK + Rust)
+### Run the GUI Demo (LDK + Rust)
 
 To run this demo,  you will need Rust installed on a Unix-like OS. You must also be connected to the internet to use Mutinynet for testing.
 
 Using a fresh Ubuntu? You may need to install OpenSSL libraries. `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
 
-Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` into the directory in **two windows**.
+Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` into the directory in **three windows**.
 
 #### Steps:
 
@@ -28,13 +28,13 @@ Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` i
    - In one window, run:
 
      ```bash
-     cargo run --features user
+     cargo run -- user
      ```
 
-   - In the other window, run:
+   - In the second window, run:
 
      ```bash
-     cargo run --features lsp
+     cargo run -- lsp
      ```
 
 2. **Get some test BTC**
