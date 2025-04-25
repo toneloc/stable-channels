@@ -1,4 +1,3 @@
-// src/user.rs
 use eframe::{egui, App, Frame};
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning_invoice::Bolt11Invoice;
@@ -14,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use image::{GrayImage, Luma};
 use qrcode::{QrCode, Color};
-use egui::TextureOptions;
+use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions, Vec2};
 use serde_json::json;
 
 use crate::audit::*;
@@ -29,7 +28,7 @@ const USER_PORT: u16 = 9736;
 const DEFAULT_LSP_PUBKEY: &str = "";
 const DEFAULT_LSP_ADDRESS: &str = ":9737";
 // const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
-const EXPECTED_USD: f64 = 10.0;
+const EXPECTED_USD: f64 = 1.0;
 const DEFAULT_GATEWAY_PUBKEY: &str = "034df820dd8f504e5bd0083bbd4fa6c8052dcb49702eaa47cc60d5d98e2a3350c4";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
@@ -54,6 +53,8 @@ pub struct UserApp {
     pub invoice_to_pay: String,
     pub on_chain_address: String,
     pub on_chain_amount: String,
+    pub show_advanced: bool, 
+
 
     // Balance fields
     pub lightning_balance_btc: f64,
@@ -167,6 +168,7 @@ impl UserApp {
             log_contents: String::new(),
             log_last_read: std::time::Instant::now(),
             audit_log_path,
+            show_advanced: false,
 
         };
 
@@ -420,6 +422,18 @@ impl UserApp {
         self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
     }
     
+    fn close_active_channel(&mut self) {
+        let channels = self.node.list_channels();
+        if let Some(ch) = channels.first() {
+            match self.node.close_channel(&ch.user_channel_id, ch.counterparty_node_id) {
+                Ok(_)  => self.status_message = format!("Closing channel {}", ch.channel_id),
+                Err(e) => self.status_message = format!("Error closing channel: {}", e),
+            }
+        } else {
+            self.status_message = "No channel to close".into();
+        }
+    }
+
     pub fn get_address(&mut self) -> bool {
         match self.node.onchain_payment().new_address() {
             Ok(address) => {
@@ -461,6 +475,9 @@ impl UserApp {
                         .map(|outpoint| outpoint.txid.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
                     
+                    let mut sc = self.stable_channel.lock().unwrap();
+                    update_balances(&self.node, &mut sc);
+
                     audit_event("CHANNEL_READY", json!({
                         "channel_id": channel_id.to_string()
                     }));
@@ -606,40 +623,45 @@ impl UserApp {
     fn show_onboarding_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.heading(
-                    egui::RichText::new("Stable Channels v0.1")
-                        .size(28.0)
-                        .strong()
-                        .color(egui::Color32::WHITE),
+                ui.add_space(30.0);
+                
+                ui.label(
+                    egui::RichText::new("Get started in 3 easy steps")
+                        .italics()
+                        .size(16.0)
+                        .color(egui::Color32::LIGHT_GRAY),
                 );
+
                 ui.add_space(50.0);
+
                 ui.heading(
-                    egui::RichText::new("Step 1: Get a Lightning invoice ⚡")
+                    egui::RichText::new("Step 1: Tap Stabilize ⚡")
                         .color(egui::Color32::WHITE),
                 );
                 ui.label(
-                    egui::RichText::new(r#"Press the \"Make stable\" button below."#)
+                    egui::RichText::new("One tap to start.")
                         .color(egui::Color32::GRAY),
                 );
                 ui.add_space(20.0);
                 ui.heading(
-                    egui::RichText::new("Step 2: Send yourself bitcoin 💸")
+                    egui::RichText::new("Step 2: Fund your wallet with BTC 💸")
                         .color(egui::Color32::WHITE),
                 );
                 ui.label(
-                    egui::RichText::new("Over Lightning, from an app or an exchange.")
+                    egui::RichText::new("Send over Lightning from any wallet.")
                         .color(egui::Color32::GRAY),
                 );
                 ui.add_space(20.0);
                 ui.heading(
-                    egui::RichText::new("Step 3: Stable channel created 🔧")
+                    egui::RichText::new("Step 3: Enjoy your stabilized BTC 🔧")
                         .color(egui::Color32::WHITE),
                 );
                 ui.label(
-                    egui::RichText::new("Self-custody. Your keys, your coins.")
+                    egui::RichText::new("Full control. 100% bitcoin.")
                         .color(egui::Color32::GRAY),
                 );
-                ui.add_space(50.0);
+
+                ui.add_space(35.0);
                 let subtle_orange =
                     egui::Color32::from_rgba_premultiplied(247, 147, 26, 200);
                 let btn = egui::Button::new(
@@ -651,16 +673,52 @@ impl UserApp {
                 .min_size(egui::vec2(200.0, 55.0))
                 .fill(subtle_orange)
                 .rounding(8.0);
+
+                
+                ui.add_space(40.0);
+
                 if ui.add(btn).clicked() {
                     self.status_message =
                         "Getting JIT channel invoice...".to_string();
                     self.get_jit_invoice(ctx);
                 }
                 if !self.status_message.is_empty() {
-                    ui.add_space(20.0);
+                    ui.add_space(40.0);
                     ui.label(self.status_message.clone());
                 }
                 ui.add_space(20.0);
+
+                // Pitch for bitcoiners
+                ui.label(
+                    egui::RichText::new("Stable Channels is for bitcoiners who want more bitcoin.")
+                        .size(14.0)
+                        .italics()
+                        .color(egui::Color32::LIGHT_GRAY),
+                );
+
+                let resp = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new("Learn more")
+                                .underline()
+                                .color(egui::Color32::from_rgb(255, 149, 0)),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                
+                if resp.clicked() {
+                    ui.output_mut(|o| {
+                        o.open_url = Some(OpenUrl {
+                            url: "https://www.stablechannels.com".to_owned(),
+                            new_tab: true,
+                        });
+                    });
+                }
+                
+                ui.add_space(20.0);
+
+
                 ui.horizontal(|ui| {
                     ui.label("Node ID: ");
                     let node_id = self.node.node_id().to_string();
@@ -682,10 +740,54 @@ impl UserApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Your node ID:")
+                                .strong()
+                                .color(Color32::from_rgb(247, 147, 26))
+                        );
+                        let nid = self.node.node_id().to_string();
+                        ui.monospace(
+                            RichText::new(&nid[..8])
+                                .color(Color32::WHITE)
+                        );
+                    
+                        ui.separator();
+                    
+                        ui.label(
+                            RichText::new("Stable channel:")
+                                .strong()
+                                .color(Color32::from_rgb(247, 147, 26))
+                        );
+                        let cid = self.node
+                            .list_channels()
+                            .get(0)
+                            .map(|ch| ch.channel_id.to_string())
+                            .unwrap_or_default();
+                        ui.monospace(
+                            RichText::new(&cid[..8.min(cid.len())])
+                                .color(Color32::WHITE)
+                        );
+                    
+                        ui.separator();
+                    
+                        ui.label(
+                            RichText::new("Stable status:")
+                                .strong()
+                                .color(Color32::from_rgb(247, 147, 26))
+                        );
+                        let dot_size = 12.0;
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(dot_size), Sense::hover());
+                        ui.painter()
+                            .circle_filled(rect.center(), dot_size * 0.5, Color32::GREEN);
+                    });
+                    ui.add_space(10.0);
                     ui.add_space(30.0);
+    
+                    // Stable Balance
                     ui.group(|ui| {
                         ui.add_space(20.0);
-                        ui.heading("Your Stable Balance");
+                        ui.heading("Stable Balance");
                         let sc = self.stable_channel.lock().unwrap();
                         let stable_btc = if sc.is_stable_receiver {
                             sc.stable_receiver_btc
@@ -709,93 +811,109 @@ impl UserApp {
                         ui.add_space(20.0);
                     });
                     ui.add_space(20.0);
+    
+                    // Bitcoin Price
                     ui.group(|ui| {
                         let sc = self.stable_channel.lock().unwrap();
                         ui.add_space(20.0);
                         ui.heading("Bitcoin Price");
                         ui.label(format!("${:.2}", sc.latest_price));
                         ui.add_space(20.0);
-
-                        let last_updated = match SystemTime::now().duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64)) {
+    
+                        let last_updated = match SystemTime::now()
+                            .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64))
+                        {
                             Ok(duration) => duration.as_secs(),
                             Err(_) => 0,
-                        };                        
+                        };
                         ui.add_space(5.0);
                         ui.label(
-                            egui::RichText::new(format!(
-                                "Last updated: {}s ago",
-                                last_updated
-                            ))
-                            .size(12.0)
-                            .color(egui::Color32::GRAY),
+                            egui::RichText::new(format!("Last updated: {}s ago", last_updated))
+                                .size(12.0)
+                                .color(egui::Color32::GRAY),
                         );
                     });
                     ui.add_space(20.0);
-                    ui.group(|ui| {
-                        ui.heading("Lightning Channels");
-                        ui.add_space(5.0);
-                        let channels = self.node.list_channels();
-                        if channels.is_empty() {
-                            ui.label("No channels found.");
-                        } else {
-                            for ch in channels {
-                                ui.label(format!(
-                                    "Channel: {} - {} sats",
-                                    ch.channel_id, ch.channel_value_sats
-                                ));
+    
+                    // Begin advanced section.
+                    CollapsingHeader::new("Show advanced features")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            if ui.button("Close Channel").clicked() {
+                                self.close_active_channel();
                             }
-                        }
-                    });
-                    ui.add_space(20.0);
-                    if !self.status_message.is_empty() {
-                        ui.label(self.status_message.clone());
-                        ui.add_space(10.0);
-                    }
-                    ui.group(|ui| {
-                        ui.label("Generate Invoice");
-                        ui.horizontal(|ui| {
-                            ui.label("Amount (sats):");
-                            ui.text_edit_singleline(&mut self.invoice_amount);
-                            if ui.button("Get Invoice").clicked() {
-                                self.generate_invoice();
+                            ui.add_space(20.0);
+    
+                            ui.group(|ui| {
+                                ui.heading("Lightning Channels");
+                                ui.add_space(5.0);
+                                let channels = self.node.list_channels();
+                                if channels.is_empty() {
+                                    ui.label("No channels found.");
+                                } else {
+                                    for ch in channels {
+                                        ui.label(format!(
+                                            "Channel: {} – {} sats",
+                                            ch.channel_id,
+                                            ch.channel_value_sats
+                                        ));
+                                    }
+                                }
+                            });
+                            ui.add_space(20.0);
+    
+                            if !self.status_message.is_empty() {
+                                ui.label(self.status_message.clone());
+                                ui.add_space(10.0);
+                            }
+    
+                            ui.group(|ui| {
+                                ui.label("Generate Invoice");
+                                ui.horizontal(|ui| {
+                                    ui.label("Amount (sats):");
+                                    ui.text_edit_singleline(&mut self.invoice_amount);
+                                    if ui.button("Get Invoice").clicked() {
+                                        self.generate_invoice();
+                                    }
+                                });
+                                if !self.invoice_result.is_empty() {
+                                    ui.text_edit_multiline(&mut self.invoice_result);
+                                    if ui.button("Copy").clicked() {
+                                        ui.output_mut(|o| {
+                                            o.copied_text = self.invoice_result.clone();
+                                        });
+                                    }
+                                }
+                            });
+    
+                            ui.group(|ui| {
+                                ui.label("Pay Invoice");
+                                ui.text_edit_multiline(&mut self.invoice_to_pay);
+                                if ui.button("Pay Invoice").clicked() {
+                                    self.pay_invoice();
+                                }
+                            });
+    
+                            if ui.button("Create New Channel").clicked() {
+                                self.show_onboarding = true;
+                            }
+                            if ui.button("Get On-chain Address").clicked() {
+                                self.get_address();
+                            }
+                            if ui.button("View Logs").clicked() {
+                                self.show_log_window = true;
                             }
                         });
-                        if !self.invoice_result.is_empty() {
-                            ui.text_edit_multiline(&mut self.invoice_result);
-                            if ui.button("Copy").clicked() {
-                                ui.output_mut(|o| {
-                                    o.copied_text = self.invoice_result.clone()
-                                });
-                            }
-                        }
-                    });
-                    ui.group(|ui| {
-                        ui.label("Pay Invoice");
-                        ui.text_edit_multiline(&mut self.invoice_to_pay);
-                        if ui.button("Pay Invoice").clicked() {
-                            self.pay_invoice();
-                        }
-                    });
-                    if ui.button("Create New Channel").clicked() {
-                        self.show_onboarding = true;
-                    }
-                    if ui.button("Get On-chain Address").clicked() {
-                        self.get_address();
-                    }
-
-                    if ui.button("View Logs").clicked() {
-                        self.show_log_window = true;
-                    }
-                });
-            });
-        });
+                }); // end vertical_centered
+            }); // end ScrollArea
+        }); // end CentralPanel
     }
-
+    
     fn show_log_window_if_open(&mut self, ctx: &egui::Context) {
         if !self.show_log_window {
             return;
         }
-        
+    
         if self.log_last_read.elapsed() > Duration::from_millis(500) {
             self.log_contents = std::fs::read_to_string(&self.audit_log_path)
                 .unwrap_or_else(|_| "Log file not found.".to_string());
@@ -820,14 +938,16 @@ impl UserApp {
                 });
             });
     }
-    
-}
+}    
 
 impl App for UserApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) { 
         self.process_events();
 
+        self.show_onboarding = self.node.list_channels().is_empty() && !self.waiting_for_payment;
+
         self.start_background_if_needed();
+
         if self.waiting_for_payment {
             self.show_waiting_for_payment_screen(ctx);
         } else if self.show_onboarding {
