@@ -17,7 +17,7 @@ pub mod stable;
 pub mod user;
 pub mod server;
 pub mod lightning; 
-pub mod ldk_wrapper;
+pub mod ldk_node_adapter;
 
 fn main() {
     let mode = env::args().nth(1).unwrap_or_else(|| "user".to_string());

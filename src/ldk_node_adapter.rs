@@ -4,9 +4,9 @@ use ldk_node::{
 };
 use crate::lightning::{LightningError, LightningNode};
 
-pub struct WrappedLdkNode(pub Arc<Node>);
+pub struct LdkNodeAdapter(pub Arc<Node>);
 
-impl LightningNode for WrappedLdkNode {
+impl LightningNode for LdkNodeAdapter {
     // These are all ~read functions
     fn node_id(&self) -> ldk_node::bitcoin::secp256k1::PublicKey {
         self.0.node_id()

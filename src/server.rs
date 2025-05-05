@@ -15,7 +15,7 @@ use serde_json::json;
 use std::fs;
 use hex;
 
-use crate::{audit::{audit_event, set_audit_log_path}, ldk_wrapper, lightning::LightningNode, types::*};
+use crate::{audit::{audit_event, set_audit_log_path}, ldk_node_adapter, lightning::LightningNode, types::*};
 use crate::stable;
 use crate::price_feeds::get_cached_price;
 
@@ -134,7 +134,7 @@ impl ServerApp {
         
         core_ldk_node.start().expect("Failed to start core node");
 
-        let node: DynNode = Arc::new(ldk_wrapper::WrappedLdkNode(core_ldk_node.clone()));
+        let node: DynNode = Arc::new(ldk_node_adapter::LdkNodeAdapter(core_ldk_node.clone()));
 
         let btc_price = get_cached_price();
         println!("[Init] Initial BTC price: {}", btc_price);
