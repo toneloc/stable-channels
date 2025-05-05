@@ -1,12 +1,11 @@
 use eframe::{egui, App, Frame};
 use egui::CollapsingHeader;
 use ldk_node::{
-    bitcoin::{Network, Address, secp256k1::PublicKey},
-    lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
-    lightning::ln::msgs::SocketAddress,
-    config::ChannelConfig,
-    Builder, Node, Event, liquidity::LSPS2ServiceConfig
+    bitcoin::{secp256k1::PublicKey, Address, Network}, config::ChannelConfig, lightning::{events::ClosureReason, ln::msgs::SocketAddress}, lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description}, lightning_types::payment::PaymentHash, liquidity::LSPS2ServiceConfig, Builder, Event, Node
 };
+
+use ldk_node::lightning::ln::types::ChannelId;
+use ldk_node::UserChannelId;
 use std::time::{Duration, Instant};
 use std::path::Path;
 use std::str::FromStr;
@@ -201,6 +200,66 @@ impl ServerApp {
         self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
     }
 
+    fn handle_channel_ready(&mut self, channel_id: ChannelId) {
+        audit_event("CHANNEL_READY", json!({ "channel_id": channel_id.to_string() }));
+        self.status_message = format!("Channel {} is now ready", channel_id);
+        self.update_balances();
+    }
+
+    fn handle_channel_pending(
+        &mut self,
+        channel_id: ChannelId,
+        user_channel_id: UserChannelId,
+        former_temp_id: [u8; 32],
+        counterparty_node_id: PublicKey,
+        funding_txo: Option<ldk_node::bitcoin::OutPoint>,
+    ) {
+        let temp_id_str = hex::encode(former_temp_id);
+        let funding_str = funding_txo
+            .map(|o| o.txid.as_raw_hash().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        audit_event("CHANNEL_PENDING", json!({
+            "channel_id":            channel_id.to_string(),
+            "user_channel_id":       format!("{:?}", user_channel_id),
+            "temp_channel_id":       temp_id_str,
+            "counterparty_node_id":  counterparty_node_id.to_string(),
+            "funding_txo":           funding_str,
+        }));
+
+        self.status_message = format!("Channel {} is pending confirmation", channel_id);
+    }
+
+    fn handle_channel_closed(&mut self, channel_id: ChannelId, reason: Option<ClosureReason>) {
+        audit_event("CHANNEL_CLOSED", json!({
+            "channel_id": channel_id.to_string(),
+            "reason": format!("{:?}", reason),
+        }));
+        self.status_message = format!("Channel {} has been closed", channel_id);
+        self.update_balances();
+    }
+
+    fn handle_payment_successful(&mut self, payment_hash: PaymentHash) {
+        audit_event("PAYMENT_SUCCESSFUL", json!({ "payment_hash": format!("{}", payment_hash) }));
+        self.status_message = format!("Sent payment {}", payment_hash);
+        self.update_balances();
+    }
+
+    fn handle_payment_received(&mut self, amount_msat: u64, payment_hash: PaymentHash) {
+        audit_event("PAYMENT_RECEIVED", json!({
+            "amount_msat": amount_msat,
+            "payment_hash": format!("{}", payment_hash),
+        }));
+        self.status_message = format!("Received payment of {} msats", amount_msat);
+        self.update_balances();
+    }
+
+    fn handle_event_ignored(&mut self, event: &Event) {
+        audit_event("EVENT_IGNORED", json!({
+            "event_type": format!("{:?}", event)
+        }));
+    }
+
     pub fn check_and_update_stable_channels(&mut self) {
         let current_price = get_cached_price();
         if current_price > 0.0 {
@@ -229,52 +288,30 @@ impl ServerApp {
     pub fn poll_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             match event {
-                Event::ChannelReady { channel_id, .. } => {
-                    audit_event("CHANNEL_READY", json!({"channel_id": channel_id.to_string()}));
-                    self.status_message = format!("Channel {} is now ready", channel_id);
-                    self.update_balances();
-                }
+                Event::ChannelReady { channel_id, .. } => self.handle_channel_ready(channel_id),
                 Event::ChannelPending {
                     channel_id,
                     user_channel_id,
                     former_temporary_channel_id,
                     counterparty_node_id,
                     funding_txo,
-                } => {
-                    let temp_id_str = hex::encode(former_temporary_channel_id.0);
-                    let funding_str = funding_txo.txid.as_raw_hash().to_string();
-
-                    audit_event(
-                        "CHANNEL_PENDING",
-                        json!({
-                            "channel_id":            channel_id.to_string(),
-                            "user_channel_id":       format!("{:?}", user_channel_id),
-                            "temp_channel_id":       temp_id_str,
-                            "counterparty_node_id":  counterparty_node_id.to_string(),
-                            "funding_txo":           funding_str,
-                        }),
-                    );
-
-                    self.status_message = format!("Channel {} is pending confirmation", channel_id);
+                } => self.handle_channel_pending(
+                    channel_id,
+                    user_channel_id,
+                    former_temporary_channel_id.0,
+                    counterparty_node_id,
+                    Some(funding_txo),
+                ),
+                Event::ChannelClosed { channel_id, reason, .. } => {
+                    self.handle_channel_closed(channel_id, reason)
                 }
                 Event::PaymentSuccessful { payment_hash, .. } => {
-                    audit_event("PAYMENT_SUCCESSFUL", json!({"payment_hash": format!("{}", payment_hash)}));
-                    self.status_message = format!("Sent payment {}", payment_hash);
-                    self.update_balances();
+                    self.handle_payment_successful(payment_hash)
                 }
                 Event::PaymentReceived { amount_msat, payment_hash, .. } => {
-                    audit_event("PAYMENT_RECEIVED", json!({"amount_msat": amount_msat, "payment_hash": format!("{}", payment_hash)}));
-                    self.status_message = format!("Received payment of {} msats", amount_msat);
-                    self.update_balances();
+                    self.handle_payment_received(amount_msat, payment_hash)
                 }
-                Event::ChannelClosed { channel_id, reason, .. } => {
-                    audit_event("CHANNEL_CLOSED", json!({"channel_id": format!("{}", channel_id), "reason": format!("{:?}", reason)}));
-                    self.status_message = format!("Channel {} has been closed", channel_id);
-                    self.update_balances();
-                }
-                _ => {
-                    audit_event("EVENT_IGNORED", json!({"event_type": format!("{:?}", event)}));
-                }
+                ref other => self.handle_event_ignored(other),
             }
             self.node.event_handled();
         }
