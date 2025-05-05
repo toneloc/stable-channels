@@ -347,7 +347,7 @@ impl ServerApp {
     pub fn send_onchain(&mut self) -> bool {
         if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
             match Address::from_str(&self.on_chain_address) {
-                Ok(addr) => match addr.require_network(Network::Bitcoin) {
+                Ok(addr) => match addr.require_network(Network::Signet) {
                     Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
                         Ok(txid) => {
                             self.status_message = format!("Transaction sent: {}", txid);
@@ -623,6 +623,44 @@ impl ServerApp {
                 });
         });
     }
+
+    pub fn force_close_specific_channel(&mut self) {
+        if self.channel_id_to_close.is_empty() {
+            self.status_message = "Please enter a channel ID to force-close".to_string();
+            return;
+        }
+
+        let input = self.channel_id_to_close.trim();
+        if input.len() == 64 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(bytes) = hex::decode(input) {
+                for channel in self.node.list_channels() {
+                    if channel.channel_id.0.to_vec() == bytes {
+                        let result = self.node.force_close_channel(&channel.user_channel_id, channel.counterparty_node_id, Some("manual force close".to_string()));
+                        self.status_message = match result {
+                            Ok(_) => format!("Force closing channel: {}", input),
+                            Err(e) => format!("Error force-closing channel: {}", e),
+                        };
+                        self.channel_id_to_close.clear();
+                        return;
+                    }
+                }
+            }
+            self.status_message = "Channel ID not found.".to_string();
+        } else {
+            for channel in self.node.list_channels() {
+                if channel.channel_id.to_string() == input {
+                    let result = self.node.force_close_channel(&channel.user_channel_id, channel.counterparty_node_id, Some("manual force close".to_string()));
+                    self.status_message = match result {
+                        Ok(_) => format!("Force closing channel: {}", input),
+                        Err(e) => format!("Error force-closing channel: {}", e),
+                    };
+                    self.channel_id_to_close.clear();
+                    return;
+                }
+            }
+            self.status_message = "Channel not found.".to_string();
+        }
+    }
     
     pub fn open_channel(&mut self) -> bool {
         match PublicKey::from_str(&self.open_channel_node_id) {
@@ -877,6 +915,17 @@ impl ServerApp {
                                 ui.text_edit_singleline(&mut self.channel_id_to_close);
                                 if ui.button("Close Channel").clicked() {
                                     self.close_specific_channel();
+                                }
+                            });
+                        });
+
+                        ui.group(|ui| {
+                            ui.heading("Force-Close Channel");
+                            ui.horizontal(|ui| {
+                                ui.label("Channel ID:");
+                                ui.text_edit_singleline(&mut self.channel_id_to_close);
+                                if ui.button("Force Close").clicked() {
+                                    self.force_close_specific_channel();
                                 }
                             });
                         });
