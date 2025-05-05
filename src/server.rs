@@ -16,7 +16,7 @@ use serde_json::json;
 use std::fs;
 use hex;
 
-use crate::{audit::{audit_event, set_audit_log_path}, types::*};
+use crate::{audit::{audit_event, set_audit_log_path}, ldk_wrapper, lightning::LightningNode, types::*};
 use crate::stable;
 use crate::price_feeds::get_cached_price;
 
@@ -32,6 +32,8 @@ const DEFAULT_NETWORK: &str = "signet";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 const EXPECTED_USD: f64 = 50.0;
 
+pub type DynNode = Arc<dyn LightningNode + Send + Sync>;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct StableChannelEntry {
     channel_id: String,
@@ -39,7 +41,7 @@ struct StableChannelEntry {
     native_btc: f64,
 }
 pub struct ServerApp {
-    node: Arc<Node>,
+    node: DynNode,
     btc_price: f64,
     status_message: String,
     last_update: Instant,
@@ -123,7 +125,7 @@ impl ServerApp {
             builder.set_liquidity_provider_lsps2(service_config);
         }
 
-        let node = Arc::new(match builder.build() {
+        let core_ldk_node = Arc::new(match builder.build() {
             Ok(n) => {
                 println!("[Init] Node built successfully");
                 n
@@ -131,7 +133,9 @@ impl ServerApp {
             Err(e) => panic!("[Init] Failed to build node: {:?}", e),
         });
         
-        node.start().expect("Failed to start node");
+        core_ldk_node.start().expect("Failed to start core node");
+
+        let node: DynNode = Arc::new(ldk_wrapper::WrappedLdkNode(core_ldk_node.clone()));
 
         let btc_price = get_cached_price();
         println!("[Init] Initial BTC price: {}", btc_price);
@@ -205,12 +209,12 @@ impl ServerApp {
     
         let mut channels_updated = false;
         for sc in &mut self.stable_channels {
-            if !stable::channel_exists(&self.node, &sc.channel_id) {
+            if !stable::channel_exists(&*self.node, &sc.channel_id) {
                 continue;
             }
     
             sc.latest_price = current_price;
-            stable::check_stability(&self.node, sc, current_price);
+            stable::check_stability(&*self.node, sc, current_price);
     
             if sc.payment_made {
                 channels_updated = true;
@@ -238,9 +242,8 @@ impl ServerApp {
                     funding_txo,
                 } => {
                     let temp_id_str = hex::encode(former_temporary_channel_id.0);
-                
                     let funding_str = funding_txo.txid.as_raw_hash().to_string();
-                
+
                     audit_event(
                         "CHANNEL_PENDING",
                         json!({
@@ -251,7 +254,7 @@ impl ServerApp {
                             "funding_txo":           funding_str,
                         }),
                     );
-                
+
                     self.status_message = format!("Channel {} is pending confirmation", channel_id);
                 }
                 Event::PaymentSuccessful { payment_hash, .. } => {
@@ -273,7 +276,7 @@ impl ServerApp {
                     audit_event("EVENT_IGNORED", json!({"event_type": format!("{:?}", event)}));
                 }
             }
-            let _ = self.node.event_handled();
+            self.node.event_handled();
         }
     }
 
@@ -489,7 +492,9 @@ impl ServerApp {
     pub fn show_node_info_section(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.label(format!("Node ID: {}", self.node.node_id()));
-            ui.label(format!("Listening on: {}", self.node.listening_addresses().unwrap()[0]));
+            if let Some(addrs) = self.node.listening_addresses() {
+                ui.label(format!("Listening on: {}", addrs[0]));
+            }
         });
     }
 

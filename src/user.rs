@@ -17,7 +17,8 @@ use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, Text
 use serde_json::json;
 
 use crate::audit::*;
-use crate::stable::update_balances;
+// These calls are specfic to the client / user app
+use crate::stable::{update_balances_node, check_stability_node};
 use crate::types::*;
 use crate::price_feeds::{get_cached_price, get_latest_price};
 use crate::stable;
@@ -30,8 +31,8 @@ const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
 
 // Populate the below two parameters to run locally
-const DEFAULT_LSP_PUBKEY: &str = "0359c163120d7e729c60ff57ab43c620d1074e1729ada017054ee41efe5095399a";
-const DEFAULT_GATEWAY_PUBKEY: &str = "";
+const DEFAULT_LSP_PUBKEY: &str = "037fae42b0e40e771bb576250a15dba529777d22532643ac77faf470ea9d862b5f";
+const DEFAULT_GATEWAY_PUBKEY: &str = "0303cace469d286a24df044ce0d353299dfd2cb79e5332dd84cf73cea3fa34ba39";
 
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
@@ -193,8 +194,8 @@ impl UserApp {
 
         {
             let mut sc = app.stable_channel.lock().unwrap();
-            stable::check_stability(&app.node, &mut sc, btc_price);
-            update_balances(&app.node, &mut sc);
+            stable::check_stability_node(&app.node, &mut sc, btc_price);
+            update_balances_node(&app.node, &mut sc);
         }
 
         let node_arc = Arc::clone(&app.node);
@@ -220,8 +221,8 @@ impl UserApp {
 
                 if price > 0.0 && !node_arc.list_channels().is_empty() {
                     if let Ok(mut sc) = sc_arc.lock() {
-                        stable::check_stability(&*node_arc, &mut sc, price);
-                        update_balances(&*node_arc, &mut sc);
+                        stable::check_stability_node(&*node_arc, &mut sc, price);
+                        update_balances_node(&*node_arc, &mut sc);
 
                         sc.latest_price = price;
                         sc.timestamp = current_unix_time();
@@ -269,8 +270,8 @@ impl UserApp {
                 // Only proceed if we have a valid price and active channels
                 if price > 0.0 && !node_arc.list_channels().is_empty() {
                     if let Ok(mut sc) = sc_arc.lock() {
-                        crate::stable::check_stability(&*node_arc, &mut sc, price);
-                        crate::stable::update_balances(&*node_arc, &mut sc);
+                        crate::stable::check_stability_node(&*node_arc, &mut sc, price);
+                        crate::stable::update_balances_node(&*node_arc, &mut sc);
                     }
                 }
 
@@ -495,7 +496,7 @@ impl UserApp {
                         .unwrap_or_else(|| "unknown".to_string());
                     
                     let mut sc = self.stable_channel.lock().unwrap();
-                    update_balances(&self.node, &mut sc);
+                    update_balances_node(&self.node, &mut sc);
 
                     audit_event("CHANNEL_READY", json!({
                         "channel_id": channel_id.to_string()
@@ -538,7 +539,7 @@ impl UserApp {
                     }));
                     self.status_message = format!("Received payment of {} msats", amount_msat);
                     let mut sc = self.stable_channel.lock().unwrap();
-                    update_balances(&self.node, &mut sc);
+                    update_balances_node(&self.node, &mut sc);
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
@@ -550,7 +551,7 @@ impl UserApp {
                     }));
                     self.status_message = format!("Sent payment {}", payment_hash);
                     let mut sc = self.stable_channel.lock().unwrap();
-                    update_balances(&self.node, &mut sc);
+                    update_balances_node(&self.node, &mut sc);
                 }
     
                 Event::ChannelClosed { channel_id, reason, .. } => {
