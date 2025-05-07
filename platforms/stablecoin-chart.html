@@ -35,18 +35,36 @@
         const myChart = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: ['2014', '2015', '2016', '2017', '2018', '2019', '2020', '2021', '2022', '2023', '2024-01', '2024-07'],
+                labels: [
+                    '2014', '2015', '2016', '2017', '2018', '2019',
+                    '2020-01', '2020-07',
+                    '2021-01', '2021-04', '2021-07', '2021-10',
+                    '2022-01', '2022-04', '2022-07', '2022-10',
+                    '2023-01', '2023-04', '2023-07', '2023-10',
+                    '2024-01', '2024-02', '2024-03', '2024-04', '2024-05', '2024-06', '2024-07', '2024-08', '2024-09', '2024-10',
+                    '2025-01', '2025-05'
+                ],
                 datasets: [{
                     label: 'USDT and USDC (billions)',
-                    data: [0, 1, 1.5, 2, 2.5, 2.5, 5, 30, 129, 119, 125, 146],
+                    data: [
+                        0.1, 0.2, 1, 2, 2.5, 2.8,
+                        5, 10,
+                        21, 35, 50, 60,
+                        78, 90, 105, 110,
+                        108, 105, 100, 98,
+                        125, 130, 138, 146, 150, 155, 165, 180, 200, 220,
+                        240, 251
+                    ],
                     backgroundColor: 'rgba(247, 102, 26, 0.4)', // Shaded area color
                     borderColor: 'rgba(247, 147, 26, 1)', // Line color
                     borderWidth: 3, // Accentuate the trend line
                     fill: true,
-                    tension: 0.4,
+                    tension: .15, // Increased tension for smoother curves
                     pointRadius: 0 // Remove the dots from the data points
                 }]
             },
+
+
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
@@ -141,6 +159,15 @@
                             }
                         }
                     }
+                },
+                elements: {
+                  line: {
+                    tension: .5,              // 0‒1   (0 = straight lines)
+                    cubicInterpolationMode: 'monotone'
+                  },
+                  point: {                     // keep points invisible
+                    radius: 0
+                  }
                 },
                 interaction: {
                     mode: 'index',
