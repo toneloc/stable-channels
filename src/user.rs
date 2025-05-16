@@ -7,7 +7,7 @@ use ldk_node::{
     lightning::ln::msgs::SocketAddress,
 };
 
-// use std::path::PathBuf;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,14 +30,33 @@ const USER_DATA_DIR: &str = "data/user";
 const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
 
-// Populate the below two parameters to run locally
+// Populate the below two parameters 
 const DEFAULT_LSP_PUBKEY: &str = "037fae42b0e40e771bb576250a15dba529777d22532643ac77faf470ea9d862b5f";
 const DEFAULT_GATEWAY_PUBKEY: &str = "0303cace469d286a24df044ce0d353299dfd2cb79e5332dd84cf73cea3fa34ba39";
 
 const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
 const EXPECTED_USD: f64 = 100.0;
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+
+const NETWORK: &str = "Signet";
+// Helper functions will match on network set above
+fn get_data_dir() -> PathBuf {
+    match NETWORK {
+        "bitcoin" | "Bitcoin" => {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("./data"))
+                .join("StableChannels")
+        }
+        _ => PathBuf::from("data/user"),
+    }
+}
+
+fn get_chain_source_url() -> &'static str {
+    match NETWORK {
+        "bitcoin" | "Bitcoin" => "https://blockstream.info/api/",
+        _ => "https://mutinynet.com/api/",
+    }
+}
 
 pub struct UserApp {
     pub node: Arc<Node>,
@@ -75,11 +94,14 @@ impl UserApp {
     pub fn new() -> Result<Self, String> {
         println!("Initializing user node...");
 
-        let user_data_dir = USER_DATA_DIR;
+        let user_data_dir = get_data_dir();
+
+        std::fs::create_dir_all(&user_data_dir).map_err(|e| format!("Failed to create user data dir: {}", e))?;
+
         let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY)
             .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
-        let audit_log_path = format!("{}/audit_log.txt", USER_DATA_DIR);
+        let audit_log_path = user_data_dir.join("audit_log.txt").to_string_lossy().to_string();
         set_audit_log_path(&audit_log_path);
 
         let mut builder = Builder::new();
@@ -97,8 +119,8 @@ impl UserApp {
         println!("[Init] Setting network to: {:?}", network);
         builder.set_network(network);
 
-        builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
-        builder.set_storage_dir_path(user_data_dir.to_string());
+        builder.set_chain_source_esplora(get_chain_source_url().to_string(), None);
+        builder.set_storage_dir_path(user_data_dir.to_string_lossy().into_owned());
         builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
         let _ = builder.set_node_alias(USER_NODE_ALIAS.to_string());
 
@@ -155,10 +177,10 @@ impl UserApp {
             latest_price: btc_price,
             risk_level: 0,
             payment_made: false,
-            timestamp: 0,
             formatted_datetime: "2021-06-01 12:00:00".to_string(),
             sc_dir: "/".to_string(),
             prices: String::new(),
+            ..Default::default() // Todo use default
         };
         let stable_channel = Arc::new(Mutex::new(sc_init));
 
@@ -498,6 +520,9 @@ impl UserApp {
                     let mut sc = self.stable_channel.lock().unwrap();
                     update_balances_node(&self.node, &mut sc);
 
+                    // drop(sc);
+                    // self.update_balances(); 
+
                     audit_event("CHANNEL_READY", json!({
                         "channel_id": channel_id.to_string()
                     }));
@@ -513,9 +538,21 @@ impl UserApp {
                     counterparty_node_id,
                     funding_txo,
                 } => {
-                    // stringify auxiliary fields without relying on `Serialize` impls
                     let temp_id_str = hex::encode(former_temporary_channel_id.0);
                 
+                    let mut sc = self.stable_channel.lock().unwrap();
+                    
+                    // update_balances_node(&self.node, &mut sc);
+
+                    // sc.timestamp = SystemTime::now()
+                    //     .duration_since(UNIX_EPOCH)
+                    //     .unwrap_or_default()
+                    //     .as_secs() as i64;
+
+                    // drop(sc);
+
+                    // self.update_balances(); 
+
                     let funding_str = funding_txo.txid.as_raw_hash().to_string();
                 
                     audit_event(
@@ -540,6 +577,8 @@ impl UserApp {
                     self.status_message = format!("Received payment of {} msats", amount_msat);
                     let mut sc = self.stable_channel.lock().unwrap();
                     update_balances_node(&self.node, &mut sc);
+                    drop(sc);
+                    self.update_balances(); 
                     self.show_onboarding = false;
                     self.waiting_for_payment = false;
                 }
@@ -552,6 +591,8 @@ impl UserApp {
                     self.status_message = format!("Sent payment {}", payment_hash);
                     let mut sc = self.stable_channel.lock().unwrap();
                     update_balances_node(&self.node, &mut sc);
+                    drop(sc);
+                    self.update_balances(); 
                 }
     
                 Event::ChannelClosed { channel_id, reason, .. } => {
@@ -646,7 +687,7 @@ impl UserApp {
                 ui.add_space(30.0);
                 
                 ui.label(
-                    egui::RichText::new("Get started in 3 steps")
+                    egui::RichText::new("Get started in 3 easy steps")
                         .italics()
                         .size(16.0)
                         .color(egui::Color32::LIGHT_GRAY),
@@ -681,7 +722,11 @@ impl UserApp {
                         .color(egui::Color32::GRAY),
                 );
 
+                // ui.add_space(20.0);
+                // self.show_onchain_send_section(ui);
+
                 ui.add_space(35.0);
+
                 let subtle_orange =
                     egui::Color32::from_rgba_premultiplied(247, 147, 26, 200);
                 let btn = egui::Button::new(
@@ -689,26 +734,24 @@ impl UserApp {
                         .color(egui::Color32::WHITE)
                         .strong()
                         .size(18.0),
-                )
+                    )
                 .min_size(egui::vec2(200.0, 55.0))
                 .fill(subtle_orange)
                 .rounding(8.0);
 
-                
-                ui.add_space(40.0);
+                ui.add_space(50.0);
 
                 if ui.add(btn).clicked() {
                     self.status_message =
                         "Getting JIT channel invoice...".to_string();
                     self.get_jit_invoice(ctx);
                 }
-                if !self.status_message.is_empty() {
-                    ui.add_space(40.0);
-                    ui.label(self.status_message.clone());
-                }
-                ui.add_space(20.0);
+                // if !self.status_message.is_empty() {
+                //     ui.add_space(40.0);
+                //     ui.label(self.status_message.clone());
+                // }
+                ui.add_space(50.0);
 
-                // Pitch for bitcoiners
                 ui.label(
                     egui::RichText::new("Stable Channels is for bitcoiners who want more bitcoin.")
                         .size(14.0)
@@ -735,9 +778,8 @@ impl UserApp {
                         });
                     });
                 }
-                
-                ui.add_space(20.0);
-
+            
+                ui.add_space(30.0);
 
                 ui.horizontal(|ui| {
                     ui.label("Node ID: ");
@@ -755,8 +797,9 @@ impl UserApp {
             });
         });
     }
+    
 
-    fn show_main_screen(&mut self, ctx: &egui::Context) {
+  fn show_main_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.vertical_centered(|ui| {
@@ -767,6 +810,7 @@ impl UserApp {
                                 .color(Color32::from_rgb(247, 147, 26))
                         );
                         let nid = self.node.node_id().to_string();
+
                         ui.monospace(
                             RichText::new(&nid[..8])
                                 .color(Color32::WHITE)
@@ -804,35 +848,197 @@ impl UserApp {
                     ui.add_space(10.0);
                     ui.add_space(30.0);
     
-                    // Stable Balance
                     ui.group(|ui| {
-                        ui.add_space(20.0);
-                        ui.heading("Stable Balance");
                         let sc = self.stable_channel.lock().unwrap();
-                        let stable_btc = if sc.is_stable_receiver {
-                            sc.stable_receiver_btc
-                        } else {
-                            sc.stable_provider_btc
-                        };
+                    
+                        // Select correct stable values
                         let stable_usd = if sc.is_stable_receiver {
                             sc.stable_receiver_usd
                         } else {
                             sc.stable_provider_usd
                         };
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("{}", stable_usd))
-                                    .size(36.0)
-                                    .strong(),
-                            ),
+                    
+                        let pegged_btc = if sc.is_stable_receiver {
+                            sc.stable_receiver_btc
+                        } else {
+                            sc.stable_provider_btc
+                        };
+                    
+                        let pegged_btc_f64 = pegged_btc.to_btc();
+                        // let native_btc_f64 = self.onchain_balance_btc;
+                        // let total_btc = pegged_btc_f64 + native_btc_f64;
+
+                        // Main heading
+                        ui.heading("Stable Balance");
+                    
+                        ui.add_space(8.0);
+                    
+                        ui.label(
+                            egui::RichText::new(format!("{:.2}", stable_usd))
+                                .size(24.0)
+                                .strong(),
                         );
-                        ui.label(format!("Agreed Peg USD: {}", sc.expected_usd));
-                        ui.label(format!("Bitcoin: {:.8}", stable_btc));
-                        ui.add_space(20.0);
+                    
+                        ui.add_space(12.0);
+                    
+                        // Agreed Peg USD
+                        ui.label(
+                            egui::RichText::new(format!("Agreed Peg USD: {:.2}", sc.expected_usd))
+                                .size(14.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    
+                        ui.add_space(8.0);
+                    
+                        ui.separator();
+                    
+                        ui.add_space(8.0);
+                    
+                        // Bitcoin Holdings
+                        ui.label(
+                            egui::RichText::new("Bitcoin Holdings")
+                                .size(16.0)
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                    
+                        egui::Grid::new("bitcoin_holdings_grid")
+                            .spacing(Vec2::new(10.0, 6.0))
+                            .show(ui, |ui| {
+                                ui.label("Pegged Bitcoin:");
+                                ui.label(
+                                    egui::RichText::new(format!("{}", pegged_btc))
+                                    .monospace(),
+                                );
+                                ui.end_row();
+                    
+                                ui.label("Native Bitcoin:");
+                                ui.label(
+                                    egui::RichText::new("0.00 000 000 BTC")
+                                        .monospace(),
+                                );
+                                ui.end_row();
+                    
+                                ui.label("Total Bitcoin:");
+                                ui.label(
+                                    egui::RichText::new(format!("{}", Bitcoin::from_btc(pegged_btc_f64)))
+                                        .monospace()
+                                        .strong(),
+                                );
+                                ui.end_row();
+                            });
                     });
+
                     ui.add_space(20.0);
+
+                    // Stability Allocation
+                    ui.group(|ui| {
+                        ui.add_space(10.0);
+                    
+                        ui.vertical_centered(|ui| {
+                            ui.heading("Stability Allocation");
+                    
+                            ui.add_space(20.0);
+                    
+                            let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
+
+                            ui.add_sized(
+                                [100.0, 20.0], 
+                                egui::Slider::new(&mut risk_level, 0..=100)
+                                    .show_value(false)
+                            );
+                    
+                            if ui.ctx().input(|i| i.pointer.any_down()) {
+                                self.stable_channel.lock().unwrap().risk_level = risk_level;
+                            }
+                    
+                            ui.add_space(10.0);
+                    
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}% BTC, {}% USD",
+                                    risk_level,
+                                    100 - risk_level
+                                ))
+                                .size(16.0)
+                                .color(egui::Color32::GRAY),
+                            );
+                    
+                            ui.add_space(20.0);
+                    
+                            if ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("Set Allocation")
+                                        .size(16.0)
+                                        .color(egui::Color32::WHITE)
+                                )
+                                .min_size(egui::vec2(150.0, 40.0))
+                                .fill(egui::Color32::from_rgb(247, 147, 26))
+                                .rounding(6.0)
+                            ).clicked() {
+                                // No action needed
+                            }
+                            ui.add_space(10.0);
+
+                        });
+                    });
+                    
+                    ui.add_space(20.0);
+
+                    // ui.group(|ui| {
+                    //     ui.add_space(10.0);
+                    
+                    //     ui.vertical_centered(|ui| {
+                    //         ui.heading("Payments");
+                    //         ui.add_space(24.0);
+                    
+                    //         // widen the horizontal gap between the two buttons
+                    //         let old_spacing = ui.spacing().item_spacing.x;
+                    //         ui.spacing_mut().item_spacing.x = 20.0;
+                    
+                    //         ui.horizontal(|ui| {
+                    //             // common button style
+                    //             let btn_size   = egui::vec2(160.0, 44.0);
+                    //             let btn_color  = egui::Color32::from_rgb(210, 210, 210); // light‑grey
+                    //             let text_style = egui::RichText::new;
+                    
+                    //             ui.add_space(40.0);
+                    //             // ── Send (↗) ──────────────────────────────────────────────────────
+                    //             if ui
+                    //                 .add(
+                    //                     egui::Button::new(text_style("↗ Send").color(Color32::BLACK).size(16.0))
+                    //                         .min_size(btn_size)
+                    //                         .fill(btn_color)
+                    //                         .rounding(6.0),
+                    //                 )
+                    //                 .clicked()
+                    //             {
+                    //                 // TODO: send‑payment flow
+                    //             }
+                    
+                    //             // ── Receive (↙) ──────────────────────────────────────────────────
+                    //             if ui
+                    //                 .add(
+                    //                     egui::Button::new(text_style("↙ Receive").color(Color32::BLACK).size(16.0))
+                    //                         .min_size(btn_size)
+                    //                         .fill(btn_color)
+                    //                         .rounding(6.0),
+                    //                 )
+                    //                 .clicked()
+                    //             {
+                    //                 // TODO: invoice / address generation flow
+                    //             }
+                    //         });
+                    
+                    //         // restore spacing so it doesn’t affect later layouts
+                    //         ui.spacing_mut().item_spacing.x = old_spacing;
+                    //         ui.add_space(10.0);
+                    //     });
+                    // });
+
+                    // ui.add_space(25.0);
+
     
-                    // Bitcoin Price
                     ui.group(|ui| {
                         let sc = self.stable_channel.lock().unwrap();
                         ui.add_space(20.0);
