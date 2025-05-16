@@ -103,9 +103,9 @@ impl std::fmt::Display for Bitcoin {
             .enumerate()
             .map(|(i, c)| if i == 4 || i == 7 { format!(" {}", c) } else { c.to_string() })
             .collect::<String>();
-
-            write!(f, "{} BTC", with_spaces)
-        }
+      
+        write!(f, "{} BTC", with_spaces)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
