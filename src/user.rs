@@ -79,6 +79,8 @@ pub struct UserApp {
     pub on_chain_address: String,
     pub on_chain_amount: String,
     pub show_advanced: bool, 
+    pub stable_message: String,
+
 
 
     // Balance fields
@@ -88,6 +90,7 @@ pub struct UserApp {
     pub onchain_balance_usd: f64,
     pub total_balance_btc: f64,
     pub total_balance_usd: f64,
+
 }
 
 impl UserApp {
@@ -211,7 +214,7 @@ impl UserApp {
             log_last_read: std::time::Instant::now(),
             audit_log_path,
             show_advanced: false,
-
+            stable_message: String::new(),
         };
 
         {
@@ -256,22 +259,6 @@ impl UserApp {
 
         Ok(app)
     }
-    // fn get_app_data_dir(component: &str) -> PathBuf {
-    //     let mut path = dirs::data_local_dir()
-    //         .unwrap_or_else(|| PathBuf::from("./data"))
-    //         .join("com.stablechannels");
-        
-    //     if !component.is_empty() {
-    //         path = path.join(component);
-    //     }
-        
-    //     // Ensure the directory exists
-    //     std::fs::create_dir_all(&path).unwrap_or_else(|e| {
-    //         eprintln!("Warning: Failed to create data directory: {}", e);
-    //     });
-        
-    //     path
-    // }
   
     fn start_background_if_needed(&mut self) {
         if self.background_started {
@@ -1065,6 +1052,16 @@ impl UserApp {
                     CollapsingHeader::new("Show advanced features")
                         .default_open(false)
                         .show(ui, |ui| {
+                            ui.group(|ui| {
+                                ui.heading("Send Stable Message");
+                                ui.add_space(8.0);
+                                ui.label("Send this message to your counterparty");
+                                ui.add(egui::TextEdit::singleline(&mut self.stable_message)
+                                    .hint_text("Enter message..."));
+                                if ui.button("Send Message").clicked() {
+                                    self.send_stable_message();
+                                }
+                            });
                             if ui.button("Close Channel").clicked() {
                                 self.close_active_channel();
                             }
@@ -1163,6 +1160,31 @@ impl UserApp {
                     );
                 });
             });
+    }
+
+    fn send_stable_message(&mut self) {
+        let amt = 1; 
+        let custom_str = self.stable_message.clone();
+        let custom_tlv = ldk_node::CustomTlvRecord {
+            type_num: 13377331,
+            value: custom_str.as_bytes().to_vec(),
+        };
+
+        let mut sc = self.stable_channel.lock().unwrap();
+        match self.node.spontaneous_payment().send_with_custom_tlvs(
+            amt,
+            sc.counterparty,
+            None,
+            vec![custom_tlv],
+        ) {
+            Ok(_payment_id) => {
+                sc.payment_made = true;
+                self.status_message = format!("Sent stable message: {}", self.stable_message);
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to send stable message: {}", e);
+            }
+        }
     }
 }    
 

@@ -1,7 +1,7 @@
 use eframe::{egui, App, Frame};
 use egui::CollapsingHeader;
 use ldk_node::{
-    bitcoin::{secp256k1::PublicKey, Address, Network}, config::ChannelConfig, lightning::{events::ClosureReason, ln::msgs::SocketAddress}, lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description}, lightning_types::payment::PaymentHash, liquidity::LSPS2ServiceConfig, Builder, Event, Node
+    bitcoin::{base64, secp256k1::PublicKey, Address, Network}, config::ChannelConfig, lightning::{events::ClosureReason, ln::msgs::SocketAddress}, lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description}, lightning_types::payment::PaymentHash, liquidity::LSPS2ServiceConfig, Builder, CustomTlvRecord, Event, Node
 };
 
 use ldk_node::lightning::ln::types::ChannelId;
@@ -245,12 +245,34 @@ impl ServerApp {
         self.update_balances();
     }
 
-    fn handle_payment_received(&mut self, amount_msat: u64, payment_hash: PaymentHash) {
+    fn handle_payment_received(
+        &mut self,
+        amount_msat: u64,
+        payment_hash: PaymentHash,
+        custom_records: Vec<CustomTlvRecord>,
+    ) {
+        let mut decoded_payload: Option<String> = None;
+    
+        for tlv in custom_records {
+            if tlv.type_num == 13377331 {
+                if let Ok(s) = String::from_utf8(tlv.value) {
+                    decoded_payload = Some(s);
+                }
+                print!("here");
+            }
+        }
+    
+        self.status_message = match &decoded_payload {
+            Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
+            None => format!("Received {} msats (no TLV)", amount_msat),
+        };
+    
         audit_event("PAYMENT_RECEIVED", json!({
             "amount_msat": amount_msat,
             "payment_hash": format!("{}", payment_hash),
+            "decoded_tlv": decoded_payload,
         }));
-        self.status_message = format!("Received payment of {} msats", amount_msat);
+    
         self.update_balances();
     }
 
@@ -308,8 +330,8 @@ impl ServerApp {
                 Event::PaymentSuccessful { payment_hash, .. } => {
                     self.handle_payment_successful(payment_hash)
                 }
-                Event::PaymentReceived { amount_msat, payment_hash, .. } => {
-                    self.handle_payment_received(amount_msat, payment_hash)
+                Event::PaymentReceived { amount_msat, payment_hash, custom_records, payment_id: _ } => {
+                    self.handle_payment_received(amount_msat, payment_hash, custom_records)
                 }
                 ref other => self.handle_event_ignored(other),
             }
@@ -885,6 +907,33 @@ impl ServerApp {
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.group(|ui| {
+                            ui.heading("Send Stable Message");
+                            ui.label("Send this message to your counterparty");
+                
+                            static mut LAST_MSG: String = String::new();
+                            static mut LAST_NODE_ID: String = String::new();
+                
+                            unsafe {
+                                ui.horizontal(|ui| {
+                                    ui.label("Node ID:");
+                                    ui.text_edit_singleline(&mut LAST_NODE_ID);
+                                });
+                
+                                ui.horizontal(|ui| {
+                                    ui.label("Message:");
+                                    ui.text_edit_singleline(&mut LAST_MSG);
+                                });
+                
+                                if ui.button("Send Message").clicked() {
+                                    if let Ok(pk) = PublicKey::from_str(&LAST_NODE_ID) {
+                                        self.send_stable_message(&LAST_MSG, pk);
+                                    } else {
+                                        self.status_message = "Invalid pubkey format".into();
+                                    }
+                                }
+                            }
+                        });
+                        ui.group(|ui| {
                             ui.heading("Open Channel");
                             ui.horizontal(|ui| {
                                 ui.label("Node ID:");
@@ -1108,6 +1157,27 @@ impl ServerApp {
             Err(e) => {
                 eprintln!("Error reading stable channels file: {}", e);
                 self.status_message = format!("Failed to read stable channels file: {}", e);
+            }
+        }
+    }
+    pub fn send_stable_message(&mut self, msg: &str, peer: PublicKey) {
+        let amt = 1;
+        let custom_tlv = CustomTlvRecord {
+            type_num: 13377331,
+            value: msg.as_bytes().to_vec(),
+        };
+
+        match self.node.spontaneous_payment().send_with_custom_tlvs(
+            amt,
+            peer,
+            None,
+            vec![custom_tlv],
+        ) {
+            Ok(_payment_id) => {
+                self.status_message = format!("Sent stable message: {}", msg);
+            }
+            Err(e) => {
+                self.status_message = format!("Failed to send stable message: {}", e);
             }
         }
     }

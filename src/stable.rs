@@ -7,6 +7,7 @@ use ureq::Agent;
 use crate::price_feeds::get_cached_price;
 use crate::audit::audit_event;
 use serde_json::json;
+use ldk_node::CustomTlvRecord;
 
 pub fn get_current_price(agent: &Agent) -> f64 {
     let cached_price = get_cached_price();
@@ -143,20 +144,45 @@ pub fn check_stability(node: &dyn LightningNode, sc: &mut StableChannel, price: 
     }
 
     let amt = USD::to_msats(dollars_from_par, sc.latest_price);
-    match node.spontaneous_payment().send(amt, sc.counterparty, None) {
+    // match node.spontaneous_payment().send(amt, sc.counterparty, None) {
+    //     Ok(payment_id) => {
+    //         sc.payment_made = true;
+    //         audit_event("STABILITY_PAYMENT_SENT", json!({
+    //             "amount_msats": amt,
+    //             "payment_id": payment_id.to_string(),
+    //             "counterparty": sc.counterparty.to_string()
+    //         }));
+    //     }
+    //     Err(e) => {
+    //         audit_event("STABILITY_PAYMENT_FAILED", json!({
+    //             "amount_msats": amt,
+    //             "error": format!("{e}"),
+    //             "counterparty": sc.counterparty.to_string()
+    //         }));
+    //     }
+    // }
+    let custom_str = "hello_stable_channels";
+    let custom_tlv = CustomTlvRecord {
+        type_num: 13377331, // choose an agreed-upon or arbitrary custom TLV type number
+        value: custom_str.as_bytes().to_vec(),
+    };
+
+    match node.spontaneous_payment().send_with_custom_tlvs(amt, sc.counterparty, None, vec![custom_tlv]) {
         Ok(payment_id) => {
             sc.payment_made = true;
             audit_event("STABILITY_PAYMENT_SENT", json!({
                 "amount_msats": amt,
                 "payment_id": payment_id.to_string(),
-                "counterparty": sc.counterparty.to_string()
+                "counterparty": sc.counterparty.to_string(),
+                "custom_tlv": custom_str
             }));
         }
         Err(e) => {
             audit_event("STABILITY_PAYMENT_FAILED", json!({
                 "amount_msats": amt,
                 "error": format!("{e}"),
-                "counterparty": sc.counterparty.to_string()
+                "counterparty": sc.counterparty.to_string(),
+                "custom_tlv": custom_str
             }));
         }
     }
@@ -236,3 +262,5 @@ pub fn check_stability_node(node: &Node, sc: &mut StableChannel, price: f64) {
         }
     }
 }
+
+
