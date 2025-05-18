@@ -11,7 +11,7 @@ exchange = []
 
 [dependencies]
 chrono = "0.4"
-ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", rev = "1525255222cd7a48de3a9301a3053e8a4e3d1a86" }
+ldk-node = { git = "https://github.com/lightningdevkit/ldk-node.git", tag = "v0.5.0" }
 lightning = { version = "0.0.125", features = ["std"] }
 ureq = { version = "2.10.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
