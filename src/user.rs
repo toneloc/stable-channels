@@ -674,7 +674,7 @@ impl UserApp {
                 ui.add_space(30.0);
                 
                 ui.label(
-                    egui::RichText::new("Get started in 3 easy steps")
+                    egui::RichText::new("Get started in 3 step.")
                         .italics()
                         .size(16.0)
                         .color(egui::Color32::LIGHT_GRAY),
@@ -740,7 +740,7 @@ impl UserApp {
                 ui.add_space(50.0);
 
                 ui.label(
-                    egui::RichText::new("Stable Channels is for bitcoiners who want more bitcoin.")
+                    egui::RichText::new("Stable Channels is for bitcoiners who just want bitcoin.")
                         .size(14.0)
                         .italics()
                         .color(egui::Color32::LIGHT_GRAY),
@@ -1065,6 +1065,50 @@ impl UserApp {
                             if ui.button("Close Channel").clicked() {
                                 self.close_active_channel();
                             }
+                            ui.group(|ui| {
+                                ui.heading("On-chain Send");
+                                ui.horizontal(|ui| {
+                                    ui.label("On-chain Balance:");
+                                    ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
+                                    ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+                                });
+                            
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("Address:");
+                                    ui.text_edit_singleline(&mut self.on_chain_address);
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Amount (sats):");
+                                    ui.text_edit_singleline(&mut self.on_chain_amount);
+                                });
+                                if ui.button("Send On-chain").clicked() {
+                                    if let Ok(amount_sat) = self.on_chain_amount.parse::<u64>() {
+                                        match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
+                                            Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Signet) {
+                                                Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount_sat, None) {
+                                                    Ok(txid) => {
+                                                        self.status_message = format!("On-chain TX sent: {}", txid);
+                                                        self.update_balances();
+                                                    }
+                                                    Err(e) => {
+                                                        self.status_message = format!("On-chain TX failed: {}", e);
+                                                    }
+                                                },
+                                                Err(_) => {
+                                                    self.status_message = "Invalid address for this network".to_string();
+                                                }
+                                            },
+                                            Err(_) => {
+                                                self.status_message = "Invalid address format".to_string();
+                                            }
+                                        }
+                                    } else {
+                                        self.status_message = "Invalid amount".to_string();
+                                    }
+                                }
+                            });                            
+                            
                             ui.add_space(20.0);
     
                             ui.group(|ui| {
