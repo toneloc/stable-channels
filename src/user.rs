@@ -1,7 +1,7 @@
 use eframe::{egui, App, Frame};
 use ldk_node::bitcoin::Network;
 use ldk_node::lightning_invoice::Bolt11Invoice;
-use ldk_node::{Builder, Event, Node};
+use ldk_node::{bip39, Builder, Event, Node};
 use ldk_node::{
     bitcoin::secp256k1::PublicKey,
     lightning::ln::msgs::SocketAddress,
@@ -71,6 +71,7 @@ pub struct UserApp {
     show_log_window: bool,
     log_contents: String,
     log_last_read: std::time::Instant,
+    pub seed_phrase: String,
     
     // UI fields
     pub invoice_amount: String,
@@ -80,7 +81,6 @@ pub struct UserApp {
     pub on_chain_amount: String,
     pub show_advanced: bool, 
     pub stable_message: String,
-
 
 
     // Balance fields
@@ -215,6 +215,7 @@ impl UserApp {
             audit_log_path,
             show_advanced: false,
             stable_message: String::new(),
+            seed_phrase: String::new(),
         };
 
         {
@@ -784,9 +785,8 @@ impl UserApp {
             });
         });
     }
-    
 
-  fn show_main_screen(&mut self, ctx: &egui::Context) {
+    fn show_main_screen(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.vertical_centered(|ui| {
@@ -1052,6 +1052,18 @@ impl UserApp {
                     CollapsingHeader::new("Show advanced features")
                         .default_open(false)
                         .show(ui, |ui| {
+                            if ui.button("Display Seed Phrase").clicked() {
+                                self.display_seed_phrase();
+                            }
+                            
+                            if !self.seed_phrase.is_empty() {
+                                ui.label(
+                                    egui::RichText::new(&self.seed_phrase)
+                                        .monospace()
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                            }
+                            
                             ui.group(|ui| {
                                 ui.heading("Send Stable Message");
                                 ui.add_space(8.0);
@@ -1230,6 +1242,45 @@ impl UserApp {
             }
         }
     }
+
+    fn display_seed_phrase(&mut self) {
+        use ldk_node::bip39;                       // re-exported bip39 1.2.*
+        let seed_path = get_data_dir().join("keys_seed");
+    
+        match std::fs::read(&seed_path) {
+            Ok(file) => {
+                // If the file looks like ASCII hex, refuse: LDK never writes hex here.
+                if file.iter().all(|b| b.is_ascii_hexdigit()) {
+                    self.status_message =
+                        "keys_seed is hex-encoded; convert it to raw bytes first.".into();
+                    return;
+                }
+    
+                if file.len() < 32 {
+                    self.status_message =
+                        format!("keys_seed is {} bytes; expected ≥32.", file.len());
+                    return;
+                }
+    
+                let entropy = &file[0..32]; // use node_seed only
+                match bip39::Mnemonic::from_entropy(entropy) {
+                    Ok(m) => {
+                        self.seed_phrase = m.to_string();
+                        self.status_message = "Seed phrase displayed.".into();
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            format!("BIP-39 conversion failed: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("Cannot read keys_seed: {e}");
+            }
+        }
+    }
+    
+
 }    
 
 impl App for UserApp {

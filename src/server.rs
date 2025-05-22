@@ -906,33 +906,33 @@ impl ServerApp {
                 CollapsingHeader::new("Show advanced features")
                     .default_open(false)
                     .show(ui, |ui| {
-                        ui.group(|ui| {
-                            ui.heading("Send Stable Message");
-                            ui.label("Send this message to your counterparty");
-                
-                            static mut LAST_MSG: String = String::new();
-                            static mut LAST_NODE_ID: String = String::new();
-                
-                            unsafe {
-                                ui.horizontal(|ui| {
-                                    ui.label("Node ID:");
-                                    ui.text_edit_singleline(&mut LAST_NODE_ID);
-                                });
-                
-                                ui.horizontal(|ui| {
-                                    ui.label("Message:");
-                                    ui.text_edit_singleline(&mut LAST_MSG);
-                                });
-                
-                                if ui.button("Send Message").clicked() {
-                                    if let Ok(pk) = PublicKey::from_str(&LAST_NODE_ID) {
-                                        self.send_stable_message(&LAST_MSG, pk);
-                                    } else {
-                                        self.status_message = "Invalid pubkey format".into();
-                                    }
-                                }
-                            }
-                        });
+                                ui.group(|ui| {
+            ui.heading("Send Stable Message");
+            ui.label("Send this message to your counterparty");
+
+            static mut LAST_MSG: String = String::new();
+            static mut LAST_NODE_ID: String = String::new();
+
+            unsafe {
+                ui.horizontal(|ui| {
+                    ui.label("Node ID:");
+                    ui.text_edit_singleline(&mut LAST_NODE_ID);
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Message:");
+                    ui.text_edit_singleline(&mut LAST_MSG);
+                });
+
+                if ui.button("Send Message").clicked() {
+                    if let Ok(pk) = PublicKey::from_str(&LAST_NODE_ID) {
+                        self.send_stable_message(&LAST_MSG, pk);
+                    } else {
+                        self.status_message = "Invalid pubkey format".into();
+                    }
+                }
+            }
+        });
                         ui.group(|ui| {
                             ui.heading("Open Channel");
                             ui.horizontal(|ui| {
