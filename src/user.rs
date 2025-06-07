@@ -919,58 +919,58 @@ impl UserApp {
                     ui.add_space(20.0);
 
                     // Stability Allocation
-                    ui.group(|ui| {
-                        ui.add_space(10.0);
+                    // ui.group(|ui| {
+                    //     ui.add_space(10.0);
                     
-                        ui.vertical_centered(|ui| {
-                            ui.heading("Stability Allocation");
+                    //     ui.vertical_centered(|ui| {
+                    //         ui.heading("Stability Allocation");
                     
-                            ui.add_space(20.0);
+                    //         ui.add_space(20.0);
                     
-                            let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
+                    //         let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
 
-                            ui.add_sized(
-                                [100.0, 20.0], 
-                                egui::Slider::new(&mut risk_level, 0..=100)
-                                    .show_value(false)
-                            );
+                    //         ui.add_sized(
+                    //             [100.0, 20.0], 
+                    //             egui::Slider::new(&mut risk_level, 0..=100)
+                    //                 .show_value(false)
+                    //         );
                     
-                            if ui.ctx().input(|i| i.pointer.any_down()) {
-                                self.stable_channel.lock().unwrap().risk_level = risk_level;
-                            }
+                    //         if ui.ctx().input(|i| i.pointer.any_down()) {
+                    //             self.stable_channel.lock().unwrap().risk_level = risk_level;
+                    //         }
                     
-                            ui.add_space(10.0);
+                    //         ui.add_space(10.0);
                     
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}% BTC, {}% USD",
-                                    risk_level,
-                                    100 - risk_level
-                                ))
-                                .size(16.0)
-                                .color(egui::Color32::GRAY),
-                            );
+                    //         ui.label(
+                    //             egui::RichText::new(format!(
+                    //                 "{}% BTC, {}% USD",
+                    //                 risk_level,
+                    //                 100 - risk_level
+                    //             ))
+                    //             .size(16.0)
+                    //             .color(egui::Color32::GRAY),
+                    //         );
                     
-                            ui.add_space(20.0);
+                    //         ui.add_space(20.0);
                     
-                            if ui.add(
-                                egui::Button::new(
-                                    egui::RichText::new("Set Allocation")
-                                        .size(16.0)
-                                        .color(egui::Color32::WHITE)
-                                )
-                                .min_size(egui::vec2(150.0, 40.0))
-                                .fill(egui::Color32::from_rgb(247, 147, 26))
-                                .rounding(6.0)
-                            ).clicked() {
-                                // No action needed
-                            }
-                            ui.add_space(10.0);
+                    //         if ui.add(
+                    //             egui::Button::new(
+                    //                 egui::RichText::new("Set Allocation")
+                    //                     .size(16.0)
+                    //                     .color(egui::Color32::WHITE)
+                    //             )
+                    //             .min_size(egui::vec2(150.0, 40.0))
+                    //             .fill(egui::Color32::from_rgb(247, 147, 26))
+                    //             .rounding(6.0)
+                    //         ).clicked() {
+                    //             // No action needed
+                    //         }
+                    //         ui.add_space(10.0);
 
-                        });
-                    });
+                    //     });
+                    // });
                     
-                    ui.add_space(20.0);
+                    // ui.add_space(20.0);
 
                     // ui.group(|ui| {
                     //     ui.add_space(10.0);
