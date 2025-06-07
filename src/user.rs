@@ -7,7 +7,6 @@ use ldk_node::{
     lightning::ln::msgs::SocketAddress,
 };
 
-// use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,7 +21,7 @@ use crate::types::*;
 use crate::price_feeds::{get_cached_price, get_latest_price};
 use crate::stable;
 
-const DEFAULT_NETWORK: &str = "signet";
+const DEFAULT_NETWORK: &str = "bitcoin";
 
 // Data will be placed at "current-directory/data/user"
 const USER_DATA_DIR: &str = "data/user";
@@ -30,13 +29,14 @@ const USER_NODE_ALIAS: &str = "user";
 const USER_PORT: u16 = 9736;
 
 // Populate the below two parameters to run locally
-const DEFAULT_LSP_PUBKEY: &str = "0359c163120d7e729c60ff57ab43c620d1074e1729ada017054ee41efe5095399a";
-const DEFAULT_GATEWAY_PUBKEY: &str = "";
+const DEFAULT_LSP_PUBKEY: &str = "02effe2d4284e8324e4f64bea853f0569c98a3c734e6b12f11afce28aa996fe9e9";
+const DEFAULT_GATEWAY_PUBKEY: &str = "033b5445cd81840dcbe4dc9d2c8a043f120481506d28ac1fc9a512ddcc0dbbb49e";
 
-const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
+const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
 const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
 const EXPECTED_USD: f64 = 100.0;
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+
 
 pub struct UserApp {
     pub node: Arc<Node>,
@@ -680,7 +680,11 @@ impl UserApp {
                         .color(egui::Color32::GRAY),
                 );
 
+                // ui.add_space(20.0);
+                // self.show_onchain_send_section(ui);
+
                 ui.add_space(35.0);
+
                 let subtle_orange =
                     egui::Color32::from_rgba_premultiplied(247, 147, 26, 200);
                 let btn = egui::Button::new(
@@ -688,26 +692,24 @@ impl UserApp {
                         .color(egui::Color32::WHITE)
                         .strong()
                         .size(18.0),
-                )
+                    )
                 .min_size(egui::vec2(200.0, 55.0))
                 .fill(subtle_orange)
                 .rounding(8.0);
 
-                
-                ui.add_space(40.0);
+                ui.add_space(50.0);
 
                 if ui.add(btn).clicked() {
                     self.status_message =
                         "Getting JIT channel invoice...".to_string();
                     self.get_jit_invoice(ctx);
                 }
-                if !self.status_message.is_empty() {
-                    ui.add_space(40.0);
-                    ui.label(self.status_message.clone());
-                }
-                ui.add_space(20.0);
+                // if !self.status_message.is_empty() {
+                //     ui.add_space(40.0);
+                //     ui.label(self.status_message.clone());
+                // }
+                ui.add_space(50.0);
 
-                // Pitch for bitcoiners
                 ui.label(
                     egui::RichText::new("Stable Channels is for bitcoiners who want more bitcoin.")
                         .size(14.0)
@@ -734,9 +736,8 @@ impl UserApp {
                         });
                     });
                 }
-                
-                ui.add_space(20.0);
-
+            
+                ui.add_space(30.0);
 
                 ui.horizontal(|ui| {
                     ui.label("Node ID: ");
@@ -803,35 +804,143 @@ impl UserApp {
                     ui.add_space(10.0);
                     ui.add_space(30.0);
     
-                    // Stable Balance
                     ui.group(|ui| {
-                        ui.add_space(20.0);
-                        ui.heading("Stable Balance");
                         let sc = self.stable_channel.lock().unwrap();
-                        let stable_btc = if sc.is_stable_receiver {
-                            sc.stable_receiver_btc
-                        } else {
-                            sc.stable_provider_btc
-                        };
+                    
+                        // Select correct stable values
                         let stable_usd = if sc.is_stable_receiver {
                             sc.stable_receiver_usd
                         } else {
                             sc.stable_provider_usd
                         };
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("{}", stable_usd))
-                                    .size(36.0)
-                                    .strong(),
-                            ),
+                    
+                        let pegged_btc = if sc.is_stable_receiver {
+                            sc.stable_receiver_btc
+                        } else {
+                            sc.stable_provider_btc
+                        };
+                    
+                        let pegged_btc_f64 = pegged_btc.to_btc();
+                        // let native_btc_f64 = self.onchain_balance_btc;
+                        // let total_btc = pegged_btc_f64 + native_btc_f64;
+
+                        // Main heading
+                        ui.heading("Stable Balance");
+                    
+                        ui.add_space(8.0);
+                    
+                        ui.label(
+                            egui::RichText::new(format!("{:.2}", stable_usd))
+                                .size(24.0)
+                                .strong(),
                         );
-                        ui.label(format!("Agreed Peg USD: {}", sc.expected_usd));
-                        ui.label(format!("Bitcoin: {:.8}", stable_btc));
-                        ui.add_space(20.0);
+                    
+                        ui.add_space(12.0);
+                    
+                        // Agreed Peg USD
+                        ui.label(
+                            egui::RichText::new(format!("Agreed Peg USD: {:.2}", sc.expected_usd))
+                                .size(14.0)
+                                .color(egui::Color32::GRAY),
+                        );
+                    
+                        ui.add_space(8.0);
+                    
+                        ui.separator();
+                    
+                        ui.add_space(8.0);
+                    
+                        // Bitcoin Holdings
+                        ui.label(
+                            egui::RichText::new("Bitcoin Holdings")
+                                .size(16.0)
+                                .strong(),
+                        );
+                        ui.add_space(8.0);
+                    
+                        egui::Grid::new("bitcoin_holdings_grid")
+                            .spacing(Vec2::new(10.0, 6.0))
+                            .show(ui, |ui| {
+                                ui.label("Pegged Bitcoin:");
+                                ui.label(
+                                    egui::RichText::new(format!("{}", pegged_btc))
+                                    .monospace(),
+                                );
+                                ui.end_row();
+                    
+                                ui.label("Native Bitcoin:");
+                                ui.label(
+                                    egui::RichText::new("0.00 000 000 BTC")
+                                        .monospace(),
+                                );
+                                ui.end_row();
+                    
+                                ui.label("Total Bitcoin:");
+                                ui.label(
+                                    egui::RichText::new(format!("{}", Bitcoin::from_btc(pegged_btc_f64)))
+                                        .monospace()
+                                        .strong(),
+                                );
+                                ui.end_row();
+                            });
                     });
+
+                    ui.add_space(20.0);
+
+                    // Stability Allocation
+                    ui.group(|ui| {
+                        ui.add_space(10.0);
+                    
+                        ui.vertical_centered(|ui| {
+                            ui.heading("Stability Allocation");
+                    
+                            ui.add_space(20.0);
+                    
+                            let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
+
+                            ui.add_sized(
+                                [100.0, 20.0], 
+                                egui::Slider::new(&mut risk_level, 0..=100)
+                                    .show_value(false)
+                            );
+                    
+                            if ui.ctx().input(|i| i.pointer.any_down()) {
+                                self.stable_channel.lock().unwrap().risk_level = risk_level;
+                            }
+                    
+                            ui.add_space(10.0);
+                    
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}% BTC, {}% USD",
+                                    risk_level,
+                                    100 - risk_level
+                                ))
+                                .size(16.0)
+                                .color(egui::Color32::GRAY),
+                            );
+                    
+                            ui.add_space(20.0);
+                    
+                            if ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("Set Allocation")
+                                        .size(16.0)
+                                        .color(egui::Color32::WHITE)
+                                )
+                                .min_size(egui::vec2(150.0, 40.0))
+                                .fill(egui::Color32::from_rgb(247, 147, 26))
+                                .rounding(6.0)
+                            ).clicked() {
+                                // No action needed
+                            }
+                            ui.add_space(10.0);
+
+                        });
+                    });
+                    
                     ui.add_space(20.0);
     
-                    // Bitcoin Price
                     ui.group(|ui| {
                         let sc = self.stable_channel.lock().unwrap();
                         ui.add_space(20.0);
@@ -957,6 +1066,61 @@ impl UserApp {
                 });
             });
     }
+
+    // fn show_onchain_send_section(&mut self, ui: &mut egui::Ui) {
+    //     ui.group(|ui| {
+    //         ui.label("On-chain Send");
+    //         ui.horizontal(|ui| {
+    //             ui.label("Address:");
+    //             ui.text_edit_singleline(&mut self.on_chain_address);
+    //         });
+    //         ui.horizontal(|ui| {
+    //             ui.label("Amount (sats):");
+    //             ui.text_edit_singleline(&mut self.on_chain_amount);
+    //         });
+
+    //         if ui.button("Send On-chain").clicked() {
+    //             self.send_onchain();
+    //         }
+    //     });
+    // }
+
+    // pub fn send_onchain(&mut self) -> bool {
+    //     if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
+    //         match Address::from_str(&self.on_chain_address) {
+    //             Ok(addr) => match addr.require_network(Network::Bitcoin) {
+    //                 Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
+    //                     Ok(txid) => {
+    //                         self.status_message = format!("Transaction sent: {}", txid);
+    //                         audit_event("ONCHAIN_SEND_SUCCESS", json!({"txid": format!("{}", txid), "amount_sat": amount}));
+    //                         self.update_balances();
+    //                         true
+    //                     }
+    //                     Err(e) => {
+    //                         self.status_message = format!("Transaction error: {}", e);
+    //                         audit_event("ONCHAIN_SEND_FAILED", json!({"amount_sat": amount, "error": format!("{}", e)}));
+    //                         false
+    //                     }
+    //                 },
+    //                 Err(_) => {
+    //                     self.status_message = "Invalid address for this network".to_string();
+    //                     audit_event("ONCHAIN_ADDRESS_INVALID_NET", json!({"address": self.on_chain_address}));
+    //                     false
+    //                 }
+    //             },
+    //             Err(_) => {
+    //                 self.status_message = "Invalid address".to_string();
+    //                 audit_event("ONCHAIN_ADDRESS_INVALID", json!({"address": self.on_chain_address}));
+    //                 false
+    //             }
+    //         }
+    //     } else {
+    //         self.status_message = "Invalid amount".to_string();
+    //         audit_event("ONCHAIN_AMOUNT_INVALID", json!({"raw_input": self.on_chain_amount}));
+    //         false
+    //     }
+    // }
+    
 }    
 
 impl App for UserApp {
