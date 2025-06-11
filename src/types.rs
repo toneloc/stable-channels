@@ -184,6 +184,8 @@ pub struct StableChannel {
     pub sc_dir: String,
     pub latest_price: f64,
     pub prices: String,
+    pub onchain_btc: Bitcoin,
+    pub onchain_usd: USD
     
 }
 
@@ -215,6 +217,8 @@ impl Default for StableChannel {
             sc_dir: ".data".to_string(),
             latest_price: 0.0,
             prices: "".to_string(),
+            onchain_btc: Bitcoin::from_sats(0),
+            onchain_usd: USD(0.0),
         }
     }
 }

@@ -158,6 +158,8 @@ impl UserApp {
             formatted_datetime: "2021-06-01 12:00:00".to_string(),
             sc_dir: "/".to_string(),
             prices: String::new(),
+            onchain_btc: Bitcoin::from_sats(0),
+            onchain_usd: USD(0.0),
         };
         let stable_channel = Arc::new(Mutex::new(sc_init));
 
@@ -218,7 +220,7 @@ impl UserApp {
                     _ => crate::price_feeds::get_cached_price()
                 };
 
-                if price > 0.0 && !node_arc.list_channels().is_empty() {
+                if price > 0.0 {
                     if let Ok(mut sc) = sc_arc.lock() {
                         stable::check_stability(&*node_arc, &mut sc, price);
                         update_balances(&*node_arc, &mut sc);
@@ -422,6 +424,7 @@ impl UserApp {
         }
     }
 
+    // TODO: check
     pub fn update_balances(&mut self) {
         let current_price = get_cached_price();
         if current_price > 0.0 {
@@ -752,6 +755,62 @@ impl UserApp {
                         ui.output_mut(|o| o.copied_text = node_id);
                     }
                 });
+
+                ui.add_space(30.0);
+
+                CollapsingHeader::new("Advanced Features")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_space(10.0);
+
+                        ui.group(|ui| {
+                            ui.heading("Withdraw On-chain");
+                            ui.horizontal(|ui| {
+                                ui.label("On-chain Balance:");
+                                if let Ok(sc) = self.stable_channel.lock() {
+                                    ui.monospace(format!("{:.8} BTC", sc.onchain_btc.to_btc()));
+                                    ui.monospace(format!("(${:.2})", sc.onchain_usd.0));
+                                } else {
+                                    ui.label("Error: could not lock stable_channel");
+                                }
+                            });
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Address:");
+                                ui.text_edit_singleline(&mut self.on_chain_address);
+                            });
+
+                            if ui.button("Withdraw all to address").clicked() {
+                                match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
+                                    Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
+                                        Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
+                                            Ok(txid) => {
+                                                self.status_message = format!("On-chain TX sent: {}", txid);
+                                                self.update_balances();
+                                            }
+                                            Err(e) => {
+                                                self.status_message = format!("On-chain TX failed: {}", e);
+                                            }
+                                        },
+                                        Err(_) => {
+                                            self.status_message = "Invalid address for this network".to_string();
+                                        }
+                                    },
+                                    Err(_) => {
+                                        self.status_message = "Invalid address format".to_string();
+                                    }
+                                }
+                            }
+
+                            if !self.status_message.is_empty() {
+                                ui.add_space(8.0);
+                                ui.label(self.status_message.clone());
+                            }
+                        });
+                    });
+
+                    ui.add_space(30.0);
             });
         });
     }
@@ -861,14 +920,14 @@ impl UserApp {
                         egui::Grid::new("bitcoin_holdings_grid")
                             .spacing(Vec2::new(10.0, 6.0))
                             .show(ui, |ui| {
-                                ui.label("Pegged Bitcoin:");
+                                ui.label("Pegged Bitcoin (Lightning):");
                                 ui.label(
                                     egui::RichText::new(format!("{}", pegged_btc))
                                     .monospace(),
                                 );
                                 ui.end_row();
                     
-                                ui.label("Native Bitcoin:");
+                                ui.label("Native Bitcoin (On-Chain):");
                                 ui.label(
                                     egui::RichText::new("0.00 000 000 BTC")
                                         .monospace(),
@@ -888,58 +947,58 @@ impl UserApp {
                     ui.add_space(20.0);
 
                     // Stability Allocation
-                    ui.group(|ui| {
-                        ui.add_space(10.0);
+                    // ui.group(|ui| {
+                    //     ui.add_space(10.0);
                     
-                        ui.vertical_centered(|ui| {
-                            ui.heading("Stability Allocation");
+                    //     ui.vertical_centered(|ui| {
+                    //         ui.heading("Stability Allocation");
                     
-                            ui.add_space(20.0);
+                    //         ui.add_space(20.0);
                     
-                            let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
+                    //         let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
 
-                            ui.add_sized(
-                                [100.0, 20.0], 
-                                egui::Slider::new(&mut risk_level, 0..=100)
-                                    .show_value(false)
-                            );
+                    //         ui.add_sized(
+                    //             [100.0, 20.0], 
+                    //             egui::Slider::new(&mut risk_level, 0..=100)
+                    //                 .show_value(false)
+                    //         );
                     
-                            if ui.ctx().input(|i| i.pointer.any_down()) {
-                                self.stable_channel.lock().unwrap().risk_level = risk_level;
-                            }
+                    //         if ui.ctx().input(|i| i.pointer.any_down()) {
+                    //             self.stable_channel.lock().unwrap().risk_level = risk_level;
+                    //         }
                     
-                            ui.add_space(10.0);
+                    //         ui.add_space(10.0);
                     
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}% BTC, {}% USD",
-                                    risk_level,
-                                    100 - risk_level
-                                ))
-                                .size(16.0)
-                                .color(egui::Color32::GRAY),
-                            );
+                    //         ui.label(
+                    //             egui::RichText::new(format!(
+                    //                 "{}% BTC, {}% USD",
+                    //                 risk_level,
+                    //                 100 - risk_level
+                    //             ))
+                    //             .size(16.0)
+                    //             .color(egui::Color32::GRAY),
+                    //         );
                     
-                            ui.add_space(20.0);
+                    //         ui.add_space(20.0);
                     
-                            if ui.add(
-                                egui::Button::new(
-                                    egui::RichText::new("Set Allocation")
-                                        .size(16.0)
-                                        .color(egui::Color32::WHITE)
-                                )
-                                .min_size(egui::vec2(150.0, 40.0))
-                                .fill(egui::Color32::from_rgb(247, 147, 26))
-                                .rounding(6.0)
-                            ).clicked() {
-                                // No action needed
-                            }
-                            ui.add_space(10.0);
+                    //         if ui.add(
+                    //             egui::Button::new(
+                    //                 egui::RichText::new("Set Allocation")
+                    //                     .size(16.0)
+                    //                     .color(egui::Color32::WHITE)
+                    //             )
+                    //             .min_size(egui::vec2(150.0, 40.0))
+                    //             .fill(egui::Color32::from_rgb(247, 147, 26))
+                    //             .rounding(6.0)
+                    //         ).clicked() {
+                    //             // No action needed
+                    //         }
+                    //         ui.add_space(10.0);
 
-                        });
-                    });
+                    //     });
+                    // });
                     
-                    ui.add_space(20.0);
+                    // ui.add_space(20.0);
     
                     ui.group(|ui| {
                         let sc = self.stable_channel.lock().unwrap();
@@ -966,11 +1025,53 @@ impl UserApp {
                     // Begin advanced section.
                     CollapsingHeader::new("Show advanced features")
                         .default_open(false)
+                        
                         .show(ui, |ui| {
-                            if ui.button("Close Channel").clicked() {
+
+
+
+                            ui.add_space(20.0);
+                            if ui.button("Close Stable Channel").clicked() {
                                 self.close_active_channel();
                             }
                             ui.add_space(20.0);
+
+                            ui.group(|ui| {
+                                ui.heading("Withdraw On-chain");
+                                ui.horizontal(|ui| {
+                                    ui.label("On-chain Balance:");
+                                    ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
+                                    ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
+                                });
+                            
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("Address:");
+                                    ui.text_edit_singleline(&mut self.on_chain_address);
+                                });
+                            
+                                if ui.button("Send On-chain").clicked() {
+                                    match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
+                                        Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
+                                            Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
+                                                Ok(txid) => {
+                                                    self.status_message = format!("On-chain TX sent: {}", txid);
+                                                    self.update_balances();
+                                                }
+                                                Err(e) => {
+                                                    self.status_message = format!("On-chain TX failed: {}", e);
+                                                }
+                                            },
+                                            Err(_) => {
+                                                self.status_message = "Invalid address for this network".to_string();
+                                            }
+                                        },
+                                        Err(_) => {
+                                            self.status_message = "Invalid address format".to_string();
+                                        }
+                                    }
+                                }
+                            });
     
                             ui.group(|ui| {
                                 ui.heading("Lightning Channels");
@@ -995,39 +1096,39 @@ impl UserApp {
                                 ui.add_space(10.0);
                             }
     
-                            ui.group(|ui| {
-                                ui.label("Generate Invoice");
-                                ui.horizontal(|ui| {
-                                    ui.label("Amount (sats):");
-                                    ui.text_edit_singleline(&mut self.invoice_amount);
-                                    if ui.button("Get Invoice").clicked() {
-                                        self.generate_invoice();
-                                    }
-                                });
-                                if !self.invoice_result.is_empty() {
-                                    ui.text_edit_multiline(&mut self.invoice_result);
-                                    if ui.button("Copy").clicked() {
-                                        ui.output_mut(|o| {
-                                            o.copied_text = self.invoice_result.clone();
-                                        });
-                                    }
-                                }
-                            });
+                            // ui.group(|ui| {
+                            //     ui.label("Generate Invoice");
+                            //     ui.horizontal(|ui| {
+                            //         ui.label("Amount (sats):");
+                            //         ui.text_edit_singleline(&mut self.invoice_amount);
+                            //         if ui.button("Get Invoice").clicked() {
+                            //             self.generate_invoice();
+                            //         }
+                            //     });
+                            //     if !self.invoice_result.is_empty() {
+                            //         ui.text_edit_multiline(&mut self.invoice_result);
+                            //         if ui.button("Copy").clicked() {
+                            //             ui.output_mut(|o| {
+                            //                 o.copied_text = self.invoice_result.clone();
+                            //             });
+                            //         }
+                            //     }
+                            // });
     
-                            ui.group(|ui| {
-                                ui.label("Pay Invoice");
-                                ui.text_edit_multiline(&mut self.invoice_to_pay);
-                                if ui.button("Pay Invoice").clicked() {
-                                    self.pay_invoice();
-                                }
-                            });
+                            // ui.group(|ui| {
+                            //     ui.label("Pay Invoice");
+                            //     ui.text_edit_multiline(&mut self.invoice_to_pay);
+                            //     if ui.button("Pay Invoice").clicked() {
+                            //         self.pay_invoice();
+                            //     }
+                            // });
     
-                            if ui.button("Create New Channel").clicked() {
-                                self.show_onboarding = true;
-                            }
-                            if ui.button("Get On-chain Address").clicked() {
-                                self.get_address();
-                            }
+                            // if ui.button("Create New Channel").clicked() {
+                            //     self.show_onboarding = true;
+                            // }
+                            // if ui.button("Get On-chain Address").clicked() {
+                            //     self.get_address();
+                            // }
                             if ui.button("View Logs").clicked() {
                                 self.show_log_window = true;
                             }

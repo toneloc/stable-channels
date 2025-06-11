@@ -41,7 +41,12 @@ pub fn update_balances<'update_balance_lifetime>(
             sc.latest_price = get_current_price(&agent);
         }
     }
-    
+
+    // --- Update On-chain ---
+    let balances = node.list_balances();
+    sc.onchain_btc = Bitcoin::from_sats(balances.total_onchain_balance_sats);
+    sc.onchain_usd = USD::from_bitcoin(sc.onchain_btc, sc.latest_price);
+
     let channels = node.list_channels();
     let matching_channel = if sc.channel_id == ChannelId::from_bytes([0; 32]) {
         channels.first()
