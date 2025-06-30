@@ -923,7 +923,7 @@ impl UserApp {
                         ui.add_space(10.0);
                     
                         ui.vertical_centered(|ui| {
-                            ui.heading("Stability Allocation");
+                            ui.heading("Your Portfolio");
                     
                             ui.add_space(20.0);
                     
@@ -955,7 +955,7 @@ impl UserApp {
                     
                             if ui.add(
                                 egui::Button::new(
-                                    egui::RichText::new("Set Allocation")
+                                    egui::RichText::new("Rebalance")
                                         .size(16.0)
                                         .color(egui::Color32::WHITE)
                                 )
@@ -963,7 +963,7 @@ impl UserApp {
                                 .fill(egui::Color32::from_rgb(247, 147, 26))
                                 .rounding(6.0)
                             ).clicked() {
-                                // No action needed
+                                self.show_advanced = true;
                             }
                             ui.add_space(10.0);
 
@@ -1052,18 +1052,6 @@ impl UserApp {
                     CollapsingHeader::new("Show advanced features")
                         .default_open(false)
                         .show(ui, |ui| {
-                            if ui.button("Display Seed Phrase").clicked() {
-                                self.display_seed_phrase();
-                            }
-                            
-                            if !self.seed_phrase.is_empty() {
-                                ui.label(
-                                    egui::RichText::new(&self.seed_phrase)
-                                        .monospace()
-                                        .color(egui::Color32::LIGHT_GRAY),
-                                );
-                            }
-                            
                             ui.group(|ui| {
                                 ui.heading("Send Stable Message");
                                 ui.add_space(8.0);
@@ -1243,43 +1231,57 @@ impl UserApp {
         }
     }
 
-    fn display_seed_phrase(&mut self) {
-        use ldk_node::bip39;                       // re-exported bip39 1.2.*
-        let seed_path = get_data_dir().join("keys_seed");
-    
-        match std::fs::read(&seed_path) {
-            Ok(file) => {
-                // If the file looks like ASCII hex, refuse: LDK never writes hex here.
-                if file.iter().all(|b| b.is_ascii_hexdigit()) {
-                    self.status_message =
-                        "keys_seed is hex-encoded; convert it to raw bytes first.".into();
-                    return;
-                }
-    
-                if file.len() < 32 {
-                    self.status_message =
-                        format!("keys_seed is {} bytes; expected ≥32.", file.len());
-                    return;
-                }
-    
-                let entropy = &file[0..32]; // use node_seed only
-                match bip39::Mnemonic::from_entropy(entropy) {
-                    Ok(m) => {
-                        self.seed_phrase = m.to_string();
-                        self.status_message = "Seed phrase displayed.".into();
-                    }
-                    Err(e) => {
-                        self.status_message =
-                            format!("BIP-39 conversion failed: {e}");
-                    }
-                }
+    fn confirm_allocation_change(&mut self, btc_pct: f64, usd_pct: f64) {
+        let mut sc = self.stable_channel.lock().unwrap();
+        let allocation = json!({
+            "channel_id": sc.channel_id.to_string(),
+            "btc_percentage": btc_pct,
+            "usd_percentage": usd_pct,
+        });
+
+        let custom_tlv = ldk_node::CustomTlvRecord {
+            type_num: 13377331,
+            value: allocation.to_string().as_bytes().to_vec(),
+        };
+
+        match self.node.spontaneous_payment().send_with_custom_tlvs(
+            1, // 1 msat
+            sc.counterparty,
+            None,
+            vec![custom_tlv],
+        ) {
+            Ok(_payment_id) => {
+                self.status_message = "Allocation update sent.".to_string();
             }
             Err(e) => {
-                self.status_message = format!("Cannot read keys_seed: {e}");
+                self.status_message = format!("Failed to send allocation update: {e}");
             }
         }
     }
-    
+
+    fn show_allocation_confirmation_popup(&mut self, ctx: &egui::Context, btc_pct: u8) {
+        let usd_pct = 100 - btc_pct;
+        egui::Window::new("Confirm Allocation Change")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Are you sure you want to change your allocation to {}% BTC and {}% USD?",
+                    btc_pct, usd_pct
+                ));
+
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.status_message = "Allocation update cancelled.".to_string();
+                        self.show_advanced = false; // hide popup
+                    }
+                    if ui.button("Confirm").clicked() {
+                        self.confirm_allocation_change(btc_pct as f64, usd_pct as f64);
+                        self.show_advanced = false; // hide popup
+                    }
+                });
+            });
+    }
 
 }    
 
@@ -1299,6 +1301,11 @@ impl App for UserApp {
             self.show_main_screen(ctx);
         }
         self.show_log_window_if_open(ctx);
+
+        if self.show_advanced {
+            let risk_level = self.stable_channel.lock().unwrap().risk_level;
+            self.show_allocation_confirmation_popup(ctx, risk_level.try_into().unwrap());
+        }
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }

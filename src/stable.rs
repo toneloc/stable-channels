@@ -113,9 +113,16 @@ pub fn check_stability(node: &dyn LightningNode, sc: &mut StableChannel, price: 
         return;
     }
 
-    let dollars_from_par = sc.stable_receiver_usd - sc.expected_usd;
+    // Convert native BTC to USD using latest price
+    let native_usd = USD::from_bitcoin(sc.native_btc, sc.latest_price);
+
+    // Subtract native portion from actual USD received to isolate the "stable" component
+    let stable_component_usd = sc.stable_receiver_usd - native_usd;
+
+    // Calculate how far the stable portion is from the expected USD
+    let dollars_from_par = stable_component_usd - sc.expected_usd;
     let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
-    let is_receiver_below_expected = sc.stable_receiver_usd < sc.expected_usd;
+    let is_receiver_below_expected = stable_component_usd < sc.expected_usd;
 
     let action = if percent_from_par < 0.1 {
         "STABLE"
@@ -132,6 +139,8 @@ pub fn check_stability(node: &dyn LightningNode, sc: &mut StableChannel, price: 
     audit_event("STABILITY_CHECK", json!({
         "expected_usd": sc.expected_usd.0,
         "current_receiver_usd": sc.stable_receiver_usd.0,
+        "stable_component_usd": stable_component_usd.0,
+        "native_usd": native_usd.0,
         "percent_from_par": percent_from_par,
         "btc_price": sc.latest_price,
         "action": action,
@@ -144,6 +153,7 @@ pub fn check_stability(node: &dyn LightningNode, sc: &mut StableChannel, price: 
     }
 
     let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+
     // match node.spontaneous_payment().send(amt, sc.counterparty, None) {
     //     Ok(payment_id) => {
     //         sc.payment_made = true;

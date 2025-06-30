@@ -29,7 +29,7 @@ const EXCHANGE_PORT: u16 = 9735;
 
 const DEFAULT_NETWORK: &str = "signet";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
-const EXPECTED_USD: f64 = 50.0;
+const EXPECTED_USD: f64 = 100.0;
 
 pub type DynNode = Arc<dyn LightningNode + Send + Sync>;
 
@@ -203,6 +203,11 @@ impl ServerApp {
     fn handle_channel_ready(&mut self, channel_id: ChannelId) {
         audit_event("CHANNEL_READY", json!({ "channel_id": channel_id.to_string() }));
         self.status_message = format!("Channel {} is now ready", channel_id);
+
+        // adding to stablechannels.json
+        self.selected_channel_id = channel_id.to_string();
+        self.stable_channel_amount = EXPECTED_USD.to_string();
+        self.designate_stable_channel();
         self.update_balances();
     }
 
@@ -311,6 +316,7 @@ impl ServerApp {
         while let Some(event) = self.node.next_event() {
             match event {
                 Event::ChannelReady { channel_id, .. } => self.handle_channel_ready(channel_id),
+                
                 Event::ChannelPending {
                     channel_id,
                     user_channel_id,
@@ -855,6 +861,7 @@ impl ServerApp {
                     formatted_datetime: "".to_string(),
                     sc_dir: LSP_DATA_DIR.to_string(),
                     prices: "".to_string(),
+                    native_btc: Bitcoin::from_usd(USD::from_f64(0.0), 111000.0),
                 };
 
                 let mut found = false;
@@ -1125,7 +1132,7 @@ impl ServerApp {
                                         counterparty: channel.counterparty_node_id,
                                         is_stable_receiver: false,
                                         expected_usd: USD::from_f64(entry.expected_usd),
-                                        expected_btc: Bitcoin::from_btc(entry.native_btc),
+                                        expected_btc: Bitcoin::from_btc(0.00),
                                         stable_receiver_btc,
                                         stable_receiver_usd,
                                         stable_provider_btc,
@@ -1137,6 +1144,7 @@ impl ServerApp {
                                         formatted_datetime: "".to_string(),
                                         sc_dir: LSP_DATA_DIR.to_string(),
                                         prices: "".to_string(),
+                                        native_btc: Bitcoin::from_btc(entry.native_btc)
                                     };
 
                                     self.stable_channels.push(stable_channel);
