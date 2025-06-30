@@ -27,10 +27,10 @@ const LSP_PORT: u16 = 9737;
 const EXCHANGE_DATA_DIR: &str = "data/exchange";
 const EXCHANGE_NODE_ALIAS: &str = "exchange";
 const EXCHANGE_PORT: u16 = 9735;
-
+s
 const DEFAULT_NETWORK: &str = "bitcoin";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
-const EXPECTED_USD: f64 = 50.0;
+const EXPECTED_USD: f64 = 100.0;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct StableChannelEntry {
@@ -68,6 +68,8 @@ pub struct ServerApp {
     log_last_read: std::time::Instant,    
     log_contents: String,
     audit_log_path: String,
+    connect_node_id: String,
+    connect_node_address: String,
 
 }
 
@@ -101,7 +103,7 @@ impl ServerApp {
         let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
         set_audit_log_path(&audit_log_path);
 
-        let listen_addr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
         println!("[Init] Setting listening address: {}", listen_addr);
         builder.set_listening_addresses(vec![listen_addr]).unwrap();
         println!("[Init] Setting node alias: {}", node_alias);
@@ -164,6 +166,8 @@ impl ServerApp {
             show_log_window: false,
             log_last_read: std::time::Instant::now(),
             audit_log_path,
+            connect_node_id: String::new(),
+            connect_node_address: String::new(),
         };
 
         app.update_balances();
@@ -882,10 +886,25 @@ impl ServerApp {
                                 }
                             });
                         });
+			ui.group(|ui| {
+			    ui.heading("Connect to Node");
+			    ui.horizontal(|ui| {
+				ui.label("Node ID:");
+				ui.text_edit_singleline(&mut self.connect_node_id);
+			    });
+			    ui.horizontal(|ui| {
+				ui.label("Net Address:");
+				ui.text_edit_singleline(&mut self.connect_node_address);
+			    });
+			    if ui.button("Connect").clicked() {
+				self.connect_to_node();
+			    }
+			});
 
                         if ui.button("View Logs").clicked() {
                             self.show_log_window = true;
                         }
+			ui.add_space(30.0);
                     });
             });
         });
@@ -1024,6 +1043,33 @@ impl ServerApp {
             }
         }
     }
+	
+	pub fn connect_to_node(&mut self) -> bool {
+	    match PublicKey::from_str(&self.connect_node_id) {
+		Ok(node_id) => match SocketAddress::from_str(&self.connect_node_address) {
+		    Ok(address) => {
+		        match self.node.connect(node_id, address, true) {
+		            Ok(_) => {
+		                self.status_message = format!("Connected to node {}", node_id);
+		                true
+		            }
+		            Err(e) => {
+		                self.status_message = format!("Connect error: {}", e);
+		                false
+		            }
+		        }
+		    }
+		    Err(_) => {
+		        self.status_message = "Invalid address format".to_string();
+		        false
+		    }
+		},
+		Err(_) => {
+		    self.status_message = "Invalid node ID format".to_string();
+		    false
+		}
+	    }
+	}
 }
 
 impl App for ServerApp {
