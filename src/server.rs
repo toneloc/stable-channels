@@ -69,6 +69,8 @@ pub struct ServerApp {
     log_last_read: std::time::Instant,    
     log_contents: String,
     audit_log_path: String,
+    connect_node_id: String,
+    connect_node_address: String,
 
 }
 
@@ -102,7 +104,7 @@ impl ServerApp {
         let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
         set_audit_log_path(&audit_log_path);
 
-        let listen_addr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
         println!("[Init] Setting listening address: {}", listen_addr);
         builder.set_listening_addresses(vec![listen_addr]).unwrap();
         println!("[Init] Setting node alias: {}", node_alias);
@@ -167,6 +169,8 @@ impl ServerApp {
             show_log_window: false,
             log_last_read: std::time::Instant::now(),
             audit_log_path,
+            connect_node_id: String::new(),
+            connect_node_address: String::new(),
         };
 
         app.update_balances();
@@ -862,6 +866,8 @@ impl ServerApp {
                     sc_dir: LSP_DATA_DIR.to_string(),
                     prices: "".to_string(),
                     native_btc: Bitcoin::from_usd(USD::from_f64(0.0), 111000.0),
+                    onchain_btc: Bitcoin::from_sats(0),
+                    onchain_usd: USD(0.0),
                 };
 
                 let mut found = false;
@@ -1016,6 +1022,20 @@ impl ServerApp {
                                 }
                             });
                         });
+			ui.group(|ui| {
+			    ui.heading("Connect to Node");
+			    ui.horizontal(|ui| {
+				ui.label("Node ID:");
+				ui.text_edit_singleline(&mut self.connect_node_id);
+			    });
+			    ui.horizontal(|ui| {
+				ui.label("Net Address:");
+				ui.text_edit_singleline(&mut self.connect_node_address);
+			    });
+			    if ui.button("Connect").clicked() {
+				self.connect_to_node();
+			    }
+			});
 
                         ui.group(|ui| {
                             ui.heading("Force-Close Channel");
@@ -1031,6 +1051,7 @@ impl ServerApp {
                         if ui.button("View Logs").clicked() {
                             self.show_log_window = true;
                         }
+			ui.add_space(30.0);
                     });
             });
         });
@@ -1144,7 +1165,9 @@ impl ServerApp {
                                         formatted_datetime: "".to_string(),
                                         sc_dir: LSP_DATA_DIR.to_string(),
                                         prices: "".to_string(),
-                                        native_btc: Bitcoin::from_btc(entry.native_btc)
+                                        native_btc: Bitcoin::from_btc(entry.native_btc),
+                                        onchain_btc: Bitcoin::from_sats(0),
+                                        onchain_usd: USD(0.0),
                                     };
 
                                     self.stable_channels.push(stable_channel);
@@ -1168,6 +1191,7 @@ impl ServerApp {
             }
         }
     }
+
     pub fn send_stable_message(&mut self, msg: &str, peer: PublicKey) {
         let amt = 1;
         let custom_tlv = CustomTlvRecord {
@@ -1189,6 +1213,34 @@ impl ServerApp {
             }
         }
     }
+	
+	pub fn connect_to_node(&mut self) -> bool {
+	    match PublicKey::from_str(&self.connect_node_id) {
+            Ok(node_id) => match SocketAddress::from_str(&self.connect_node_address) {
+                Ok(address) => {
+                    match self.node.connect(node_id, address, true) {
+                        Ok(_) => {
+                            self.status_message = format!("Connected to node {}", node_id);
+                            true
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Connect error: {}", e);
+                            false
+                        }
+                    }
+                }
+                Err(_) => {
+                    self.status_message = "Invalid address format".to_string();
+                    false
+                }
+		},
+		Err(_) => {
+		    self.status_message = "Invalid node ID format".to_string();
+		    false
+		}
+	    }
+	}
+
 }
 
 impl App for ServerApp {

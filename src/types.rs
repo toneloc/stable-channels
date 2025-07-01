@@ -103,7 +103,6 @@ impl std::fmt::Display for Bitcoin {
             .enumerate()
             .map(|(i, c)| if i == 4 || i == 7 { format!(" {}", c) } else { c.to_string() })
             .collect::<String>();
-      
         write!(f, "{} BTC", with_spaces)
     }
 }
@@ -185,7 +184,9 @@ pub struct StableChannel {
     pub latest_price: f64,
     pub prices: String,
     pub native_btc: Bitcoin,
-    
+    pub onchain_btc: Bitcoin,
+    pub onchain_usd: USD
+
 }
 
 // Implement manual Default for StableChannel
@@ -217,6 +218,8 @@ impl Default for StableChannel {
             latest_price: 0.0,
             prices: "".to_string(),
             native_btc: Bitcoin::from_sats(0),
+            onchain_btc: Bitcoin::from_sats(0),
+            onchain_usd: USD(0.0),
         }
     }
 }

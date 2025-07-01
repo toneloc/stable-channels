@@ -26,17 +26,19 @@ pub fn channel_exists(node: &dyn LightningNode, channel_id: &ChannelId) -> bool 
 }
 
 pub fn update_balances<'a>(node: &dyn LightningNode, sc: &'a mut StableChannel) -> (bool, &'a mut StableChannel) {
-    internal_update_balances(node.list_channels(), sc)
+    internal_update_balances(node.list_balances(), node.list_channels(), sc)
 }
 
 pub fn update_balances_node<'a>(node: &Node, sc: &'a mut StableChannel) -> (bool, &'a mut StableChannel) {
-    internal_update_balances(node.list_channels(), sc)
+    internal_update_balances(node.list_balances(), node.list_channels(), sc)
 }
 
 fn internal_update_balances<'a>(
+    balances: ldk_node::BalanceDetails,
     channels: Vec<ldk_node::ChannelDetails>,
     sc: &'a mut StableChannel,
 ) -> (bool, &'a mut StableChannel) {
+    // Ensure price is set
     if sc.latest_price == 0.0 {
         sc.latest_price = get_cached_price();
         if sc.latest_price == 0.0 {
@@ -45,35 +47,41 @@ fn internal_update_balances<'a>(
         }
     }
 
-    let matching_channel = if sc.channel_id == ChannelId::from_bytes([0; 32]) {
+    // --- Update On-chain from passed balances ---
+    sc.onchain_btc = Bitcoin::from_sats(balances.total_onchain_balance_sats);
+    sc.onchain_usd = USD::from_bitcoin(sc.onchain_btc, sc.latest_price);
+
+    // Find matching channel from the caller’s list
+    let matching = if sc.channel_id == ChannelId::from_bytes([0; 32]) {
         channels.first()
     } else {
         channels.iter().find(|c| c.channel_id == sc.channel_id)
     };
 
-    if let Some(channel) = matching_channel {
+    if let Some(channel) = matching {
+        // If first run, set the stable-channel ID
         if sc.channel_id == ChannelId::from_bytes([0; 32]) {
             sc.channel_id = channel.channel_id;
             println!("Set active channel ID to: {}", sc.channel_id);
         }
 
-        let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
-        let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-        let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+        let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+        let our_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+        let their_sats = channel.channel_value_sats - our_sats;
 
         if sc.is_stable_receiver {
-            sc.stable_receiver_btc = Bitcoin::from_sats(our_balance_sats);
-            sc.stable_provider_btc = Bitcoin::from_sats(their_balance_sats);
+            sc.stable_receiver_btc = Bitcoin::from_sats(our_sats);
+            sc.stable_provider_btc = Bitcoin::from_sats(their_sats);
         } else {
-            sc.stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
-            sc.stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+            sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
+            sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
         }
 
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
 
         audit_event("BALANCE_UPDATE", json!({
-            "channel_id": format!("{}", sc.channel_id),
+            "channel_id": sc.channel_id.to_string(),
             "stable_receiver_btc": sc.stable_receiver_btc.to_string(),
             "stable_provider_btc": sc.stable_provider_btc.to_string(),
             "stable_receiver_usd": sc.stable_receiver_usd.to_string(),
@@ -81,11 +89,11 @@ fn internal_update_balances<'a>(
             "btc_price": sc.latest_price
         }));
 
-        return (true, sc);
+        (true, sc)
+    } else {
+        println!("No matching channel found for ID: {}", sc.channel_id);
+        (true, sc)
     }
-
-    println!("No matching channel found for ID: {}", sc.channel_id);
-    (true, sc)
 }
 
 pub fn check_stability(node: &dyn LightningNode, sc: &mut StableChannel, price: f64) {
@@ -171,7 +179,7 @@ pub fn check_stability(node: &dyn LightningNode, sc: &mut StableChannel, price: 
     //         }));
     //     }
     // }
-    let custom_str = "hello_stable_channels";
+    let custom_str = "STABILITY_PAYMENT";
     let custom_tlv = CustomTlvRecord {
         type_num: 13377331, // choose an agreed-upon or arbitrary custom TLV type number
         value: custom_str.as_bytes().to_vec(),
@@ -254,6 +262,7 @@ pub fn check_stability_node(node: &Node, sc: &mut StableChannel, price: f64) {
     }
 
     let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+
     match node.spontaneous_payment().send(amt, sc.counterparty, None) {
         Ok(payment_id) => {
             sc.payment_made = true;

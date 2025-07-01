@@ -19,6 +19,13 @@ pub trait LightningNode: Send + Sync {
     fn event_handled(&self);
 
     // These are all ~write functions
+    fn connect(
+        &self,
+        peer_pubkey: PublicKey,
+        address: SocketAddress,
+        announce: bool,
+    ) -> Result<(), LightningError>;
+    
     fn open_announced_channel(
         &self,
         node_id: PublicKey,

@@ -78,4 +78,15 @@ impl LightningNode for LdkNodeAdapter {
             .close_channel(user_channel_id, counterparty_node_id)
             .map_err(|e| LightningError::LdkError(e.to_string()))
     }
+
+    fn connect(
+        &self,
+        peer_pubkey: PublicKey,
+        address: SocketAddress,
+        announce: bool,
+    ) -> Result<(), LightningError> {
+        self.0
+            .connect(peer_pubkey, address, announce)
+            .map_err(|e| LightningError::LdkError(e.to_string()))
+    }
 }

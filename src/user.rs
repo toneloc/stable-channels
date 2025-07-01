@@ -529,18 +529,6 @@ impl UserApp {
                     let temp_id_str = hex::encode(former_temporary_channel_id.0);
                 
                     let mut sc = self.stable_channel.lock().unwrap();
-                    
-                    // update_balances_node(&self.node, &mut sc);
-
-                    // sc.timestamp = SystemTime::now()
-                    //     .duration_since(UNIX_EPOCH)
-                    //     .unwrap_or_default()
-                    //     .as_secs() as i64;
-
-                    // drop(sc);
-
-                    // self.update_balances(); 
-
                     let funding_str = funding_txo.txid.as_raw_hash().to_string();
                 
                     audit_event(
