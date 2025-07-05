@@ -132,9 +132,10 @@ async fn main() -> Result<()> {
 
     // ── HTTP router & server ───────────────────────────────────────────────
     let app = Router::new()
-        .route("/balance", get(get_balance))
-        .route("/pay",     post(pay_handler))
-        .route("/channels", get(get_channels));
+        .route("/api/balance", get(get_balance))
+        .route("/api/pay",     post(pay_handler))
+        .route("/api/channels", get(get_channels))
+        .route("/api/price", get(get_price));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     println!("Backend running at http://127.0.0.1:8080");
@@ -145,7 +146,6 @@ async fn main() -> Result<()> {
 /* ---- handlers ---------------------------------------------------- */
 
 async fn get_balance() -> Json<Balance> {
-    // grab the shared app, refresh balances, then snapshot the numbers
     let (sats, usd) = {
         let mut app = APP.lock().unwrap();
 
@@ -183,6 +183,12 @@ pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
         .collect();
 
     Json(out)
+}
+
+/// GET /api/price
+async fn get_price() -> Json<f64> {
+        let price = get_cached_price();
+        Json(price)
 }
 
 
