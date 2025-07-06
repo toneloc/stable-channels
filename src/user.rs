@@ -23,20 +23,21 @@
     use std::path::PathBuf;
     use dirs::data_dir;
 
-    const DEFAULT_NETWORK: &str = "bitcoin";
+    const DEFAULT_NETWORK: &str = "signet";
 
     // Data will be placed at "current-directory/data/user"
     const USER_NODE_ALIAS: &str = "user";
     const USER_PORT: u16 = 9736;
 
     // Populate the below two parameters to run locally
-    const DEFAULT_LSP_PUBKEY: &str = "02effe2d4284e8324e4f64bea853f0569c98a3c734e6b12f11afce28aa996fe9e9";
+    const DEFAULT_LSP_PUBKEY: &str = "037fae42b0e40e771bb576250a15dba529777d22532643ac77faf470ea9d862b5f";
     const DEFAULT_GATEWAY_PUBKEY: &str = "033b5445cd81840dcbe4dc9d2c8a043f120481506d28ac1fc9a512ddcc0dbbb49e";
 
-    const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
+    // const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
+    const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
     const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
     const EXPECTED_USD: f64 = 100.0;
-    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
 
     fn user_data_dir() -> PathBuf {
         data_dir()
@@ -81,14 +82,19 @@
         pub fn new() -> Result<Self, String> {
             println!("Initializing user node...");
 
-            // for testing: const USER_DATA_DIR: &str = "data/user";
-            let data_dir = user_data_dir();
+            // for testing: 
+            const USER_DATA_DIR: &str = "data/user";
+            // let data_dir = user_data_dir();
             
             let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY)
                 .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
-            let audit_log_path = data_dir.join("audit_log.txt").to_string_lossy().into_owned();
-            set_audit_log_path(&audit_log_path);
+            // let audit_log_path = data_dir.join("audit_log.txt").to_string_lossy().into_owned();
+            // const USER_DATA_DIR: &str = "data/user";
+            // set_audit_log_path(&audit_log_path);
+
+            let audit_log_path = "data/user";
+            set_audit_log_path(audit_log_path);
 
             let mut builder = Builder::new();
             
@@ -106,11 +112,12 @@
             builder.set_network(network);
 
             builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
-            builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
+            // builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
+            builder.set_storage_dir_path("data/user/".to_string());
             builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
             let _ = builder.set_node_alias(USER_NODE_ALIAS.to_string());
 
-            // Let's set up our LSP
+            // Let's set up our LSPd
             builder.set_liquidity_source_lsps2(
                 lsp_pubkey,
                 SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap(),
@@ -197,7 +204,7 @@
                 show_log_window: false,
                 log_contents: String::new(),
                 log_last_read: std::time::Instant::now(),
-                audit_log_path,
+                audit_log_path: audit_log_path.to_string(),
                 show_advanced: false,
             };
 

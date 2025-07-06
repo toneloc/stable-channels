@@ -1,4 +1,5 @@
 use axum::http;
+use axum::extract::Path as AxumPath;
 use ldk_node::{
     bitcoin::{Network, Address, secp256k1::PublicKey},
     lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
@@ -7,7 +8,7 @@ use ldk_node::{
     Builder, Node, Event, liquidity::LSPS2ServiceConfig
 };
 use std::{sync::Mutex, time::{Duration, Instant}};
-use std::path::Path;
+use std::path::Path as FilePath;
 use std::str::FromStr;
 use std::sync::Arc;
 use serde::{Serialize, Deserialize};
@@ -104,6 +105,19 @@ struct Balance { sats: u64, usd: f64 }
 #[derive(Deserialize)]
 struct PayReq { invoice: String }
 
+#[derive(Deserialize)]
+struct DesignateStableChannelReq {
+    channel_id: String,
+    target_usd: String,
+}
+
+#[derive(Serialize)]
+struct DesignateStableChannelRes {
+    ok: bool,
+    status: String,
+}
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ── periodic upkeep task ───────────────────────────────────────────────
@@ -135,7 +149,10 @@ async fn main() -> Result<()> {
         .route("/api/balance", get(get_balance))
         .route("/api/pay",     post(pay_handler))
         .route("/api/channels", get(get_channels))
-        .route("/api/price", get(get_price));
+        .route("/api/price", get(get_price))
+        .route("/api/close_channel/{id}", post(post_close_channel))
+        .route("/api/designate_stable_channel", post(designate_stable_channel_handler));
+;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
     println!("Backend running at http://127.0.0.1:8080");
@@ -191,6 +208,32 @@ async fn get_price() -> Json<f64> {
         Json(price)
 }
 
+/// POST /api/close_channel
+async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
+    let mut app = APP.lock().unwrap();
+    for chan in app.node.list_channels() {
+        if hex::encode(chan.channel_id.0) == id {
+            let res = app.node.close_channel(&chan.user_channel_id, chan.counterparty_node_id);
+            return match res {
+                Ok(_) => format!("Closing channel {}", id),
+                Err(e) => format!("Error closing channel {}: {}", id, e),
+            };
+        }
+    }
+    format!("Channel {} not found", id)
+}
+
+async fn designate_stable_channel_handler(Json(req): Json<DesignateStableChannelReq>) -> Json<DesignateStableChannelRes> {
+    println!("hi");
+    let mut app = APP.lock().unwrap();
+    app.selected_channel_id = req.channel_id;
+    app.stable_channel_amount = req.target_usd;
+    app.designate_stable_channel();
+    Json(DesignateStableChannelRes {
+        ok: app.status_message.starts_with("Channel") || app.status_message.contains("stable"),
+        status: app.status_message.clone(),
+    })
+}
 
 async fn pay_handler(Json(_req): Json<PayReq>) -> &'static str {
     // TODO Node::send_payment(&_req.invoice) ?
@@ -258,6 +301,12 @@ impl ServerApp {
         });
         
         node.start().expect("Failed to start node");
+
+        println!("[Init] Node ID: {}", node.node_id());
+        
+        if let Some(addrs) = node.listening_addresses() {
+            println!("[Init] Listening on: {:?}", addrs);
+        }
 
         let btc_price = get_cached_price();
         println!("[Init] Initial BTC price: {}", btc_price);
@@ -721,7 +770,7 @@ impl ServerApp {
             native_btc: sc.expected_btc.to_btc(),
         }).collect();
 
-        let file_path = Path::new(LSP_DATA_DIR).join("stablechannels.json");
+        let file_path = FilePath::new(LSP_DATA_DIR).join("stablechannels.json");
 
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent).unwrap_or_else(|e| {
@@ -750,7 +799,7 @@ impl ServerApp {
     }
 
     pub fn load_stable_channels(&mut self) {
-        let file_path = Path::new(LSP_DATA_DIR).join("stablechannels.json");
+        let file_path = FilePath::new(LSP_DATA_DIR).join("stablechannels.json");
 
         if !file_path.exists() {
             println!("No existing stable channels file found.");

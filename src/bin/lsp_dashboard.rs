@@ -7,7 +7,7 @@ use eframe::{egui, App, NativeOptions};
 use egui::{RichText, CollapsingHeader};
 use futures_util::FutureExt; // now_or_never
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
@@ -46,6 +46,18 @@ struct InvoiceInfo {
     timestamp:   String,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DesignateStableChannelRes {
+    ok: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DesignateStableChannelReq {
+    channel_id: String,
+    target_usd: String,
+}
+
 /* ---------- GUI State ------------------------------------------ */
 
 struct Dashboard {
@@ -58,6 +70,8 @@ struct Dashboard {
     payments_task: Option<JoinHandle<reqwest::Result<Vec<PaymentInfo>>>>,
     invoices_task: Option<JoinHandle<reqwest::Result<Vec<InvoiceInfo>>>>,
     logs_task:     Option<JoinHandle<reqwest::Result<String>>>,
+    designate_task: Option<JoinHandle<reqwest::Result<DesignateStableChannelRes>>>,
+
 
     balance:  Option<Balance>,
     channels: Vec<ChannelInfo>,
@@ -83,6 +97,9 @@ struct Dashboard {
 
     show_logs: bool,
     last_log_refresh: Instant,
+    designate_channel_id: String,
+    designate_channel_usd: String,
+    designate_stable_result: Option<String>,
 }
 
 fn main() -> eframe::Result<()> {
@@ -122,7 +139,6 @@ impl Dashboard {
             open_channel_pubkey: String::new(),
             open_channel_address: "127.0.0.1:9737".into(),
             open_channel_sats: "100000".into(),
-
             close_channel_id: String::new(),
 
             onchain_address: String::new(),
@@ -130,6 +146,10 @@ impl Dashboard {
 
             show_logs: false,
             last_log_refresh: Instant::now(),
+            designate_channel_id: String::new(),
+            designate_channel_usd: String::new(),
+            designate_stable_result: None,
+            designate_task: None,
         }
     }
 
@@ -248,6 +268,23 @@ impl Dashboard {
         });
     }
 
+    fn designate_stable_channel(&mut self) {
+        if self.designate_task.is_some() { return; }
+        let client = self.client.clone();
+        let channel_id = self.designate_channel_id.trim().to_string();
+        let target_usd = self.designate_channel_usd.trim().to_string();
+        self.designate_task = Some(self.rt.spawn(async move {
+            let req = DesignateStableChannelReq { channel_id, target_usd };
+            client
+                .post("http://127.0.0.1:8080/api/designate_stable_channel")
+                .json(&req)
+                .send()
+                .await?
+                .json::<DesignateStableChannelRes>()
+                .await
+        }));
+    }
+
     // ---- stub API endpoints ----
 
     fn fetch_channel_details(&self, id: &str) {
@@ -311,11 +348,31 @@ impl App for Dashboard {
         poll_task!(payments_task => |v| self.payments = v);
         poll_task!(invoices_task => |v| self.invoices = v);
         poll_task!(logs_task => |v| self.log_tail = v);
+        poll_task!(designate_task => |res: DesignateStableChannelRes| {
+            self.designate_stable_result = Some(res.status);
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.show_balance(ui);
             ui.add_space(10.0);
             self.show_channels(ui);
+            ui.group(|ui| {
+                ui.heading("Designate Stable Channel");
+                ui.horizontal(|ui| {
+                    ui.label("Channel ID:");
+                    ui.text_edit_singleline(&mut self.designate_channel_id);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Target USD amount:");
+                    ui.text_edit_singleline(&mut self.designate_channel_usd);
+                });
+                if ui.button("Designate as Stable").clicked() {
+                    self.designate_stable_channel();
+                }
+                if let Some(msg) = &self.designate_stable_result {
+                    ui.label(msg);
+                }
+            });
         });
 
         if self.balance.is_none() && self.bal_task.is_none() {
@@ -327,6 +384,7 @@ impl App for Dashboard {
         if self.price_usd.is_none() && self.price_task.is_none() {
             self.fetch_price();
         }
+
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }
