@@ -803,7 +803,7 @@
 
                                 if ui.button("Withdraw all to address").clicked() {
                                     match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
-                                        Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
+                                        Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Signet) {
                                             Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
                                                 Ok(txid) => {
                                                     self.status_message = format!("On-chain TX sent: {}", txid);
@@ -1072,7 +1072,7 @@
                                 
                                     if ui.button("Send On-chain").clicked() {
                                         match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
-                                            Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
+                                            Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Signet) {
                                                 Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
                                                     Ok(txid) => {
                                                         self.status_message = format!("On-chain TX sent: {}", txid);

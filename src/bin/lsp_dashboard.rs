@@ -77,7 +77,13 @@ struct Dashboard {
     invoices_task: Option<JoinHandle<reqwest::Result<Vec<InvoiceInfo>>>>,
     logs_task:     Option<JoinHandle<reqwest::Result<String>>>,
     designate_task: Option<JoinHandle<reqwest::Result<DesignateStableChannelRes>>>,
-
+    close_task:     Option<JoinHandle<reqwest::Result<String>>>,
+    pay_task:      Option<JoinHandle<reqwest::Result<String>>>,
+    onchain_send_task:    Option<JoinHandle<reqwest::Result<String>>>,
+    onchain_send_result:  Option<String>,
+    pay_result:    Option<String>,
+    close_result:   Option<String>,      
+    get_address_task: Option<JoinHandle<reqwest::Result<String>>>,
 
     balance:  Option<Balance>,
     channels: Vec<ChannelInfo>,
@@ -128,6 +134,10 @@ impl Dashboard {
             payments_task: None,
             invoices_task: None,
             logs_task: None,
+            close_task: None,
+            close_result: None,
+            pay_task: None,
+            pay_result: None,
 
             balance: None,
             channels: Vec::new(),
@@ -156,6 +166,10 @@ impl Dashboard {
             designate_channel_usd: String::new(),
             designate_stable_result: None,
             designate_task: None,
+            onchain_send_task: None,
+            onchain_send_result:  None,
+            get_address_task: None,
+
         }
     }
 
@@ -198,27 +212,16 @@ impl Dashboard {
         }));
     }
 
-    fn fetch_payments(&mut self) {
-        if self.payments_task.is_some() { return; }
-        self.payments_task = Some(self.rt.spawn(async move {
-            // STUB: GET /api/payments
-            Ok(Vec::<PaymentInfo>::new())
-        }));
-    }
-
-    fn fetch_invoices(&mut self) {
-        if self.invoices_task.is_some() { return; }
-        self.invoices_task = Some(self.rt.spawn(async move {
-            // STUB: GET /api/invoices
-            Ok(Vec::<InvoiceInfo>::new())
-        }));
-    }
-
-    fn fetch_logs(&mut self) {
-        if self.logs_task.is_some() { return; }
-        self.logs_task = Some(self.rt.spawn(async move {
-            // STUB: GET /api/logs
-            Ok(String::from("(log output placeholder)"))
+    fn fetch_onchain_address(&mut self) {
+        if self.get_address_task.is_some() { return; }
+        let client = self.client.clone();
+        self.get_address_task = Some(self.rt.spawn(async move {
+            client
+                .get("http://127.0.0.1:8080/api/onchain_address")
+                .send()
+                .await?
+                .json::<String>()
+                .await
         }));
     }
 
@@ -314,10 +317,11 @@ impl Dashboard {
                             }
                         });
                 });
+
+
         });
     }
     
-
     fn designate_stable_channel(&mut self) {
         if self.designate_task.is_some() { return; }
         let client = self.client.clone();
@@ -335,10 +339,62 @@ impl Dashboard {
         }));
     }
 
-    // ---- stub API endpoints ----
+    fn close_specific_channel(&mut self) {
+        if self.close_task.is_some() { return; }
+        let id = self.close_channel_id.trim().to_string();
+        if id.is_empty() { return; }
+    
+        self.close_channel_id.clear();              // clear box immediately
+        let client = self.client.clone();
+        self.close_task = Some(self.rt.spawn(async move {
+            client
+                .post(format!("http://127.0.0.1:8080/api/close_channel/{}", id))
+                .send()
+                .await?
+                .text()
+                .await
+        }));
+    }
 
-    fn fetch_channel_details(&self, id: &str) {
-        // TODO: GET /api/channels/{id}
+    fn pay_invoice(&mut self) {
+        if self.pay_task.is_some() { return; }
+        let inv = self.invoice_to_pay.trim().to_string();
+        if inv.is_empty() { return; }
+    
+        self.invoice_to_pay.clear();           // clear textbox
+        let client = self.client.clone();
+        self.pay_task = Some(self.rt.spawn(async move {
+            #[derive(Serialize)] struct Req { invoice: String }
+            client
+                .post("http://127.0.0.1:8080/api/pay")
+                .json(&Req { invoice: inv })
+                .send()
+                .await?
+                .json::<String>()              // backend returns status string
+                .await
+        }));
+    }
+
+    fn send_onchain(&mut self) {
+        if self.onchain_send_task.is_some() { return; }
+        let addr  = self.onchain_address.trim().to_string();
+        let amt   = self.onchain_amount.trim().to_string();
+        if addr.is_empty() || amt.is_empty() { return; }
+    
+        self.onchain_address.clear();
+        self.onchain_amount.clear();
+    
+        let client = self.client.clone();
+        #[derive(Serialize)] struct Req { address: String, amount: String }
+        self.onchain_send_task = Some(self.rt.spawn(async move {
+            client
+                .post("http://127.0.0.1:8080/api/onchain_send")
+                .json(&Req { address: addr, amount: amt })
+                .send()
+                .await?
+                .json::<String>()
+                .await
+        }));
     }
 
     fn open_channel_stub(&self, peer_pubkey: &str, sat_amount: u64, push_msat: Option<u64>) {
@@ -351,10 +407,6 @@ impl Dashboard {
 
     fn fetch_payments_stub(&self) {
         // TODO: GET /api/payments
-    }
-
-    fn send_payment_stub(&self, bolt11_invoice: &str) {
-        // TODO: POST /api/payments
     }
 
     fn fetch_invoices_stub(&self) {
@@ -372,6 +424,23 @@ impl Dashboard {
     fn fetch_logs_stub(&self) {
         // TODO: GET /api/logs
     }
+    fn show_onchain_address_section(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.heading("On-chain Address");
+            if ui.button("Get Address").clicked() {
+                self.fetch_onchain_address();
+            }
+    
+            if !self.onchain_address.is_empty() {
+                ui.label(&self.onchain_address);
+                if ui.button("Copy").clicked() {
+                    ui.output_mut(|o| o.copied_text = self.onchain_address.clone());
+                }
+            }
+        });
+    }
+
+
 }
 
 impl App for Dashboard {
@@ -401,6 +470,11 @@ impl App for Dashboard {
         poll_task!(designate_task => |res: DesignateStableChannelRes| {
             self.designate_stable_result = Some(res.status);
         });
+        poll_task!(close_task => |v| self.close_result = Some(v));
+        poll_task!(pay_task => |v| self.pay_result = Some(v));
+        poll_task!(onchain_send_task => |v| self.onchain_send_result = Some(v));
+        poll_task!(get_address_task   => |addr| self.onchain_address = addr);
+        poll_task!(get_address_task => |addr| self.onchain_address = addr);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.show_balance(ui);
@@ -420,6 +494,55 @@ impl App for Dashboard {
                     self.designate_stable_channel();
                 }
                 if let Some(msg) = &self.designate_stable_result {
+                    ui.label(msg);
+                }
+            });
+
+            ui.add_space(10.0);
+            self.show_onchain_address_section(ui);
+            ui.add_space(10.0);
+
+            ui.group(|ui| {
+                ui.heading("On-chain Send");
+                ui.horizontal(|ui| {
+                    ui.label("Address:");
+                    ui.text_edit_singleline(&mut self.onchain_address);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Amount (sats):");
+                    ui.text_edit_singleline(&mut self.onchain_amount);
+                });
+                if ui.button("Send On-chain").clicked() {
+                    self.send_onchain();
+                }
+                if let Some(msg) = &self.onchain_send_result {
+                    ui.label(msg);
+                }
+            });
+
+            ui.add_space(10.0);
+            ui.group(|ui| {
+                ui.heading("Pay Invoice");
+                ui.text_edit_multiline(&mut self.invoice_to_pay);
+                if ui.button("Pay Invoice").clicked() {
+                    self.pay_invoice();
+                }
+                if let Some(msg) = &self.pay_result {
+                    ui.label(msg);
+                }
+            });
+
+            ui.add_space(10.0);
+            ui.group(|ui| {
+                ui.heading("Close Specific Channel");
+                ui.horizontal(|ui| {
+                    ui.label("Channel ID:");
+                    ui.text_edit_singleline(&mut self.close_channel_id);
+                    if ui.button("Close Channel").clicked() {
+                        self.close_specific_channel();
+                    }
+                });
+                if let Some(msg) = &self.close_result {
                     ui.label(msg);
                 }
             });

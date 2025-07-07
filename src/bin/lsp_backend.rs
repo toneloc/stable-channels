@@ -123,6 +123,12 @@ struct DesignateStableChannelRes {
     status: String,
 }
 
+#[derive(Deserialize)]
+struct OnchainSendReq {
+    address: String,
+    amount:  String,   // sats, still as string for reuse
+}
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -157,7 +163,9 @@ async fn main() -> Result<()> {
         .route("/api/channels", get(get_channels))
         .route("/api/price", get(get_price))
         .route("/api/close_channel/{id}", post(post_close_channel))
-        .route("/api/designate_stable_channel", post(designate_stable_channel_handler));
+        .route("/api/designate_stable_channel", post(designate_stable_channel_handler))
+        .route("/api/onchain_send", post(onchain_send_handler))
+        .route("/api/onchain_address", get(get_onchain_address));
 ;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
@@ -262,10 +270,31 @@ async fn designate_stable_channel_handler(Json(req): Json<DesignateStableChannel
     })
 }
 
-async fn pay_handler(Json(_req): Json<PayReq>) -> &'static str {
-    // TODO Node::send_payment(&_req.invoice) ?
-    "OK"
+async fn pay_handler(Json(req): Json<PayReq>) -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    app.invoice_to_pay = req.invoice;
+    let ok = app.pay_invoice();
+    Json(app.status_message.clone())
 }
+
+async fn onchain_send_handler(Json(req): Json<OnchainSendReq>) -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    app.on_chain_address = req.address;
+    app.on_chain_amount  = req.amount;
+    app.send_onchain();                    // updates status_message
+    Json(app.status_message.clone())
+}
+
+async fn get_onchain_address() -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    if app.get_address() {
+        Json(app.on_chain_address.clone())
+    } else {
+        Json(app.status_message.clone())
+    }
+}
+
+
 
 impl ServerApp {
     pub fn new_with_mode(mode: &str) -> Self {
@@ -554,7 +583,7 @@ impl ServerApp {
     pub fn send_onchain(&mut self) -> bool {
         if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
             match Address::from_str(&self.on_chain_address) {
-                Ok(addr) => match addr.require_network(Network::Bitcoin) {
+                Ok(addr) => match addr.require_network(Network::Signet) {
                     Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
                         Ok(txid) => {
                             self.status_message = format!("Transaction sent: {}", txid);
