@@ -95,8 +95,14 @@ pub struct ChannelInfo {
     pub remote_pubkey: String,
     pub capacity_sats: u64,
     pub local_balance_sats: u64,
+    pub local_balance_usd:  f64,
     pub remote_balance_sats: u64,
+    pub remote_balance_usd:  f64,
     pub status: String,
+    pub is_channel_ready: bool,  
+    pub is_usable: bool,         
+    pub is_stable: bool,   
+    pub expected_usd: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -181,26 +187,47 @@ async fn get_balance() -> Json<Balance> {
 
 /// GET /api/channels
 pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
-    // Snapshot channel state under the global mutex
-    let channels = {
-        let app = APP.lock().expect("APP mutex poisoned");
-        app.node.list_channels() // Vec<ldk_node::ChannelDetails>
-    };
+    let app = APP.lock().expect("APP mutex poisoned");
+    let price = app.btc_price;                       // cache once
 
-    let out: Vec<ChannelInfo> = channels
+    let out: Vec<ChannelInfo> = app
+        .node
+        .list_channels()
         .into_iter()
-        .map(|c| ChannelInfo {
-            id: hex::encode(c.channel_id.0),
-            remote_pubkey: c.counterparty_node_id.to_string(),
-            capacity_sats: c.channel_value_sats,
-            local_balance_sats: c.outbound_capacity_msat / 1_000, // msat → sat
-            remote_balance_sats: c.inbound_capacity_msat / 1_000,
-            status: if c.is_channel_ready { "open".into() } else { "pending".into() },
+        .map(|c| {
+            let is_stable = app
+                .stable_channels
+                .iter()
+                .find(|sc| sc.channel_id == c.channel_id);
+
+            let expected_usd = is_stable.map(|sc| sc.expected_usd.0);
+
+            let local_sat   = c.outbound_capacity_msat / 1_000;
+            let remote_sat  = c.inbound_capacity_msat / 1_000;
+
+            ChannelInfo {
+                id: hex::encode(c.channel_id.0),
+                remote_pubkey: c.counterparty_node_id.to_string(),
+                capacity_sats: c.channel_value_sats,
+
+                local_balance_sats:  local_sat,
+                local_balance_usd:   local_sat as f64 / 100_000_000.0 * price,
+
+                remote_balance_sats: remote_sat,
+                remote_balance_usd:  remote_sat as f64 / 100_000_000.0 * price,
+
+                expected_usd,        // Some(x) or None
+                status: if c.is_channel_ready { "open".into() } else { "pending".into() },
+                is_channel_ready: c.is_channel_ready,
+                is_usable:       c.is_usable,
+                is_stable:       is_stable.is_some(),
+            }
         })
         .collect();
 
     Json(out)
 }
+
 
 /// GET /api/price
 async fn get_price() -> Json<f64> {

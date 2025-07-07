@@ -26,8 +26,14 @@ struct ChannelInfo {
     remote_pubkey: String,
     capacity_sats: u64,
     local_balance_sats: u64,
+    local_balance_usd:  f64,
     remote_balance_sats: u64,
+    remote_balance_usd:  f64,
     status: String,
+    is_channel_ready: bool,  
+    is_usable: bool,         
+    is_stable: bool,   
+    expected_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -234,39 +240,83 @@ impl Dashboard {
     }
 
     fn show_channels(&mut self, ui: &mut egui::Ui) {
-        use egui::ScrollArea;
+        use egui::{RichText, ScrollArea};
+    
+        fn short(s: &str, n: usize) -> String {
+            if s.len() > n { format!("{}…", &s[..n]) } else { s.to_owned() }
+        }
+    
         ui.group(|ui| {
             ui.heading("Channels");
             if ui.button("Refresh Channels").clicked() {
                 self.fetch_channels();
             }
-            ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                if self.channels.is_empty() {
-                    ui.label("(no channels)");
-                } else {
-                    egui::Grid::new("channels").striped(true).show(ui, |ui| {
-                        ui.label(RichText::new("ID").strong());
-                        ui.label(RichText::new("Peer").strong());
-                        ui.label(RichText::new("Capacity").strong());
-                        ui.label(RichText::new("Local").strong());
-                        ui.label(RichText::new("Remote").strong());
-                        ui.label(RichText::new("Status").strong());
-                        ui.end_row();
-
-                        for c in &self.channels {
-                            ui.label(&c.id[..8.min(c.id.len())]);
-                            ui.label(&c.remote_pubkey[..8.min(c.remote_pubkey.len())]);
-                            ui.label(c.capacity_sats.to_string());
-                            ui.label(c.local_balance_sats.to_string());
-                            ui.label(c.remote_balance_sats.to_string());
-                            ui.label(&c.status);
+    
+            ScrollArea::both()
+                .max_height(160.0)
+                .auto_shrink([true; 2])
+                .show(ui, |ui| {
+                    egui::Grid::new("channel_table")
+                        .striped(true)
+                        .min_col_width(50.0)
+                        .show(ui, |ui| {
+                            // ── headers ───────────────────────────────────────────
+                            for h in [
+                                "ID", "Peer", "Capacity",
+                                "Local", "USD",           // local sats / local USD
+                                "Remote", "USD",          // remote sats / remote USD
+                                "Status", "Ready", "Usable", "Stable $"
+                            ] {
+                                ui.label(RichText::new(h).strong().small());
+                            }
                             ui.end_row();
-                        }
-                    });
-                }
-            });
+    
+                            // ── rows ─────────────────────────────────────────────
+                            for ch in &self.channels {
+                                // ID (copy)
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(short(&ch.id, 8)).monospace());
+                                    if ui.small_button("⧉").on_hover_text("Copy full ID").clicked() {
+                                        ui.output_mut(|o| o.copied_text = ch.id.clone());
+                                    }
+                                });
+    
+                                // Peer (copy)
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(short(&ch.remote_pubkey, 8)).monospace());
+                                    if ui.small_button("⧉").on_hover_text("Copy full peer key").clicked() {
+                                        ui.output_mut(|o| o.copied_text = ch.remote_pubkey.clone());
+                                    }
+                                });
+    
+                                ui.label(ch.capacity_sats.to_string());
+    
+                                // Local sats + USD
+                                ui.label(ch.local_balance_sats.to_string());
+                                ui.label(format!("{:.2}", ch.local_balance_usd));
+    
+                                // Remote sats + USD
+                                ui.label(ch.remote_balance_sats.to_string());
+                                ui.label(format!("{:.2}", ch.remote_balance_usd));
+    
+                                ui.label(&ch.status);
+                                ui.label(ch.is_channel_ready.to_string());
+                                ui.label(ch.is_usable.to_string());
+    
+                                // Stable target USD (Option<f64>)
+                                ui.label(
+                                    ch.expected_usd
+                                        .map(|v| format!("{:.2}", v))
+                                        .unwrap_or_else(|| "n/a".into()),
+                                );
+    
+                                ui.end_row();
+                            }
+                        });
+                });
         });
     }
+    
 
     fn designate_stable_channel(&mut self) {
         if self.designate_task.is_some() { return; }
