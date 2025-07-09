@@ -158,6 +158,11 @@
                 }
             }
 
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+
             let sc_init = StableChannel {
                 channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]),
                 counterparty: lsp_pubkey,
@@ -171,7 +176,7 @@
                 latest_price: btc_price,
                 risk_level: 0,
                 payment_made: false,
-                timestamp: 0,
+                timestamp: now,
                 formatted_datetime: "2021-06-01 12:00:00".to_string(),
                 sc_dir: "/".to_string(),
                 prices: String::new(),
@@ -907,11 +912,11 @@
 
                             // fixes the $2.00 bug
                             let display_usd = if usd_val < 3.0 {
-                                "---".to_string()
+                                "----".to_owned()
                             } else {
                                 format!("{:.2}", usd_val)
                             };
-                        
+
                             let pegged_btc = if sc.is_stable_receiver {
                                 sc.stable_receiver_btc
                             } else {
@@ -928,7 +933,7 @@
                             ui.add_space(8.0);
                         
                             ui.label(
-                                egui::RichText::new(format!("{:.2}", display_usd))
+                                egui::RichText::new(display_usd)
                                     .size(24.0)
                                     .strong(),
                             );
