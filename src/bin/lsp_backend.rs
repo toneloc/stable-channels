@@ -34,12 +34,8 @@ const LSP_DATA_DIR: &str = "data/lsp";
 const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
 
-const EXCHANGE_DATA_DIR: &str = "data/exchange";
-const EXCHANGE_NODE_ALIAS: &str = "exchange";
-const EXCHANGE_PORT: u16 = 9735;
-
-const DEFAULT_NETWORK: &str = "signet";
-const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+const DEFAULT_NETWORK: &str = "bitcoin";
+const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
 const EXPECTED_USD: f64 = 100.0;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -299,7 +295,6 @@ async fn get_onchain_address() -> Json<String> {
 impl ServerApp {
     pub fn new_with_mode(mode: &str) -> Self {
         let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
-            "exchange" => (EXCHANGE_DATA_DIR, EXCHANGE_NODE_ALIAS, EXCHANGE_PORT),
             "lsp" => (LSP_DATA_DIR, LSP_NODE_ALIAS, LSP_PORT),
             _ => panic!("Invalid mode"),
         };
@@ -583,7 +578,7 @@ impl ServerApp {
     pub fn send_onchain(&mut self) -> bool {
         if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
             match Address::from_str(&self.on_chain_address) {
-                Ok(addr) => match addr.require_network(Network::Signet) {
+                Ok(addr) => match addr.require_network(Network::Bitcoin) {
                     Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
                         Ok(txid) => {
                             self.status_message = format!("Transaction sent: {}", txid);

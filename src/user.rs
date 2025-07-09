@@ -24,7 +24,7 @@
     use std::path::PathBuf;
     use dirs::data_dir;
 
-    const DEFAULT_NETWORK: &str = "signet";
+    const DEFAULT_NETWORK: &str = "bitcoin";
 
     // Data will be placed at "current-directory/data/user"
     const USER_NODE_ALIAS: &str = "user";
@@ -38,7 +38,7 @@
     const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
     const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
     const EXPECTED_USD: f64 = 100.0;
-    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
+    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
 
     fn user_data_dir() -> PathBuf {
         data_dir()
@@ -84,18 +84,20 @@
             println!("Initializing user node...");
 
             // for testing: 
-            const USER_DATA_DIR: &str = "data/user";
-            // let data_dir = user_data_dir();
+            // const USER_DATA_DIR: &str = "data/user";
+            let data_dir = user_data_dir();
             
             let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY)
                 .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
-            // let audit_log_path = data_dir.join("audit_log.txt").to_string_lossy().into_owned();
-            // const USER_DATA_DIR: &str = "data/user";
-            // set_audit_log_path(&audit_log_path);
 
-            let audit_log_path = "data/user";
-            set_audit_log_path(audit_log_path);
+            // let audit_log_path = "data/user";
+            // set_audit_log_path(audit_log_path);
+
+            let audit_log_path = data_dir.join("audit_log.txt")
+                             .to_string_lossy()
+                             .into_owned();
+            set_audit_log_path(&audit_log_path);
 
             let mut builder = Builder::new();
             
@@ -113,8 +115,8 @@
             builder.set_network(network);
 
             builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
-            // builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
-            builder.set_storage_dir_path("data/user/".to_string());
+            builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
+            // builder.set_storage_dir_path("data/user/".to_string());
             builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
             let _ = builder.set_node_alias(USER_NODE_ALIAS.to_string());
 
@@ -210,7 +212,7 @@
                 show_log_window: false,
                 log_contents: String::new(),
                 log_last_read: std::time::Instant::now(),
-                audit_log_path: audit_log_path.to_string(),
+                audit_log_path,
                 show_advanced: false,
             };
 
@@ -818,7 +820,7 @@
 
                                 if ui.button("Withdraw all to address").clicked() {
                                     match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
-                                        Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Signet) {
+                                        Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
                                             Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
                                                 Ok(txid) => {
                                                     self.status_message = format!("On-chain TX sent: {}", txid);
@@ -1096,7 +1098,7 @@
                                 
                                     if ui.button("Send On-chain").clicked() {
                                         match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
-                                            Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Signet) {
+                                            Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
                                                 Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
                                                     Ok(txid) => {
                                                         self.status_message = format!("On-chain TX sent: {}", txid);
