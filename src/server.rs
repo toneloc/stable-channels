@@ -160,7 +160,7 @@ impl ServerApp {
             selected_channel_id: String::new(),
             stable_channel_amount: EXPECTED_USD.to_string(),
             open_channel_node_id: String::new(),
-            open_channel_address: "127.0.0.1:9737".into(),
+            open_channel_address: "0.0.0.1:9737".into(),
             log_contents: String::new(),
             open_channel_amount: "100000".into(),
             show_log_window: false,
