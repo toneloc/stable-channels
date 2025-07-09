@@ -234,8 +234,7 @@ impl ServerApp {
                     self.status_message = format!("Channel {} is now ready", channel_id);
                     self.update_balances();
                 }
-                Event::ChannelPending {
-                    channel_id,
+                Event::ChannelPending {                    channel_id,
                     user_channel_id,
                     former_temporary_channel_id,
                     counterparty_node_id,
@@ -351,7 +350,7 @@ impl ServerApp {
     pub fn send_onchain(&mut self) -> bool {
         if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
             match Address::from_str(&self.on_chain_address) {
-                Ok(addr) => match addr.require_network(Network::Bitcoin) {
+                Ok(addr) => match addr.require_network(Network::Signet) {
                     Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
                         Ok(txid) => {
                             self.status_message = format!("Transaction sent: {}", txid);

@@ -6,13 +6,14 @@
         bitcoin::secp256k1::PublicKey,
         lightning::ln::msgs::SocketAddress,
     };
-
+    use egui::{Stroke, TextureHandle, Frame as EguiFrame};
+    use std::error::Error;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use image::{GrayImage, Luma};
     use qrcode::{QrCode, Color};
-    use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions, Vec2};
+    use egui::{CollapsingHeader, Color32, CursorIcon, IconData, OpenUrl, RichText, Sense, TextureOptions, Vec2};
     use serde_json::json;
 
     use crate::audit::*;
@@ -30,11 +31,11 @@
     const USER_PORT: u16 = 9736;
 
     // Populate the below two parameters to run locally
-    const DEFAULT_LSP_PUBKEY: &str = "037fae42b0e40e771bb576250a15dba529777d22532643ac77faf470ea9d862b5f";
+    const DEFAULT_LSP_PUBKEY: &str = "020549cf31166df8db929707256754388029cfda7d4ad11c9a81c744a861b50893";
     const DEFAULT_GATEWAY_PUBKEY: &str = "033b5445cd81840dcbe4dc9d2c8a043f120481506d28ac1fc9a512ddcc0dbbb49e";
 
     // const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
-    const DEFAULT_LSP_ADDRESS: &str = "127.0.0.1:9737";
+    const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
     const DEFAULT_GATEWAY_ADDRESS: &str = "127.0.0.1:9735";
     const EXPECTED_USD: f64 = 100.0;
     const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mutinynet.com/api/";
@@ -610,11 +611,19 @@
                     ui.add_space(3.0);
                     ui.label("This is a Bolt11 Lightning invoice.");
                     ui.add_space(8.0);
+
                     if let Some(ref qr) = self.qr_texture {
-                        ui.image(qr);
+                        let resp = ui.image(qr);
+                    
+                        ui.painter().rect_stroke(
+                            resp.rect,                 
+                            0.0,                      
+                            Stroke::new(4.0, Color32::WHITE),
+                        );
                     } else {
                         ui.label("Lightning QR Missing");
                     }
+                    
                     ui.add_space(8.0);
                     ui.add(
                         egui::TextEdit::multiline(&mut self.invoice_result)
@@ -697,11 +706,12 @@
                             .color(egui::Color32::WHITE),
                     );
                     ui.label(
-                        egui::RichText::new("Self-custody. 100% bitcoin under the hood.")
+                        egui::RichText::new("Self-custody. 100% bitcoin.")
                             .color(egui::Color32::GRAY),
                     );
 
-                    // ui.add_space(20.0);
+                    // here
+
                     // self.show_onchain_send_section(ui);
 
                     ui.add_space(35.0);
@@ -892,6 +902,15 @@
                             } else {
                                 sc.stable_provider_usd
                             };
+
+                            let usd_val = stable_usd.0;
+
+                            // fixes the $2.00 bug
+                            let display_usd = if usd_val < 3.0 {
+                                "---".to_string()
+                            } else {
+                                format!("{:.2}", usd_val)
+                            };
                         
                             let pegged_btc = if sc.is_stable_receiver {
                                 sc.stable_receiver_btc
@@ -909,7 +928,7 @@
                             ui.add_space(8.0);
                         
                             ui.label(
-                                egui::RichText::new(format!("{:.2}", stable_usd))
+                                egui::RichText::new(format!("{:.2}", display_usd))
                                     .size(24.0)
                                     .strong(),
                             );
@@ -1200,7 +1219,7 @@
         //             ui.text_edit_singleline(&mut self.on_chain_amount);
         //         });
 
-        //         if ui.button("Send On-chain").clicked() {
+        //        
         //             self.send_onchain();
         //         }
         //     });
@@ -1266,26 +1285,40 @@
     }
 
     pub fn run() {
-        println!("Starting User Interface...");
+        println!("Starting User Interface…");
+    
+        /* ---- load sc-icon.png into egui::IconData ----------------------- */
+        let icon_bytes = include_bytes!("../sc-icon-egui.png");
+        let icon_rgba  = image::load_from_memory(icon_bytes)
+            .expect("decode sc-icon.png")
+            .to_rgba8();
+        let (w, h) = icon_rgba.dimensions();
+        let icon   = IconData { rgba: icon_rgba.into_raw(), width: w, height: h };
+    
+        /* ---- viewport + options ----------------------------------------- */
+        let viewport = egui::ViewportBuilder::default()
+            .with_inner_size([460.0, 700.0])
+            .with_icon(icon);
+    
         let native_options = eframe::NativeOptions {
-            viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([460.0, 700.0]),
+            viewport,
             ..Default::default()
         };
-
-        let app_result = UserApp::new();
-        match app_result {
+    
+        /* ---- launch ------------------------------------------------------ */
+        match UserApp::new() {
             Ok(app) => {
                 eframe::run_native(
                     "Stable Channels",
                     native_options,
-                    Box::new(|_| Ok(Box::new(app))),
-                ).unwrap();
+                    // The closure must return Result<Box<dyn App>, Box<dyn Error + Send + Sync>>
+                    Box::new(|_cc| Ok::<Box<dyn App>, Box<dyn Error + Send + Sync>>(Box::new(app))),
+                )
+                .expect("eframe failed");
             }
             Err(e) => {
-                eprintln!("Failed to initialize app: {}", e);
+                eprintln!("Failed to initialize app: {e}");
                 std::process::exit(1);
             }
         }
     }
-
