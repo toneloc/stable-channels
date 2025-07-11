@@ -6,7 +6,7 @@
         bitcoin::secp256k1::PublicKey,
         lightning::ln::msgs::SocketAddress,
     };
-    use egui::{Stroke, TextureHandle, Frame as EguiFrame};
+    use egui::{Stroke, Visuals};
     use std::error::Error;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
@@ -31,7 +31,7 @@
     const USER_PORT: u16 = 9736;
 
     // Populate the below two parameters to run locally
-    const DEFAULT_LSP_PUBKEY: &str = "020549cf31166df8db929707256754388029cfda7d4ad11c9a81c744a861b50893";
+    const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
     const DEFAULT_GATEWAY_PUBKEY: &str = "033b5445cd81840dcbe4dc9d2c8a043f120481506d28ac1fc9a512ddcc0dbbb49e";
 
     // const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
@@ -1307,19 +1307,20 @@
             .with_inner_size([460.0, 700.0])
             .with_icon(icon);
     
-        let native_options = eframe::NativeOptions {
-            viewport,
-            ..Default::default()
-        };
-    
         /* ---- launch ------------------------------------------------------ */
         match UserApp::new() {
             Ok(app) => {
                 eframe::run_native(
                     "Stable Channels",
-                    native_options,
-                    // The closure must return Result<Box<dyn App>, Box<dyn Error + Send + Sync>>
-                    Box::new(|_cc| Ok::<Box<dyn App>, Box<dyn Error + Send + Sync>>(Box::new(app))),
+                    eframe::NativeOptions {   // keep the options you already use
+                        viewport,
+                        ..Default::default()
+                    },
+                    Box::new(|cc| {
+                        // FORCES DARK MODE ON EVERY START
+                        cc.egui_ctx.set_visuals(Visuals::dark());
+                        Ok::<Box<dyn eframe::App>, _>(Box::new(app))
+                    }),
                 )
                 .expect("eframe failed");
             }
