@@ -29,27 +29,27 @@ jobs:
 
       # ---- Optional stripping to shrink binary ------------------------------
       - name: Strip symbols
-    run: |
-      cargo install cargo-binutils --force
-      rustup component add llvm-tools-preview
-      objcopy target\x86_64-pc-windows-msvc\release\stable-channels.exe --strip-all target\x86_64-pc-windows-msvc\release\stable-channels-stripped.exe
-   
-      # ---- Code-sign (requires secrets) -------------------------------------
-      - name: Sign executable
-        if: env.WINDOWS_CERTIFICATE != ''
-        env:
-          PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE }}     # base64-encoded .pfx
-          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }} # cert password
-        run: |
-          echo "$Env:PFX_BASE64" | base64 -d > code.pfx
-          certutil -f -p "$Env:PFX_PASSWORD" -importpfx code.pfx
-          "C:\Program Files (x86)\Windows Kits\10\App Certification Kit\signtool.exe" ^
-            sign /fd sha256 /f code.pfx /p "$Env:PFX_PASSWORD" ^
-            /tr http://timestamp.digicert.com /td sha256 ^
-            target\x86_64-pc-windows-msvc\release\stable-channels-stripped.exe
+      run: |
+        cargo install cargo-binutils --force
+        rustup component add llvm-tools-preview
+        objcopy target\x86_64-pc-windows-msvc\release\stable-channels.exe --strip-all target\x86_64-pc-windows-msvc\release\stable-channels-stripped.exe
+     
+        # ---- Code-sign (requires secrets) -------------------------------------
+        - name: Sign executable
+          if: env.WINDOWS_CERTIFICATE != ''
+          env:
+            PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE }}     # base64-encoded .pfx
+            PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }} # cert password
+          run: |
+            echo "$Env:PFX_BASE64" | base64 -d > code.pfx
+            certutil -f -p "$Env:PFX_PASSWORD" -importpfx code.pfx
+            "C:\Program Files (x86)\Windows Kits\10\App Certification Kit\signtool.exe" ^
+              sign /fd sha256 /f code.pfx /p "$Env:PFX_PASSWORD" ^
+              /tr http://timestamp.digicert.com /td sha256 ^
+              target\x86_64-pc-windows-msvc\release\stable-channels-stripped.exe
 
-      # ---- Upload artifact --------------------------------------------------
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stable-channels-windows
-          path: target/x86_64-pc-windows-msvc/release/stable-channels-stripped.exe
+        # ---- Upload artifact --------------------------------------------------
+        - uses: actions/upload-artifact@v4
+          with:
+            name: stable-channels-windows
+            path: target/x86_64-pc-windows-msvc/release/stable-channels-stripped.exe
