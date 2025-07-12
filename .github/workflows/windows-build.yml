@@ -29,6 +29,7 @@ jobs:
 
       # ---- Optional stripping to shrink binary ------------------------------
       - name: Strip symbols
+        shell: bash
         run: |
           cargo install cargo-binutils --force
           rustup component add llvm-tools-preview
