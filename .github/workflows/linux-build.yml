@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read  # change to write only if publishing releases
+  contents: read          # change to write only if publishing releases
 
 concurrency:
   group: build-linux-${{ github.ref }}
@@ -21,31 +21,102 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Cache cargo/target to speed incremental builds
+      # ---------- Rust cache ----------
       - uses: Swatinem/rust-cache@v2
 
-      # Rust toolchain
+      # ---------- Rust toolchain ----------
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy,rustfmt  # optional
+          profile: minimal
+          components: clippy,rustfmt   # optional
+          override: true
 
-      # AppImage tooling
+      # ---------- AppImage tooling ----------
       - name: Install AppImage tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y libfuse2 patchelf
-          curl -L https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o linuxdeploy
-          curl -L https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -o appimagetool
-          chmod +x linuxdeploy appimagetool
-          sudo mv linuxdeploy appimagetool /usr/local/bin/
+          sudo apt-get install -y libfuse2 patchelf gcc-aarch64-linux-gnu
+          curl -L https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+               -o /usr/local/bin/linuxdeploy
+          curl -L https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage \
+               -o /usr/local/bin/appimagetool
+          chmod +x /usr/local/bin/linuxdeploy /usr/local/bin/appimagetool
 
-      # Build + package
+      # ---------- Build & package ----------
       - name: Build AppImages
         run: |
-          chmod +x ./make_linux_app.sh
-          ./make_linux_app.sh
+          #!/usr/bin/env bash
+          set -euo pipefail
 
-      # Upload artifacts
+          # ─── config ──────────────────────────────────────────────────────
+          APP_NAME="Stable Channels"
+          BIN_NAME="stable-channels"
+          VERSION="0.1.0"
+          PNG_ICON="sc-icon-egui.png"      # optional; 1024×1024 PNG in repo root
+          ARCHS=(x86_64 aarch64)           # build for x86‑64 & AArch64
+          DIST_DIR="dist"
+          # ─────────────────────────────────────────────────────────────────
+
+          require() { command -v "$1" >/dev/null || { echo "❌  $1 not found"; exit 1; }; }
+          require cargo
+          require rustup
+          require linuxdeploy
+          require appimagetool
+
+          echo "▶ Installing Rust targets…"
+          for arch in "${ARCHS[@]}"; do
+            rustup target add "${arch}-unknown-linux-gnu"
+          done
+
+          echo "▶ Building release binaries…"
+          for arch in "${ARCHS[@]}"; do
+            cargo build --release --bin "$BIN_NAME" --target "${arch}-unknown-linux-gnu"
+          done
+
+          echo "▶ Packaging AppImages…"
+          rm -rf "$DIST_DIR" && mkdir -p "$DIST_DIR"
+
+          for arch in "${ARCHS[@]}"; do
+            TARGET="${arch}-unknown-linux-gnu"
+            APPDIR="${BIN_NAME}.AppDir"
+            rm -rf "$APPDIR"
+
+            # AppDir skeleton
+            mkdir -p "$APPDIR/usr/bin" \
+                     "$APPDIR/usr/share/applications" \
+                     "$APPDIR/usr/share/icons/hicolor/512x512/apps"
+
+            cp "target/${TARGET}/release/${BIN_NAME}" "$APPDIR/usr/bin/"
+
+            # optional icon
+            if [[ -f "$PNG_ICON" ]]; then
+              cp "$PNG_ICON" "$APPDIR/usr/share/icons/hicolor/512x512/apps/${BIN_NAME}.png"
+              ICON_LINE="Icon=${BIN_NAME}"
+            else
+              echo "⚠️  $PNG_ICON not found – building without custom icon."
+              ICON_LINE="Icon=application-default-icon"
+            fi
+
+            # desktop entry
+            cat >"$APPDIR/usr/share/applications/${BIN_NAME}.desktop" <<DESKTOP
+            [Desktop Entry]
+            Type=Application
+            Name=${APP_NAME}
+            Exec=${BIN_NAME} %u
+            ${ICON_LINE}
+            Categories=Finance;
+            Terminal=false
+            DESKTOP
+
+            # build AppImage
+            ARCH=$arch linuxdeploy --appdir "$APPDIR" --output appimage >/dev/null
+            mv ./*.AppImage "$DIST_DIR/${BIN_NAME}-${VERSION}-${arch}.AppImage"
+          done
+
+          chmod +x "$DIST_DIR"/*.AppImage
+          echo "✅  Finished – see '$DIST_DIR/' for ready-to-ship AppImages."
+
+      # ---------- Upload artifacts ----------
       - uses: actions/upload-artifact@v4
         with:
           name: stable-channels-linux
