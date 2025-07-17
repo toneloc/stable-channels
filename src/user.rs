@@ -308,48 +308,58 @@
         }
 
         fn get_jit_invoice(&mut self, ctx: &egui::Context) {
+            // ── price & amounts ───────────────────────────────────────────────
             let latest_price = {
                 let sc = self.stable_channel.lock().unwrap();
                 sc.latest_price
             };
+            let raw_msat = USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price);
+            // round
+            let amount_msat = ((raw_msat + 500) / 1_000) * 1_000;
+            let amount_sat = amount_msat / 1000;
+
+
+            // ── invoice description ───────────────────────────────────────────
             let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
                 ldk_node::lightning_invoice::Description::new(
                     "Stable Channel JIT payment".to_string(),
                 )
                 .unwrap(),
             );
-            let result = self.node.bolt11_payment().receive_via_jit_channel(
-                USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price),
-                &description,
-                3600,
-                Some(10_000_000),
-            );
-
+        
+            // ── request JIT invoice (LSPS-2 expects msats) ────────────────────
+            let result = self.node
+                .bolt11_payment()
+                .receive_via_jit_channel(amount_msat, &description, 3600, Some(10_000_000));
+        
             audit_event("JIT_INVOICE_ATTEMPT", json!({
                 "expected_usd": EXPECTED_USD,
-                "btc_price": latest_price
+                "btc_price":    latest_price,
+                "amount_msat":  amount_msat,
+                "amount_sat":   amount_sat
             }));
-
+        
             match result {
                 Ok(invoice) => {
                     self.invoice_result = invoice.to_string();
+                    self.invoice_amount = amount_sat.to_string();  // show sats in UI
+        
                     audit_event("JIT_INVOICE_GENERATED", json!({
-                        "invoice": self.invoice_result,
-                        "amount_msats": USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price)
+                        "invoice":      self.invoice_result,
+                        "amount_msat":  amount_msat,
+                        "amount_sat":   amount_sat
                     }));
-                    let code = QrCode::new(&self.invoice_result).unwrap();
-                    let bits = code.to_colors();
-                    let width = code.width();
-                    let scale = 4;
-                    let mut imgbuf =
-                        GrayImage::new((width * scale) as u32, (width * scale) as u32);
+        
+                    // ── QR-code rendering (unchanged) ─────────────────────────
+                    let code   = QrCode::new(&self.invoice_result).unwrap();
+                    let bits   = code.to_colors();
+                    let width  = code.width();
+                    let scale  = 4;
+                    let mut imgbuf = GrayImage::new((width * scale) as u32, (width * scale) as u32);
+        
                     for y in 0..width {
                         for x in 0..width {
-                            let color = if bits[y * width + x] == Color::Dark {
-                                0
-                            } else {
-                                255
-                            };
+                            let color = if bits[y * width + x] == Color::Dark { 0 } else { 255 };
                             for dy in 0..scale {
                                 for dx in 0..scale {
                                     imgbuf.put_pixel(
@@ -361,6 +371,7 @@
                             }
                         }
                     }
+        
                     let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
                     let mut rgba = Vec::with_capacity(w * h * 4);
                     for p in imgbuf.pixels() {
@@ -373,19 +384,22 @@
                         TextureOptions::LINEAR,
                     );
                     self.qr_texture = Some(tex);
-                    self.status_message =
-                        "Invoice generated. Pay it to create a JIT channel.".to_string();
+        
+                    self.status_message = format!(
+                        "Invoice for {} sats generated. Pay it to create a JIT channel.",
+                        amount_sat
+                    );
                     self.waiting_for_payment = true;
                 }
+        
                 Err(e) => {
-                    audit_event("JIT_INVOICE_FAILED", json!({
-                        "error": format!("{e}")
-                    }));
+                    audit_event("JIT_INVOICE_FAILED", json!({ "error": format!("{e}") }));
                     self.invoice_result = format!("Error: {e:?}");
-                    self.status_message = format!("Failed to generate invoice: {}", e);
+                    self.status_message  = format!("Failed to generate invoice: {}", e);
                 }
             }
         }
+        
 
         pub fn generate_invoice(&mut self) -> bool {
             if let Ok(amount) = self.invoice_amount.parse::<u64>() {
