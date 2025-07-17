@@ -1,0 +1,80 @@
+name: Build – macOS Universal App
+
+on:
+  push:
+    branches: [sc-lsp]
+  workflow_dispatch:
+
+permissions:
+  contents: read  # change to write only if this job pushes commits or releases
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    runs-on: macos-14   # Apple‑silicon runner; x86_64 slice built via `lipo`
+
+    env:
+      APP_PATH: dist/Stable\ Channels.app
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+          override: true
+
+      # Build universal .app bundle
+      - name: Build universal .app
+        run: |
+          chmod +x ./make_mac_app.sh
+          ./make_mac_app.sh
+
+      # Codesign & notarize (runs only if secrets exist)
+      - name: Codesign & notarize
+        if: ${{ secrets.DEV_ID_CERT_P12 != '' && secrets.ASC_KEY_P8 != '' }}
+        env:
+          P12_B64:       ${{ secrets.DEV_ID_CERT_P12 }}
+          P12_PASS:      ${{ secrets.DEV_ID_CERT_PASS }}
+          ASC_KEY_P8:    ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          # Import Developer‑ID certificate
+          echo "$P12_B64" | base64 --decode > cert.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import cert.p12 -k build.keychain -P "$P12_PASS" -T /usr/bin/codesign
+          CODESIGN_ID=$(security find-identity -v -p codesigning build.keychain | awk '{print $2}')
+
+          # Sign the app bundle
+          codesign --options runtime --timestamp -f -s "$CODESIGN_ID" "$APP_PATH"
+
+          # Notarize & staple
+          echo "$ASC_KEY_P8" | base64 --decode > key.p8
+          xcrun notarytool submit "$APP_PATH" \
+               --key key.p8 --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait
+          xcrun stapler staple "$APP_PATH"
+
+          # Clean up secrets
+          rm -f cert.p12 key.p8
+
+      # Zip the notarized bundle
+      - name: Zip .app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" Stable-Channels-mac.zip
+
+      # Upload artifact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-channels-mac
+          path: Stable-Channels-mac.zip
+          if-no-files-found: error

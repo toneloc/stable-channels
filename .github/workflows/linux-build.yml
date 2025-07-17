@@ -1,0 +1,53 @@
+name: Build – Linux AppImage
+
+on:
+  push:
+    branches: [sc-lsp]
+  workflow_dispatch:
+
+permissions:
+  contents: read  # change to write only if publishing releases
+
+concurrency:
+  group: build-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Cache cargo/target to speed incremental builds
+      - uses: Swatinem/rust-cache@v2
+
+      # Rust toolchain
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt  # optional
+
+      # AppImage tooling
+      - name: Install AppImage tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 patchelf
+          curl -L https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o linuxdeploy
+          curl -L https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -o appimagetool
+          chmod +x linuxdeploy appimagetool
+          sudo mv linuxdeploy appimagetool /usr/local/bin/
+
+      # Build + package
+      - name: Build AppImages
+        run: |
+          chmod +x ./make_linux_app.sh
+          ./make_linux_app.sh
+
+      # Upload artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stable-channels-linux
+          path: dist/*.AppImage
+          if-no-files-found: error

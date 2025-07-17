@@ -33,8 +33,9 @@ jobs:
         run: |
           cargo install cargo-binutils --force
           rustup component add llvm-tools-preview
-          objcopy target\x86_64-pc-windows-msvc\release\stable-channels.exe --strip-all target\x86_64-pc-windows-msvc\release\stable-channels-stripped.exe
-     
+          objcopy target/x86_64-pc-windows-msvc/release/stable-channels.exe \
+            --strip-all target/x86_64-pc-windows-msvc/release/stable-channels-stripped.exe
+
         # ---- Code-sign (requires secrets) -------------------------------------
       - name: Sign executable
         if: env.WINDOWS_CERTIFICATE != ''
