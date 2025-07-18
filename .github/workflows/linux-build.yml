@@ -46,6 +46,8 @@ jobs:
       - name: Build AppImages
         env:
           OPENSSL_STATIC: "1"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: "aarch64-linux-gnu-gcc"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_AR: "aarch64-linux-gnu-ar"
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
