@@ -58,3 +58,6 @@ path = "src/bin/lsp_backend.rs"
 [[bin]]
 name = "lsp_dashboard"
 path = "src/bin/lsp_dashboard.rs"
+
+[patch.crates-io]
+openssl-sys = { version = "0.9.109", features = ["vendored"] }
