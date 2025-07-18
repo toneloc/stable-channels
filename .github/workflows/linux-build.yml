@@ -1,4 +1,4 @@
-name: Build – Linux AppImage
+name: Build – Linux
 
 on:
   push:
@@ -46,7 +46,6 @@ jobs:
       - name: Build AppImages
         env:
           OPENSSL_STATIC: "1"
-          OPENSSL_NO_PKG_CONFIG: "1"
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
