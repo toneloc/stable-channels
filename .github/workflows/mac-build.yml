@@ -1,4 +1,4 @@
-name: Build – Mac
+name: Desktop Build – Mac
 
 on:
   push:
@@ -60,6 +60,8 @@ jobs:
             "target/aarch64-apple-darwin/release/${BIN_NAME}" \
             "target/x86_64-apple-darwin/release/${BIN_NAME}"
 
+          xcrun strip -x "target/universal/release/${BIN_NAME}"
+          
           ICON_PLIST_SNIPPET=""
           if [[ -f "$PNG_ICON" ]]; then
             echo "▶ Converting $PNG_ICON → ${ICNS_NAME}…"
