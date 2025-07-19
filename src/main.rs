@@ -1,3 +1,5 @@
+#[cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 /// Stable Channels in LDK 
 /// Contents
 /// Main data structure and helper types are in `types.rs`.

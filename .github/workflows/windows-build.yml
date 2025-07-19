@@ -34,7 +34,23 @@ jobs:
           cargo install cargo-binutils --force
           rustup component add llvm-tools-preview
           objcopy target/x86_64-pc-windows-msvc/release/stable-channels.exe \
-            --strip-all target/x86_64-pc-windows-msvc/release/stable-channels-stripped.exe
+            --strip-all target/x86_64-pc-windows-msvc/release/stable-channels.exe
+
+      # ---- Convert PNG → ICO (one‑liner; ImageMagick via Chocolatey) --------
+      - name: Install ImageMagick & make .ico
+        shell: pwsh
+        run: |
+          choco install imagemagick.app -y                                   # installs `magick`
+          magick sc-icon-egui.png -define icon:auto-resize=256,128,64,32,16 `
+                 sc-icon-egui.ico
+
+      # ---- Embed icon with rcedit -------------------------------------------
+      - name: Set EXE icon
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/electron/rcedit/releases/download/v1.1.1/rcedit-x64.exe -OutFile rcedit.exe
+          ./rcedit.exe target\x86_64-pc-windows-msvc\release\stable-channels.exe `
+            --set-icon sc-icon-egui.ico
 
         # ---- Code-sign (requires secrets) -------------------------------------
       - name: Sign executable
@@ -48,10 +64,10 @@ jobs:
             "C:\Program Files (x86)\Windows Kits\10\App Certification Kit\signtool.exe" ^
               sign /fd sha256 /f code.pfx /p "$Env:PFX_PASSWORD" ^
               /tr http://timestamp.digicert.com /td sha256 ^
-              target\x86_64-pc-windows-msvc\release\stable-channels-stripped.exe
+              target\x86_64-pc-windows-msvc\release\stable-channels.exe
 
         # ---- Upload artifact --------------------------------------------------
       - uses: actions/upload-artifact@v4
         with:
            name: stable-channels-windows
-           path: target/x86_64-pc-windows-msvc/release/stable-channels-stripped.exe
+           path: target/x86_64-pc-windows-msvc/release/stable-channels.exe

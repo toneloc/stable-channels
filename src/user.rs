@@ -6,7 +6,7 @@
         bitcoin::secp256k1::PublicKey,
         lightning::ln::msgs::SocketAddress,
     };
-    use egui::{Stroke, Visuals};
+    use egui::{Stroke, Theme, Visuals};
     use std::error::Error;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
@@ -1331,8 +1331,7 @@
                         ..Default::default()
                     },
                     Box::new(|cc| {
-                        // FORCES DARK MODE ON EVERY START
-                        cc.egui_ctx.set_visuals(Visuals::dark());
+                        cc.egui_ctx.set_theme(egui::Theme::Dark);
                         Ok::<Box<dyn eframe::App>, _>(Box::new(app))
                     }),
                 )
