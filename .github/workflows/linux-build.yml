@@ -102,15 +102,15 @@ jobs:
             fi
 
             # desktop entry
-            cat >"$APPDIR/usr/share/applications/${BIN_NAME}.desktop" <<DESKTOP
-            [Desktop Entry]
-            Type=Application
-            Name=${APP_NAME}
-            Exec=${BIN_NAME} %u
-            ${ICON_LINE}
-            Categories=Finance;
-            Terminal=false
-            DESKTOP
+            cat >"$APPDIR/usr/share/applications/${BIN_NAME}.desktop" <<-DESKTOP
+          [Desktop Entry]
+          Type=Application
+          Name=${APP_NAME}
+          Exec=${BIN_NAME} %u
+          ${ICON_LINE}
+          Categories=Finance;
+          Terminal=false
+          DESKTOP
 
             # build AppImage
             ARCH=$arch linuxdeploy --appdir "$APPDIR" --output appimage >/dev/null
