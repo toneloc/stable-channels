@@ -84,6 +84,9 @@ struct Dashboard {
     pay_result:    Option<String>,
     close_result:   Option<String>,      
     get_address_task: Option<JoinHandle<reqwest::Result<String>>>,
+    connect_task:  Option<JoinHandle<reqwest::Result<String>>>,
+    connect_result: Option<String>,   
+
 
     balance:  Option<Balance>,
     channels: Vec<ChannelInfo>,
@@ -138,6 +141,8 @@ impl Dashboard {
             close_result: None,
             pay_task: None,
             pay_result: None,
+            connect_task:      None, 
+            connect_result:     None,
 
             balance: None,
             channels: Vec::new(),
@@ -397,33 +402,6 @@ impl Dashboard {
         }));
     }
 
-    fn open_channel_stub(&self, peer_pubkey: &str, sat_amount: u64, push_msat: Option<u64>) {
-        // TODO: POST /api/channels
-    }
-
-    fn delete_channel_stub(&self, id: &str, force: bool) {
-        // TODO: DELETE /api/channels/{id}
-    }
-
-    fn fetch_payments_stub(&self) {
-        // TODO: GET /api/payments
-    }
-
-    fn fetch_invoices_stub(&self) {
-        // TODO: GET /api/invoices
-    }
-
-    fn create_invoice_stub(&self, amount_sats: u64, description: &str) {
-        // TODO: POST /api/invoices
-    }
-
-    fn fetch_price_stub(&self) {
-        // TODO: GET /api/price
-    }
-
-    fn fetch_logs_stub(&self) {
-        // TODO: GET /api/logs
-    }
     fn show_onchain_address_section(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.heading("On-chain Address");
@@ -438,6 +416,27 @@ impl Dashboard {
                 }
             }
         });
+    }
+
+    fn connect_to_node(&mut self) {
+        if self.connect_task.is_some() { return; }
+    
+        let node_id = self.open_channel_pubkey.trim().to_owned();
+        let address = self.open_channel_address.trim().to_owned();
+        if node_id.is_empty() || address.is_empty() { return; }
+    
+        let client = self.client.clone();
+        #[derive(Serialize)] struct Req { node_id: String, address: String }
+    
+        self.connect_task = Some(self.rt.spawn(async move {
+            client
+                .post("http://100.25.168.115:8080/api/connect")
+                .json(&Req { node_id, address })
+                .send()
+                .await?
+                .json::<String>()        // <— now just a String
+                .await
+        }));
     }
 
 
@@ -475,6 +474,7 @@ impl App for Dashboard {
         poll_task!(onchain_send_task => |v| self.onchain_send_result = Some(v));
         poll_task!(get_address_task   => |addr| self.onchain_address = addr);
         poll_task!(get_address_task => |addr| self.onchain_address = addr);
+        poll_task!(connect_task => |v| self.connect_result = Some(v));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.show_balance(ui);
@@ -531,8 +531,27 @@ impl App for Dashboard {
                     ui.label(msg);
                 }
             });
-
             ui.add_space(10.0);
+
+            ui.group(|ui| {
+                ui.heading("Connect to Node");
+                ui.horizontal(|ui| {
+                    ui.label("Node ID:");
+                    ui.text_edit_singleline(&mut self.open_channel_pubkey);   // reuse existing field
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Address:");
+                    ui.text_edit_singleline(&mut self.open_channel_address);  // reuse existing field
+                });
+                if ui.button("Connect").clicked() {
+                    self.connect_to_node();
+                }
+                if let Some(msg) = &self.connect_result {
+                    ui.label(msg);
+                }
+            });
+
+            
             ui.group(|ui| {
                 ui.heading("Close Specific Channel");
                 ui.horizontal(|ui| {
