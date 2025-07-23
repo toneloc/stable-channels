@@ -125,6 +125,12 @@ struct OnchainSendReq {
     amount:  String,   // sats, still as string for reuse
 }
 
+#[derive(Deserialize)]
+struct ConnectReq {
+    node_id: String,
+    address: String,
+}
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -161,7 +167,8 @@ async fn main() -> Result<()> {
         .route("/api/close_channel/{id}", post(post_close_channel))
         .route("/api/designate_stable_channel", post(designate_stable_channel_handler))
         .route("/api/onchain_send", post(onchain_send_handler))
-        .route("/api/onchain_address", get(get_onchain_address));
+        .route("/api/onchain_address", get(get_onchain_address))
+        .route("/api/connect", post(connect_handler));
 ;
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
@@ -288,6 +295,19 @@ async fn get_onchain_address() -> Json<String> {
     } else {
         Json(app.status_message.clone())
     }
+}
+
+async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    app.connect_node_id      = req.node_id.clone();
+    app.connect_node_address = req.address.clone();
+
+    let ok = app.connect_to_node();
+    Json(if ok {
+        format!("Connected to {}", req.node_id)
+    } else {
+        app.status_message.clone()   
+    })
 }
 
 
