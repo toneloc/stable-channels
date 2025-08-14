@@ -32,11 +32,11 @@
 
     // Populate the below two parameters to run locally
     const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
-    const DEFAULT_GATEWAY_PUBKEY: &str = "033e9ce4e8f0e68f7db49ffb6b9eecc10605f3f3fcb3c630545887749ab515b9c7";
+    const DEFAULT_GATEWAY_PUBKEY: &str = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed";
 
     // const DEFAULT_LSP_ADDRESS: &str = "54.210.112.22:9737";
     const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
-    const DEFAULT_GATEWAY_ADDRESS: &str = "213.174.156.72:9735";
+    const DEFAULT_GATEWAY_ADDRESS: &str = "213.174.156.80:9735";
     const EXPECTED_USD: f64 = 100.0;
     const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
     
@@ -1325,7 +1325,7 @@
         match UserApp::new() {
             Ok(app) => {
                 eframe::run_native(
-                    "Stable Channels",
+                    "Stable Channels Wallet",
                     eframe::NativeOptions {   // keep the options you already use
                         viewport,
                         ..Default::default()
