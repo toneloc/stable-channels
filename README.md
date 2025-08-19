@@ -2,20 +2,28 @@
 
 ## Stable Channels
 
-Stable Channels allows Lightning Network node operators to keep one side of a channel stable in dollar terms. The nodes receiving stability are called Stable Receivers, while their counterparts are Stable Providers, who assume the price volatility.
+Stable Channels is a wallet and technology that lets users peg a portion of their bitcoin to a dollar balance. 
 
-Each node queries five price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the Stable Receiver's balance at a fixed dollar value (e.g., $10,000 of bitcoin).
+The Stable Channels Desktop Wallet runs a full Lightning node on either MacOS, Linux, or Windows, and lets users stabilize the money that they send to themselves. 
 
-Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. The project is in-progress and is compatible with LND, CLN, or LDK. The LND and CLN implementations use Python. The LDK one uses Rust.
+The LSP/Server keeps the user stable by overcollateralizing the Stable Channel at the time of channel creation, whereupon each user puts in the same amount of bitcoin, the stability mechanism is activated. 
+
+The stability mechanism works like this: each node queries four exchange price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
+
+Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. 
+
+The project is in-progress and is based on LDK Node. Prior versions were compatible with LND and CLN. These legacy implementation can be found in /legacy. 
 
 Links with examples:
 - **Basic example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
 - **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
 - **Project website:** [StableChannels.com](https://www.stablechannels.com)
 
-### Developer Demo (LDK + Rust)
+### Run the User Desktop App on MacOS, Windows, or Linux
 
-To run this demo,  you will need Rust installed on a Unix-like OS. You must also be connected to the internet to use Mutinynet for testing.
+You can check out the latest builds here - t
+
+To run the app from this source, please install Rust on your OS.
 
 Using a fresh Ubuntu? You may need to install OpenSSL libraries. `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
 
