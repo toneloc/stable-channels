@@ -1270,7 +1270,7 @@
         match app_result {
             Ok(app) => {
                 eframe::run_native(
-                    "Stable Channels",
+                    "Stable Channels Wallet",
                     native_options,
                     Box::new(|_| Ok(Box::new(app))),
                 ).unwrap();
