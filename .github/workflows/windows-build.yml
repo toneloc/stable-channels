@@ -1,0 +1,73 @@
+name: Desktop Build - Windows
+
+on:
+  push:
+    branches: [sc-lsp]
+  workflow_dispatch:     # manual trigger
+
+permissions:
+  contents: write         # so Releases can be created/uploaded
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Rust toolchain ---------------------------------------------------
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+          profile: minimal
+          override: true
+
+      # ---- Build ------------------------------------------------------------
+      - name: Cargo build (release)
+        run: cargo build --release --bin stable-channels --target x86_64-pc-windows-msvc
+
+      # ---- Optional stripping to shrink binary ------------------------------
+      - name: Strip symbols
+        shell: bash
+        run: |
+          cargo install cargo-binutils --force
+          rustup component add llvm-tools-preview
+          objcopy target/x86_64-pc-windows-msvc/release/stable-channels.exe \
+            --strip-all target/x86_64-pc-windows-msvc/release/stable-channels.exe
+
+      # ---- Convert PNG → ICO (one‑liner; ImageMagick via Chocolatey) --------
+      - name: Install ImageMagick & make .ico
+        shell: pwsh
+        run: |
+          choco install imagemagick.app -y                                   # installs `magick`
+          magick sc-icon-egui.png -define icon:auto-resize=256,128,64,32,16 `
+                 sc-icon-egui.ico
+
+      # ---- Embed icon with rcedit -------------------------------------------
+      - name: Set EXE icon
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/electron/rcedit/releases/download/v1.1.1/rcedit-x64.exe -OutFile rcedit.exe
+          ./rcedit.exe target\x86_64-pc-windows-msvc\release\stable-channels.exe `
+            --set-icon sc-icon-egui.ico
+
+        # ---- Code-sign (requires secrets) -------------------------------------
+      - name: Sign executable
+        if: env.WINDOWS_CERTIFICATE != ''
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE }}     # base64-encoded .pfx
+          PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }} # cert password
+        run: |
+            echo "$Env:PFX_BASE64" | base64 -d > code.pfx
+            certutil -f -p "$Env:PFX_PASSWORD" -importpfx code.pfx
+            "C:\Program Files (x86)\Windows Kits\10\App Certification Kit\signtool.exe" ^
+              sign /fd sha256 /f code.pfx /p "$Env:PFX_PASSWORD" ^
+              /tr http://timestamp.digicert.com /td sha256 ^
+              target\x86_64-pc-windows-msvc\release\stable-channels.exe
+
+        # ---- Upload artifact --------------------------------------------------
+      - uses: actions/upload-artifact@v4
+        with:
+           name: stable-channels-windows
+           path: target/x86_64-pc-windows-msvc/release/stable-channels.exe
