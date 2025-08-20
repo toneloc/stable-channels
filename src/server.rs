@@ -1,11 +1,12 @@
 use eframe::{egui, App, Frame};
 use egui::CollapsingHeader;
 use ldk_node::{
-    bitcoin::{base64, secp256k1::PublicKey, Address, Network}, config::ChannelConfig, lightning::{events::ClosureReason, ln::msgs::SocketAddress}, lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description}, lightning_types::payment::PaymentHash, liquidity::LSPS2ServiceConfig, Builder, CustomTlvRecord, Event, Node
+    bitcoin::{Network, Address, secp256k1::PublicKey},
+    lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
+    lightning::ln::msgs::SocketAddress,
+    config::ChannelConfig,
+    Builder, Node, Event, liquidity::LSPS2ServiceConfig
 };
-
-use ldk_node::lightning::ln::types::ChannelId;
-use ldk_node::UserChannelId;
 use std::time::{Duration, Instant};
 use std::path::Path;
 use std::str::FromStr;
@@ -15,7 +16,7 @@ use serde_json::json;
 use std::fs;
 use hex;
 
-use crate::{audit::{audit_event, set_audit_log_path}, ldk_node_adapter, lightning::LightningNode, types::*};
+use crate::{audit::{audit_event, set_audit_log_path}, types::*};
 use crate::stable;
 use crate::price_feeds::get_cached_price;
 
@@ -31,8 +32,6 @@ const DEFAULT_NETWORK: &str = "bitcoin";
 const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
 const EXPECTED_USD: f64 = 50.0;
 
-pub type DynNode = Arc<dyn LightningNode + Send + Sync>;
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct StableChannelEntry {
     channel_id: String,
@@ -40,7 +39,7 @@ struct StableChannelEntry {
     native_btc: f64,
 }
 pub struct ServerApp {
-    node: DynNode,
+    node: Arc<Node>,
     btc_price: f64,
     status_message: String,
     last_update: Instant,
@@ -124,7 +123,7 @@ impl ServerApp {
             builder.set_liquidity_provider_lsps2(service_config);
         }
 
-        let core_ldk_node = Arc::new(match builder.build() {
+        let node = Arc::new(match builder.build() {
             Ok(n) => {
                 println!("[Init] Node built successfully");
                 n
@@ -132,9 +131,7 @@ impl ServerApp {
             Err(e) => panic!("[Init] Failed to build node: {:?}", e),
         });
         
-        core_ldk_node.start().expect("Failed to start core node");
-
-        let node: DynNode = Arc::new(ldk_node_adapter::LdkNodeAdapter(core_ldk_node.clone()));
+        node.start().expect("Failed to start node");
 
         let btc_price = get_cached_price();
         println!("[Init] Initial BTC price: {}", btc_price);
@@ -200,88 +197,6 @@ impl ServerApp {
         self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
     }
 
-    fn handle_channel_ready(&mut self, channel_id: ChannelId) {
-        audit_event("CHANNEL_READY", json!({ "channel_id": channel_id.to_string() }));
-        self.status_message = format!("Channel {} is now ready", channel_id);
-        self.update_balances();
-    }
-
-    fn handle_channel_pending(
-        &mut self,
-        channel_id: ChannelId,
-        user_channel_id: UserChannelId,
-        former_temp_id: [u8; 32],
-        counterparty_node_id: PublicKey,
-        funding_txo: Option<ldk_node::bitcoin::OutPoint>,
-    ) {
-        let temp_id_str = hex::encode(former_temp_id);
-        let funding_str = funding_txo
-            .map(|o| o.txid.as_raw_hash().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        audit_event("CHANNEL_PENDING", json!({
-            "channel_id":            channel_id.to_string(),
-            "user_channel_id":       format!("{:?}", user_channel_id),
-            "temp_channel_id":       temp_id_str,
-            "counterparty_node_id":  counterparty_node_id.to_string(),
-            "funding_txo":           funding_str,
-        }));
-
-        self.status_message = format!("Channel {} is pending confirmation", channel_id);
-    }
-
-    fn handle_channel_closed(&mut self, channel_id: ChannelId, reason: Option<ClosureReason>) {
-        audit_event("CHANNEL_CLOSED", json!({
-            "channel_id": channel_id.to_string(),
-            "reason": format!("{:?}", reason),
-        }));
-        self.status_message = format!("Channel {} has been closed", channel_id);
-        self.update_balances();
-    }
-
-    fn handle_payment_successful(&mut self, payment_hash: PaymentHash) {
-        audit_event("PAYMENT_SUCCESSFUL", json!({ "payment_hash": format!("{}", payment_hash) }));
-        self.status_message = format!("Sent payment {}", payment_hash);
-        self.update_balances();
-    }
-
-    fn handle_payment_received(
-        &mut self,
-        amount_msat: u64,
-        payment_hash: PaymentHash,
-        custom_records: Vec<CustomTlvRecord>,
-    ) {
-        let mut decoded_payload: Option<String> = None;
-    
-        for tlv in custom_records {
-            if tlv.type_num == 13377331 {
-                if let Ok(s) = String::from_utf8(tlv.value) {
-                    decoded_payload = Some(s);
-                }
-                print!("here");
-            }
-        }
-    
-        self.status_message = match &decoded_payload {
-            Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
-            None => format!("Received {} msats (no TLV)", amount_msat),
-        };
-    
-        audit_event("PAYMENT_RECEIVED", json!({
-            "amount_msat": amount_msat,
-            "payment_hash": format!("{}", payment_hash),
-            "decoded_tlv": decoded_payload,
-        }));
-    
-        self.update_balances();
-    }
-
-    fn handle_event_ignored(&mut self, event: &Event) {
-        audit_event("EVENT_IGNORED", json!({
-            "event_type": format!("{:?}", event)
-        }));
-    }
-
     pub fn check_and_update_stable_channels(&mut self) {
         let current_price = get_cached_price();
         if current_price > 0.0 {
@@ -290,12 +205,12 @@ impl ServerApp {
     
         let mut channels_updated = false;
         for sc in &mut self.stable_channels {
-            if !stable::channel_exists(&*self.node, &sc.channel_id) {
+            if !stable::channel_exists(&self.node, &sc.channel_id) {
                 continue;
             }
     
             sc.latest_price = current_price;
-            stable::check_stability(&*self.node, sc, current_price);
+            stable::check_stability(&self.node, sc, current_price);
     
             if sc.payment_made {
                 channels_updated = true;
@@ -310,32 +225,55 @@ impl ServerApp {
     pub fn poll_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             match event {
-                Event::ChannelReady { channel_id, .. } => self.handle_channel_ready(channel_id),
+                Event::ChannelReady { channel_id, .. } => {
+                    audit_event("CHANNEL_READY", json!({"channel_id": channel_id.to_string()}));
+                    self.status_message = format!("Channel {} is now ready", channel_id);
+                    self.update_balances();
+                }
                 Event::ChannelPending {
                     channel_id,
                     user_channel_id,
                     former_temporary_channel_id,
                     counterparty_node_id,
                     funding_txo,
-                } => self.handle_channel_pending(
-                    channel_id,
-                    user_channel_id,
-                    former_temporary_channel_id.0,
-                    counterparty_node_id,
-                    Some(funding_txo),
-                ),
-                Event::ChannelClosed { channel_id, reason, .. } => {
-                    self.handle_channel_closed(channel_id, reason)
+                } => {
+                    let temp_id_str = hex::encode(former_temporary_channel_id.0);
+                
+                    let funding_str = funding_txo.txid.as_raw_hash().to_string();
+                
+                    audit_event(
+                        "CHANNEL_PENDING",
+                        json!({
+                            "channel_id":            channel_id.to_string(),
+                            "user_channel_id":       format!("{:?}", user_channel_id),
+                            "temp_channel_id":       temp_id_str,
+                            "counterparty_node_id":  counterparty_node_id.to_string(),
+                            "funding_txo":           funding_str,
+                        }),
+                    );
+                
+                    self.status_message = format!("Channel {} is pending confirmation", channel_id);
                 }
                 Event::PaymentSuccessful { payment_hash, .. } => {
-                    self.handle_payment_successful(payment_hash)
+                    audit_event("PAYMENT_SUCCESSFUL", json!({"payment_hash": format!("{}", payment_hash)}));
+                    self.status_message = format!("Sent payment {}", payment_hash);
+                    self.update_balances();
                 }
-                Event::PaymentReceived { amount_msat, payment_hash, custom_records, payment_id: _ } => {
-                    self.handle_payment_received(amount_msat, payment_hash, custom_records)
+                Event::PaymentReceived { amount_msat, payment_hash, .. } => {
+                    audit_event("PAYMENT_RECEIVED", json!({"amount_msat": amount_msat, "payment_hash": format!("{}", payment_hash)}));
+                    self.status_message = format!("Received payment of {} msats", amount_msat);
+                    self.update_balances();
                 }
-                ref other => self.handle_event_ignored(other),
+                Event::ChannelClosed { channel_id, reason, .. } => {
+                    audit_event("CHANNEL_CLOSED", json!({"channel_id": format!("{}", channel_id), "reason": format!("{:?}", reason)}));
+                    self.status_message = format!("Channel {} has been closed", channel_id);
+                    self.update_balances();
+                }
+                _ => {
+                    audit_event("EVENT_IGNORED", json!({"event_type": format!("{:?}", event)}));
+                }
             }
-            self.node.event_handled();
+            let _ = self.node.event_handled();
         }
     }
 
@@ -409,7 +347,7 @@ impl ServerApp {
     pub fn send_onchain(&mut self) -> bool {
         if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
             match Address::from_str(&self.on_chain_address) {
-                Ok(addr) => match addr.require_network(Network::Signet) {
+                Ok(addr) => match addr.require_network(Network::Bitcoin) {
                     Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
                         Ok(txid) => {
                             self.status_message = format!("Transaction sent: {}", txid);
@@ -551,9 +489,7 @@ impl ServerApp {
     pub fn show_node_info_section(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.label(format!("Node ID: {}", self.node.node_id()));
-            if let Some(addrs) = self.node.listening_addresses() {
-                ui.label(format!("Listening on: {}", addrs[0]));
-            }
+            ui.label(format!("Listening on: {}", self.node.listening_addresses().unwrap()[0]));
         });
     }
 
@@ -686,44 +622,6 @@ impl ServerApp {
                         });
                 });
         });
-    }
-
-    pub fn force_close_specific_channel(&mut self) {
-        if self.channel_id_to_close.is_empty() {
-            self.status_message = "Please enter a channel ID to force-close".to_string();
-            return;
-        }
-
-        let input = self.channel_id_to_close.trim();
-        if input.len() == 64 && input.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(bytes) = hex::decode(input) {
-                for channel in self.node.list_channels() {
-                    if channel.channel_id.0.to_vec() == bytes {
-                        let result = self.node.force_close_channel(&channel.user_channel_id, channel.counterparty_node_id, Some("manual force close".to_string()));
-                        self.status_message = match result {
-                            Ok(_) => format!("Force closing channel: {}", input),
-                            Err(e) => format!("Error force-closing channel: {}", e),
-                        };
-                        self.channel_id_to_close.clear();
-                        return;
-                    }
-                }
-            }
-            self.status_message = "Channel ID not found.".to_string();
-        } else {
-            for channel in self.node.list_channels() {
-                if channel.channel_id.to_string() == input {
-                    let result = self.node.force_close_channel(&channel.user_channel_id, channel.counterparty_node_id, Some("manual force close".to_string()));
-                    self.status_message = match result {
-                        Ok(_) => format!("Force closing channel: {}", input),
-                        Err(e) => format!("Error force-closing channel: {}", e),
-                    };
-                    self.channel_id_to_close.clear();
-                    return;
-                }
-            }
-            self.status_message = "Channel not found.".to_string();
-        }
     }
     
     pub fn open_channel(&mut self) -> bool {
@@ -909,33 +807,6 @@ impl ServerApp {
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.group(|ui| {
-                            ui.heading("Send Stable Message");
-                            ui.label("Send this message to your counterparty");
-                
-                            static mut LAST_MSG: String = String::new();
-                            static mut LAST_NODE_ID: String = String::new();
-                
-                            unsafe {
-                                ui.horizontal(|ui| {
-                                    ui.label("Node ID:");
-                                    ui.text_edit_singleline(&mut LAST_NODE_ID);
-                                });
-                
-                                ui.horizontal(|ui| {
-                                    ui.label("Message:");
-                                    ui.text_edit_singleline(&mut LAST_MSG);
-                                });
-                
-                                if ui.button("Send Message").clicked() {
-                                    if let Ok(pk) = PublicKey::from_str(&LAST_NODE_ID) {
-                                        self.send_stable_message(&LAST_MSG, pk);
-                                    } else {
-                                        self.status_message = "Invalid pubkey format".into();
-                                    }
-                                }
-                            }
-                        });
-                        ui.group(|ui| {
                             ui.heading("Open Channel");
                             ui.horizontal(|ui| {
                                 ui.label("Node ID:");
@@ -1008,17 +879,6 @@ impl ServerApp {
                                 ui.text_edit_singleline(&mut self.channel_id_to_close);
                                 if ui.button("Close Channel").clicked() {
                                     self.close_specific_channel();
-                                }
-                            });
-                        });
-
-                        ui.group(|ui| {
-                            ui.heading("Force-Close Channel");
-                            ui.horizontal(|ui| {
-                                ui.label("Channel ID:");
-                                ui.text_edit_singleline(&mut self.channel_id_to_close);
-                                if ui.button("Force Close").clicked() {
-                                    self.force_close_specific_channel();
                                 }
                             });
                         });
@@ -1161,27 +1021,6 @@ impl ServerApp {
             Err(e) => {
                 eprintln!("Error reading stable channels file: {}", e);
                 self.status_message = format!("Failed to read stable channels file: {}", e);
-            }
-        }
-    }
-    pub fn send_stable_message(&mut self, msg: &str, peer: PublicKey) {
-        let amt = 1;
-        let custom_tlv = CustomTlvRecord {
-            type_num: 13377331,
-            value: msg.as_bytes().to_vec(),
-        };
-
-        match self.node.spontaneous_payment().send_with_custom_tlvs(
-            amt,
-            peer,
-            None,
-            vec![custom_tlv],
-        ) {
-            Ok(_payment_id) => {
-                self.status_message = format!("Sent stable message: {}", msg);
-            }
-            Err(e) => {
-                self.status_message = format!("Failed to send stable message: {}", e);
             }
         }
     }
