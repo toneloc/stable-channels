@@ -2,7 +2,7 @@ name: Desktop Build – Mac
 
 on:
   push:
-    branches: [sc-lsp]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   build-macos:
+    if: contains(github.event.head_commit.message, 'build')
     runs-on: macos-14   # Apple‑silicon runner
 
     env:
