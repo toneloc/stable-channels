@@ -6,9 +6,9 @@
 Stable Channels is a wallet and technology that lets users peg a portion of their bitcoin to a dollar balance. 
 
 ### Downloads
-- [macOS (.dmg)](https://github.com/<org>/<repo>/releases/latest/download/app-mac.dmg)
-- [Windows (.exe)](https://github.com/<org>/<repo>/releases/latest/download/app-win.exe)
-- [Linux (.AppImage)](https://github.com/<org>/<repo>/releases/latest/download/app-linux.AppImage)
+- [macOS](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-mac.zip))
+- [Windows](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-windows.zip)
+- [Linux](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-linux.zip)
 
 The Stable Channels Desktop Wallet runs a full Lightning node that lets users stabilize the money that they send to themselves during onboarding. 
 
