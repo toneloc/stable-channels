@@ -595,7 +595,7 @@
                 ui.add_space(10.0);
                 ui.vertical_centered(|ui| {
                     ui.heading(
-                        egui::RichText::new("Send yourself bitcoin to make it stable.")
+                        egui::RichText::new("You are sending yourself bitcoin to your Stable Channels Wallet to make it stable.")
                             .size(16.0)
                             .strong()
                             .color(egui::Color32::WHITE),
@@ -1042,12 +1042,36 @@
                             .show(ui, |ui| {
 
 
+                            let mut show_close_popup = false;
 
                                 ui.add_space(20.0);
                                 if ui.button("Close Stable Channel").clicked() {
                                     self.close_active_channel();
                                 }
                                 ui.add_space(20.0);
+
+                                if show_close_popup {
+                                    egui::Window::new("Confirm Close")
+                                        .collapsible(false)
+                                        .resizable(false)
+                                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                                        .show(ctx, |ui| {
+                                            ui.label("Are you sure you want to close your Stable Channel?");
+                                            ui.label("Your on-chain funds will show up under \"Advanced Section\" when the channel has closed.");
+                                            ui.add_space(10.0);
+
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Yes").clicked() {
+                                                    self.close_active_channel();
+                                                    show_close_popup = false;
+                                                }
+                                                if ui.button("Cancel").clicked() {
+                                                    show_close_popup = false;
+                                                }
+                                            });
+                                        });
+                                }
+
 
                                 ui.group(|ui| {
                                     ui.heading("Withdraw On-chain");
