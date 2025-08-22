@@ -2,7 +2,7 @@ name: Desktop Build - Windows
 
 on:
   push:
-    branches: [sc-lsp]
+    branches: [main]
   workflow_dispatch:     # manual trigger
 
 permissions:
