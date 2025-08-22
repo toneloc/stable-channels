@@ -6,7 +6,7 @@
 Stable Channels is a wallet and technology that lets users peg a portion of their bitcoin to a dollar balance. 
 
 ### Downloads
-- [macOS](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-mac.zip))
+- [macOS](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-mac.zip)
 - [Windows](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-windows.zip)
 - [Linux](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-linux.zip)
 
