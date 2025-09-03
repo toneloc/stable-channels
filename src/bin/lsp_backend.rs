@@ -1,4 +1,3 @@
-use axum::http;
 use axum::extract::Path as AxumPath;
 use ldk_node::{
     bitcoin::{Network, Address, secp256k1::PublicKey},
@@ -17,20 +16,20 @@ use std::fs;
 use hex;
 use once_cell::sync::Lazy;
 
+use stable_channels::audit::{audit_event, set_audit_log_path};
+use stable_channels::price_feeds::get_cached_price;
+use stable_channels::stable;
+use stable_channels::types::{USD, Bitcoin, StableChannel};
+
 // HTTP
 use axum::{routing::{get, post}, Json, Router};
 use anyhow::Result;
-
-use stable_channels::audit::{audit_event, set_audit_log_path};
-use stable_channels::types::*;
-use stable_channels::stable;
-use stable_channels::price_feeds::get_cached_price;
 
 static APP: Lazy<Mutex<ServerApp>> = Lazy::new(|| {
     Mutex::new(ServerApp::new_with_mode("lsp"))
 });
 
-const LSP_DATA_DIR: &str = "data/lsp";
+const LSP_DATA_DIR: &str = "data-2/lsp";
 const LSP_NODE_ALIAS: &str = "lsp";
 const LSP_PORT: u16 = 9737;
 
@@ -333,8 +332,17 @@ impl ServerApp {
 
         println!("[Init] Setting network to: {:?}", network);
         builder.set_network(network);
-        println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
-        builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
+
+        // println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
+        // builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
+
+         println!("[Init] Setting Bitcoin RPC connection");
+        builder.set_chain_source_bitcoind_rpc(
+            "127.0.0.1".into(), 8332,
+            "".into(),
+            "".into(),
+        );
+
         println!("[Init] Setting storage directory: {}", data_dir);
         builder.set_storage_dir_path(data_dir.to_string());
 
