@@ -36,7 +36,7 @@
     const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
     const DEFAULT_GATEWAY_ADDRESS: &str = "213.174.156.80:9735";
     const EXPECTED_USD: f64 = 100.0;
-    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api";
 
     fn user_data_dir() -> PathBuf {
         data_dir()
@@ -66,7 +66,8 @@
         pub on_chain_address: String,
         pub on_chain_amount: String,
         pub show_advanced: bool, 
-
+        balance_last_update: std::time::Instant,
+        confirm_close_popup: bool,
 
         // Balance fields
         pub lightning_balance_btc: f64,
@@ -200,6 +201,8 @@
                 log_last_read: std::time::Instant::now(),
                 audit_log_path,
                 show_advanced: false,
+                balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
+                confirm_close_popup: false,
             };
 
             {
@@ -300,15 +303,24 @@
             };
             let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
                 ldk_node::lightning_invoice::Description::new(
-                    "Stable Channel JIT payment".to_string(),
+                    "Stable Channel Wallet onboarding".to_string(),
                 )
                 .unwrap(),
             );
+
+            // let max_proportional_lsp_fee_limit_ppm_msat = Some(20_000);
+
+            // let result = self.node.bolt11_payment().receive_variable_amount_via_jit_channel(
+            //     &description, 
+            //     3600, 
+            //     max_proportional_lsp_fee_limit_ppm_msat
+            // );
+            
             let result = self.node.bolt11_payment().receive_via_jit_channel(
                 USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price),
                 &description,
                 3600,
-                Some(10_000_000),
+                Some(10_000_000)
             );
 
             audit_event("JIT_INVOICE_ATTEMPT", json!({
@@ -894,16 +906,21 @@
                             };
                         
                             let pegged_btc_f64 = pegged_btc.to_btc();
-                            // let native_btc_f64 = self.onchain_balance_btc;
-                            // let total_btc = pegged_btc_f64 + native_btc_f64;
-
+                        
                             // Main heading
                             ui.heading("Stable Balance");
                         
                             ui.add_space(8.0);
+
+                            // Show USD stable balance, or "---" if < 2
+                            let stable_usd_display = if stable_usd.0 < 2.0 {
+                                "---".to_string()
+                            } else {
+                                format!("{:.2}", stable_usd.0)
+                            };                        
                         
                             ui.label(
-                                egui::RichText::new(format!("{:.2}", stable_usd))
+                                egui::RichText::new(stable_usd_display)
                                     .size(24.0)
                                     .strong(),
                             );
@@ -937,25 +954,27 @@
                                     ui.label("Pegged Bitcoin (Lightning):");
                                     ui.label(
                                         egui::RichText::new(format!("{}", pegged_btc))
-                                        .monospace(),
-                                    );
-                                    ui.end_row();
-                        
-                                    ui.label("Native Bitcoin (On-Chain):");
-                                    ui.label(
-                                        egui::RichText::new("0.00 000 000 BTC")
                                             .monospace(),
                                     );
                                     ui.end_row();
-                        
-                                    ui.label("Total Bitcoin:");
+                            
+                                    ui.label("Native Bitcoin (On-Chain):");
                                     ui.label(
-                                        egui::RichText::new(format!("{}", Bitcoin::from_btc(pegged_btc_f64)))
+                                        egui::RichText::new(format!("{}", Bitcoin::from_btc(self.onchain_balance_btc)))
+                                            .monospace(),
+                                    );
+                                    ui.end_row();
+                            
+                                    ui.label("Total Bitcoin:");
+                                    let total_btc = self.lightning_balance_btc + self.onchain_balance_btc;
+                                    ui.label(
+                                        egui::RichText::new(format!("{}", Bitcoin::from_btc(total_btc)))
                                             .monospace()
                                             .strong(),
                                     );
                                     ui.end_row();
                                 });
+
                         });
 
                         ui.add_space(20.0);
@@ -1046,33 +1065,40 @@
                             let mut show_close_popup = false;
 
                                 ui.add_space(20.0);
+
                                 if ui.button("Close Stable Channel").clicked() {
-                                    self.close_active_channel();
+                                    self.confirm_close_popup = true;
                                 }
-                                ui.add_space(20.0);
-
-                                if show_close_popup {
-                                    egui::Window::new("Confirm Close")
-                                        .collapsible(false)
-                                        .resizable(false)
-                                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                                        .show(ctx, |ui| {
-                                            ui.label("Are you sure you want to close your Stable Channel?");
-                                            ui.label("Your on-chain funds will show up under \"Advanced Section\" when the channel has closed.");
-                                            ui.add_space(10.0);
-
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Yes").clicked() {
-                                                    self.close_active_channel();
-                                                    show_close_popup = false;
-                                                }
-                                                if ui.button("Cancel").clicked() {
-                                                    show_close_popup = false;
-                                                }
-                                            });
+                                
+                                // Record user intent inside the modal; don't touch `self` or `open` here
+                                let mut clicked_yes = false;
+                                let mut clicked_cancel = false;
+                                
+                                egui::Window::new("Confirm Close")
+                                    .collapsible(false)
+                                    .resizable(false)
+                                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                                    .open(&mut self.confirm_close_popup)   
+                                    .show(ctx, |ui| {
+                                        ui.label("Are you sure you want to close your Stable Channel?");
+                                        ui.label("Your on-chain funds will appear under \"Advanced features\" after the transaction processes.");
+                                        ui.add_space(10.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Yes, close").clicked() {
+                                                clicked_yes = true;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                clicked_cancel = true; 
+                                            }
                                         });
+                                    });
+                                
+                                if clicked_yes {
+                                    self.close_active_channel();
+                                    self.confirm_close_popup = false;
+                                } else if clicked_cancel {
+                                    self.confirm_close_popup = false;
                                 }
-
 
                                 ui.group(|ui| {
                                     ui.heading("Withdraw On-chain");
@@ -1269,6 +1295,11 @@
             self.show_onboarding = self.node.list_channels().is_empty() && !self.waiting_for_payment;
 
             self.start_background_if_needed();
+
+            if self.balance_last_update.elapsed() >= Duration::from_secs(2) {
+                self.update_balances();
+                self.balance_last_update = std::time::Instant::now();
+            }
 
             if self.waiting_for_payment {
                 self.show_waiting_for_payment_screen(ctx);
