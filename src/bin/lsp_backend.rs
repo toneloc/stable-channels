@@ -110,8 +110,8 @@ struct PayReq { invoice: String }
 #[derive(Deserialize)]
 struct EditStableChannelReq {
     channel_id: String,
-    target_usd: String,
-    note: String
+    target_usd: Option<String>,
+    note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
         .route("/api/onchain_send", post(onchain_send_handler))
         .route("/api/onchain_address", get(get_onchain_address))
         .route("/api/connect", post(connect_handler));
-;
+
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     println!("Backend running at http://0.0.0.0:8080");
@@ -266,11 +266,28 @@ async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
 }
 
 async fn edit_stable_channel_handler(Json(req): Json<EditStableChannelReq>) -> Json<EditStableChannelRes> {
-    println!("hi");
     let mut app = APP.lock().unwrap();
+
     app.selected_channel_id = req.channel_id;
-    app.stable_channel_amount = req.target_usd;
+
+    if let Some(t) = req.target_usd {
+        app.stable_channel_amount = t;
+    }
+
+    if let Some(n) = req.note {
+        let selected_id = app.selected_channel_id.clone();
+
+        if let Some(sc) = app.stable_channels.iter_mut()
+            .find(|sc| sc.channel_id.to_string() == selected_id)
+        {
+            sc.note = Some(n);
+            app.save_stable_channels();
+            app.status_message = "Note updated".to_string();
+        }
+    }
+
     app.edit_stable_channel();
+
     Json(EditStableChannelRes {
         ok: app.status_message.starts_with("Channel") || app.status_message.contains("stable"),
         status: app.status_message.clone(),

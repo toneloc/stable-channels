@@ -57,7 +57,8 @@ struct EditStableChannelRes {
 #[derive(Debug, Clone, Serialize)]
 struct EditStableChannelReq {
     channel_id: String,
-    target_usd: String,
+    target_usd: Option<String>,
+    note: Option<String>,
 }
 
 /* ---------- GUI State ------------------------------------------ */
@@ -110,6 +111,7 @@ struct Dashboard {
     last_log_refresh: Instant,
     edit_channel_id: String,
     edit_channel_usd: String,
+    edit_channel_note: String, 
     edit_stable_result: Option<String>,
 }
 
@@ -165,6 +167,7 @@ impl Dashboard {
             last_log_refresh: Instant::now(),
             edit_channel_id: String::new(),
             edit_channel_usd: String::new(),
+            edit_channel_note: String::new(),
             edit_stable_result: None,
             edit_task: None,
             onchain_send_task: None,
@@ -335,12 +338,21 @@ impl Dashboard {
     }
     
     fn edit_stable_channel(&mut self) {
-        if self.edit_task.is_some() { return; }
+        if self.edit_task.is_some() {
+            return;
+        }
+    
         let client = self.client.clone();
         let channel_id = self.edit_channel_id.trim().to_string();
         let target_usd = self.edit_channel_usd.trim().to_string();
+        let note = self.edit_channel_note.trim().to_string();
+    
         self.edit_task = Some(self.rt.spawn(async move {
-            let req = EditStableChannelReq { channel_id, target_usd };
+            let req = EditStableChannelReq {
+                channel_id,
+                target_usd: if target_usd.is_empty() { None } else { Some(target_usd) },
+                note: if note.is_empty() { None } else { Some(note) },
+            };
             client
                 .post("http://100.25.168.115:8080/api/edit_stable_channel")
                 .json(&req)
@@ -489,17 +501,26 @@ impl App for Dashboard {
             self.show_channels(ui);
             ui.group(|ui| {
                 ui.heading("Edit Stable Channel");
+            
                 ui.horizontal(|ui| {
                     ui.label("Channel ID:");
                     ui.text_edit_singleline(&mut self.edit_channel_id);
                 });
+            
                 ui.horizontal(|ui| {
                     ui.label("Target USD amount:");
                     ui.text_edit_singleline(&mut self.edit_channel_usd);
                 });
-                if ui.button("edit as Stable").clicked() {
+            
+                ui.horizontal(|ui| {
+                    ui.label("Note:");
+                    ui.text_edit_singleline(&mut self.edit_channel_note);
+                });
+            
+                if ui.button("Submit Edits").clicked() {
                     self.edit_stable_channel();
                 }
+            
                 if let Some(msg) = &self.edit_stable_result {
                     ui.label(msg);
                 }
