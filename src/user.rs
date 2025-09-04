@@ -500,6 +500,7 @@
             }
         }
 
+        // for onchain deposits ...
         // fn get_lsps1_channel(&mut self) {
         //     let lsp_balance_sat = 10_000;
         //     let client_balance_sat = 10_000;
@@ -960,29 +961,33 @@
                             egui::Grid::new("bitcoin_holdings_grid")
                                 .spacing(Vec2::new(10.0, 6.0))
                                 .show(ui, |ui| {
+                                    // Use consistent sources (BTC as f64) and explicit formatting.
+                                    let pegged_btc_f64 = pegged_btc.to_btc();
+                                    let native_btc_f64 = self.onchain_balance_btc;
+                                    let total_btc_f64  = pegged_btc_f64 + native_btc_f64;
+                            
                                     ui.label("Pegged Bitcoin (Lightning):");
                                     ui.label(
-                                        egui::RichText::new(format!("{}", pegged_btc))
+                                        egui::RichText::new(format!("{:.8} BTC", pegged_btc_f64))
                                             .monospace(),
                                     );
                                     ui.end_row();
                             
                                     ui.label("Native Bitcoin (On-Chain):");
                                     ui.label(
-                                        egui::RichText::new(format!("{}", Bitcoin::from_btc(self.onchain_balance_btc)))
+                                        egui::RichText::new(format!("{:.8} BTC", native_btc_f64))
                                             .monospace(),
                                     );
                                     ui.end_row();
                             
                                     ui.label("Total Bitcoin:");
-                                    let total_btc = self.lightning_balance_btc + self.onchain_balance_btc;
                                     ui.label(
-                                        egui::RichText::new(format!("{}", Bitcoin::from_btc(total_btc)))
+                                        egui::RichText::new(format!("{:.8} BTC", total_btc_f64))
                                             .monospace()
                                             .strong(),
                                     );
                                     ui.end_row();
-                                });
+                            });
 
                         });
 
@@ -1240,60 +1245,6 @@
                     });
                 });
         }
-
-        // fn show_onchain_send_section(&mut self, ui: &mut egui::Ui) {
-        //     ui.group(|ui| {
-        //         ui.label("On-chain Send");
-        //         ui.horizontal(|ui| {
-        //             ui.label("Address:");
-        //             ui.text_edit_singleline(&mut self.on_chain_address);
-        //         });
-        //         ui.horizontal(|ui| {
-        //             ui.label("Amount (sats):");
-        //             ui.text_edit_singleline(&mut self.on_chain_amount);
-        //         });
-
-        //         if ui.button("Send On-chain").clicked() {
-        //             self.send_onchain();
-        //         }
-        //     });
-        // }
-
-        // pub fn send_onchain(&mut self) -> bool {
-        //     if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
-        //         match Address::from_str(&self.on_chain_address) {
-        //             Ok(addr) => match addr.require_network(Network::Bitcoin) {
-        //                 Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
-        //                     Ok(txid) => {
-        //                         self.status_message = format!("Transaction sent: {}", txid);
-        //                         audit_event("ONCHAIN_SEND_SUCCESS", json!({"txid": format!("{}", txid), "amount_sat": amount}));
-        //                         self.update_balances();
-        //                         true
-        //                     }
-        //                     Err(e) => {
-        //                         self.status_message = format!("Transaction error: {}", e);
-        //                         audit_event("ONCHAIN_SEND_FAILED", json!({"amount_sat": amount, "error": format!("{}", e)}));
-        //                         false
-        //                     }
-        //                 },
-        //                 Err(_) => {
-        //                     self.status_message = "Invalid address for this network".to_string();
-        //                     audit_event("ONCHAIN_ADDRESS_INVALID_NET", json!({"address": self.on_chain_address}));
-        //                     false
-        //                 }
-        //             },
-        //             Err(_) => {
-        //                 self.status_message = "Invalid address".to_string();
-        //                 audit_event("ONCHAIN_ADDRESS_INVALID", json!({"address": self.on_chain_address}));
-        //                 false
-        //             }
-        //         }
-        //     } else {
-        //         self.status_message = "Invalid amount".to_string();
-        //         audit_event("ONCHAIN_AMOUNT_INVALID", json!({"raw_input": self.on_chain_amount}));
-        //         false
-        //     }
-        // }
         
     }    
 
@@ -1326,6 +1277,7 @@
     pub fn run() {
         println!("Starting User Interface...");
         let native_options = eframe::NativeOptions {
+            
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_inner_size([460.0, 700.0]),
             ..Default::default()
@@ -1337,7 +1289,11 @@
                 eframe::run_native(
                     "Stable Channels Wallet",
                     native_options,
-                    Box::new(|_| Ok(Box::new(app))),
+                    Box::new(|cc| {
+                        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+    
+                        Ok(Box::new(app))
+                    }),
                 ).unwrap();
             }
             Err(e) => {
