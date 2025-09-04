@@ -491,7 +491,6 @@ impl App for Dashboard {
         poll_task!(close_task => |v| self.close_result = Some(v));
         poll_task!(pay_task => |v| self.pay_result = Some(v));
         poll_task!(onchain_send_task => |v| self.onchain_send_result = Some(v));
-        poll_task!(get_address_task   => |addr| self.onchain_address = addr);
         poll_task!(get_address_task => |addr| self.onchain_address = addr);
         poll_task!(connect_task => |v| self.connect_result = Some(v));
 

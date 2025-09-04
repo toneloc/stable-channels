@@ -265,27 +265,28 @@
             }
             format!("Channel {} not found", id)
         }
+
         async fn edit_stable_channel_handler(Json(req): Json<EditStableChannelReq>) -> Json<EditStableChannelRes> {
             let mut app = APP.lock().unwrap();
-        
             app.selected_channel_id = req.channel_id;
         
             if let Some(t) = req.target_usd {
                 app.stable_channel_amount = t;
             }
         
-            if let Some(n) = req.note {
-                let selected_id = app.selected_channel_id.clone();
+            let note = req.note;
         
+            if let Some(n) = note.as_ref() {
+                let selected_id = app.selected_channel_id.clone();
                 if let Some(sc) = app.stable_channels.iter_mut()
                     .find(|sc| sc.channel_id.to_string() == selected_id)
                 {
-                    sc.note = Some(n);
+                    sc.note = Some(n.clone()); // sc.note is Option<String>
                     app.status_message = "Note updated".to_string();
                 }
             }
         
-            app.edit_stable_channel();
+            app.edit_stable_channel(note);
         
             Json(EditStableChannelRes {
                 ok: app.status_message.starts_with("Channel") || app.status_message.contains("stable"),
@@ -781,7 +782,7 @@
                 }
             }
 
-            pub fn edit_stable_channel(&mut self) {
+            pub fn edit_stable_channel(&mut self, note: Option<String>) {
                 if self.selected_channel_id.is_empty() {
                     self.status_message = "Please select a channel ID".to_string();
                     audit_event("STABLE_EDIT_NO_CHANNEL", json!({}));  
@@ -813,11 +814,12 @@
                         let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
                         let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
             
-                        // ✅ Preserve existing note if present
-                        let mut note = None;
-                        if let Some(existing) = self.stable_channels.iter().find(|sc| sc.channel_id == channel.channel_id) {
-                            note = existing.note.clone();
-                        }
+                        let mut note = note.clone();
+                        if note.is_none() {
+                            if let Some(existing) = self.stable_channels.iter().find(|sc| sc.channel_id == channel.channel_id) {
+                                note = existing.note.clone();
+                            }
+                        }                        
             
                         let stable_channel = StableChannel {
                             channel_id: channel.channel_id,
