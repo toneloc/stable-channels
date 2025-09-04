@@ -29,6 +29,7 @@ struct ChannelInfo {
     is_usable: bool,         
     is_stable: bool,   
     expected_usd: Option<f64>,
+    note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -48,13 +49,13 @@ struct InvoiceInfo {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-struct DesignateStableChannelRes {
+struct EditStableChannelRes {
     ok: bool,
     status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct DesignateStableChannelReq {
+struct EditStableChannelReq {
     channel_id: String,
     target_usd: String,
 }
@@ -71,7 +72,7 @@ struct Dashboard {
     payments_task: Option<JoinHandle<reqwest::Result<Vec<PaymentInfo>>>>,
     invoices_task: Option<JoinHandle<reqwest::Result<Vec<InvoiceInfo>>>>,
     logs_task:     Option<JoinHandle<reqwest::Result<String>>>,
-    designate_task: Option<JoinHandle<reqwest::Result<DesignateStableChannelRes>>>,
+    edit_task: Option<JoinHandle<reqwest::Result<EditStableChannelRes>>>,
     close_task:     Option<JoinHandle<reqwest::Result<String>>>,
     pay_task:      Option<JoinHandle<reqwest::Result<String>>>,
     onchain_send_task:    Option<JoinHandle<reqwest::Result<String>>>,
@@ -107,9 +108,9 @@ struct Dashboard {
 
     show_logs: bool,
     last_log_refresh: Instant,
-    designate_channel_id: String,
-    designate_channel_usd: String,
-    designate_stable_result: Option<String>,
+    edit_channel_id: String,
+    edit_channel_usd: String,
+    edit_stable_result: Option<String>,
 }
 
 fn main() -> eframe::Result<()> {
@@ -162,10 +163,10 @@ impl Dashboard {
 
             show_logs: false,
             last_log_refresh: Instant::now(),
-            designate_channel_id: String::new(),
-            designate_channel_usd: String::new(),
-            designate_stable_result: None,
-            designate_task: None,
+            edit_channel_id: String::new(),
+            edit_channel_usd: String::new(),
+            edit_stable_result: None,
+            edit_task: None,
             onchain_send_task: None,
             onchain_send_result:  None,
             get_address_task: None,
@@ -265,7 +266,7 @@ impl Dashboard {
                         .show(ui, |ui| {
                             // ── headers ───────────────────────────────────────────
                             for h in [
-                                "ID", "Peer", "Capacity",
+                                "Notes","ID", "Peer", "Capacity",
                                 "Local", "USD",           // local sats / local USD
                                 "Remote", "USD",          // remote sats / remote USD
                                 "Status", "Ready", "Usable", "Stable $"
@@ -276,6 +277,17 @@ impl Dashboard {
     
                             // ── rows ─────────────────────────────────────────────
                             for ch in &self.channels {
+                                // Note (copy)
+                                let note_text = ch.note.clone().unwrap_or_else(|| "---".to_string());
+
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label(note_text.clone());
+                                    if ui.button("📋").clicked() {
+                                        ui.output_mut(|o| o.copied_text = note_text);
+                                    }
+                                });
+
                                 // ID (copy)
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(short(&ch.id, 8)).monospace());
@@ -322,19 +334,19 @@ impl Dashboard {
         });
     }
     
-    fn designate_stable_channel(&mut self) {
-        if self.designate_task.is_some() { return; }
+    fn edit_stable_channel(&mut self) {
+        if self.edit_task.is_some() { return; }
         let client = self.client.clone();
-        let channel_id = self.designate_channel_id.trim().to_string();
-        let target_usd = self.designate_channel_usd.trim().to_string();
-        self.designate_task = Some(self.rt.spawn(async move {
-            let req = DesignateStableChannelReq { channel_id, target_usd };
+        let channel_id = self.edit_channel_id.trim().to_string();
+        let target_usd = self.edit_channel_usd.trim().to_string();
+        self.edit_task = Some(self.rt.spawn(async move {
+            let req = EditStableChannelReq { channel_id, target_usd };
             client
-                .post("http://100.25.168.115:8080/api/designate_stable_channel")
+                .post("http://100.25.168.115:8080/api/edit_stable_channel")
                 .json(&req)
                 .send()
                 .await?
-                .json::<DesignateStableChannelRes>()
+                .json::<EditStableChannelRes>()
                 .await
         }));
     }
@@ -461,8 +473,8 @@ impl App for Dashboard {
         poll_task!(payments_task => |v| self.payments = v);
         poll_task!(invoices_task => |v| self.invoices = v);
         poll_task!(logs_task => |v| self.log_tail = v);
-        poll_task!(designate_task => |res: DesignateStableChannelRes| {
-            self.designate_stable_result = Some(res.status);
+        poll_task!(edit_task => |res: EditStableChannelRes| {
+            self.edit_stable_result = Some(res.status);
         });
         poll_task!(close_task => |v| self.close_result = Some(v));
         poll_task!(pay_task => |v| self.pay_result = Some(v));
@@ -476,19 +488,19 @@ impl App for Dashboard {
             ui.add_space(10.0);
             self.show_channels(ui);
             ui.group(|ui| {
-                ui.heading("Designate Stable Channel");
+                ui.heading("Edit Stable Channel");
                 ui.horizontal(|ui| {
                     ui.label("Channel ID:");
-                    ui.text_edit_singleline(&mut self.designate_channel_id);
+                    ui.text_edit_singleline(&mut self.edit_channel_id);
                 });
                 ui.horizontal(|ui| {
                     ui.label("Target USD amount:");
-                    ui.text_edit_singleline(&mut self.designate_channel_usd);
+                    ui.text_edit_singleline(&mut self.edit_channel_usd);
                 });
-                if ui.button("Designate as Stable").clicked() {
-                    self.designate_stable_channel();
+                if ui.button("edit as Stable").clicked() {
+                    self.edit_stable_channel();
                 }
-                if let Some(msg) = &self.designate_stable_result {
+                if let Some(msg) = &self.edit_stable_result {
                     ui.label(msg);
                 }
             });

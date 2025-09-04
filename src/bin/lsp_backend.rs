@@ -98,6 +98,7 @@ pub struct ChannelInfo {
     pub is_usable: bool,         
     pub is_stable: bool,   
     pub expected_usd: Option<f64>,
+    pub note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -107,13 +108,14 @@ struct Balance { sats: u64, usd: f64 }
 struct PayReq { invoice: String }
 
 #[derive(Deserialize)]
-struct DesignateStableChannelReq {
+struct EditStableChannelReq {
     channel_id: String,
     target_usd: String,
+    note: String
 }
 
 #[derive(Serialize)]
-struct DesignateStableChannelRes {
+struct EditStableChannelRes {
     ok: bool,
     status: String,
 }
@@ -164,7 +166,7 @@ async fn main() -> Result<()> {
         .route("/api/channels", get(get_channels))
         .route("/api/price", get(get_price))
         .route("/api/close_channel/{id}", post(post_close_channel))
-        .route("/api/designate_stable_channel", post(designate_stable_channel_handler))
+        .route("/api/edit_stable_channel", post(edit_stable_channel_handler))
         .route("/api/onchain_send", post(onchain_send_handler))
         .route("/api/onchain_address", get(get_onchain_address))
         .route("/api/connect", post(connect_handler));
@@ -210,7 +212,9 @@ pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
                 .iter()
                 .find(|sc| sc.channel_id == c.channel_id);
 
+            // If the channel is stabilized, pull the data
             let expected_usd = is_stable.map(|sc| sc.expected_usd.0);
+            let note = is_stable.and_then(|sc| sc.note.clone());
 
             let local_sat   = c.outbound_capacity_msat / 1_000;
             let remote_sat  = c.inbound_capacity_msat / 1_000;
@@ -231,6 +235,7 @@ pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
                 is_channel_ready: c.is_channel_ready,
                 is_usable:       c.is_usable,
                 is_stable:       is_stable.is_some(),
+                note,
             }
         })
         .collect();
@@ -260,13 +265,13 @@ async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
     format!("Channel {} not found", id)
 }
 
-async fn designate_stable_channel_handler(Json(req): Json<DesignateStableChannelReq>) -> Json<DesignateStableChannelRes> {
+async fn edit_stable_channel_handler(Json(req): Json<EditStableChannelReq>) -> Json<EditStableChannelRes> {
     println!("hi");
     let mut app = APP.lock().unwrap();
     app.selected_channel_id = req.channel_id;
     app.stable_channel_amount = req.target_usd;
-    app.designate_stable_channel();
-    Json(DesignateStableChannelRes {
+    app.edit_stable_channel();
+    Json(EditStableChannelRes {
         ok: app.status_message.starts_with("Channel") || app.status_message.contains("stable"),
         status: app.status_message.clone(),
     })
@@ -760,10 +765,10 @@ impl ServerApp {
         }
     }
 
-    pub fn designate_stable_channel(&mut self) {
+    pub fn edit_stable_channel(&mut self) {
         if self.selected_channel_id.is_empty() {
             self.status_message = "Please select a channel ID".to_string();
-            audit_event("STABLE_DESIGNATE_NO_CHANNEL", json!({}));  
+            audit_event("STABLE_EDIT_NO_CHANNEL", json!({}));  
             return;
         }
 
@@ -771,7 +776,7 @@ impl ServerApp {
             Ok(val) => val,
             Err(_) => {
                 self.status_message = "Invalid amount format".to_string();
-                audit_event("STABLE_DESIGNATE_AMOUNT_INVALID", json!({"raw_input": self.stable_channel_amount}));
+                audit_event("STABLE_EDIT_AMOUNT_INVALID", json!({"raw_input": self.stable_channel_amount}));
                 return;
             }
         };
@@ -811,6 +816,7 @@ impl ServerApp {
                     prices: "".to_string(),
                     onchain_btc: Bitcoin::from_sats(0),
                     onchain_usd: USD(0.0),
+                    note: Some("".to_string())
                 };
 
                 let mut found = false;
@@ -829,16 +835,16 @@ impl ServerApp {
                 self.save_stable_channels();
 
                 self.status_message = format!(
-                    "Channel {} designated as stable with target ${}",
+                    "Channel {} edited as stable with target ${}",
                     channel_id_str, amount
                 );
-                audit_event("STABLE_DESIGNATED", json!({"channel_id": channel_id_str, "target_usd": amount}));
+                audit_event("STABLE_EDITED", json!({"channel_id": channel_id_str, "target_usd": amount}));
                 self.selected_channel_id.clear();
                 self.stable_channel_amount = EXPECTED_USD.to_string();
                 return;
             }
         }
-        audit_event("STABLE_DESIGNATE_CHANNEL_NOT_FOUND", json!({"channel_id": self.selected_channel_id}));
+        audit_event("STABLE_EDIT_CHANNEL_NOT_FOUND", json!({"channel_id": self.selected_channel_id}));
         self.status_message = format!("No channel found matching: {}", self.selected_channel_id);
     }
 
@@ -922,6 +928,7 @@ impl ServerApp {
                                         prices: "".to_string(),
                                         onchain_btc: Bitcoin::from_sats(0),
                                         onchain_usd: USD(0.0),
+                                        note: Some("".to_string())
                                     };
 
                                     self.stable_channels.push(stable_channel);

@@ -755,6 +755,7 @@ impl ServerApp {
                     prices: "".to_string(),
                     onchain_btc: Bitcoin::from_sats(0),
                     onchain_usd: USD(0.0),
+                    note: Some("".to_string())
                 };
 
                 let mut found = false;
@@ -1001,6 +1002,7 @@ impl ServerApp {
                                         prices: "".to_string(),
                                         onchain_btc: Bitcoin::from_sats(0),
                                         onchain_usd: USD(0.0),
+                                        note: Some("".to_string())
                                     };
 
                                     self.stable_channels.push(stable_channel);
