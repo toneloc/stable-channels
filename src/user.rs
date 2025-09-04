@@ -6,6 +6,7 @@
         bitcoin::secp256k1::PublicKey,
         lightning::ln::msgs::SocketAddress,
     };
+    use ldk_node::config::{EsploraSyncConfig, BackgroundSyncConfig};
 
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
@@ -106,7 +107,15 @@
             println!("[Init] Setting network to: {:?}", network);
             builder.set_network(network);
 
-            builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
+            let esplora_cfg = EsploraSyncConfig {
+                background_sync_config: Some(BackgroundSyncConfig {
+                    onchain_wallet_sync_interval_secs: 160,   // was 80s (default)
+                    lightning_wallet_sync_interval_secs: 60, // was 30s (default)
+                    fee_rate_cache_update_interval_secs: 1200 // was 600s (default)
+                }),
+            };            
+
+            builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), Some(esplora_cfg));
             builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
             builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
             let _ = builder.set_node_alias(USER_NODE_ALIAS.to_string());
