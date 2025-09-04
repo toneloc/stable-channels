@@ -870,7 +870,7 @@
                             ui.separator();
                         
                             ui.label(
-                                RichText::new("Stable channel:")
+                                RichText::new("Stable Channel ID:")
                                     .strong()
                                     .color(Color32::from_rgb(247, 147, 26))
                             );
