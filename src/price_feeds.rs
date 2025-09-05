@@ -7,7 +7,6 @@ use retry::{retry, delay::Fixed};
 use crate::audit::audit_event;
 use serde_json::json;
 
-
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
         price: 0.0,
@@ -16,7 +15,6 @@ lazy_static::lazy_static! {
     }));
 }
 
-// A very simple price cache structure
 pub struct PriceCache {
     price: f64,
     last_update: Instant,
@@ -41,23 +39,18 @@ impl PriceFeed {
 
 // Get cached price or fetch a new one if needed
 pub fn get_cached_price() -> f64 {
-    // First check if we need to update
     let should_update = {
         let cache = PRICE_CACHE.lock().unwrap();
         cache.last_update.elapsed() > Duration::from_secs(5) && !cache.updating
     };
-    
-    // If update is needed
+
     if should_update {
-        // Get the lock again and mark as updating
         let mut cache = PRICE_CACHE.lock().unwrap();
         cache.updating = true;
-        drop(cache); 
-        
-        // Try to fetch a new price
+        drop(cache);
+
         let agent = Agent::new();
         if let Ok(new_price) = get_latest_price(&agent) {
-            // Update the cache with new price
             let mut cache = PRICE_CACHE.lock().unwrap();
             cache.price = new_price;
             cache.last_update = Instant::now();
@@ -65,14 +58,12 @@ pub fn get_cached_price() -> f64 {
             audit_event("PRICE_FETCH", json!({ "btc_price": new_price }));
             return new_price;
         } else {
-            // Update failed, just clear the updating flag
             let mut cache = PRICE_CACHE.lock().unwrap();
             cache.updating = false;
-            return cache.price; // Return the existing price
+            return cache.price;
         }
     }
-    
-    // No update needed, just return current price
+
     let cache = PRICE_CACHE.lock().unwrap();
     cache.price
 }
@@ -89,11 +80,12 @@ pub fn set_price_feeds() -> Vec<PriceFeed> {
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
             vec!["bitcoin", "usd"],
         ),
-        // PriceFeed::new(
-        //     "Coindesk",
-        //     "https://api.coindesk.com/v1/bpi/currentprice/USD.json",
-        //     vec!["bpi", "USD", "rate_float"],
-        // ),
+        // Kraken returns { "result": { "XXBTZUSD": { "c": ["<last>", "<vol>"], ... } } }
+        PriceFeed::new(
+            "Kraken",
+            "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD",
+            vec!["result", "XXBTZUSD", "c"], // we'll take c[0] below
+        ),
         PriceFeed::new(
             "Coinbase",
             "https://api.coinbase.com/v2/prices/spot?currency=USD",
@@ -113,7 +105,7 @@ pub fn fetch_prices(
 ) -> Result<Vec<(String, f64)>, Box<dyn Error>> {
     let mut prices = Vec::new();
 
-    for price_feed in price_feeds {
+    'feeds: for price_feed in price_feeds {
         let url: String = price_feed
             .urlformat
             .replace("{currency_lc}", "usd")
@@ -142,11 +134,15 @@ pub fn fetch_prices(
             if let Some(inner_data) = data.get(key) {
                 data = inner_data;
             } else {
-                println!(
-                    "Key '{}' not found in the response from {}",
-                    key, price_feed.name
-                );
-                continue;
+                eprintln!("Key '{}' not found in the response from {}", key, price_feed.name);
+                continue 'feeds;
+            }
+        }
+
+        // If the value is an array (e.g., Kraken "c": ["<last>", "<vol>"]), take the first item.
+        if let Some(arr) = data.as_array() {
+            if let Some(first) = arr.get(0) {
+                data = first;
             }
         }
 
@@ -156,18 +152,11 @@ pub fn fetch_prices(
             if let Ok(price) = price_str.parse::<f64>() {
                 prices.push((price_feed.name.clone(), price));
             } else {
-                println!("Invalid price format for {}: {}", price_feed.name, price_str);
+                eprintln!("Invalid price format for {}: {}", price_feed.name, price_str);
             }
         } else {
-            println!(
-                "Price data not found or invalid format for {}",
-                price_feed.name
-            );
+            eprintln!("Price data not found or invalid format for {}", price_feed.name);
         }
-    }
-
-    if prices.len() < 5 {
-        // println!("Fewer than 5 prices fetched.");
     }
 
     if prices.is_empty() {
@@ -180,13 +169,11 @@ pub fn fetch_prices(
 pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
     let price_feeds = set_price_feeds();
     let prices = fetch_prices(agent, &price_feeds)?;
-    
-    // Print all prices
+
     for (feed_name, price) in &prices {
         println!("{:<25} ${:>1.2}", feed_name, price);
     }
 
-    // Calculate the median price
     let mut price_values: Vec<f64> = prices.iter().map(|(_, price)| *price).collect();
     price_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median_price = if price_values.len() % 2 == 0 {
