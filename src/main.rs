@@ -21,7 +21,7 @@ fn main() {
 
     match mode.as_str() {
         "user" => user::run(),
-        "lsp" | "exchange" => server::run_with_mode(&mode),
+        // "lsp" | "exchange" => server::run_with_mode(&mode),
         _ => {
             eprintln!("Unknown mode: '{}'. Use: `user`, `lsp`, or `exchange`", mode);
             std::process::exit(1);
