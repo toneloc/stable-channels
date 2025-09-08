@@ -939,9 +939,7 @@
                             } else {
                                 sc.stable_provider_btc
                             };
-                        
-                            let pegged_btc_f64 = pegged_btc.to_btc();
-                        
+                                                
                             // Main heading
                             ui.heading("Stable Balance");
                         
@@ -1113,54 +1111,30 @@
                             .default_open(false)
                             
                             .show(ui, |ui| {
+                                if !self.status_message.is_empty() {
+                                    ui.label(self.status_message.clone());
+                                    ui.add_space(10.0);
+                                }
+
                                 ui.group(|ui| {
                                     ui.heading("Send Message to LSP");
                                     ui.add_space(8.0);
                                     ui.label("Please send your email address to the LSP, if you haven't already");
+                                    ui.add_space(4.0);
+
                                     ui.add(egui::TextEdit::singleline(&mut self.stable_message)
                                         .hint_text("Enter message..."));
-                                    if ui.button("Send Message").clicked() {
-                                        self.send_stable_message();
-                                    }
-                                });
+                                    ui.add_space(4.0);
 
-                                let show_close_popup = false;
+                                if ui.button("Send Message").clicked() {
+                                    if !self.stable_message.trim().is_empty() {
+                                        self.send_stable_message();
+                                        self.stable_message.clear(); // reset box
+                                    }
+                                }
+                            });
 
                                 ui.add_space(20.0);
-
-                                if ui.button("Close Stable Channel").clicked() {
-                                    self.confirm_close_popup = true;
-                                }
-                                
-                                // Record user intent inside the modal; don't touch `self` or `open` here
-                                let mut clicked_yes = false;
-                                let mut clicked_cancel = false;
-                                
-                                egui::Window::new("Confirm Close")
-                                    .collapsible(false)
-                                    .resizable(false)
-                                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                                    .open(&mut self.confirm_close_popup)   
-                                    .show(ctx, |ui| {
-                                        ui.label("Are you sure you want to close your Stable Channel?");
-                                        ui.label("Your on-chain funds will appear under \"Advanced features\" after the transaction processes.");
-                                        ui.add_space(10.0);
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Yes, close").clicked() {
-                                                clicked_yes = true;
-                                            }
-                                            if ui.button("Cancel").clicked() {
-                                                clicked_cancel = true; 
-                                            }
-                                        });
-                                    });
-                                    
-                                if clicked_yes {
-                                    self.close_active_channel();
-                                    self.confirm_close_popup = false;
-                                } else if clicked_cancel {
-                                    self.confirm_close_popup = false;
-                                }
 
                                 ui.group(|ui| {
                                     ui.heading("Withdraw On-chain");
@@ -1216,11 +1190,40 @@
                                     }
                                 });
                                 ui.add_space(20.0);
-        
-                                if !self.status_message.is_empty() {
-                                    ui.label(self.status_message.clone());
-                                    ui.add_space(10.0);
+
+                                if ui.button("Close Stable Channel").clicked() {
+                                    self.confirm_close_popup = true;
                                 }
+                                
+                                let mut clicked_yes = false;
+                                let mut clicked_cancel = false;
+                                
+                                egui::Window::new("Confirm Close")
+                                    .collapsible(false)
+                                    .resizable(false)
+                                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                                    .open(&mut self.confirm_close_popup)   
+                                    .show(ctx, |ui| {
+                                        ui.label("Are you sure you want to close your Stable Channel?");
+                                        ui.label("Your on-chain funds will appear under \"Advanced features\" after the transaction processes.");
+                                        ui.add_space(10.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Yes, close").clicked() {
+                                                clicked_yes = true;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                clicked_cancel = true; 
+                                            }
+                                        });
+                                    });
+                                    
+                                if clicked_yes {
+                                    self.close_active_channel();
+                                    self.confirm_close_popup = false;
+                                } else if clicked_cancel {
+                                    self.confirm_close_popup = false;
+                                }
+    
         
                                 // ui.group(|ui| {
                                 //     ui.label("Generate Invoice");
