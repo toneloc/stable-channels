@@ -4,7 +4,8 @@
             lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
             lightning::ln::msgs::SocketAddress,
             config::ChannelConfig,
-            Builder, Node, Event, liquidity::LSPS2ServiceConfig
+            lightning_types::payment::PaymentHash,
+            Builder, Node, Event, liquidity::LSPS2ServiceConfig, CustomTlvRecord,
         };
         use std::{sync::Mutex, time::{Duration, Instant}};
         use std::path::Path as FilePath;
@@ -34,7 +35,7 @@
         const LSP_PORT: u16 = 9737;
 
         const DEFAULT_NETWORK: &str = "bitcoin";
-        const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+        // const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
         const EXPECTED_USD: f64 = 100.0;
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -574,7 +575,7 @@
                             former_temporary_channel_id,
                             counterparty_node_id,
                             funding_txo,
-                        } => {
+                            } => {
                             let temp_id_str = hex::encode(former_temporary_channel_id.0);
                         
                             let funding_str = funding_txo.txid.as_raw_hash().to_string();
@@ -597,10 +598,13 @@
                             self.status_message = format!("Sent payment {}", payment_hash);
                             self.update_balances();
                         }
-                        Event::PaymentReceived { amount_msat, payment_hash, .. } => {
-                            audit_event("PAYMENT_RECEIVED", json!({"amount_msat": amount_msat, "payment_hash": format!("{}", payment_hash)}));
-                            self.status_message = format!("Received payment of {} msats", amount_msat);
-                            self.update_balances();
+                        // Event::PaymentReceived { amount_msat, payment_hash, .. } => {
+                        //     audit_event("PAYMENT_RECEIVED", json!({"amount_msat": amount_msat, "payment_hash": format!("{}", payment_hash)}));
+                        //     self.status_message = format!("Received payment of {} msats", amount_msat);
+                        //     self.update_balances();
+                        // }
+                        Event::PaymentReceived { amount_msat, payment_hash, custom_records, payment_id: _ } => {
+                            self.handle_payment_received(amount_msat, payment_hash, custom_records)
                         }
                         Event::ChannelClosed { channel_id, reason, .. } => {
                             audit_event("CHANNEL_CLOSED", json!({"channel_id": format!("{}", channel_id), "reason": format!("{:?}", reason)}));
@@ -615,6 +619,44 @@
                 }
             }
 
+            fn handle_payment_received(
+                &mut self,
+                amount_msat: u64,
+                payment_hash: PaymentHash,
+                custom_records: Vec<CustomTlvRecord>,
+            ) {
+                let mut decoded_payload: Option<String> = None;
+            
+                for tlv in custom_records {
+                    if tlv.type_num == 13377331 {
+                        if let Ok(s) = String::from_utf8(tlv.value) {
+                            decoded_payload = Some(s);
+                        }
+                    }
+                }
+            
+                self.status_message = match &decoded_payload {
+                    Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
+                    None => format!("Received {} msats (no TLV)", amount_msat),
+                };
+            
+                if amount_msat == 1 {
+                    // Special audit for 1 msat “message” payments
+                    audit_event("MESSAGE_RECEIVED", json!({
+                        "payment_hash": format!("{}", payment_hash),
+                        "message": decoded_payload,
+                    }));
+                } else {
+                    audit_event("PAYMENT_RECEIVED", json!({
+                        "amount_msat": amount_msat,
+                        "payment_hash": format!("{}", payment_hash),
+                        "decoded_tlv": decoded_payload,
+                    }));
+                }
+            
+                self.update_balances();
+            }
+            
             pub fn generate_invoice(&mut self) -> bool {
                 if let Ok(amount) = self.invoice_amount.parse::<u64>() {
                     let msats = amount * 1000;

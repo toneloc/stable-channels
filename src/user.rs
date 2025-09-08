@@ -26,7 +26,6 @@
 
     const DEFAULT_NETWORK: &str = "bitcoin";
 
-    // Data will be placed at "current-directory/data/user"
     const USER_NODE_ALIAS: &str = "user";
     const USER_PORT: u16 = 9736;
 
@@ -39,6 +38,7 @@
     const EXPECTED_USD: f64 = 100.0;
     const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api";
 
+    // Data will find the relvant path based on the OS
     fn user_data_dir() -> PathBuf {
         data_dir()
             .expect("Could not determine user data dir")
@@ -69,6 +69,7 @@
         pub show_advanced: bool, 
         balance_last_update: std::time::Instant,
         confirm_close_popup: bool,
+        pub stable_message: String,
 
         // Balance fields
         pub lightning_balance_btc: f64,
@@ -212,6 +213,7 @@
                 show_advanced: false,
                 balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
                 confirm_close_popup: false,
+                stable_message: String::new(),
             };
 
             {
@@ -454,7 +456,6 @@
             }
         }
 
-        // TODO: check
         pub fn update_balances(&mut self) {
             let current_price = get_cached_price();
             if current_price > 0.0 {
@@ -466,7 +467,6 @@
             self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
             self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
             
-            // Calculate USD values
             self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
             self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
             
@@ -515,6 +515,31 @@
         //         }
         //     }
         // }
+
+        fn send_stable_message(&mut self) {
+            let amt = 1; 
+            let custom_str = self.stable_message.clone();
+            let custom_tlv = ldk_node::CustomTlvRecord {
+                type_num: 13377331,
+                value: custom_str.as_bytes().to_vec(),
+            };
+    
+            let mut sc = self.stable_channel.lock().unwrap();
+            match self.node.spontaneous_payment().send_with_custom_tlvs(
+                amt,
+                sc.counterparty,
+                None,
+                vec![custom_tlv],
+            ) {
+                Ok(_payment_id) => {
+                    sc.payment_made = true;
+                    self.status_message = format!("Sent stable message: {}", self.stable_message);
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to send stable message: {}", e);
+                }
+            }
+        }  
 
         fn process_events(&mut self) {
             while let Some(event) = self.node.next_event() {
@@ -1051,18 +1076,32 @@
                             let sc = self.stable_channel.lock().unwrap();
                             ui.add_space(20.0);
                             ui.heading("Bitcoin Price");
-                            ui.label(format!("${:.2}", sc.latest_price));
+
+                            let price_ok = sc.latest_price.is_finite() && sc.latest_price > 0.0;
+
+                            if price_ok {
+                                ui.label(format!("${:.2}", sc.latest_price));
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Fetching latest price ...")
+                                        .italics()
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                            }
                             ui.add_space(20.0);
         
-                            let last_updated = match SystemTime::now()
-                                .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64))
-                            {
-                                Ok(duration) => duration.as_secs(),
-                                Err(_) => 0,
+                            let last_updated_text = if !price_ok || sc.timestamp == 0 {
+                                "Fetching latest price ...".to_string()
+                            } else {
+                                let secs = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64))
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                format!("Last updated: {}s ago", secs)
                             };
-                            ui.add_space(5.0);
+                            
                             ui.label(
-                                egui::RichText::new(format!("Last updated: {}s ago", last_updated))
+                                egui::RichText::new(last_updated_text)
                                     .size(12.0)
                                     .color(egui::Color32::GRAY),
                             );
@@ -1074,9 +1113,18 @@
                             .default_open(false)
                             
                             .show(ui, |ui| {
+                                ui.group(|ui| {
+                                    ui.heading("Send Message to LSP");
+                                    ui.add_space(8.0);
+                                    ui.label("Please send your email address to the LSP, if you haven't already");
+                                    ui.add(egui::TextEdit::singleline(&mut self.stable_message)
+                                        .hint_text("Enter message..."));
+                                    if ui.button("Send Message").clicked() {
+                                        self.send_stable_message();
+                                    }
+                                });
 
-
-                            let mut show_close_popup = false;
+                                let show_close_popup = false;
 
                                 ui.add_space(20.0);
 
@@ -1106,7 +1154,7 @@
                                             }
                                         });
                                     });
-                                
+                                    
                                 if clicked_yes {
                                     self.close_active_channel();
                                     self.confirm_close_popup = false;
