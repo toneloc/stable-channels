@@ -103,7 +103,14 @@
         }
 
         #[derive(Serialize)]
-        struct Balance { sats: u64, usd: f64 }
+        struct Balance {
+            total_sats: u64,
+            total_usd:  f64,
+            lightning_sats: u64,
+            lightning_usd:  f64,
+            onchain_sats:   u64,
+            onchain_usd:    f64,
+        }
 
         #[derive(Deserialize)]
         struct PayReq { invoice: String }
@@ -181,21 +188,36 @@
 
         /* ---- handlers ---------------------------------------------------- */
 
+        // GET /api/balance
         async fn get_balance() -> Json<Balance> {
-            let (sats, usd) = {
+            let (total_usd, lightning_usd, onchain_usd, lightning_sats, onchain_sats) = {
                 let mut app = APP.lock().unwrap();
 
-                // pull latest BTC price + node balances (just in case the 30-sec loop
-                // hasn’t fired yet)
+                // Refresh cached price + app.{lightning, onchain, total}_* fields
                 app.update_balances();
 
+                // Pull sat balances from LDK directly to avoid any float rounding
+                let b = app.node.list_balances();
+                let lightning_sats = b.total_lightning_balance_sats;
+                let onchain_sats   = b.total_onchain_balance_sats;
+
                 (
-                    (app.total_balance_btc * 100_000_000.0) as u64, // convert BTC → sats
                     app.total_balance_usd,
+                    app.lightning_balance_usd,
+                    app.onchain_balance_usd,
+                    lightning_sats,
+                    onchain_sats,
                 )
             };
 
-            Json(Balance { sats, usd })
+            Json(Balance {
+                total_sats: lightning_sats + onchain_sats,
+                total_usd,
+                lightning_sats,
+                lightning_usd,
+                onchain_sats,
+                onchain_usd,
+            })
         }
 
         /// GET /api/channels

@@ -11,10 +11,13 @@ use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct Balance {
-    sats: u64,
-    usd:  f64,
+    total_sats: u64,
+    total_usd:  f64,
+    lightning_sats: u64,
+    lightning_usd:  f64,
+    onchain_sats:   u64,
+    onchain_usd:    f64,
 }
-
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ChannelInfo {
     id: String,
@@ -233,9 +236,26 @@ impl Dashboard {
         ui.group(|ui| {
             ui.heading("Balances");
             match &self.balance {
-                Some(bal) => ui.label(format!("{} sats  ≈ ${:.2}", bal.sats, bal.usd)),
-                None => ui.label("Balance: —"),
-            };
+                Some(bal) => {
+                    ui.label(format!(
+                        "Lightning: {} sats  ≈ ${:.2}",
+                        bal.lightning_sats, bal.lightning_usd
+                    ));
+                    ui.label(format!(
+                        "On-chain:  {} sats  ≈ ${:.2}",
+                        bal.onchain_sats, bal.onchain_usd
+                    ));
+                    ui.separator();
+                    ui.label(format!(
+                        "Total:     {} sats  ≈ ${:.2}",
+                        bal.total_sats, bal.total_usd
+                    ));
+                }
+                None => {                     
+                    ui.label("Balance: —");  
+                }
+            }
+    
             if let Some(p) = self.price_usd {
                 ui.label(format!("BTC/USD price: ${:.2}", p));
             }
