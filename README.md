@@ -37,7 +37,11 @@ You can check out the latest builds for MacOS, Windows, or Linux here - https://
 
 To run the app from this source, please install Rust on your OS.
 
-Using a fresh Ubuntu? You may need to install OpenSSL libraries. `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
+Using a fresh Ubuntu or on Windows? You may need to install OpenSSL libraries or Perl. 
+
+Linux - `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
+
+Windows - `winget install StrawberryPerl.StrawberryPerl`
 
 Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` into it.
 
