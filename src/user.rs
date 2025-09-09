@@ -327,8 +327,13 @@
             //     max_proportional_lsp_fee_limit_ppm_msat
             // );
             
+            let msats = USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price);
+            
+            // Round to the nearest sat (i.e., nearest 1_000 msats); ties round up.
+            let msats_rounded = ((msats.saturating_add(500)) / 1_000) * 1_000;
+
             let result = self.node.bolt11_payment().receive_via_jit_channel(
-                USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price),
+                msats_rounded,
                 &description,
                 3600,
                 Some(10_000_000)
@@ -636,6 +641,23 @@
         
                 let _ = self.node.event_handled();
             }
+        }
+
+        fn format_currency(v: f64) -> String {
+            let s = format!("{:.2}", v); // "112226.70"
+            let (int, frac) = s.split_once('.').unwrap();
+        
+            let int_with_commas = int
+                .chars()
+                .rev()
+                .collect::<Vec<_>>()
+                .chunks(3)
+                .map(|c| c.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join(",");
+        
+            let int_with_commas = int_with_commas.chars().rev().collect::<String>();
+            format!("${}.{}", int_with_commas, frac)
         }
 
         fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
@@ -1074,18 +1096,26 @@
                             let sc = self.stable_channel.lock().unwrap();
                             ui.add_space(20.0);
                             ui.heading("Bitcoin Price");
+                            ui.add_space(10.0);
+
 
                             let price_ok = sc.latest_price.is_finite() && sc.latest_price > 0.0;
 
                             if price_ok {
-                                ui.label(format!("${:.2}", sc.latest_price));
+                                ui.label(
+                                    egui::RichText::new(Self::format_currency(sc.latest_price))
+                                        .size(20.0)
+                                        .strong()
+                                );
                             } else {
                                 ui.label(
                                     egui::RichText::new("Fetching latest price ...")
                                         .italics()
-                                        .color(egui::Color32::LIGHT_GRAY),
+                                        .color(egui::Color32::LIGHT_GRAY)
+                                        .size(16.0),
                                 );
                             }
+
                             ui.add_space(20.0);
         
                             let last_updated_text = if !price_ok || sc.timestamp == 0 {
