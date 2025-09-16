@@ -40,7 +40,7 @@ jobs:
 
           APP_NAME="Stable Channels"
           APP_BUNDLE="${APP_NAME}.app"
-          IDENTIFIER="com.yourcompany.stablechannels"
+          IDENTIFIER="com.stablechannels.mac"
           VERSION="0.1.0"
           BIN_NAME="stable-channels"
           WRAPPER_NAME="$APP_NAME"

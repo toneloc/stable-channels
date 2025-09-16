@@ -52,9 +52,8 @@ icon = ["icons/icon.icns"]
 version = "0.1.0"
 resources = ["assets", "resources"]
 copyright = "Copyright (c) 2025 Stable Channels Developers"
-category = "Finance"
-short_description = "Bitcoin Stable Channels App"
-long_description = "A Bitcoin wallet that maintains value in USD."
+short_description = "Stable Channels Wallet"
+long_description = "A self-custodial bitcoin wallet with USD stability."
 
 [[bin]]
 name = "lsp_backend"
