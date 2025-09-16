@@ -1331,6 +1331,15 @@
 
     impl App for UserApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) { 
+            // Set dark background for Windows
+            ctx.set_visuals(egui::Visuals::dark());
+            
+            // Explicitly set the background color
+            let mut visuals = egui::Visuals::dark();
+            visuals.window_fill = egui::Color32::from_rgb(20, 20, 20); // Dark gray background
+            visuals.panel_fill = egui::Color32::from_rgb(20, 20, 20);  // Dark gray panels
+            ctx.set_visuals(visuals);
+            
             self.process_events();
 
             self.show_onboarding = self.node.list_channels().is_empty() && !self.waiting_for_payment;
@@ -1358,9 +1367,10 @@
     pub fn run() {
         println!("Starting User Interface...");
         let native_options = eframe::NativeOptions {
-            
             viewport: eframe::egui::ViewportBuilder::default()
-                .with_inner_size([460.0, 700.0]),
+                .with_inner_size([460.0, 700.0])
+                .with_decorations(true)
+                .with_transparent(false),
             ..Default::default()
         };
 
@@ -1371,7 +1381,11 @@
                     "Stable Channels Wallet",
                     native_options,
                     Box::new(|cc| {
-                        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+                        // Set dark theme with explicit background colors for Windows
+                        let mut visuals = egui::Visuals::dark();
+                        visuals.window_fill = egui::Color32::from_rgb(20, 20, 20); // Dark gray background
+                        visuals.panel_fill = egui::Color32::from_rgb(20, 20, 20);  // Dark gray panels
+                        cc.egui_ctx.set_visuals(visuals);
     
                         Ok(Box::new(app))
                     }),
