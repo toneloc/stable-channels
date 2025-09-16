@@ -1336,8 +1336,8 @@
             
             // Explicitly set the background color
             let mut visuals = egui::Visuals::dark();
-            visuals.window_fill = egui::Color32::from_rgb(20, 20, 20); // Dark gray background
-            visuals.panel_fill = egui::Color32::from_rgb(20, 20, 20);  // Dark gray panels
+            visuals.window_fill = egui::Color32::from_rgb(25, 25, 25); // Dark gray background
+            visuals.panel_fill = egui::Color32::from_rgb(25, 25, 25);  // Dark gray panels
             ctx.set_visuals(visuals);
             
             self.process_events();
@@ -1383,8 +1383,8 @@
                     Box::new(|cc| {
                         // Set dark theme with explicit background colors for Windows
                         let mut visuals = egui::Visuals::dark();
-                        visuals.window_fill = egui::Color32::from_rgb(20, 20, 20); // Dark gray background
-                        visuals.panel_fill = egui::Color32::from_rgb(20, 20, 20);  // Dark gray panels
+                        visuals.window_fill = egui::Color32::from_rgb(25, 25, 25); // Dark gray background
+                        visuals.panel_fill = egui::Color32::from_rgb(25, 25, 25);  // Dark gray panels
                         cc.egui_ctx.set_visuals(visuals);
     
                         Ok(Box::new(app))
