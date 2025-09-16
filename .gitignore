@@ -174,3 +174,4 @@ Temporary Items
 
 # Built Visual Studio Code Extensions
 *.vsix
+.cargo/config.toml
