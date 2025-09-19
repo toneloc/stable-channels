@@ -5,6 +5,7 @@ use ldk_node::{
 use ureq::Agent;
 use crate::price_feeds::get_cached_price;
 use crate::audit::audit_event;
+use crate::constants::{STABILITY_THRESHOLD_PERCENT, MAX_RISK_LEVEL};
 use serde_json::json;
 
 /// Get the current BTC/USD price, preferring cached value when available
@@ -120,9 +121,9 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
     let is_receiver_below_expected = sc.stable_receiver_usd < sc.expected_usd;
 
-    let action = if percent_from_par < 0.1 {
+    let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
         "STABLE"
-    } else if sc.risk_level > 100 {
+    } else if sc.risk_level > MAX_RISK_LEVEL {
         "HIGH_RISK_NO_ACTION"
     } else if (sc.is_stable_receiver && is_receiver_below_expected)
         || (!sc.is_stable_receiver && !is_receiver_below_expected)

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use retry::{retry, delay::Fixed};
 use crate::audit::audit_event;
+use crate::constants::{PRICE_CACHE_REFRESH_SECS, PRICE_FETCH_RETRY_DELAY_MS, PRICE_FETCH_MAX_RETRIES};
 use serde_json::json;
 
 lazy_static::lazy_static! {
@@ -21,27 +22,14 @@ pub struct PriceCache {
     updating: bool,
 }
 
-pub struct PriceFeed {
-    pub name: String,
-    pub urlformat: String,
-    pub jsonpath: Vec<String>,
-}
-
-impl PriceFeed {
-    pub fn new(name: &str, urlformat: &str, jsonpath: Vec<&str>) -> PriceFeed {
-        PriceFeed {
-            name: name.to_string(),
-            urlformat: urlformat.to_string(),
-            jsonpath: jsonpath.iter().map(|&s| s.to_string()).collect(),
-        }
-    }
-}
+// Re-export from constants module
+pub use crate::constants::{PriceFeedConfig as PriceFeed, get_default_price_feeds};
 
 // Get cached price or fetch a new one if needed
 pub fn get_cached_price() -> f64 {
     let should_update = {
         let cache = PRICE_CACHE.lock().unwrap();
-        cache.last_update.elapsed() > Duration::from_secs(5) && !cache.updating
+        cache.last_update.elapsed() > Duration::from_secs(PRICE_CACHE_REFRESH_SECS) && !cache.updating
     };
 
     if should_update {
@@ -69,34 +57,7 @@ pub fn get_cached_price() -> f64 {
 }
 
 pub fn set_price_feeds() -> Vec<PriceFeed> {
-    vec![
-        PriceFeed::new(
-            "Bitstamp",
-            "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-            vec!["last"],
-        ),
-        PriceFeed::new(
-            "CoinGecko",
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            vec!["bitcoin", "usd"],
-        ),
-        // Kraken returns { "result": { "XXBTZUSD": { "c": ["<last>", "<vol>"], ... } } }
-        PriceFeed::new(
-            "Kraken",
-            "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD",
-            vec!["result", "XXBTZUSD", "c"], // we'll take c[0] below
-        ),
-        PriceFeed::new(
-            "Coinbase",
-            "https://api.coinbase.com/v2/prices/spot?currency=USD",
-            vec!["data", "amount"],
-        ),
-        PriceFeed::new(
-            "Blockchain.com",
-            "https://blockchain.info/ticker",
-            vec!["USD", "last"],
-        ),
-    ]
+    get_default_price_feeds()
 }
 
 pub fn fetch_prices(
@@ -107,11 +68,11 @@ pub fn fetch_prices(
 
     'feeds: for price_feed in price_feeds {
         let url: String = price_feed
-            .urlformat
+            .url_format
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD");
 
-        let response = retry(Fixed::from_millis(300).take(3), || {
+        let response = retry(Fixed::from_millis(PRICE_FETCH_RETRY_DELAY_MS).take(PRICE_FETCH_MAX_RETRIES), || {
             match agent.get(&url).call() {
                 Ok(resp) => {
                     if resp.status() >= 200 && resp.status() < 300 {
@@ -130,7 +91,7 @@ pub fn fetch_prices(
         let json: Value = response.into_json()?;
         let mut data = &json;
 
-        for key in &price_feed.jsonpath {
+        for key in &price_feed.json_path {
             if let Some(inner_data) = data.get(key) {
                 data = inner_data;
             } else {

@@ -8,7 +8,6 @@
             Builder, Node, Event, liquidity::LSPS2ServiceConfig, CustomTlvRecord,
         };
         use std::{sync::Mutex, time::{Duration, Instant}};
-        use std::path::Path as FilePath;
         use std::str::FromStr;
         use std::sync::Arc;
         use serde::{Serialize, Deserialize};
@@ -21,6 +20,8 @@
         use stable_channels::price_feeds::get_cached_price;
         use stable_channels::stable;
         use stable_channels::types::{USD, Bitcoin, StableChannel};
+        use stable_channels::constants::*;
+        use stable_channels::config::AppConfig;
 
         // HTTP
         use axum::{routing::{get, post}, Json, Router};
@@ -30,13 +31,7 @@
             Mutex::new(ServerApp::new_with_mode("lsp"))
         });
 
-        const LSP_DATA_DIR: &str = "data-2/lsp";
-        const LSP_NODE_ALIAS: &str = "lsp";
-        const LSP_PORT: u16 = 9737;
-
-        const DEFAULT_NETWORK: &str = "bitcoin";
-        // const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
-        const EXPECTED_USD: f64 = 100.0;
+        // Configuration will be loaded from AppConfig
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
         struct StableChannelEntry {
@@ -52,6 +47,7 @@
             status_message: String,
             last_update: Instant,
             last_stability_check: Instant,
+            config: AppConfig,
 
             lightning_balance_btc: f64,
             onchain_balance_btc:    f64,
@@ -148,18 +144,18 @@
             tokio::spawn(async {
                 loop {
                     {
-                        let mut app = APP.lock().unwrap();
+                        let app = APP.lock().unwrap();
 
                         app.poll_events();
 
-                        if app.last_update.elapsed() >= Duration::from_secs(30) {
+                        if app.last_update.elapsed() >= Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS) {
                             let p = get_cached_price();
                             if p > 0.0 { app.btc_price = p; }
                             app.update_balances();
                             app.last_update = Instant::now();
                         }
 
-                        if app.last_stability_check.elapsed() >= Duration::from_secs(30) {
+                        if app.last_stability_check.elapsed() >= Duration::from_secs(STABILITY_CHECK_INTERVAL_SECS) {
                             app.check_and_update_stable_channels();
                             app.last_stability_check = Instant::now();
                         }
@@ -192,7 +188,7 @@
         // GET /api/balance
         async fn get_balance() -> Json<Balance> {
             let (total_usd, lightning_usd, onchain_usd, lightning_sats, onchain_sats) = {
-                let mut app = APP.lock().unwrap();
+                let app = APP.lock().unwrap();
 
                 // Refresh cached price + app.{lightning, onchain, total}_* fields
                 app.update_balances();
@@ -276,7 +272,7 @@
 
         /// POST /api/close_channel
         async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             for chan in app.node.list_channels() {
                 if hex::encode(chan.channel_id.0) == id {
                     let res = app.node.close_channel(&chan.user_channel_id, chan.counterparty_node_id);
@@ -290,7 +286,7 @@
         }
 
         async fn edit_stable_channel_handler(Json(req): Json<EditStableChannelReq>) -> Json<EditStableChannelRes> {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             app.selected_channel_id = req.channel_id;
         
             if let Some(t) = req.target_usd {
@@ -318,14 +314,14 @@
         }
         
         async fn pay_handler(Json(req): Json<PayReq>) -> Json<String> {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             app.invoice_to_pay = req.invoice;
-            let ok = app.pay_invoice();
+            let _ok = app.pay_invoice();
             Json(app.status_message.clone())
         }
 
         async fn onchain_send_handler(Json(req): Json<OnchainSendReq>) -> Json<String> {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             app.on_chain_address = req.address;
             app.on_chain_amount  = req.amount;
             app.send_onchain();                    // updates status_message
@@ -333,7 +329,7 @@
         }
 
         async fn get_onchain_address() -> Json<String> {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             if app.get_address() {
                 Json(app.on_chain_address.clone())
             } else {
@@ -342,35 +338,43 @@
         }
 
         async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             app.connect_node_id      = req.node_id.clone();
             app.connect_node_address = req.address.clone();
 
-            let ok = app.connect_to_node();
-            Json(if ok {
-                format!("Connected to {}", req.node_id)
-            } else {
-                app.status_message.clone()   
-            })
+            let _ok = app.connect_to_node();
+            Json(format!("Connection attempt to {}", req.node_id))
         }
 
 
 
         impl ServerApp {
             pub fn new_with_mode(mode: &str) -> Self {
+                // Load configuration
+                let config = AppConfig::load().expect("Failed to load configuration");
+                
+                // Validate configuration
+                if let Err(errors) = config.validate() {
+                    eprintln!("Configuration validation errors:");
+                    for error in errors {
+                        eprintln!("  - {}", error);
+                    }
+                    eprintln!("Please set the required environment variables.");
+                }
+                
                 let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
-                    "lsp" => (LSP_DATA_DIR, LSP_NODE_ALIAS, LSP_PORT),
+                    "lsp" => (config.get_lsp_data_dir(), config.lsp_node_alias.clone(), config.lsp_port),
                     _ => panic!("Invalid mode"),
                 };
 
                 let mut builder = Builder::new();
 
-                let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
+                let network = match config.network.to_lowercase().as_str() {
                     "signet" => Network::Signet,
                     "testnet" => Network::Testnet,
                     "bitcoin" => Network::Bitcoin,
                     _ => {
-                        println!("Warning: Unknown network in config, defaulting to Signet");
+                        println!("Warning: Unknown network in config, defaulting to Bitcoin");
                         Network::Bitcoin
                     }
                 };
@@ -388,10 +392,10 @@
                     "".into(),
                 );
 
-                println!("[Init] Setting storage directory: {}", data_dir);
-                builder.set_storage_dir_path(data_dir.to_string());
+                println!("[Init] Setting storage directory: {}", data_dir.display());
+                builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
 
-                let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
+                let audit_log_path = config.get_audit_log_path("lsp");
                 set_audit_log_path(&audit_log_path);
 
                 let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
@@ -400,18 +404,18 @@
                 println!("[Init] Setting node alias: {}", node_alias);
                 let _ = builder.set_node_alias(node_alias.to_string()).ok();
 
-                if node_alias == LSP_NODE_ALIAS {
+                if node_alias == config.lsp_node_alias {
                     println!("[Init] Configuring LSP parameters...");
                     let service_config = LSPS2ServiceConfig {
                         require_token: None,
                         advertise_service: true,
-                        channel_opening_fee_ppm: 0,
-                        channel_over_provisioning_ppm: 1_000_000,
-                        min_channel_opening_fee_msat: 0,
-                        min_channel_lifetime: 100,
-                        max_client_to_self_delay: 1024,
-                        min_payment_size_msat: 0,
-                        max_payment_size_msat: 100_000_000_000,
+                        channel_opening_fee_ppm: CHANNEL_OPENING_FEE_PPM,
+                        channel_over_provisioning_ppm: CHANNEL_OVER_PROVISIONING_PPM,
+                        min_channel_opening_fee_msat: MIN_CHANNEL_OPENING_FEE_MSAT,
+                        min_channel_lifetime: MIN_CHANNEL_LIFETIME,
+                        max_client_to_self_delay: DEFAULT_MAX_CLIENT_TO_SELF_DELAY,
+                        min_payment_size_msat: MIN_PAYMENT_SIZE_MSAT,
+                        max_payment_size_msat: MAX_PAYMENT_SIZE_MSAT,
                     };
                     builder.set_liquidity_provider_lsps2(service_config);
                 }
@@ -435,12 +439,14 @@
                 let btc_price = get_cached_price();
                 println!("[Init] Initial BTC price: {}", btc_price);
 
+                let expected_usd = config.expected_usd;
                 let mut app = Self {
                     node,
                     btc_price,
                     status_message: String::new(),
                     last_update: Instant::now(),
                     last_stability_check: Instant::now(),
+                    config,
                 
                     lightning_balance_btc: 0.0,
                     onchain_balance_btc:   0.0,
@@ -465,7 +471,7 @@
                     channel_id_to_close: String::new(),
                 
                     selected_channel_id:   String::new(),
-                    stable_channel_amount: EXPECTED_USD.to_string(),
+                    stable_channel_amount: expected_usd.to_string(),
                 
                     stable_channels: Vec::new(),
                 };
@@ -473,7 +479,7 @@
                 app.update_balances();
                 app.update_channel_info();
 
-                if node_alias == LSP_NODE_ALIAS {
+                if node_alias == app.config.lsp_node_alias {
                     app.load_stable_channels();
                 }
 
@@ -536,15 +542,15 @@
                                 .find(|c| c.channel_id == channel_id)
                             {
                                 // We need to divide this by 2.0 to account for how much the user put in
-                                let funded_usd = chan.channel_value_sats as f64 / 2.0 / 100_000_000.0 * self.btc_price;
-                                let tolerance = 0.01; // 1% tolerance band
-                                let lower = EXPECTED_USD * (1.0 - tolerance);
-                                let upper = EXPECTED_USD * (1.0 + tolerance);
+                                let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64 * self.btc_price;
+                                let tolerance = STABLE_CHANNEL_TOLERANCE;
+                                let lower = self.config.expected_usd * (1.0 - tolerance);
+                                let upper = self.config.expected_usd * (1.0 + tolerance);
                         
                                 if funded_usd >= lower && funded_usd <= upper {
                                     // Good: within tolerance → designate as stable
                                     self.selected_channel_id   = channel_id.to_string();
-                                    self.stable_channel_amount = EXPECTED_USD.to_string();
+                                    self.stable_channel_amount = self.config.expected_usd.to_string();
                                     self.edit_stable_channel(None);
                         
                                     audit_event("CHANNEL_READY_STABLE", json!({
@@ -553,7 +559,7 @@
                                     }));
                                     self.status_message = format!(
                                         "Channel {} is stable at ${} (funded ≈ ${:.2})",
-                                        channel_id, EXPECTED_USD, funded_usd
+                                        channel_id, self.config.expected_usd, funded_usd
                                     );
                                 } else {
                                     // Outside tolerance → don’t designate
@@ -563,7 +569,7 @@
                                     }));
                                     self.status_message = format!(
                                         "Channel {} funded at ${:.2}, not within tolerance of ${}",
-                                        channel_id, funded_usd, EXPECTED_USD
+                                        channel_id, funded_usd, self.config.expected_usd
                                     );
                                 }
                             }
@@ -628,7 +634,7 @@
                 let mut decoded_payload: Option<String> = None;
             
                 for tlv in custom_records {
-                    if tlv.type_num == 13377331 {
+                    if tlv.type_num == STABLE_CHANNEL_TLV_TYPE {
                         if let Ok(s) = String::from_utf8(tlv.value) {
                             decoded_payload = Some(s);
                         }
@@ -663,7 +669,7 @@
                     match self.node.bolt11_payment().receive(
                         msats,
                         &Bolt11InvoiceDescription::Direct(Description::new("Invoice".to_string()).unwrap()),
-                        3600,
+                        INVOICE_EXPIRY_SECS,
                     ) {
                         Ok(invoice) => {
                             self.invoice_result = invoice.to_string();
@@ -935,7 +941,7 @@
                             payment_made: false,
                             timestamp: 0,
                             formatted_datetime: "".to_string(),
-                            sc_dir: LSP_DATA_DIR.to_string(),
+                            sc_dir: self.config.get_lsp_data_dir().to_string_lossy().into_owned(),
                             prices: "".to_string(),
                             onchain_btc: Bitcoin::from_sats(0),
                             onchain_usd: USD(0.0),
@@ -963,7 +969,7 @@
                         );
                         audit_event("STABLE_EDITED", json!({"channel_id": channel_id_str, "target_usd": amount}));
                         self.selected_channel_id.clear();
-                        self.stable_channel_amount = EXPECTED_USD.to_string();
+                        self.stable_channel_amount = self.config.expected_usd.to_string();
                         return;
                     }
                 }
@@ -980,7 +986,7 @@
                     note: sc.note.clone(),  
                 }).collect();
             
-                let file_path = FilePath::new(LSP_DATA_DIR).join("stablechannels.json");
+                let file_path = self.config.get_lsp_data_dir().join("stablechannels.json");
             
                 if let Some(parent) = file_path.parent() {
                     fs::create_dir_all(parent).unwrap_or_else(|e| {
@@ -1006,7 +1012,7 @@
             }
 
             pub fn load_stable_channels(&mut self) {
-                let file_path = FilePath::new(LSP_DATA_DIR).join("stablechannels.json");
+                let file_path = self.config.get_lsp_data_dir().join("stablechannels.json");
 
                 if !file_path.exists() {
                     println!("No existing stable channels file found.");
@@ -1046,7 +1052,7 @@
                                                 payment_made: false,
                                                 timestamp: 0,
                                                 formatted_datetime: "".to_string(),
-                                                sc_dir: LSP_DATA_DIR.to_string(),
+                                                sc_dir: self.config.get_lsp_data_dir().to_string_lossy().into_owned(),
                                                 prices: "".to_string(),
                                                 onchain_btc: Bitcoin::from_sats(0),
                                                 onchain_usd: USD(0.0),

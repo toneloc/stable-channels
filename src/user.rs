@@ -21,29 +21,15 @@
     use crate::types::*;
     use crate::price_feeds::{get_cached_price, get_latest_price};
     use crate::stable;
+    use crate::constants::*;
+    use crate::config::AppConfig;
     use std::path::PathBuf;
-    use dirs::data_dir;
 
-    const DEFAULT_NETWORK: &str = "bitcoin";
+    // Configuration will be loaded from AppConfig
 
-    const USER_NODE_ALIAS: &str = "user";
-    const USER_PORT: u16 = 9736;
-
-    // Populate the below two parameters to run locally
-    const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
-    const DEFAULT_GATEWAY_PUBKEY: &str = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed";
-
-    const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
-    const DEFAULT_GATEWAY_ADDRESS: &str = "213.174.156.80:9735";
-    const EXPECTED_USD: f64 = 100.0;
-    const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api";
-
-    // Data will find the relvant path based on the OS
-    fn user_data_dir() -> PathBuf {
-        data_dir()
-            .expect("Could not determine user data dir")
-            .join("StableChannels")
-            .join("user")
+    // Data will find the relevant path based on the OS
+    fn user_data_dir(config: &AppConfig) -> PathBuf {
+        config.get_user_data_dir()
     }
 
     pub struct UserApp {
@@ -59,6 +45,7 @@
         show_log_window: bool,
         log_contents: String,
         log_last_read: std::time::Instant,
+        config: AppConfig,
         
         // UI fields
         pub invoice_amount: String,
@@ -84,23 +71,37 @@
         pub fn new() -> Result<Self, String> {
             println!("Initializing user node...");
 
-            // for testing: const USER_DATA_DIR: &str = "data/user";
-            let data_dir = user_data_dir();
+            // Load configuration
+            let config = AppConfig::load().map_err(|e| format!("Failed to load config: {}", e))?;
             
-            let lsp_pubkey = PublicKey::from_str(DEFAULT_LSP_PUBKEY)
+            // Validate configuration
+            if let Err(errors) = config.validate() {
+                eprintln!("Configuration validation errors:");
+                for error in errors {
+                    eprintln!("  - {}", error);
+                }
+                eprintln!("Please set the required environment variables.");
+            }
+
+            let data_dir = user_data_dir(&config);
+            
+            let lsp_pubkey = config.lsp_pubkey
+                .as_ref()
+                .ok_or("LSP pubkey not configured. Set STABLE_CHANNELS_LSP_PUBKEY environment variable.")?
+                .parse::<PublicKey>()
                 .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
-            let audit_log_path = data_dir.join("audit_log.txt").to_string_lossy().into_owned();
+            let audit_log_path = config.get_audit_log_path("user");
             set_audit_log_path(&audit_log_path);
 
             let mut builder = Builder::new();
             
-            let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
+            let network = match config.network.to_lowercase().as_str() {
                 "signet" => Network::Signet,
                 "testnet" => Network::Testnet,
                 "bitcoin" => Network::Bitcoin,
                 _ => {
-                    println!("Warning: Unknown network in config, defaulting to Signet");
+                    println!("Warning: Unknown network in config, defaulting to Bitcoin");
                     Network::Bitcoin
                 }
             };
@@ -110,26 +111,32 @@
 
             let esplora_cfg = EsploraSyncConfig {
                 background_sync_config: Some(BackgroundSyncConfig {
-                    onchain_wallet_sync_interval_secs: 160,   // was 80s (default)
-                    lightning_wallet_sync_interval_secs: 60, // was 30s (default)
-                    fee_rate_cache_update_interval_secs: 1200 // was 600s (default)
+                    onchain_wallet_sync_interval_secs: ONCHAIN_WALLET_SYNC_INTERVAL_SECS,
+                    lightning_wallet_sync_interval_secs: LIGHTNING_WALLET_SYNC_INTERVAL_SECS,
+                    fee_rate_cache_update_interval_secs: FEE_RATE_CACHE_UPDATE_INTERVAL_SECS
                 }),
             };            
 
-            builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), Some(esplora_cfg));
+            builder.set_chain_source_esplora(config.chain_source_url.clone(), Some(esplora_cfg));
             builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
-            builder.set_listening_addresses(vec![format!("127.0.0.1:{}", USER_PORT).parse().unwrap()]).unwrap();
-            let _ = builder.set_node_alias(USER_NODE_ALIAS.to_string());
+            builder.set_listening_addresses(vec![format!("127.0.0.1:{}", config.user_port).parse().unwrap()]).unwrap();
+            let _ = builder.set_node_alias(config.user_node_alias.clone());
 
             // Let's set up our LSP
+            let lsp_address = config.lsp_address
+                .as_ref()
+                .ok_or("LSP address not configured. Set STABLE_CHANNELS_LSP_ADDRESS environment variable.")?
+                .parse::<SocketAddress>()
+                .map_err(|e| format!("Invalid LSP address: {}", e))?;
+                
             builder.set_liquidity_source_lsps2(
                 lsp_pubkey,
-                SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap(),
+                lsp_address.clone(),
                 None,
             );
             builder.set_liquidity_source_lsps1(
                 lsp_pubkey,
-                SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap(),
+                lsp_address,
                 None,
             );
 
@@ -139,17 +146,19 @@
             println!("User node started: {}", node.node_id());
 
             // We try to connect to the "GATEWAY NODE" ... a well-connected Lightning node
-            if let Ok(pubkey) = PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY) {
-                let socket_addr = SocketAddress::from_str(DEFAULT_GATEWAY_ADDRESS).unwrap();
-                if let Err(e) = node.connect(pubkey, socket_addr, true) {
-                    println!("Failed to connect to Gateway node: {}", e);
+            if let (Some(gateway_pubkey_str), Some(gateway_address_str)) = (&config.gateway_pubkey, &config.gateway_address) {
+                if let Ok(pubkey) = PublicKey::from_str(gateway_pubkey_str) {
+                    if let Ok(socket_addr) = SocketAddress::from_str(gateway_address_str) {
+                        if let Err(e) = node.connect(pubkey, socket_addr, true) {
+                            println!("Failed to connect to Gateway node: {}", e);
+                        }
+                    }
                 }
             }
             
             // And the LSP
-            if let Ok(pubkey) = PublicKey::from_str(DEFAULT_LSP_PUBKEY) {
-                let socket_addr = SocketAddress::from_str(DEFAULT_LSP_ADDRESS).unwrap();
-                if let Err(e) = node.connect(pubkey, socket_addr, true) {
+            if let Ok(socket_addr) = SocketAddress::from_str(config.lsp_address.as_ref().unwrap()) {
+                if let Err(e) = node.connect(lsp_pubkey, socket_addr, true) {
                     println!("Failed to connect to LSP node: {}", e);
                 }
             }
@@ -165,8 +174,8 @@
                 channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]),
                 counterparty: lsp_pubkey,
                 is_stable_receiver: true,
-                expected_usd: USD::from_f64(EXPECTED_USD),
-                expected_btc: Bitcoin::from_usd(USD::from_f64(EXPECTED_USD), btc_price),
+                expected_usd: USD::from_f64(config.expected_usd),
+                expected_btc: Bitcoin::from_usd(USD::from_f64(config.expected_usd), btc_price),
                 stable_receiver_btc: Bitcoin::default(),
                 stable_receiver_usd: USD::default(),
                 stable_provider_btc: Bitcoin::default(),
@@ -214,6 +223,7 @@
                 balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
                 confirm_close_popup: false,
                 stable_message: String::new(),
+                config,
             };
 
             {
@@ -252,7 +262,7 @@
                             sc.timestamp = current_unix_time();
                         }
                     }
-                    sleep(Duration::from_secs(30));
+                    sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
                 }
             });
 
@@ -300,7 +310,7 @@
                     }
 
                     // Sleep between checks, but be ready to interrupt if needed
-                    std::thread::sleep(Duration::from_secs(30));
+                    std::thread::sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
                 }
             });
 
@@ -327,7 +337,7 @@
             //     max_proportional_lsp_fee_limit_ppm_msat
             // );
             
-            let msats = USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price);
+            let msats = USD::to_msats(USD::from_f64(self.config.expected_usd), latest_price);
             
             // Round to the nearest sat (i.e., nearest 1_000 msats); ties round up.
             let msats_rounded = ((msats.saturating_add(500)) / 1_000) * 1_000;
@@ -335,12 +345,12 @@
             let result = self.node.bolt11_payment().receive_via_jit_channel(
                 msats_rounded,
                 &description,
-                3600,
-                Some(10_000_000)
+                INVOICE_EXPIRY_SECS,
+                Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT)
             );
 
             audit_event("JIT_INVOICE_ATTEMPT", json!({
-                "expected_usd": EXPECTED_USD,
+                "expected_usd": self.config.expected_usd,
                 "btc_price": latest_price
             }));
 
@@ -349,7 +359,7 @@
                     self.invoice_result = invoice.to_string();
                     audit_event("JIT_INVOICE_GENERATED", json!({
                         "invoice": self.invoice_result,
-                        "amount_msats": USD::to_msats(USD::from_f64(EXPECTED_USD), latest_price)
+                        "amount_msats": USD::to_msats(USD::from_f64(self.config.expected_usd), latest_price)
                     }));
                     let code = QrCode::new(&self.invoice_result).unwrap();
                     let bits = code.to_colors();
@@ -409,7 +419,7 @@
                     &ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
                         ldk_node::lightning_invoice::Description::new("Invoice".to_string()).unwrap()
                     ),
-                    3600,
+                    INVOICE_EXPIRY_SECS,
                 ) {
                     Ok(invoice) => {
                         self.invoice_result = invoice.to_string();
@@ -525,7 +535,7 @@
             let amt = 1; 
             let custom_str = self.stable_message.clone();
             let custom_tlv = ldk_node::CustomTlvRecord {
-                type_num: 13377331,
+                type_num: STABLE_CHANNEL_TLV_TYPE,
                 value: custom_str.as_bytes().to_vec(),
             };
     
@@ -967,8 +977,8 @@
                         
                             ui.add_space(8.0);
 
-                            // Show USD stable balance, or "---" if < 2
-                            let stable_usd_display = if stable_usd.0 < 2.0 {
+                            // Show USD stable balance, or "---" if < MIN_DISPLAY_USD
+                            let stable_usd_display = if stable_usd.0 < MIN_DISPLAY_USD {
                                 "---".to_string()
                             } else {
                                 format!("{:.2}", stable_usd.0)
