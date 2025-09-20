@@ -49,6 +49,53 @@ Run `cargo run --bin stable-channels user`. This will start the app on mainnet. 
 
 Check out logs, key files, and other information in `/data`.
 
+### Configuration
+
+The application supports configuration via environment variables or a `.env` file:
+
+#### Quick Setup
+```bash
+# Copy configuration template
+cp env.example .env
+
+# Edit with your values
+nano .env
+
+# Run the application
+cargo run
+```
+
+#### Required Environment Variables
+- `STABLE_CHANNELS_LSP_PUBKEY` - LSP node public key
+- `STABLE_CHANNELS_LSP_ADDRESS` - LSP node address (e.g., `100.25.168.115:9737`)
+
+#### Optional Environment Variables (with defaults)
+- `STABLE_CHANNELS_NETWORK` - Bitcoin network (`bitcoin`/`testnet`)
+- `STABLE_CHANNELS_USER_NODE_ALIAS` - User node alias (`user`)
+- `STABLE_CHANNELS_USER_PORT` - User node port (`9736`)
+- `STABLE_CHANNELS_LSP_NODE_ALIAS` - LSP node alias (`lsp`)
+- `STABLE_CHANNELS_LSP_PORT` - LSP node port (`9737`)
+- `STABLE_CHANNELS_CHAIN_SOURCE_URL` - Bitcoin API endpoint (`https://blockstream.info/api`)
+- `STABLE_CHANNELS_EXPECTED_USD` - Expected USD amount (`100.0`)
+
+#### Running Different Components
+```bash
+# User interface
+cargo run
+
+# LSP backend server
+cargo run --bin lsp_backend
+
+# LSP dashboard
+cargo run --bin lsp_frontend
+```
+
+#### Data Directories
+- **User data**: `~/.local/share/StableChannels/user/` (Linux/Mac) or `%APPDATA%\StableChannels\user\` (Windows)
+- **LSP data**: `~/.local/share/StableChannels/lsp/` (Linux/Mac) or `%APPDATA%\StableChannels\lsp\` (Windows)
+
+<sub><sup>*actual directory might differ depending on user's system</sup></sub>
+
 ### Stable Channels Process
 
 Every 30 seconds, the price of bitcoin:
