@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 use dirs::data_dir;
+use crate::constants::*;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -11,10 +12,10 @@ pub struct AppConfig {
     pub lsp_port: u16,
     pub chain_source_url: String,
     pub expected_usd: f64,
-    pub lsp_pubkey: Option<String>,
-    pub gateway_pubkey: Option<String>,
-    pub lsp_address: Option<String>,
-    pub gateway_address: Option<String>,
+    pub lsp_pubkey: String,
+    pub gateway_pubkey: String,
+    pub lsp_address: String,
+    pub gateway_address: String,
     pub bitcoin_rpc_user: Option<String>,
     pub bitcoin_rpc_password: Option<String>,
 }
@@ -32,28 +33,19 @@ impl AppConfig {
             lsp_port: env_var_or_default_parse("STABLE_CHANNELS_LSP_PORT", DEFAULT_LSP_PORT),
             chain_source_url: env_var_or_default("STABLE_CHANNELS_CHAIN_SOURCE_URL", DEFAULT_CHAIN_URL),
             expected_usd: env_var_or_default_parse("STABLE_CHANNELS_EXPECTED_USD", DEFAULT_EXPECTED_USD),
-            lsp_pubkey: env::var("STABLE_CHANNELS_LSP_PUBKEY").ok(),
-            gateway_pubkey: env::var("STABLE_CHANNELS_GATEWAY_PUBKEY").ok(),
-            lsp_address: env::var("STABLE_CHANNELS_LSP_ADDRESS").ok(),
-            gateway_address: env::var("STABLE_CHANNELS_GATEWAY_ADDRESS").ok(),
+            lsp_pubkey: env::var("STABLE_CHANNELS_LSP_PUBKEY").unwrap_or_else(|_| DEFAULT_LSP_PUBKEY.to_string()),
+            gateway_pubkey: env::var("STABLE_CHANNELS_GATEWAY_PUBKEY").unwrap_or_else(|_| DEFAULT_GATEWAY_PUBKEY.to_string()),
+            lsp_address: env::var("STABLE_CHANNELS_LSP_ADDRESS").unwrap_or_else(|_| DEFAULT_LSP_ADDRESS.to_string()),
+            gateway_address: env::var("STABLE_CHANNELS_GATEWAY_ADDRESS").unwrap_or_else(|_| DEFAULT_GATEWAY_ADDRESS.to_string()),
             bitcoin_rpc_user: env::var("STABLE_CHANNELS_BITCOIN_RPC_USER").ok(),
             bitcoin_rpc_password: env::var("STABLE_CHANNELS_BITCOIN_RPC_PASSWORD").ok(),
         })
     }
     
     pub fn validate(&self) -> Result<(), Vec<String>> {
-        let mut errors = Vec::new();
-        if self.lsp_pubkey.is_none() {
-            errors.push("STABLE_CHANNELS_LSP_PUBKEY environment variable is not set.".to_string());
-        }
-        if self.lsp_address.is_none() {
-            errors.push("STABLE_CHANNELS_LSP_ADDRESS environment variable is not set.".to_string());
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        // No validation needed since we now have smart defaults
+        // All required fields will have values from constants if not set via environment
+        Ok(())
     }
     
     pub fn get_user_data_dir(&self) -> PathBuf {

@@ -51,9 +51,15 @@ Check out logs, key files, and other information in `/data`.
 
 ### Configuration
 
-The application supports configuration via environment variables or a `.env` file:
+The application works out of the box with smart defaults, but supports customization via environment variables or a `.env` file:
 
-#### Quick Setup
+#### Quick Setup (Works Out of the Box)
+```bash
+# Just run - no configuration needed!
+cargo run
+```
+
+#### Custom Configuration (Optional)
 ```bash
 # Copy configuration template
 cp env.example .env
@@ -65,11 +71,9 @@ nano .env
 cargo run
 ```
 
-#### Required Environment Variables
-- `STABLE_CHANNELS_LSP_PUBKEY` - LSP node public key
-- `STABLE_CHANNELS_LSP_ADDRESS` - LSP node address (e.g., `100.25.168.115:9737`)
-
-#### Optional Environment Variables (with defaults)
+#### Environment Variables (Optional - has smart defaults)
+- `STABLE_CHANNELS_LSP_PUBKEY` - LSP node public key (default: included)
+- `STABLE_CHANNELS_LSP_ADDRESS` - LSP node address (default: `100.25.168.115:9737`)
 - `STABLE_CHANNELS_NETWORK` - Bitcoin network (`bitcoin`/`testnet`)
 - `STABLE_CHANNELS_USER_NODE_ALIAS` - User node alias (`user`)
 - `STABLE_CHANNELS_USER_PORT` - User node port (`9736`)

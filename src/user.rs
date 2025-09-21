@@ -86,8 +86,6 @@
             let data_dir = user_data_dir(&config);
             
             let lsp_pubkey = config.lsp_pubkey
-                .as_ref()
-                .ok_or("LSP pubkey not configured. Set STABLE_CHANNELS_LSP_PUBKEY environment variable.")?
                 .parse::<PublicKey>()
                 .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
@@ -124,8 +122,6 @@
 
             // Let's set up our LSP
             let lsp_address = config.lsp_address
-                .as_ref()
-                .ok_or("LSP address not configured. Set STABLE_CHANNELS_LSP_ADDRESS environment variable.")?
                 .parse::<SocketAddress>()
                 .map_err(|e| format!("Invalid LSP address: {}", e))?;
                 
@@ -146,18 +142,14 @@
             println!("User node started: {}", node.node_id());
 
             // We try to connect to the "GATEWAY NODE" ... a well-connected Lightning node
-            if let (Some(gateway_pubkey_str), Some(gateway_address_str)) = (&config.gateway_pubkey, &config.gateway_address) {
-                if let Ok(pubkey) = PublicKey::from_str(gateway_pubkey_str) {
-                    if let Ok(socket_addr) = SocketAddress::from_str(gateway_address_str) {
-                        if let Err(e) = node.connect(pubkey, socket_addr, true) {
-                            println!("Failed to connect to Gateway node: {}", e);
-                        }
-                    }
+            if let (Ok(gateway_pubkey), Ok(gateway_address)) = (PublicKey::from_str(&config.gateway_pubkey), SocketAddress::from_str(&config.gateway_address)) {
+                if let Err(e) = node.connect(gateway_pubkey, gateway_address, true) {
+                    println!("Failed to connect to Gateway node: {}", e);
                 }
             }
             
             // And the LSP
-            if let Ok(socket_addr) = SocketAddress::from_str(config.lsp_address.as_ref().unwrap()) {
+            if let Ok(socket_addr) = SocketAddress::from_str(&config.lsp_address) {
                 if let Err(e) = node.connect(lsp_pubkey, socket_addr, true) {
                     println!("Failed to connect to LSP node: {}", e);
                 }
