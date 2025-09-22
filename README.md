@@ -51,7 +51,6 @@ Logs and key files can be found in these directories:
 - Linux   - `~/.local/share/StableChannels`
 - Mac     - `~/Library/Application\ Support/StableChannels`
 - Windows - `%APPDATA%\StableChannels`
-
 <sub><sup>*actual directory might differ depending on user's system</sup></sub>
 
 ### Configuration
