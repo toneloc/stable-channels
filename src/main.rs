@@ -15,6 +15,8 @@ pub mod types;
 pub mod audit;
 pub mod stable;
 pub mod user;
+pub mod constants;
+pub mod config;
 
 fn main() {
     let mode = env::args().nth(1).unwrap_or_else(|| "user".to_string());

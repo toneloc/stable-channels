@@ -62,7 +62,7 @@ impl Default for Bitcoin {
 }
 
 impl Bitcoin {
-    const SATS_IN_BTC: u64 = 100_000_000;
+    const SATS_IN_BTC: u64 = crate::constants::SATS_IN_BTC;
 
     pub fn from_sats(sats: u64) -> Self {
         Self { sats }
