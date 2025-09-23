@@ -1,5 +1,5 @@
 use eframe::{egui, App, NativeOptions};
-use egui;
+use egui::{RichText, CollapsingHeader};
 use futures_util::FutureExt; // now_or_never
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

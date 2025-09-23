@@ -144,7 +144,7 @@
             tokio::spawn(async {
                 loop {
                     {
-                        let app = APP.lock().unwrap();
+                        let mut app = APP.lock().unwrap();
 
                         app.poll_events();
 
@@ -188,7 +188,7 @@
         // GET /api/balance
         async fn get_balance() -> Json<Balance> {
             let (total_usd, lightning_usd, onchain_usd, lightning_sats, onchain_sats) = {
-                let app = APP.lock().unwrap();
+                let mut app = APP.lock().unwrap();
 
                 // Refresh cached price + app.{lightning, onchain, total}_* fields
                 app.update_balances();
@@ -219,7 +219,7 @@
 
         /// GET /api/channels
         pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
-            let app = APP.lock().expect("APP mutex poisoned");
+            let mut app = APP.lock().expect("APP mutex poisoned");
             let price = app.btc_price;                       // cache once
 
             let out: Vec<ChannelInfo> = app
@@ -272,7 +272,7 @@
 
         /// POST /api/close_channel
         async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
-            let app = APP.lock().unwrap();
+            let mut app = APP.lock().unwrap();
             for chan in app.node.list_channels() {
                 if hex::encode(chan.channel_id.0) == id {
                     let res = app.node.close_channel(&chan.user_channel_id, chan.counterparty_node_id);
@@ -286,7 +286,7 @@
         }
 
         async fn edit_stable_channel_handler(Json(req): Json<EditStableChannelReq>) -> Json<EditStableChannelRes> {
-            let app = APP.lock().unwrap();
+            let mut app = APP.lock().unwrap();
             app.selected_channel_id = req.channel_id;
         
             if let Some(t) = req.target_usd {
@@ -314,14 +314,14 @@
         }
         
         async fn pay_handler(Json(req): Json<PayReq>) -> Json<String> {
-            let app = APP.lock().unwrap();
+            let mut app = APP.lock().unwrap();
             app.invoice_to_pay = req.invoice;
             let _ok = app.pay_invoice();
             Json(app.status_message.clone())
         }
 
         async fn onchain_send_handler(Json(req): Json<OnchainSendReq>) -> Json<String> {
-            let app = APP.lock().unwrap();
+            let mut app = APP.lock().unwrap();
             app.on_chain_address = req.address;
             app.on_chain_amount  = req.amount;
             app.send_onchain();                    // updates status_message
@@ -329,7 +329,7 @@
         }
 
         async fn get_onchain_address() -> Json<String> {
-            let app = APP.lock().unwrap();
+            let mut app = APP.lock().unwrap();
             if app.get_address() {
                 Json(app.on_chain_address.clone())
             } else {
@@ -338,7 +338,7 @@
         }
 
         async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
-            let app = APP.lock().unwrap();
+            let mut app = APP.lock().unwrap();
             app.connect_node_id      = req.node_id.clone();
             app.connect_node_address = req.address.clone();
 
