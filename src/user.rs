@@ -57,12 +57,13 @@
         balance_last_update: std::time::Instant,
         confirm_close_popup: bool,
         pub stable_message: String,
+        show_confirm_alloc: bool,
+        
 
         // Balance fields
         pub lightning_balance_btc: f64,
         pub onchain_balance_btc: f64,
         pub lightning_balance_usd: f64,
-        pub onchain_balance_usd: f64,
         pub total_balance_btc: f64,
         pub total_balance_usd: f64,
     }
@@ -173,7 +174,7 @@
                 stable_provider_btc: Bitcoin::default(),
                 stable_provider_usd: USD::default(),
                 latest_price: btc_price,
-                risk_level: 0,
+                btc_allocation: 0,
                 payment_made: false,
                 timestamp: 0,
                 formatted_datetime: "2021-06-01 12:00:00".to_string(),
@@ -204,7 +205,6 @@
                 lightning_balance_btc: 0.0,
                 onchain_balance_btc: 0.0,
                 lightning_balance_usd: 0.0,
-                onchain_balance_usd: 0.0,
                 total_balance_btc: 0.0,
                 total_balance_usd: 0.0,
                 show_log_window: false,
@@ -216,6 +216,7 @@
                 confirm_close_popup: false,
                 stable_message: String::new(),
                 config,
+                show_confirm_alloc: false,
             };
 
             {
@@ -475,10 +476,9 @@
             self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
             
             self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-            self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
             
             self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
-            self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+            self.total_balance_usd = self.lightning_balance_usd;
         }
         
         fn close_active_channel(&mut self) {
@@ -522,6 +522,75 @@
         //         }
         //     }
         // }
+
+        fn change_allocation(&mut self, btc_pct_i32: i32) {
+            // Persist slider value
+            let mut sc = self.stable_channel.lock().unwrap();
+            sc.btc_allocation = btc_pct_i32;
+        
+            // Price
+            let price = if sc.latest_price > 0.0 { sc.latest_price } else { self.btc_price };
+        
+            // Current composition
+            let pegged_btc_now = if sc.is_stable_receiver {
+                sc.stable_receiver_btc.to_btc()
+            } else {
+                sc.stable_provider_btc.to_btc()
+            };
+        
+            // LN & on-chain
+            let total_ln_btc = self.lightning_balance_btc;
+            let unstabilized_ln_btc = (total_ln_btc - pegged_btc_now).max(0.0);
+            let native_btc_now = self.onchain_balance_btc + unstabilized_ln_btc;
+        
+            // Convert to USD
+            let pegged_usd_now = pegged_btc_now * price;
+            let native_usd_now = native_btc_now * price;
+            let total_usd_gross = pegged_usd_now + native_usd_now;
+        
+            // Fee (USD)
+            let fee_pct = 0.25_f64;
+            let fee_usd = total_usd_gross * (fee_pct / 100.0);
+            let total_usd_net = (total_usd_gross - fee_usd).max(0.0);
+        
+            // Targets (USD-first)
+            let btc_pct = btc_pct_i32.clamp(0, 100) as f64;
+            let usd_pct = (100 - btc_pct_i32).clamp(0, 100) as f64;
+        
+            let target_btc_usd = total_usd_net * (btc_pct / 100.0);
+            let target_usd_usd = total_usd_net - target_btc_usd;
+        
+            // Write peg target (USD leg) – this is what stability logic will chase
+            sc.expected_usd = USD::from_f64(target_usd_usd);
+            sc.expected_btc = Bitcoin::from_usd(sc.expected_usd, price); // convenience for display
+        
+            // Status + audit
+            self.status_message = format!(
+                "Allocation set to {:.0}% BTC (${:.2}) / {:.0}% USD (${:.2}) • fee ${:.2}",
+                btc_pct, target_btc_usd, usd_pct, target_usd_usd, fee_usd
+            );
+        
+            audit_event("ALLOCATION_SET", serde_json::json!({
+                "btc_allocation_pct": btc_pct,
+                "price": price,
+                "pegged_usd_now": pegged_usd_now,
+                "native_usd_now": native_usd_now,
+                "total_usd_gross": total_usd_gross,
+                "fee_pct": fee_pct,
+                "fee_usd": fee_usd,
+                "total_usd_net": total_usd_net,
+                "target_btc_usd": target_btc_usd,
+                "target_usd_usd": target_usd_usd,
+            }));
+        
+            drop(sc); // unlock before calling into stable
+        
+            // Trigger stability with the new target
+            if let Ok(mut sc2) = self.stable_channel.lock() {
+                stable::check_stability(&self.node, &mut sc2, price);
+                update_balances(&self.node, &mut sc2);
+            }
+        }
 
         fn send_stable_message(&mut self) {
             let amt = 1; 
@@ -1005,94 +1074,178 @@
                             );
                             ui.add_space(8.0);
                         
-                            egui::Grid::new("bitcoin_holdings_grid")
-                                .spacing(Vec2::new(10.0, 6.0))
-                                .show(ui, |ui| {
-                                    // Use consistent sources (BTC as f64) and explicit formatting.
-                                    let pegged_btc_f64 = pegged_btc.to_btc();
-                                    let native_btc_f64 = self.onchain_balance_btc;
-                                    let total_btc_f64  = pegged_btc_f64 + native_btc_f64;
-                            
-                                    ui.label("Pegged Bitcoin (Lightning):");
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.8} BTC", pegged_btc_f64))
-                                            .monospace(),
-                                    );
-                                    ui.end_row();
-                            
-                                    ui.label("Native Bitcoin (On-Chain):");
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.8} BTC", native_btc_f64))
-                                            .monospace(),
-                                    );
-                                    ui.end_row();
-                            
-                                    ui.label("Total Bitcoin:");
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.8} BTC", total_btc_f64))
-                                            .monospace()
-                                            .strong(),
-                                    );
-                                    ui.end_row();
-                            });
+                                egui::Grid::new("bitcoin_holdings_grid")
+                                    .spacing(Vec2::new(10.0, 6.0))
+                                    .show(ui, |ui| {
+                                        let pegged_btc_f64 = pegged_btc.to_btc();
+                                        let total_ln_btc = self.lightning_balance_btc;
+                                        let unstabilized_ln_btc = (total_ln_btc - pegged_btc_f64).max(0.0);
+                                        
+                                        // WE are NOT counting on-chain BTC here 
+                                        // Only unstabilized LN BTC
+                                        let native_btc_f64 = unstabilized_ln_btc;
+                                        
+                                        let total_btc_f64 = pegged_btc_f64 + native_btc_f64;
+                                
+                                        ui.label("Pegged Bitcoin (USD):");
+                                        ui.label(
+                                            egui::RichText::new(format!("{:.8} BTC", pegged_btc_f64))
+                                                .monospace(),
+                                        );
+                                        ui.end_row();
+                                
+                                        ui.label("Native Bitcoin (BTC):");
+                                        ui.label(
+                                            egui::RichText::new(format!("{:.8} BTC", native_btc_f64))
+                                                .monospace(),
+                                        );
+                                        ui.end_row();
+                                
+                                        ui.label("Total Bitcoin:");
+                                        ui.label(
+                                            egui::RichText::new(format!("{:.8} BTC", total_btc_f64))
+                                                .monospace()
+                                                .strong(),
+                                        );
+                                        ui.end_row();
+                                });
 
                         });
 
                         ui.add_space(20.0);
 
                         // Stability Allocation
-                        // ui.group(|ui| {
-                        //     ui.add_space(10.0);
+                        ui.group(|ui| {
+                            ui.add_space(10.0);
                         
-                        //     ui.vertical_centered(|ui| {
-                        //         ui.heading("Stability Allocation");
+                            ui.vertical_centered(|ui| {
+                                ui.heading("Portfolio");
                         
-                        //         ui.add_space(20.0);
-                        
-                        //         let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
+                                ui.add_space(20.0);
 
-                        //         ui.add_sized(
-                        //             [100.0, 20.0], 
-                        //             egui::Slider::new(&mut risk_level, 0..=100)
-                        //                 .show_value(false)
-                        //         );
-                        
-                        //         if ui.ctx().input(|i| i.pointer.any_down()) {
-                        //             self.stable_channel.lock().unwrap().risk_level = risk_level;
-                        //         }
-                        
-                        //         ui.add_space(10.0);
-                        
-                        //         ui.label(
-                        //             egui::RichText::new(format!(
-                        //                 "{}% BTC, {}% USD",
-                        //                 risk_level,
-                        //                 100 - risk_level
-                        //             ))
-                        //             .size(16.0)
-                        //             .color(egui::Color32::GRAY),
-                        //         );
-                        
-                        //         ui.add_space(20.0);
-                        
-                        //         if ui.add(
-                        //             egui::Button::new(
-                        //                 egui::RichText::new("Set Allocation")
-                        //                     .size(16.0)
-                        //                     .color(egui::Color32::WHITE)
-                        //             )
-                        //             .min_size(egui::vec2(150.0, 40.0))
-                        //             .fill(egui::Color32::from_rgb(247, 147, 26))
-                        //             .rounding(6.0)
-                        //         ).clicked() {
-                        //             // No action needed
-                        //         }
-                        //         ui.add_space(10.0);
+                                let mut btc_allocation = self.stable_channel.lock().unwrap().btc_allocation; // 0..=100
 
-                        //     });
-                        // });
+                                ui.scope(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() * 0.10).round());
+                                        ui.style_mut().spacing.slider_width = (ui.available_width() * 0.80_f32).round();
+                                        ui.add(egui::Slider::new(&mut btc_allocation, 0..=100).show_value(false));
+                                    });
+                                });
+
+                                if ui.ctx().input(|i| i.pointer.any_down()) {
+                                    self.stable_channel.lock().unwrap().btc_allocation = btc_allocation;
+                                }
                         
-                        // ui.add_space(20.0);
+                                ui.add_space(10.0);
+                        
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}% BTC, {}% USD",
+                                        btc_allocation,
+                                        100 - btc_allocation
+                                    ))
+                                    .size(16.0)
+                                    .color(egui::Color32::GRAY),
+                                );
+                        
+                                ui.add_space(20.0);
+                        
+                                if ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Set Allocation")
+                                            .size(16.0)
+                                            .color(egui::Color32::WHITE)
+                                    )
+                                    .min_size(egui::vec2(150.0, 40.0))
+                                    .fill(egui::Color32::from_rgb(247, 147, 26))
+                                    .rounding(6.0)
+                                ).clicked() {
+                                    self.show_confirm_alloc = true;
+                                }
+
+                                ui.add_space(10.0);
+
+                            });
+
+                            // Allocation confirmation dialog
+                            if self.show_confirm_alloc {
+                                // Use current btc_allocation and balances to preview amounts
+                                let btc_allocation_now = self.stable_channel.lock().unwrap().btc_allocation; // 0..=100
+                                // Total BTC to display split preview (pegged + native)
+                                let sc_for_preview = self.stable_channel.lock().unwrap();
+                                let pegged_btc = if sc_for_preview.is_stable_receiver {
+                                    sc_for_preview.stable_receiver_btc
+                                } else {
+                                    sc_for_preview.stable_provider_btc
+                                }.to_btc();
+                                drop(sc_for_preview); // release lock
+
+                                let price = self.btc_price.max(0.0);
+                                let btc_pct = btc_allocation_now as f64;
+                                let usd_pct = (100 - btc_allocation_now) as f64;
+                                
+                                // Current composition (in BTC)
+                                let total_ln_btc = self.lightning_balance_btc;
+                                let pegged_btc_now = pegged_btc;
+                                let unstabilized_ln_btc = (total_ln_btc - pegged_btc_now).max(0.0);
+                                let native_btc_now = self.onchain_balance_btc + unstabilized_ln_btc;
+                                
+                                // Convert to USD
+                                let pegged_usd_now = pegged_btc_now * price;
+                                let native_usd_now = native_btc_now * price;
+                                let total_usd_gross = pegged_usd_now + native_usd_now;
+                                
+                                // Fee (USD)
+                                let fee_pct = 0.25_f64;
+                                let fee_usd = total_usd_gross * (fee_pct / 100.0);
+                                let total_usd_net = (total_usd_gross - fee_usd).max(0.0);
+                                
+                                // Target USD split
+                                let target_btc_usd = total_usd_net * (btc_pct / 100.0);
+                                let target_usd_usd = total_usd_net - target_btc_usd;
+                                
+                                // Display in BTC for the preview (derived from USD)
+                                let btc_amt_btc = if price > 0.0 { target_btc_usd / price } else { 0.0 };
+                                let usd_amt_btc = if price > 0.0 { target_usd_usd / price } else { 0.0 };
+
+                                egui::Window::new("Confirm Allocation")
+                                    .collapsible(false)
+                                    .resizable(false)
+                                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                                    .show(ctx, |ui| {
+                                        ui.separator();
+                                        ui.add_space(8.0);
+
+                                        ui.label("Are you sure you want to change your allocation?");
+                                        ui.add_space(8.0);
+
+                                        ui.monospace(format!("{:.0}% BTC  (${:.2})  ≈ {:.8} BTC", btc_pct, target_btc_usd, btc_amt_btc));
+                                        ui.monospace(format!("{:.0}% USD  (${:.2})  ≈ {:.8} BTC", usd_pct, target_usd_usd, usd_amt_btc));
+                                        
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new(format!("{:.2}% fee (${:.2})", fee_pct, fee_usd)).small());
+                                        
+
+                                        ui.add_space(10.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Confirm").clicked() {
+                                                self.change_allocation(btc_allocation_now);
+                                                self.show_confirm_alloc = false;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                self.show_confirm_alloc = false;
+                                            }
+                                        });
+
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                    });
+                            }
+
+                        });
+                        
+                        ui.add_space(20.0);
         
                         ui.group(|ui| {
                             let sc = self.stable_channel.lock().unwrap();
@@ -1173,7 +1326,6 @@
                                     ui.horizontal(|ui| {
                                         ui.label("On-chain Balance:");
                                         ui.monospace(format!("{:.8} BTC", self.onchain_balance_btc));
-                                        ui.monospace(format!("(${:.2})", self.onchain_balance_usd));
                                     });
                                 
                                     ui.add_space(8.0);

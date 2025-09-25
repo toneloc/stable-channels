@@ -65,3 +65,7 @@ path = "src/bin/lsp_backend.rs"
 [[bin]]
 name = "lsp_frontend"
 path = "src/bin/lsp_frontend.rs"
+
+# Fixes App store "_CGSSetWindowBackgroundBlurRadius" bug
+[patch.crates-io]
+winit = { path = "vendor/winit" }
