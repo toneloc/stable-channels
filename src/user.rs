@@ -689,6 +689,8 @@
                             .hint_text("Invoice..."),
                     );
                     ui.add_space(8.0);
+        
+                    // Button 1: Copy
                     if ui
                         .add(
                             egui::Button::new(
@@ -703,8 +705,12 @@
                         .clicked()
                     {
                         ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                        self.status_message = "Invoice copied".to_string();
                     }
+        
                     ui.add_space(5.0);
+        
+                    // Button 2: Back
                     if ui
                         .add(
                             egui::Button::new(
@@ -720,10 +726,21 @@
                     {
                         self.waiting_for_payment = false;
                     }
+        
+                    // ↓↓↓ Moved the message to be **below both buttons**
+                    ui.add_space(6.0);
+                    if !self.status_message.is_empty() {
+                        ui.label(
+                            egui::RichText::new(&self.status_message)
+                                .color(egui::Color32::WHITE),
+                        );
+                    }
+                    // ↑↑↑ end move
+        
                     ui.add_space(8.0);
                 });
             });
-        }
+        }        
 
         fn show_onboarding_screen(&mut self, ctx: &egui::Context) {
             egui::CentralPanel::default().show(ctx, |ui| {
