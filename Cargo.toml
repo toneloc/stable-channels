@@ -65,3 +65,6 @@ path = "src/bin/lsp_backend.rs"
 [[bin]]
 name = "lsp_frontend"
 path = "src/bin/lsp_frontend.rs"
+
+[patch.crates-io]
+winit = { git = "https://github.com/toneloc/toneloc-winit-mas.git", rev = "7653bd2b0863428075a57ff4d2dbaf900352812a" }
