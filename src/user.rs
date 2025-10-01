@@ -673,7 +673,7 @@
                             .color(egui::Color32::WHITE),
                     );
                     ui.add_space(3.0);
-                    ui.label("This is a Bolt11 Lightning invoice.");
+                    ui.label("Bolt11 Lightning invoice.");
                     ui.add_space(8.0);
                     if let Some(ref qr) = self.qr_texture {
                         ui.image(qr);
