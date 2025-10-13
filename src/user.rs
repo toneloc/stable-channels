@@ -57,6 +57,8 @@
         balance_last_update: std::time::Instant,
         confirm_close_popup: bool,
         pub stable_message: String,
+        show_confirm_allocation: bool, 
+        ui_btc_allocation: i32, // for UI purposes for now - does not touch biz logic
 
         // Balance fields
         pub lightning_balance_btc: f64,
@@ -216,6 +218,8 @@
                 confirm_close_popup: false,
                 stable_message: String::new(),
                 config,
+                show_confirm_allocation: false,
+                ui_btc_allocation: 0, 
             };
 
             {
@@ -260,22 +264,6 @@
 
             Ok(app)
         }
-        // fn get_app_data_dir(component: &str) -> PathBuf {
-        //     let mut path = dirs::data_local_dir()
-        //         .unwrap_or_else(|| PathBuf::from("./data"))
-        //         .join("com.stablechannels");
-            
-        //     if !component.is_empty() {
-        //         path = path.join(component);
-        //     }
-            
-        //     // Ensure the directory exists
-        //     std::fs::create_dir_all(&path).unwrap_or_else(|e| {
-        //         eprintln!("Warning: Failed to create data directory: {}", e);
-        //     });
-            
-        //     path
-        // }
     
         fn start_background_if_needed(&mut self) {
             if self.background_started {
@@ -507,7 +495,7 @@
             }
         }
 
-        // for onchain deposits ...
+        // TODO - for onchain deposits ...
         // fn get_lsps1_channel(&mut self) {
         //     let lsp_balance_sat = 10_000;
         //     let client_balance_sat = 10_000;
@@ -522,6 +510,17 @@
         //         }
         //     }
         // }
+
+        fn change_allocation(&mut self, _btc_pct_i32: i32) {
+            // NO-OP: UI only. Intentionally does not modify StableChannel or targets.
+            // (Optional) Light feedback without changing state:
+            self.status_message = format!("(Preview only) Allocation set to {}% BTC / {}% USD",
+                _btc_pct_i32.clamp(0, 100),
+                (100 - _btc_pct_i32).clamp(0, 100)
+            );
+            // (Optional) audit only (still not changing biz logic):
+            audit_event("ALLOCATION_UI_CONFIRMED (Preview only)", serde_json::json!({ "btc_allocation_pct": _btc_pct_i32 }));
+        }
 
         fn send_stable_message(&mut self) {
             let amt = 1; 
@@ -1058,58 +1057,120 @@
                         ui.add_space(20.0);
 
                         // Stability Allocation
-                        // ui.group(|ui| {
-                        //     ui.add_space(10.0);
+                        ui.group(|ui| {
+                            ui.add_space(10.0);
+                            ui.vertical_centered(|ui| {
+                                ui.heading("Portfolio (TABConf exclusive preview)");
+                                ui.add_space(20.0);
                         
-                        //     ui.vertical_centered(|ui| {
-                        //         ui.heading("Stability Allocation");
+                                // Use UI-only state
+                                ui.scope(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() * 0.10).round());
+                                        ui.style_mut().spacing.slider_width = (ui.available_width() * 0.80_f32).round();
+                                        ui.add(egui::Slider::new(&mut self.ui_btc_allocation, 0..=100).show_value(false));
+                                    });
+                                });
                         
-                        //         ui.add_space(20.0);
+                                ui.add_space(10.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{}% BTC, {}% USD",
+                                        self.ui_btc_allocation,
+                                        100 - self.ui_btc_allocation
+                                    ))
+                                    .size(16.0)
+                                    .color(egui::Color32::GRAY),
+                                );
                         
-                        //         let mut risk_level = self.stable_channel.lock().unwrap().risk_level;
+                                ui.add_space(20.0);
+                        
+                                if ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Set Allocation")
+                                            .size(16.0)
+                                            .color(egui::Color32::WHITE)
+                                    )
+                                    .min_size(egui::vec2(150.0, 40.0))
+                                    .fill(egui::Color32::from_rgb(247, 147, 26))
+                                    .rounding(6.0)
+                                ).clicked() {
+                                    self.show_confirm_allocation = true;
+                                }
+                        
+                                ui.add_space(10.0);
+                            });
+                        
+                            if self.show_confirm_allocation {
+                                // Read-only peek for preview math (safe to read SC)
+                                let pegged_btc_now = {
+                                    let sc = self.stable_channel.lock().unwrap();
+                                    if sc.is_stable_receiver { sc.stable_receiver_btc } else { sc.stable_provider_btc }
+                                }.to_btc();
+                        
+                                let price = self.btc_price.max(0.0);
+                                let btc_pct = self.ui_btc_allocation as f64;
+                                let usd_pct = (100 - self.ui_btc_allocation) as f64;
+                        
+                                let total_ln_btc = self.lightning_balance_btc;
+                                let unstabilized_ln_btc = (total_ln_btc - pegged_btc_now).max(0.0);
+                                let native_btc_now = self.onchain_balance_btc + unstabilized_ln_btc;
+                        
+                                // Convert to USD for display
+                                let pegged_usd_now = pegged_btc_now * price;
+                                let native_usd_now = native_btc_now * price;
+                                let total_usd_gross = pegged_usd_now + native_usd_now;
+                        
+                                // Fee for display only
+                                let fee_pct = 0.25_f64;
+                                let fee_usd = total_usd_gross * (fee_pct / 100.0);
+                                let total_usd_net = (total_usd_gross - fee_usd).max(0.0);
+                        
+                                let target_btc_usd = total_usd_net * (btc_pct / 100.0);
+                                let target_usd_usd = total_usd_net - target_btc_usd;
+                        
+                                let btc_amt_btc = if price > 0.0 { target_btc_usd / price } else { 0.0 };
+                                let usd_amt_btc = if price > 0.0 { target_usd_usd / price } else { 0.0 };
+                        
+                                egui::Window::new("Confirm Allocation (Demo)")
+                                    .collapsible(false)
+                                    .resizable(false)
+                                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                                    .show(ctx, |ui| {
+                                        ui.separator();
+                                        ui.add_space(8.0);
 
-                        //         ui.add_sized(
-                        //             [100.0, 20.0], 
-                        //             egui::Slider::new(&mut risk_level, 0..=100)
-                        //                 .show_value(false)
-                        //         );
+                                        ui.label(egui::RichText::new("This is a TABConf preview of trading. No channel allocations are changed.").italics());
+                                        ui.add_space(6.0);
                         
-                        //         if ui.ctx().input(|i| i.pointer.any_down()) {
-                        //             self.stable_channel.lock().unwrap().risk_level = risk_level;
-                        //         }
+                                        ui.label("Are you sure you want to change your allocation?");
+                                        ui.add_space(8.0);
                         
-                        //         ui.add_space(10.0);
+                                        ui.monospace(format!("{:.0}% BTC  (${:.2})  ≈ {:.8} BTC", btc_pct, target_btc_usd, btc_amt_btc));
+                                        ui.monospace(format!("{:.0}% USD  (${:.2})  ≈ {:.8} BTC", usd_pct, target_usd_usd, usd_amt_btc));
                         
-                        //         ui.label(
-                        //             egui::RichText::new(format!(
-                        //                 "{}% BTC, {}% USD",
-                        //                 risk_level,
-                        //                 100 - risk_level
-                        //             ))
-                        //             .size(16.0)
-                        //             .color(egui::Color32::GRAY),
-                        //         );
+                                        ui.add_space(6.0);
+                                        ui.label(egui::RichText::new(format!("{:.2}% fee (${:.2})", fee_pct, fee_usd)).small());
                         
-                        //         ui.add_space(20.0);
+                                        ui.add_space(10.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Confirm").clicked() {
+                                                // UI-only call; does nothing to biz logic.
+                                                self.change_allocation(self.ui_btc_allocation);
+                                                self.show_confirm_allocation = false;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                self.show_confirm_allocation = false;
+                                            }
+                                        });
                         
-                        //         if ui.add(
-                        //             egui::Button::new(
-                        //                 egui::RichText::new("Set Allocation")
-                        //                     .size(16.0)
-                        //                     .color(egui::Color32::WHITE)
-                        //             )
-                        //             .min_size(egui::vec2(150.0, 40.0))
-                        //             .fill(egui::Color32::from_rgb(247, 147, 26))
-                        //             .rounding(6.0)
-                        //         ).clicked() {
-                        //             // No action needed
-                        //         }
-                        //         ui.add_space(10.0);
-
-                        //     });
-                        // });
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                    });
+                            }
+                        });
                         
-                        // ui.add_space(20.0);
+                        ui.add_space(20.0);
         
                         ui.group(|ui| {
                             let sc = self.stable_channel.lock().unwrap();
