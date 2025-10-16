@@ -1060,7 +1060,7 @@
                         ui.group(|ui| {
                             ui.add_space(10.0);
                             ui.vertical_centered(|ui| {
-                                ui.heading("Portfolio (TABConf exclusive preview)");
+                                ui.heading("Portfolio (demo)");
                                 ui.add_space(20.0);
                         
                                 // Use UI-only state
