@@ -1,18 +1,27 @@
 [![main on CLN v24.02.2](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml/badge.svg?branch=main)](https://github.com/toneloc/stable-channels/actions/workflows/main_v24.02.yml)
 
-
 ## Stable Channels
 
-The Stable Channels is Wallet lets users peg a portion of their bitcoin to a dollar balance, all while staying self-custodial and 100% in bitcoin. 
+The Stable Channels Wallet lets users peg a portion of their bitcoin to a dollar balance, all while staying self-custodial and 100% in bitcoin. 
+
+<p align="center">
+  <img width="337" height="524" src="https://github.com/user-attachments/assets/c9a15617-dc60-48a6-a21f-18f7c2d3f95b" />
+  &#x2003;&#x2003;&#x2003;&#x2003; <!-- 4 em-spaces (~wide gap) -->
+  <img width="331" height="520" src="https://github.com/user-attachments/assets/43191915-eaad-4593-bb85-3af40be15d01" />
+</p>
 
 ### Downloads
 - [macOS](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-mac.zip)
 - [Windows](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-windows.zip)
 - [Linux](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-linux.zip)
 
+Check out the latest releases in [Releases](https://github.com/toneloc/stable-channels/releases)
+
+### Overview
+
 The Stable Channels Desktop Wallet runs a full Lightning node that lets users stabilize the money that they send to themselves during onboarding. 
 
-The LSP/Server keeps the user stable by overcollateralizing the Stable Channel by 100% at the time of channel creation. Each user (the stability receiver and the the LSP/stability provider) puts in the same amount of bitcoin, and the stability mechanism is activated. 
+The LSP/Server keeps the user stable by overcollateralizing the Stable Channel by 100% at the time of channel creation. Each user (the stability receiver and the LSP/stability provider) puts in the same amount of bitcoin, and the stability mechanism is activated. 
 
 The stability mechanism works like this: each node queries four exchange price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
 
@@ -22,16 +31,17 @@ The stability mechanism works like this: each node queries four exchange price f
 
 Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. 
 
-The project is in-progress and is built on LDK Node. Prior versions were compatible with LND and CLN. These legacy implementation can be found in `/legacy`. 
+The project is in-progress and is built on LDK Node. Prior versions were compatible with LND and CLN. These legacy implementations can be found in `/legacy`. 
 
 Links with examples:
 - **Basic example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
 - **In-depth discussion:** [Delving Bitcoin](https://delvingbitcoin.org/t/stable-channels-peer-to-peer-dollar-balances-on-lightning)
+- **Podcast discussion:** [Stephan Livera Podcast — Episode 591](https://stephanlivera.com/episode/591/)
 - **Project website:** [StableChannels.com](https://www.stablechannels.com)
 
 ### Run the User Desktop Wallet 
 
-You can check out the latest builds for MacOS, Windows, or Linux here - https://github.com/toneloc/stable-channels/releases
+You can check out the latest builds for macOS, Windows, or Linux here - https://github.com/toneloc/stable-channels/releases
 
 ### Run from Source
 
@@ -121,7 +131,7 @@ Every 30 seconds, the price of bitcoin:
 
 ## Payout Examples (entry = $100,000/BTC)
 
-Each side puts in 1 BTC at $100,0000.
+Each side puts in 1 BTC at $100,000.
 
 Abbreviations:
 - SR = Stable Receiver (targeting $100,000)
