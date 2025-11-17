@@ -511,15 +511,86 @@
         //     }
         // }
 
-        fn change_allocation(&mut self, _btc_pct_i32: i32) {
-            // NO-OP: UI only. Intentionally does not modify StableChannel or targets.
-            // (Optional) Light feedback without changing state:
-            self.status_message = format!("(Preview only) Allocation set to {}% BTC / {}% USD",
-                _btc_pct_i32.clamp(0, 100),
-                (100 - _btc_pct_i32).clamp(0, 100)
-            );
-            // (Optional) audit only (still not changing biz logic):
-            audit_event("ALLOCATION_UI_CONFIRMED (Preview only)", serde_json::json!({ "btc_allocation_pct": _btc_pct_i32 }));
+        fn change_allocation(&mut self, btc_pct_i32: i32) {
+            // Clamp to [0, 100]
+            let pct_btc: i32 = btc_pct_i32.clamp(0, 100);
+            let pct_usd: i32 = (100 - pct_btc).clamp(0, 100);
+
+            // Grab channel_id and counterparty from StableChannel (in memory)
+            let (channel_id_str, counterparty) = {
+                let sc = self.stable_channel.lock().unwrap();
+                (sc.channel_id.to_string(), sc.counterparty)
+            };
+
+            // Base payload that the backend asked for
+            let payload = json!({
+                "type": "TRADE_REALLOCATE_V1",
+                "channel_id": channel_id_str,
+                "proposed_allocation": {
+                    "pct_btc": pct_btc,
+                    "pct_usd": pct_usd,
+                },
+            });
+
+            // Serialize payload and sign it with the node's key
+            let payload_str = payload.to_string();
+            let signature = self.node.sign_message(payload_str.as_bytes());
+
+            // Envelope we actually send over the wire:
+            //  {
+            //    "payload": "<JSON string above>",
+            //    "signature": "<recoverable sig string from sign_message>"
+            //  }
+            let signed_msg = json!({
+                "payload": payload_str,
+                "signature": signature,
+            });
+
+            let signed_str = signed_msg.to_string();
+
+            // Build custom TLV record
+            let custom_tlv = ldk_node::CustomTlvRecord {
+                type_num: STABLE_CHANNEL_TLV_TYPE,
+                value: signed_str.as_bytes().to_vec(),
+            };
+
+            // 1 msat marker payment
+            let amt_msat: u64 = 1;
+
+            match self.node.spontaneous_payment().send_with_custom_tlvs(
+                amt_msat,
+                counterparty,
+                None,
+                vec![custom_tlv],
+            ) {
+                Ok(payment_id) => {
+                    self.status_message = format!(
+                        "Sent allocation update: {}% BTC / {}% USD",
+                        pct_btc,
+                        pct_usd,
+                    );
+                    audit_event("ALLOCATION_MESSAGE_SENT", json!({
+                        "payment_id": format!("{payment_id}"),
+                        "channel_id": channel_id_str,
+                        "pct_btc": pct_btc,
+                        "pct_usd": pct_usd,
+                    }));
+                }
+                Err(e) => {
+                    self.status_message = format!(
+                        "Failed to send allocation update: {e}"
+                    );
+                    audit_event("ALLOCATION_MESSAGE_FAILED", json!({
+                        "error": format!("{e}"),
+                        "channel_id": channel_id_str,
+                        "pct_btc": pct_btc,
+                        "pct_usd": pct_usd,
+                    }));
+                }
+            }
+
+            // Keep UI slider consistent with the last attempted value
+            self.ui_btc_allocation = pct_btc;
         }
 
         fn send_stable_message(&mut self) {
@@ -626,7 +697,7 @@
                             "channel_id": format!("{channel_id}"),
                             "reason": format!("{:?}", reason)
                         }));
-                        self.status_message = format!("Channel {channel_id} has been closed");
+                        self.status_message = format!("Channel {channel_id} has been closed. Please wait 2-3 minutes for your funds to appear.");
                         if self.node.list_channels().is_empty() {
                             self.show_onboarding = true;
                             self.waiting_for_payment = false;
@@ -1214,7 +1285,261 @@
                                     .color(egui::Color32::GRAY),
                             );
                         });
+
                         ui.add_space(20.0);
+
+                        // Portfolio table (demo-only; uses total BTC balance)
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.heading("Portfolio");
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("(demo)")
+                                        .size(12.0)
+                                        .color(Color32::GRAY),
+                                );
+                            });
+                            ui.add_space(6.0);
+
+                            let total_btc = self.total_balance_btc.max(0.0);
+
+                            let usd_btc   = total_btc * 0.10; // 10%
+                            let spot_btc  = total_btc * 0.50; // 50%
+                            let gold_btc  = total_btc * 0.10; // 10%
+                            let sp500_btc = total_btc * 0.30; // 30%
+
+                            fn fmt_btc(v: f64) -> String {
+                                format!("{:.8} BTC", v)
+                            }
+
+                            // Centered pie chart + centered 2x2 legend under "Allocation"
+                            ui.vertical_centered(|ui| {
+                                use std::f32::consts::TAU;
+
+                                let pie_size = Vec2::splat(112.0);
+                                let (resp, painter) =
+                                    ui.allocate_painter(pie_size, Sense::hover());
+                                let center = resp.rect.center();
+                                let radius = pie_size.x.min(pie_size.y) * 0.5;
+
+                                let btc_color   = Color32::from_rgb(247, 147, 26);
+                                let usd_color   = Color32::from_rgb( 88, 175, 255);
+                                let gold_color  = Color32::from_rgb(212, 175,  55);
+                                let sp500_color = Color32::from_rgb(144, 190, 109);
+
+                                let slices = [
+                                    ("BTC",   0.50_f32, btc_color),
+                                    ("USD",   0.10_f32, usd_color),
+                                    ("Gold",  0.10_f32, gold_color),
+                                    ("SP500", 0.30_f32, sp500_color),
+                                ];
+
+                                // Draw pie
+                                let mut start = 0.0_f32;
+                                for &(_, frac, color) in &slices {
+                                    let sweep = frac * TAU;
+                                    let steps = 32;
+                                    let mut points = Vec::with_capacity(steps + 2);
+                                    points.push(center);
+                                    for i in 0..=steps {
+                                        let t = start + sweep * (i as f32 / steps as f32);
+                                        let dir = Vec2::new(t.cos(), t.sin());
+                                        points.push(center + dir * radius);
+                                    }
+                                    painter.add(egui::Shape::convex_polygon(
+                                        points,
+                                        color,
+                                        egui::Stroke::NONE,
+                                    ));
+                                    start += sweep;
+                                }
+
+                                if resp.hovered() {
+                                    resp.on_hover_text(
+                                        "BTC 50%",
+                                    );
+                                }
+
+                                ui.add_space(6.0);
+
+                                // "Allocation" title centered
+                                ui.label(
+                                    RichText::new("Allocation")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(Color32::LIGHT_GRAY),
+                                );
+                                ui.add_space(4.0);
+
+                                // Legend item helper (bold labels)
+                                let legend_item = |ui: &mut egui::Ui,
+                                                name: &str,
+                                                frac: f32,
+                                                color: Color32| {
+                                    ui.horizontal(|ui| {
+                                        let (dot_resp, p) = ui.allocate_painter(
+                                            Vec2::splat(8.0),
+                                            Sense::hover(),
+                                        );
+                                        p.circle_filled(dot_resp.rect.center(), 4.0, color);
+
+                                        let txt = format!("{} {:>3.0}%", name, (frac * 100.0).round());
+                                        ui.label(
+                                            RichText::new(txt)
+                                                .size(11.0)
+                                                .strong()
+                                                .color(Color32::LIGHT_GRAY),
+                                        );
+                                    });
+                                };
+
+                                // Center the entire grid
+                                ui.horizontal(|ui| {
+                                    ui.add_space((ui.available_width() - 160.0).max(0.0) / 2.0);
+                                    egui::Grid::new("allocation_legend_grid")
+                                        .spacing(Vec2::new(16.0, 4.0))
+                                        .show(ui, |ui| {
+                                                legend_item(ui, "BTC",   0.50, btc_color);
+                                                legend_item(ui, "Gold",  0.10, gold_color);
+                                                ui.end_row();
+                                                legend_item(ui, "USD",   0.10, usd_color);
+                                                legend_item(ui, "SP500", 0.30, sp500_color);
+                                                ui.end_row();
+                                        });
+                                });
+
+
+                            });
+
+                            ui.add_space(20.0);
+
+                            egui::Grid::new("portfolio_grid")
+                                .num_columns(7)
+                                .spacing(Vec2::new(12.0, 6.0))
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    // Header
+                                    ui.label(RichText::new("Asset").strong());
+                                    ui.label(RichText::new("Units").strong());
+                                    ui.label(RichText::new("Target").strong());
+                                    ui.label(RichText::new("BTC").strong());
+                                    ui.label(RichText::new("Funding Rate").strong());
+                                    ui.label(RichText::new("Buy").strong());
+                                    ui.label(RichText::new("Sell").strong());
+                                    ui.end_row();
+
+                                    for _ in 0..7 {
+                                        ui.add(egui::Separator::default().shrink(2.0));
+                                    }
+                                    ui.end_row();
+
+                                    let row = |ui: &mut egui::Ui,
+                                              name: &str,
+                                              units_label: &str,
+                                              pct_label: &str,
+                                              btc_val: f64,
+                                              fr_label: &str,
+                                              hover: &str| {
+                                        let asset_resp = ui.label(
+                                            RichText::new(name)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        );
+                                        ui.label(
+                                            RichText::new(units_label)
+                                                .color(Color32::LIGHT_GRAY),
+                                        );
+                                        ui.label(
+                                            RichText::new(pct_label)
+                                                .color(Color32::LIGHT_GRAY),
+                                        );
+                                        ui.monospace(
+                                            RichText::new(fmt_btc(btc_val))
+                                                .color(Color32::WHITE),
+                                        );
+                                        ui.label(
+                                            RichText::new(fr_label)
+                                                .color(Color32::LIGHT_GRAY),
+                                        );
+
+                                        let mut buy_resp = ui.add(
+                                            egui::Button::new("Buy")
+                                                .min_size(Vec2::new(48.0, 22.0)),
+                                        );
+                                        let mut sell_resp = ui.add(
+                                            egui::Button::new("Sell")
+                                                .min_size(Vec2::new(48.0, 22.0)),
+                                        );
+
+                                        if !hover.is_empty() {
+                                            asset_resp.on_hover_text(hover);
+                                            buy_resp = buy_resp.on_hover_text(format!(
+                                                "Increase {} allocation",
+                                                name
+                                            ));
+                                            sell_resp = sell_resp.on_hover_text(format!(
+                                                "Decrease {} allocation",
+                                                name
+                                            ));
+                                        }
+
+                                        if buy_resp.clicked() {
+                                            // TODO: wire Buy action
+                                        }
+                                        if sell_resp.clicked() {
+                                            // TODO: wire Sell action
+                                        }
+
+                                        ui.end_row();
+                                    };
+
+                                    row(
+                                        ui,
+                                        "Bitcoin",
+                                        &fmt_btc(spot_btc),
+                                        "50%",
+                                        spot_btc,
+                                        "0.0%",
+                                        "Unlevered BTC exposure.",
+                                    );
+
+                                    row(
+                                        ui,
+                                        "USD (stabilized)",
+                                        "$10.00",
+                                        "10%",
+                                        usd_btc,
+                                        "+11.1%",
+                                        "BTC-backed synthetic USD stability.",
+                                    );
+
+                                    row(
+                                        ui,
+                                        "Gold (stabilized)",
+                                        "0.002 oz",
+                                        "10%",
+                                        gold_btc,
+                                        "+4.2%",
+                                        "BTC-settled synthetic gold exposure.",
+                                    );
+
+                                    row(
+                                        ui,
+                                        "SP500 (stabilized)",
+                                        "0.04",
+                                        "30%",
+                                        sp500_btc,
+                                        "+2.1%",
+                                        "BTC-settled synthetic S&P 500 exposure.",
+                                    );
+                                });
+                        });
+
+                        ui.add_space(20.0);
+
+
+                        ui.add_space(20.0);
+
         
                         // Begin advanced section.
                         CollapsingHeader::new("Show advanced features")
