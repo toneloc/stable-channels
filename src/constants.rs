@@ -13,7 +13,7 @@ pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 // ============================================================================
 
 /// Default LSP public key
-pub const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
+pub const DEFAULT_LSP_PUBKEY: &str = "03c421763f4be781f01695f86771cb27e680018846d1b7423a484ae47acb76dd3c";
 
 /// Default LSP address
 pub const DEFAULT_LSP_ADDRESS: &str = "34.229.140.223:9737";
