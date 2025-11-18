@@ -30,7 +30,7 @@
             Mutex::new(ServerApp::new_with_mode("lsp"))
         });
 
-        const LSP_DATA_DIR: &str = "/home/ubuntu/.local/share/StableChannels/lsp/";
+        const LSP_DATA_DIR: &str = "data-2/lsp";
         const LSP_NODE_ALIAS: &str = "lsp";
         const LSP_PORT: u16 = 9737;
 
