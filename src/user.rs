@@ -16,6 +16,8 @@
     use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions, Vec2};
     use serde_json::json;
 
+    use ldk_node::lightning_types::payment::{PaymentHash, PaymentPreimage};
+
     use crate::audit::*;
     use crate::stable::update_balances;
     use crate::types::*;
@@ -67,6 +69,11 @@
         pub onchain_balance_usd: f64,
         pub total_balance_btc: f64,
         pub total_balance_usd: f64,
+
+        // JIT Channel State
+        last_jit_payment_hash: Option<PaymentHash>,
+        last_jit_preimage: Option<PaymentPreimage>,
+        last_jit_amount_msat: Option<u64>,
     }
 
     impl UserApp {
@@ -220,6 +227,11 @@
                 config,
                 show_confirm_allocation: false,
                 ui_btc_allocation: 0, 
+
+                // JIT claim state
+                last_jit_payment_hash: None,
+                last_jit_preimage: None,
+                last_jit_amount_msat: None,
             };
 
             {
@@ -322,11 +334,19 @@
             // Round to the nearest sat (i.e., nearest 1_000 msats); ties round up.
             let msats_rounded = ((msats.saturating_add(500)) / 1_000) * 1_000;
 
-            let result = self.node.bolt11_payment().receive_via_jit_channel(
+            println!("Generating JIT invoice!");
+            let manual_preimage = PaymentPreimage([42u8; 32]);
+            let manual_payment_hash: PaymentHash = manual_preimage.into();
+            self.last_jit_preimage = Some(manual_preimage);
+            self.last_jit_payment_hash = Some(manual_payment_hash);
+            self.last_jit_amount_msat = Some(msats_rounded);
+
+            let result = self.node.bolt11_payment().receive_via_jit_channel_for_hash(
                 msats_rounded,
                 &description,
                 INVOICE_EXPIRY_SECS,
-                Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT)
+                Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT),
+                manual_payment_hash
             );
 
             audit_event("JIT_INVOICE_ATTEMPT", json!({
@@ -621,6 +641,76 @@
         fn process_events(&mut self) {
             while let Some(event) = self.node.next_event() {
                 match event {
+                                        // NEW: auto-claim any hash-locked inbound payment we know the preimage for
+                    Event::PaymentClaimable {
+                        payment_id,
+                        payment_hash,
+                        claimable_amount_msat,
+                        ..
+                    } => {
+                        audit_event("PAYMENT_CLAIMABLE", json!({
+                            "payment_id": format!("{payment_id}"),
+                            "payment_hash": format!("{payment_hash}"),
+                            "claimable_amount_msat": claimable_amount_msat,
+                        }));
+
+                        // Is this the JIT onboarding invoice we just created?
+                        let should_claim = matches!(
+                            self.last_jit_payment_hash,
+                            Some(ref h) if *h == payment_hash
+                        );
+
+                        if should_claim {
+                            // Take ownership of the stored preimage/hash/amount
+                            let preimage_opt = self.last_jit_preimage.take();
+                            let _ = self.last_jit_payment_hash.take();
+                            let _ = self.last_jit_amount_msat.take();
+
+                            if let Some(preimage) = preimage_opt {
+                                match self
+                                    .node
+                                    .bolt11_payment()
+                                    .claim_for_hash(payment_hash, claimable_amount_msat, preimage)
+                                {
+                                    Ok(()) => {
+                                        self.status_message = "Onboarding payment arrived; claimed automatically."
+                                            .to_string();
+                                        audit_event("PAYMENT_CLAIMED_AUTO", json!({
+                                            "payment_hash": format!("{payment_hash}"),
+                                            "amount_msat": claimable_amount_msat,
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        self.status_message =
+                                            format!("Failed to claim onboarding payment: {e}");
+                                        audit_event("PAYMENT_CLAIM_FAILED", json!({
+                                            "payment_hash": format!("{payment_hash}"),
+                                            "error": format!("{e}"),
+                                        }));
+
+                                        // Best effort: fail it back so we don't leave HTLCs hanging.
+                                        let _ = self
+                                            .node
+                                            .bolt11_payment()
+                                            .fail_for_hash(payment_hash);
+                                    }
+                                }
+                            } else {
+                                // We *expected* to know the preimage but don't; fail it back.
+                                let _ = self.node.bolt11_payment().fail_for_hash(payment_hash);
+                                audit_event("PAYMENT_CLAIM_MISSING_PREIMAGE", json!({
+                                    "payment_hash": format!("{payment_hash}"),
+                                }));
+                            }
+                        } else {
+                            // Not a payment we know how to claim; fail it back for now.
+                            let _ = self.node.bolt11_payment().fail_for_hash(payment_hash);
+                            audit_event("PAYMENT_CLAIM_UNKNOWN_HASH_FAILED", json!({
+                                "payment_hash": format!("{payment_hash}"),
+                            }));
+                        }
+                    }
+                        
                     Event::ChannelReady { channel_id, .. } => {
                         let txid_str = self.node
                             .list_channels()
@@ -648,7 +738,6 @@
                         counterparty_node_id,
                         funding_txo,
                     } => {
-                        // stringify auxiliary fields without relying on `Serialize` impls
                         let temp_id_str = hex::encode(former_temporary_channel_id.0);
                     
                         let funding_str = funding_txo.txid.as_raw_hash().to_string();

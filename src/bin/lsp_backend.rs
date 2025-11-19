@@ -399,10 +399,10 @@
                 println!("[Init] Setting network to: {:?}", network);
                 builder.set_network(network);
 
-                // println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
+                println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
                 builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
 
-                println!("[Init] Setting Bitcoin RPC connection");
+                // println!("[Init] Setting Bitcoin RPC connection");
                 // builder.set_chain_source_bitcoind_rpc(
                 //     "127.0.0.1".into(), 8332,
                 //     "".into(),
@@ -424,12 +424,12 @@
                 if node_alias == LSP_NODE_ALIAS {
                     println!("[Init] Configuring LSP parameters...");
                     let service_config = LSPS2ServiceConfig {
-                        require_token: None,
-                        advertise_service: true,
-                        channel_opening_fee_ppm: 0,
-                        channel_over_provisioning_ppm: 1_000_000,
-                        min_channel_opening_fee_msat: 0,
-                        min_channel_lifetime: 100,
+                        require_token: None, 
+                        advertise_service: true, // Need this?
+                        channel_opening_fee_ppm: 0, // Add fees here
+                        channel_over_provisioning_ppm: 1_000_000, // Overcollateralize Stable Position by 100%
+                        min_channel_opening_fee_msat: 0, 
+                        min_channel_lifetime: 100, 
                         max_client_to_self_delay: 1024,
                         min_payment_size_msat: 0,
                         max_payment_size_msat: 100_000_000_000,
