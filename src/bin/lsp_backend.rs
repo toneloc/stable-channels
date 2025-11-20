@@ -661,22 +661,33 @@
                     Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
                     None => format!("Received {} msats (no TLV)", amount_msat),
                 };
-            
+
+                // Lets add in the reallocation logic here ... 
+                // we need to incldue the channel id AND a sigbature of it  .,, 
+                // we need to update the stable channels.json with the udpated allocation
+                // we need to update the stability logic to make sure that it works with the native btc exposure .. 
+                // we need to sign the message and verify 
                 if amount_msat == 1 {
-                    // Special audit for 1 msat “message” payments
-                    audit_event("MESSAGE_RECEIVED", json!({
-                        "payment_hash": format!("{}", payment_hash),
-                        "message": decoded_payload,
-                    }));
-                    // Lets add in the reallocation logic here ... 
-                    // we need to incldue the channel id AND a sigbature of it  .,, 
-                    // we need to update the stable channels.json with the udpated allocation
-                    // we need to update the stability logic to make sure that it works with the native btc exposure .. 
-                    // we need to sign the message and verify 
+                    // 1 msat marker payment: interpret as a control / reallocation message
+                    match &decoded_payload {
+                        Some(raw) => {
+                            // Log raw first
+                            audit_event("REALLOCATE_MESSAGE_RECEIVED", json!({
+                                "payment_hash": format!("{payment_hash}"),
+                                "raw": raw,
+                            }));
 
-
-
-
+                            // Try to parse + (later) apply; for now at least logs all parse/verify results
+                            self.handle_reallocation_message(raw, &payment_hash);
+                        }
+                        None => {
+                            // No TLV payload, still log it distinctly
+                            audit_event("MESSAGE_RECEIVED_EMPTY_TLV", json!({
+                                "payment_hash": format!("{payment_hash}"),
+                                "amount_msat": amount_msat,
+                            }));
+                        }
+                    }
                 } else {
                     audit_event("PAYMENT_RECEIVED", json!({
                         "amount_msat": amount_msat,
@@ -684,7 +695,7 @@
                         "decoded_tlv": decoded_payload,
                     }));
                 }
-            
+
                 self.update_balances();
             }
 
