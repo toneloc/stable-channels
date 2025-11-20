@@ -705,37 +705,50 @@
                 payment_hash: &PaymentHash,
             ) {
                 // 1) Outer envelope: {"payload":"...", "signature":"..."}
-                let signed: ReallocationSignedMessage = match serde_json::from_str(raw_msg) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        audit_event("REALLOCATE_PARSE_SIGNED_FAILED", json!({
-                            "error": format!("{e}"),
-                            "raw": raw_msg,
-                            "payment_hash": format!("{payment_hash}"),
-                        }));
-                        self.status_message = "Reallocation: malformed signed JSON".to_string();
-                        return;
-                    }
-                };
+                let signed: ReallocationSignedMessage =
+                    match serde_json::from_str::<ReallocationSignedMessage>(raw_msg) {
+                        Ok(v) => {
+                            audit_event("REALLOCATE_PARSED_SIGNED_OK", json!({
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                            v
+                        }
+                        Err(e) => {
+                            audit_event("REALLOCATE_PARSE_SIGNED_FAILED", json!({
+                                "error": format!("{e}"),
+                                "raw": raw_msg,
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                            self.status_message = "Reallocation: malformed signed JSON".to_string();
+                            return;
+                        }
+                    };
 
                 // 2) Inner payload: type + channel_id + proposed_allocation
-                let payload: ReallocationPayload = match serde_json::from_str(&signed.payload) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        audit_event("REALLOCATE_PARSE_PAYLOAD_FAILED", json!({
-                            "error": format!("{e}"),
-                            "payload": signed.payload,
-                            "payment_hash": format!("{payment_hash}"),
-                        }));
-                        self.status_message = "Reallocation: malformed payload".to_string();
-                        return;
-                    }
-                };
+                let payload: ReallocationPayload =
+                    match serde_json::from_str::<ReallocationPayload>(&signed.payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            audit_event("REALLOCATE_PARSE_PAYLOAD_FAILED", json!({
+                                "error": format!("{e}"),
+                                "payload": signed.payload,
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                            self.status_message = "Reallocation: malformed payload".to_string();
+                            return;
+                        }
+                    };
+
+                audit_event("REALLOCATE_PARSED_PAYLOAD_OK", json!({
+                    "payment_hash": format!("{}", payment_hash),
+                    "payload_channel_id": &payload.channel_id,
+                    "payload_type": &payload.kind,
+                }));
 
                 if payload.kind != "TRADE_REALLOCATE_V1" {
                     audit_event("REALLOCATE_UNHANDLED_TYPE", json!({
                         "kind": payload.kind,
-                        "payment_hash": format!("{payment_hash}"),
+                        "payment_hash": format!("{}", payment_hash),
                     }));
                     self.status_message = format!("Reallocation: ignoring type {}", payload.kind);
                     return;
@@ -744,6 +757,14 @@
                 // Optionally clamp / sanity-check percentages
                 let pct_btc = payload.proposed_allocation.pct_btc.min(100);
                 let pct_usd = payload.proposed_allocation.pct_usd.min(100);
+
+                if pct_btc as u16 + pct_usd as u16 != 100 {
+                    audit_event("REALLOCATE_PERCENT_MISMATCH", json!({
+                        "pct_btc": pct_btc,
+                        "pct_usd": pct_usd,
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+                }
 
                 let chan_id_str = payload.channel_id.clone();
 
@@ -761,7 +782,7 @@
                             "channel_id": chan_id_str,
                             "pct_btc": pct_btc,
                             "pct_usd": pct_usd,
-                            "payment_hash": format!("{payment_hash}"),
+                            "payment_hash": format!("{}", payment_hash),
                         }));
                         self.status_message = format!(
                             "Reallocation: unknown channel {}",
@@ -783,13 +804,16 @@
                         "channel_id": chan_id_str,
                         "pct_btc": pct_btc,
                         "pct_usd": pct_usd,
-                        "payment_hash": format!("{payment_hash}"),
+                        "payment_hash": format!("{}", payment_hash),
                     }));
                     self.status_message = format!(
                         "Reallocation: signature NOT verified for channel {}",
                         chan_id_str
                     );
-                    println!("Reallocation message NOT verified for channel {}", chan_id_str);
+                    println!(
+                        "Reallocation message NOT verified for channel {}",
+                        chan_id_str
+                    );
                     return;
                 }
 
@@ -798,7 +822,7 @@
                     "channel_id": chan_id_str,
                     "pct_btc": pct_btc,
                     "pct_usd": pct_usd,
-                    "payment_hash": format!("{payment_hash}"),
+                    "payment_hash": format!("{}", payment_hash),
                 }));
                 self.status_message = format!(
                     "Reallocation: message VERIFIED for channel {} ({}% BTC / {}% USD)",
@@ -813,7 +837,6 @@
                 // Later you can plug in your actual allocation / trading logic after this point.
             }
 
-            
             pub fn generate_invoice(&mut self) -> bool {
                 if let Ok(amount) = self.invoice_amount.parse::<u64>() {
                     let msats = amount * 1000;
