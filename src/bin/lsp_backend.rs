@@ -704,7 +704,7 @@
                 raw_msg: &str,
                 payment_hash: &PaymentHash,
             ) {
-                // First level: {"payload":"...", "signature":"..."}
+                // 1) Outer envelope: {"payload":"...", "signature":"..."}
                 let signed: ReallocationSignedMessage = match serde_json::from_str(raw_msg) {
                     Ok(v) => v,
                     Err(e) => {
@@ -713,11 +713,12 @@
                             "raw": raw_msg,
                             "payment_hash": format!("{payment_hash}"),
                         }));
+                        self.status_message = "Reallocation: malformed signed JSON".to_string();
                         return;
                     }
                 };
 
-                // Second level: inner payload with type, channel_id, proposed_allocation
+                // 2) Inner payload: type + channel_id + proposed_allocation
                 let payload: ReallocationPayload = match serde_json::from_str(&signed.payload) {
                     Ok(v) => v,
                     Err(e) => {
@@ -726,34 +727,27 @@
                             "payload": signed.payload,
                             "payment_hash": format!("{payment_hash}"),
                         }));
+                        self.status_message = "Reallocation: malformed payload".to_string();
                         return;
                     }
                 };
 
-                // Only handle the message types we care about
                 if payload.kind != "TRADE_REALLOCATE_V1" {
                     audit_event("REALLOCATE_UNHANDLED_TYPE", json!({
                         "kind": payload.kind,
                         "payment_hash": format!("{payment_hash}"),
                     }));
+                    self.status_message = format!("Reallocation: ignoring type {}", payload.kind);
                     return;
                 }
 
-                // Sanity clamp; don't trust the client blindly
+                // Optionally clamp / sanity-check percentages
                 let pct_btc = payload.proposed_allocation.pct_btc.min(100);
                 let pct_usd = payload.proposed_allocation.pct_usd.min(100);
 
-                if pct_btc as u16 + pct_usd as u16 != 100 {
-                    audit_event("REALLOCATE_PERCENT_MISMATCH", json!({
-                        "pct_btc": pct_btc,
-                        "pct_usd": pct_usd,
-                        "payment_hash": format!("{payment_hash}"),
-                    }));
-                }
-
                 let chan_id_str = payload.channel_id.clone();
 
-                // 1) Find the channel in LDK so we can get the correct pubkey
+                // 3) Find the channel to get the counterparty pubkey
                 let channel_opt = self
                     .node
                     .list_channels()
@@ -770,14 +764,14 @@
                             "payment_hash": format!("{payment_hash}"),
                         }));
                         self.status_message = format!(
-                            "Reallocation message for unknown channel {}",
+                            "Reallocation: unknown channel {}",
                             chan_id_str
                         );
                         return;
                     }
                 };
 
-                // 2) Use the counterparty_node_id as the public key for signature verification
+                // 4) Use the channel’s counterparty node ID as verifying key
                 let pkey = channel.counterparty_node_id;
 
                 let sig_ok = self
@@ -792,61 +786,33 @@
                         "payment_hash": format!("{payment_hash}"),
                     }));
                     self.status_message = format!(
-                        "Invalid signature on reallocation for channel {}",
+                        "Reallocation: signature NOT verified for channel {}",
                         chan_id_str
                     );
+                    println!("Reallocation message NOT verified for channel {}", chan_id_str);
                     return;
                 }
 
-                // 3) Signature is valid: update the corresponding StableChannel entry
-                if let Some(sc) = self
-                    .stable_channels
-                    .iter_mut()
-                    .find(|sc| sc.channel_id == channel.channel_id)
-                {
-                    // Human-readable ack into note; preserves any existing note
-                    let mut new_note = format!(
-                        "Target allocation: {}% BTC / {}% USD (via MESSAGE {})",
-                        pct_btc,
-                        pct_usd,
-                        payment_hash,
-                    );
+                // At this point: verified message from correct pubkey
+                audit_event("REALLOCATE_SIGNATURE_VALID", json!({
+                    "channel_id": chan_id_str,
+                    "pct_btc": pct_btc,
+                    "pct_usd": pct_usd,
+                    "payment_hash": format!("{payment_hash}"),
+                }));
+                self.status_message = format!(
+                    "Reallocation: message VERIFIED for channel {} ({}% BTC / {}% USD)",
+                    chan_id_str, pct_btc, pct_usd
+                );
+                println!(
+                    "Reallocation message VERIFIED for channel {} ({}% BTC / {}% USD)",
+                    chan_id_str, pct_btc, pct_usd
+                );
 
-                    if let Some(existing) = sc.note.as_ref() {
-                        if !existing.trim().is_empty() {
-                            new_note.push('\n');
-                            new_note.push_str(existing);
-                        }
-                    }
-
-                    sc.note = Some(new_note);
-                    self.save_stable_channels();
-
-                    self.status_message = format!(
-                        "Updated allocation for channel {} to {}% BTC / {}% USD",
-                        chan_id_str, pct_btc, pct_usd
-                    );
-
-                    audit_event("TRADE_REALLOCATE_APPLIED", json!({
-                        "channel_id": chan_id_str,
-                        "pct_btc": pct_btc,
-                        "pct_usd": pct_usd,
-                        "payment_hash": format!("{payment_hash}"),
-                    }));
-                } else {
-                    // Channel exists in LDK but not yet in stable_channels index
-                    audit_event("TRADE_REALLOCATE_STABLE_ENTRY_NOT_FOUND", json!({
-                        "channel_id": chan_id_str,
-                        "pct_btc": pct_btc,
-                        "pct_usd": pct_usd,
-                        "payment_hash": format!("{payment_hash}"),
-                    }));
-                    self.status_message = format!(
-                        "Reallocation for channel {} received, but no StableChannel entry found",
-                        chan_id_str
-                    );
-                }
+                // For “log only first step”, stop here.
+                // Later you can plug in your actual allocation / trading logic after this point.
             }
+
             
             pub fn generate_invoice(&mut self) -> bool {
                 if let Ok(amount) = self.invoice_amount.parse::<u64>() {
