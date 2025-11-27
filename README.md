@@ -23,7 +23,7 @@ The Stable Channels Desktop Wallet runs a full Lightning node that lets users st
 
 The LSP/Server keeps the user stable by overcollateralizing the Stable Channel by 100% at the time of channel creation. Each user (the stability receiver and the LSP/stability provider) puts in the same amount of bitcoin, and the stability mechanism is activated. 
 
-The stability mechanism works like this: each node queries four exchange price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
+The stability mechanism works like this: each node queries five exchange price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
 
 <p align="center">
   <img src="./sc.gif" alt="Stable Channels Architecture" width="700"/>
