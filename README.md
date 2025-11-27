@@ -47,12 +47,6 @@ You can check out the latest builds for macOS, Windows, or Linux here - https://
 
 To run the app from this source code, please install Rust on your OS.
 
-Using a fresh Ubuntu or on Windows? You may need to install OpenSSL libraries or Perl. 
-
-Linux - `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
-
-Windows - `winget install StrawberryPerl.StrawberryPerl`. Windows also requires a few other things as well.
-
 Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` into it.
 
 Run `cargo run --bin stable-channels user`. This will start the app on mainnet. Pay the invoice and you are good to go.
@@ -128,6 +122,14 @@ Every 30 seconds, the price of bitcoin:
   - **No action required.**
 
 *Note: Stable Channels are currently non-routing channels. Work is ongoing to add routing and payment capabilities.*
+
+## Technical tips
+
+Using a fresh Ubuntu or on Windows? You may need to install OpenSSL libraries or Perl. 
+
+Linux - `sudo apt-get install -y pkg-config libssl-dev` and `curl`.
+
+Windows - `winget install StrawberryPerl.StrawberryPerl`. Windows also requires a few other things as well.
 
 ## Payout Examples (entry = $100,000/BTC)
 
