@@ -45,11 +45,12 @@ You can check out the latest builds for macOS, Windows, or Linux here - https://
 
 ### Run from Source
 
-To run the app from this source code, please install Rust on your OS.
+#### Quick Setup
+```bash
+cargo run --bin stable-channels user
+```
 
-Clone the repo `git clone https://github.com/toneloc/stable-channels` and `cd` into it.
-
-Run `cargo run --bin stable-channels user`. This will start the app on mainnet. Pay the invoice and you are good to go.
+This will start the app on mainnet. Pay the invoice and you are good to go.
 
 Logs and key files can be found in these directories:
 - Linux   - `~/.local/share/StableChannels`
@@ -60,12 +61,6 @@ Logs and key files can be found in these directories:
 ### Configuration
 
 The application works out of the box with smart defaults, but supports customization via environment variables or a `.env` file:
-
-#### Quick Setup (Works Out of the Box)
-```bash
-# Just run - no configuration needed!
-cargo run --bin stable-channels user
-```
 
 #### Custom Configuration (Optional)
 ```bash
@@ -91,6 +86,7 @@ cargo run --bin stable-channels user
 - `STABLE_CHANNELS_EXPECTED_USD` - Expected USD amount (`100.0`)
 
 #### Running Different Components
+
 ```bash
 # User interface
 cargo run --bin stable-channels user
