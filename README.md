@@ -31,7 +31,7 @@ The stability mechanism works like this: each node queries five exchange price f
 
 Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. 
 
-The project is in-progress and is built on LDK Node. Prior versions were compatible with LND and CLN. These legacy implementations can be found in `/legacy`. 
+The project is in-progress and is built on LDK Node and Rust. Prior versions were compatible with LND and CLN. These legacy implementations can be found in `/legacy`. 
 
 Links with examples:
 - **Basic example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
@@ -45,7 +45,7 @@ You can check out the latest builds for macOS, Windows, or Linux here - https://
 
 ### Run from Source
 
-To run the app from this source, please install Rust on your OS.
+To run the app from this source code, please install Rust on your OS.
 
 Using a fresh Ubuntu or on Windows? You may need to install OpenSSL libraries or Perl. 
 
