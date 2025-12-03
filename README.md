@@ -52,10 +52,13 @@ cargo run --bin stable-channels user
 
 This will start the app on mainnet. Pay the invoice and you are good to go.
 
-Logs and key files can be found in these directories:
+#### Backups and logs
+
+Logs and backup/key files can be found in these directories:
 - Linux   - `~/.local/share/StableChannels`
 - Mac     - `~/Library/Application\ Support/StableChannels`
 - Windows - `%APPDATA%\StableChannels`
+
 <sub><sup>*actual directory might differ depending on user's system</sup></sub>
 
 ### Configuration
