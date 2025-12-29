@@ -63,6 +63,7 @@
         struct StableChannelEntry {
             channel_id: String,
             expected_usd: f64,
+            #[serde(default)]
             native_btc: f64,
             note: Option<String>,
         }
@@ -799,6 +800,7 @@
                     .node
                     .verify_signature(signed.payload.as_bytes(), &signed.signature, &pkey);
 
+                // Signature was wrong; return
                 if !sig_ok {
                     audit_event("REALLOCATE_SIGNATURE_INVALID", json!({
                         "channel_id": chan_id_str,
@@ -824,6 +826,80 @@
                     "pct_usd": pct_usd,
                     "payment_hash": format!("{}", payment_hash),
                 }));
+
+                // ---- apply to StableChannel in an inner scope to avoid borrow conflicts ----
+                let mut updated = false;
+                let mut applied_target_stable_usd: f64 = 0.0;
+                let mut applied_native_btc_str: String = String::new();
+
+                {
+                    if let Some(sc) = self
+                        .stable_channels
+                        .iter_mut()
+                        .find(|sc| sc.channel_id == channel.channel_id)
+                    {
+                        // Refresh balances so we know current receiver USD
+                        let (ok, sc_ref) = stable::update_balances(&self.node, sc);
+                        if !ok {
+                            audit_event("REALLOCATE_BALANCE_UPDATE_FAILED", json!({
+                                "channel_id": chan_id_str,
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                        } else {
+                            // Total receiver USD right now
+                            let total_receiver_usd = sc_ref.stable_receiver_usd.0;
+
+                            // USD portion the user wants hedged
+                            let target_stable_usd = total_receiver_usd * (pct_usd as f64 / 100.0);
+
+                            // *** THIS IS WHERE expected_usd IS CHANGED ***
+                            sc_ref.expected_usd = USD::from_f64(target_stable_usd);
+
+                            // Remaining is native channel BTC exposure
+                            let target_native_usd = (total_receiver_usd - target_stable_usd).max(0.0);
+                            let native_usd = USD::from_f64(target_native_usd);
+                            sc_ref.native_channel_btc = Bitcoin::from_usd(native_usd, sc_ref.latest_price);
+
+                            // Optional: update note
+                            let mut new_note = format!(
+                                "Target allocation: {}% BTC / {}% USD (via MESSAGE {})",
+                                pct_btc, pct_usd, payment_hash,
+                            );
+                            if let Some(existing) = sc_ref.note.as_ref() {
+                                if !existing.trim().is_empty() {
+                                    new_note.push('\n');
+                                    new_note.push_str(existing);
+                                }
+                            }
+                            sc_ref.note = Some(new_note);
+
+                            applied_target_stable_usd = target_stable_usd;
+                            applied_native_btc_str = sc_ref.native_channel_btc.to_string();
+                            updated = true;
+                        }
+                    } else {
+                        audit_event("TRADE_REALLOCATE_STABLE_ENTRY_NOT_FOUND", json!({
+                            "channel_id": chan_id_str,
+                            "pct_btc": pct_btc,
+                            "pct_usd": pct_usd,
+                            "payment_hash": format!("{}", payment_hash),
+                        }));
+                    }
+                } // <- mutable borrow of self.stable_channels ends here
+
+                if updated {
+                    self.save_stable_channels();
+
+                    audit_event("TRADE_REALLOCATE_APPLIED", json!({
+                        "channel_id": chan_id_str,
+                        "pct_btc": pct_btc,
+                        "pct_usd": pct_usd,
+                        "target_stable_usd": applied_target_stable_usd,
+                        "native_channel_btc": applied_native_btc_str,
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+                }
+
                 self.status_message = format!(
                     "Reallocation: message VERIFIED for channel {} ({}% BTC / {}% USD)",
                     chan_id_str, pct_btc, pct_usd
@@ -832,9 +908,6 @@
                     "Reallocation message VERIFIED for channel {} ({}% BTC / {}% USD)",
                     chan_id_str, pct_btc, pct_usd
                 );
-
-                // For “log only first step”, stop here.
-                // Later you can plug in your actual allocation / trading logic after this point.
             }
 
             pub fn generate_invoice(&mut self) -> bool {
@@ -1067,39 +1140,50 @@
                     audit_event("STABLE_EDIT_NO_CHANNEL", json!({}));  
                     return;
                 }
-            
+
                 let amount = match self.stable_channel_amount.parse::<f64>() {
                     Ok(val) => val,
                     Err(_) => {
                         self.status_message = "Invalid amount format".to_string();
-                        audit_event("STABLE_EDIT_AMOUNT_INVALID", json!({"raw_input": self.stable_channel_amount}));
+                        audit_event("STABLE_EDIT_AMOUNT_INVALID", json!({
+                            "raw_input": self.stable_channel_amount
+                        }));
                         return;
                     }
                 };
-            
+
                 let channel_id_str = self.selected_channel_id.trim().to_string();
-            
+
                 for channel in self.node.list_channels() {
                     if channel.channel_id.to_string() == channel_id_str {
                         let expected_usd = USD::from_f64(amount);
                         let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
-            
+
                         let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
                         let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
                         let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-            
+
                         let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
                         let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
                         let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
                         let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
-            
+
+                        // --- preserve existing note + native_channel_btc if present ---
                         let mut note = note.clone();
-                        if note.is_none() {
-                            if let Some(existing) = self.stable_channels.iter().find(|sc| sc.channel_id == channel.channel_id) {
+                        let mut native_channel_btc = Bitcoin::from_btc(0.0);
+
+                        if let Some(existing) = self
+                            .stable_channels
+                            .iter()
+                            .find(|sc| sc.channel_id == channel.channel_id)
+                        {
+                            if note.is_none() {
                                 note = existing.note.clone();
                             }
-                        }                        
-            
+                            // <-- this is the key change: do NOT overwrite with 0
+                            native_channel_btc = existing.native_channel_btc;
+                        }
+
                         let stable_channel = StableChannel {
                             channel_id: channel.channel_id,
                             counterparty: channel.counterparty_node_id,
@@ -1119,9 +1203,10 @@
                             prices: "".to_string(),
                             onchain_btc: Bitcoin::from_sats(0),
                             onchain_usd: USD(0.0),
-                            note, // <-- use preserved note instead of wiping
+                            note,
+                            native_channel_btc,
                         };
-            
+
                         let mut found = false;
                         for sc in &mut self.stable_channels {
                             if sc.channel_id == channel.channel_id {
@@ -1130,33 +1215,41 @@
                                 break;
                             }
                         }
-            
+
                         if !found {
                             self.stable_channels.push(stable_channel);
                         }
-            
+
                         self.save_stable_channels();
-            
+
                         self.status_message = format!(
                             "Channel {} edited as stable with target ${}",
                             channel_id_str, amount
                         );
-                        audit_event("STABLE_EDITED", json!({"channel_id": channel_id_str, "target_usd": amount}));
+                        audit_event("STABLE_EDITED", json!({
+                            "channel_id": channel_id_str,
+                            "target_usd": amount
+                        }));
                         self.selected_channel_id.clear();
                         self.stable_channel_amount = EXPECTED_USD.to_string();
                         return;
                     }
                 }
-            
-                audit_event("STABLE_EDIT_CHANNEL_NOT_FOUND", json!({"channel_id": self.selected_channel_id}));
-                self.status_message = format!("No channel found matching: {}", self.selected_channel_id);
-            }            
+
+                audit_event("STABLE_EDIT_CHANNEL_NOT_FOUND", json!({
+                    "channel_id": self.selected_channel_id
+                }));
+                self.status_message = format!(
+                    "No channel found matching: {}",
+                    self.selected_channel_id
+                );
+            }
 
             pub fn save_stable_channels(&mut self) {
                 let entries: Vec<StableChannelEntry> = self.stable_channels.iter().map(|sc| StableChannelEntry {
                     channel_id: sc.channel_id.to_string(),
                     expected_usd: sc.expected_usd.0,
-                    native_btc: 0.0,                
+                    native_btc: sc.native_channel_btc.to_btc(),            
                     note: sc.note.clone(),  
                 }).collect();
             
@@ -1231,6 +1324,7 @@
                                                 onchain_btc: Bitcoin::from_sats(0),
                                                 onchain_usd: USD(0.0),
                                                 note: entry.note.clone(),
+                                                native_channel_btc: Bitcoin::from_btc(entry.native_btc)
                                             };
 
                                             self.stable_channels.push(stable_channel);

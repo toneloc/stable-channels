@@ -187,6 +187,7 @@ pub struct StableChannel {
     pub onchain_btc: Bitcoin,
     pub onchain_usd: USD,
     pub note: Option<String>,
+    pub native_channel_btc: Bitcoin,
     
 }
 
@@ -221,6 +222,8 @@ impl Default for StableChannel {
             onchain_btc: Bitcoin::from_sats(0),
             onchain_usd: USD(0.0),
             note: Some("".to_string()),
+            native_channel_btc: Bitcoin::from_sats(0),
+
         }
     }
 }
