@@ -159,7 +159,7 @@ impl Dashboard {
             invoice_to_pay: String::new(),
 
             open_channel_pubkey: String::new(),
-            open_channel_address: ":9737".into(),
+            open_channel_address: "35.175.221.7:9737".into(),
             open_channel_sats: "100000".into(),
             close_channel_id: String::new(),
 
@@ -185,7 +185,7 @@ impl Dashboard {
         let client = self.client.clone();
         self.bal_task = Some(self.rt.spawn(async move {
             client
-                .get("http://100.25.168.115:8080/api/balance")
+                .get("http://35.175.221.7:8080/api/balance")
                 .send()
                 .await?
                 .json::<Balance>()
@@ -198,7 +198,7 @@ impl Dashboard {
         let client = self.client.clone();
         self.ch_task = Some(self.rt.spawn(async move {
             client
-                .get("http://100.25.168.115:8080/api/channels")
+                .get("http://35.175.221.7:8080/api/channels")
                 .send()
                 .await?
                 .json::<Vec<ChannelInfo>>()
@@ -211,7 +211,7 @@ impl Dashboard {
         let client = self.client.clone();
         self.price_task = Some(self.rt.spawn(async move {
             let resp = client
-                .get("http://100.25.168.115:8080/api/price")
+                .get("http://35.175.221.7:8080/api/price")
                 .send()
                 .await?;
             let price = resp.json::<f64>().await?;
@@ -224,7 +224,7 @@ impl Dashboard {
         let client = self.client.clone();
         self.get_address_task = Some(self.rt.spawn(async move {
             client
-                .get("http://100.25.168.115:8080/api/onchain_address")
+                .get("http://35.175.221.7:8080/api/onchain_address")
                 .send()
                 .await?
                 .json::<String>()
@@ -374,7 +374,7 @@ impl Dashboard {
                 note: if note.is_empty() { None } else { Some(note) },
             };
             client
-                .post("http://100.25.168.115:8080/api/edit_stable_channel")
+                .post("http://35.175.221.7:8080/api/edit_stable_channel")
                 .json(&req)
                 .send()
                 .await?
@@ -392,7 +392,7 @@ impl Dashboard {
         let client = self.client.clone();
         self.close_task = Some(self.rt.spawn(async move {
             client
-                .post(format!("http://100.25.168.115:8080/api/close_channel/{}", id))
+                .post(format!("http://35.175.221.7:8080/api/close_channel/{}", id))
                 .send()
                 .await?
                 .text()
@@ -410,7 +410,7 @@ impl Dashboard {
         self.pay_task = Some(self.rt.spawn(async move {
             #[derive(Serialize)] struct Req { invoice: String }
             client
-                .post("http://100.25.168.115:8080/api/pay")
+                .post("http://35.175.221.7:8080/api/pay")
                 .json(&Req { invoice: inv })
                 .send()
                 .await?
@@ -432,7 +432,7 @@ impl Dashboard {
         #[derive(Serialize)] struct Req { address: String, amount: String }
         self.onchain_send_task = Some(self.rt.spawn(async move {
             client
-                .post("http://100.25.168.115:8080/api/onchain_send")
+                .post("http://35.175.221.7:8080/api/onchain_send")
                 .json(&Req { address: addr, amount: amt })
                 .send()
                 .await?
@@ -469,7 +469,7 @@ impl Dashboard {
     
         self.connect_task = Some(self.rt.spawn(async move {
             client
-                .post("http://100.25.168.115:8080/api/connect")
+                .post("http://35.175.221.7:8080/api/connect")
                 .json(&Req { node_id, address })
                 .send()
                 .await?
