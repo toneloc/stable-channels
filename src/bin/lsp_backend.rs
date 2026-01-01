@@ -35,7 +35,7 @@
         const LSP_PORT: u16 = 9737;
 
         const DEFAULT_NETWORK: &str = "bitcoin";
-        const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mempool.space/api";        
+        const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api";        
         const EXPECTED_USD: f64 = 100.0;
 
         #[derive(Deserialize, Debug)]
@@ -510,64 +510,93 @@
 
         impl ServerApp {
             pub fn update_balances(&mut self) {
-                // Refresh price first
-                let current_price = get_cached_price();
-                if current_price > 0.0 {
-                    self.btc_price = current_price;
+                    let current_price = get_cached_price();
+                    if current_price > 0.0 {
+                        self.btc_price = current_price;
+                    }
+
+                    let balances = self.node.list_balances();
+
+                    // existing stuff
+                    self.lightning_balance_btc =
+                        balances.total_lightning_balance_sats as f64 / 100_000_000.0;
+                    self.onchain_balance_btc =
+                        balances.spendable_onchain_balance_sats as f64 / 100_000_000.0;
+                    self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
+                    self.onchain_balance_usd   = self.onchain_balance_btc   * self.btc_price;
+                    self.total_balance_btc     = self.lightning_balance_btc + self.onchain_balance_btc;
+                    self.total_balance_usd     = self.lightning_balance_usd + self.onchain_balance_usd;
+
+                    // --- NEW: log pending sweep balances from channel closures -----------------
+                    #[allow(unused_variables)]
+                    {
+                        use ldk_node::PendingSweepBalance;
+
+                        let mut total_pending_sats: u64 = 0;
+
+                        for p in &balances.pending_balances_from_channel_closures {
+                            match p {
+                                PendingSweepBalance::PendingBroadcast {
+                                    channel_id,
+                                    amount_satoshis,
+                                } => {
+                                    total_pending_sats += *amount_satoshis;
+                                    println!(
+                                        "[PendingSweep] PendingBroadcast: chan={:?} amount={} sats (~${:.2})",
+                                        channel_id,
+                                        amount_satoshis,
+                                        (*amount_satoshis as f64 / 100_000_000.0) * self.btc_price
+                                    );
+                                }
+
+                                PendingSweepBalance::BroadcastAwaitingConfirmation {
+                                    channel_id,
+                                    latest_broadcast_height,
+                                    latest_spending_txid,
+                                    amount_satoshis,
+                                } => {
+                                    total_pending_sats += *amount_satoshis;
+                                    println!(
+                                        "[PendingSweep] BroadcastAwaitingConfirmation: \
+                                        chan={:?} height={} txid={} amount={} sats (~${:.2})",
+                                        channel_id,
+                                        latest_broadcast_height,
+                                        latest_spending_txid,
+                                        amount_satoshis,
+                                        (*amount_satoshis as f64 / 100_000_000.0) * self.btc_price
+                                    );
+                                }
+
+                                PendingSweepBalance::AwaitingThresholdConfirmations {
+                                    channel_id,
+                                    latest_spending_txid,
+                                    confirmation_hash,
+                                    confirmation_height,
+                                    amount_satoshis,
+                                } => {
+                                    total_pending_sats += *amount_satoshis;
+                                    println!(
+                                        "[PendingSweep] AwaitingThresholdConfirmations: \
+                                        chan={:?} conf_height={} txid={} amount={} sats (~${:.2})",
+                                        channel_id,
+                                        confirmation_height,
+                                        latest_spending_txid,
+                                        amount_satoshis,
+                                        (*amount_satoshis as f64 / 100_000_000.0) * self.btc_price
+                                    );
+                                }
+                            }
+                        }
+
+                        if total_pending_sats > 0 {
+                            println!(
+                                "[PendingSweep/summary] total_pending={} sats (~${:.2})",
+                                total_pending_sats,
+                                (total_pending_sats as f64 / 100_000_000.0) * self.btc_price
+                            );
+                        }
+                    }
                 }
-
-                // Pull raw balances from LDK
-                let balances = self.node.list_balances();
-                let lightning_sats = balances.total_lightning_balance_sats;
-                let onchain_sats   = balances.total_onchain_balance_sats;
-
-                // Convert to BTC + USD
-                self.lightning_balance_btc = lightning_sats as f64 / 100_000_000.0;
-                self.onchain_balance_btc   = onchain_sats   as f64 / 100_000_000.0;
-
-                self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-                self.onchain_balance_usd   = self.onchain_balance_btc   * self.btc_price;
-
-                self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
-                self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
-
-                // ---- Stable-channel aggregate view ------------------------------------
-                let stable_receiver_total_usd: f64 = self
-                    .stable_channels
-                    .iter()
-                    .map(|sc| sc.stable_receiver_usd.0)
-                    .sum();
-
-                let native_total_btc: f64 = self
-                    .stable_channels
-                    .iter()
-                    .map(|sc| sc.native_channel_btc.to_btc())
-                    .sum();
-
-                // ---- Debug prints: where is everything? --------------------------------
-                println!(
-                    "[Balances] price=${:.2} | onchain={} sats ({:.8} BTC, ~${:.2}) \
-                    | ln={} sats ({:.8} BTC, ~${:.2}) | total={} sats ({:.8} BTC, ~${:.2})",
-                    self.btc_price,
-                    onchain_sats,
-                    self.onchain_balance_btc,
-                    self.onchain_balance_usd,
-                    lightning_sats,
-                    self.lightning_balance_btc,
-                    self.lightning_balance_usd,
-                    onchain_sats + lightning_sats,
-                    self.total_balance_btc,
-                    self.total_balance_usd,
-                );
-
-                println!(
-                    "[Balances/stable] entries={} | receiver_USD≈${:.2} | native_BTC≈{:.8} BTC",
-                    self.stable_channels.len(),
-                    stable_receiver_total_usd,
-                    native_total_btc,
-                );
-            }
-
             pub fn check_and_update_stable_channels(&mut self) {
                 let current_price = get_cached_price();
                 if current_price > 0.0 {
