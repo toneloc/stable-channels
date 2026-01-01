@@ -35,7 +35,7 @@
         const LSP_PORT: u16 = 9737;
 
         const DEFAULT_NETWORK: &str = "bitcoin";
-        const DEFAULT_CHAIN_SOURCE_URL: &str = "https://blockstream.info/api/";
+        const DEFAULT_CHAIN_SOURCE_URL: &str = "https://mempool.space/api";        
         const EXPECTED_USD: f64 = 100.0;
 
         #[derive(Deserialize, Debug)]
@@ -510,18 +510,62 @@
 
         impl ServerApp {
             pub fn update_balances(&mut self) {
+                // Refresh price first
                 let current_price = get_cached_price();
                 if current_price > 0.0 {
                     self.btc_price = current_price;
                 }
 
+                // Pull raw balances from LDK
                 let balances = self.node.list_balances();
-                self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-                self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+                let lightning_sats = balances.total_lightning_balance_sats;
+                let onchain_sats   = balances.total_onchain_balance_sats;
+
+                // Convert to BTC + USD
+                self.lightning_balance_btc = lightning_sats as f64 / 100_000_000.0;
+                self.onchain_balance_btc   = onchain_sats   as f64 / 100_000_000.0;
+
                 self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-                self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+                self.onchain_balance_usd   = self.onchain_balance_btc   * self.btc_price;
+
                 self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
                 self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+
+                // ---- Stable-channel aggregate view ------------------------------------
+                let stable_receiver_total_usd: f64 = self
+                    .stable_channels
+                    .iter()
+                    .map(|sc| sc.stable_receiver_usd.0)
+                    .sum();
+
+                let native_total_btc: f64 = self
+                    .stable_channels
+                    .iter()
+                    .map(|sc| sc.native_channel_btc.to_btc())
+                    .sum();
+
+                // ---- Debug prints: where is everything? --------------------------------
+                println!(
+                    "[Balances] price=${:.2} | onchain={} sats ({:.8} BTC, ~${:.2}) \
+                    | ln={} sats ({:.8} BTC, ~${:.2}) | total={} sats ({:.8} BTC, ~${:.2})",
+                    self.btc_price,
+                    onchain_sats,
+                    self.onchain_balance_btc,
+                    self.onchain_balance_usd,
+                    lightning_sats,
+                    self.lightning_balance_btc,
+                    self.lightning_balance_usd,
+                    onchain_sats + lightning_sats,
+                    self.total_balance_btc,
+                    self.total_balance_usd,
+                );
+
+                println!(
+                    "[Balances/stable] entries={} | receiver_USD≈${:.2} | native_BTC≈{:.8} BTC",
+                    self.stable_channels.len(),
+                    stable_receiver_total_usd,
+                    native_total_btc,
+                );
             }
 
             pub fn check_and_update_stable_channels(&mut self) {
