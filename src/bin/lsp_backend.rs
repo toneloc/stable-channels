@@ -1,11 +1,6 @@
         use axum::extract::Path as AxumPath;
         use ldk_node::{
-            bitcoin::{Network, Address, secp256k1::PublicKey},
-            lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
-            lightning::ln::msgs::SocketAddress,
-            config::ChannelConfig,
-            lightning_types::payment::PaymentHash,
-            Builder, Node, Event, liquidity::LSPS2ServiceConfig, CustomTlvRecord,
+            Builder, CustomTlvRecord, Event, Node, bitcoin::{Address, Network, secp256k1::PublicKey}, config::{BackgroundSyncConfig, ChannelConfig, EsploraSyncConfig}, lightning::ln::msgs::SocketAddress, lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description}, lightning_types::payment::PaymentHash, liquidity::LSPS2ServiceConfig
         };
         use std::{sync::Mutex, time::{Duration, Instant}};
         use std::path::Path as FilePath;
@@ -401,7 +396,16 @@
                 builder.set_network(network);
 
                 println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
-                builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
+
+                let esplora_cfg = EsploraSyncConfig {
+                    background_sync_config: Some(BackgroundSyncConfig {
+                        onchain_wallet_sync_interval_secs: 500,
+                        lightning_wallet_sync_interval_secs: 200,
+                        fee_rate_cache_update_interval_secs: 1200
+                    }),
+                };            
+
+                builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), Some(esplora_cfg));
 
                 // println!("[Init] Setting Bitcoin RPC connection");
                 // builder.set_chain_source_bitcoind_rpc(
