@@ -345,8 +345,14 @@
                     let bits = code.to_colors();
                     let width = code.width();
                     let scale = 4;
-                    let mut imgbuf =
-                        GrayImage::new((width * scale) as u32, (width * scale) as u32);
+                    let border = scale * 2; // 2 modules of border
+                    let img_size = (width * scale) as u32;
+                    let bordered_size = img_size + (border * 2) as u32;
+
+                    // Create image with border (white background)
+                    let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255]));
+
+                    // Draw QR code in the center
                     for y in 0..width {
                         for x in 0..width {
                             let color = if bits[y * width + x] == Color::Dark {
@@ -357,8 +363,8 @@
                             for dy in 0..scale {
                                 for dx in 0..scale {
                                     imgbuf.put_pixel(
-                                        (x * scale + dx) as u32,
-                                        (y * scale + dy) as u32,
+                                        (x * scale + dx) as u32 + border as u32,
+                                        (y * scale + dy) as u32 + border as u32,
                                         Luma([color]),
                                     );
                                 }
