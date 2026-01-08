@@ -22,15 +22,6 @@
     use crate::price_feeds::{get_cached_price, get_latest_price};
     use crate::stable;
     use crate::constants::*;
-    use crate::config::AppConfig;
-    use std::path::PathBuf;
-
-    // Configuration will be loaded from AppConfig
-
-    // Data will find the relevant path based on the OS
-    fn user_data_dir(config: &AppConfig) -> PathBuf {
-        config.get_user_data_dir()
-    }
 
     pub struct UserApp {
         pub node: Arc<Node>,
@@ -45,8 +36,7 @@
         show_log_window: bool,
         log_contents: String,
         log_last_read: std::time::Instant,
-        config: AppConfig,
-        
+
         // UI fields
         pub invoice_amount: String,
         pub invoice_result: String,
@@ -73,30 +63,18 @@
         pub fn new() -> Result<Self, String> {
             println!("Initializing user node...");
 
-            // Load configuration
-            let config = AppConfig::load().map_err(|e| format!("Failed to load config: {}", e))?;
-            
-            // Validate configuration
-            if let Err(errors) = config.validate() {
-                eprintln!("Configuration validation errors:");
-                for error in errors {
-                    eprintln!("  - {}", error);
-                }
-                eprintln!("Please set the required environment variables.");
-            }
+            let data_dir = get_user_data_dir();
 
-            let data_dir = user_data_dir(&config);
-            
-            let lsp_pubkey = config.lsp_pubkey
+            let lsp_pubkey = DEFAULT_LSP_PUBKEY
                 .parse::<PublicKey>()
                 .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
-            let audit_log_path = config.get_audit_log_path("user");
+            let audit_log_path = audit_log_path_for("user");
             set_audit_log_path(&audit_log_path);
 
             let mut builder = Builder::new();
-            
-            let network = match config.network.to_lowercase().as_str() {
+
+            let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
                 "signet" => Network::Signet,
                 "testnet" => Network::Testnet,
                 "bitcoin" => Network::Bitcoin,
@@ -115,15 +93,15 @@
                     lightning_wallet_sync_interval_secs: LIGHTNING_WALLET_SYNC_INTERVAL_SECS,
                     fee_rate_cache_update_interval_secs: FEE_RATE_CACHE_UPDATE_INTERVAL_SECS
                 }),
-            };            
+            };
 
-            builder.set_chain_source_esplora(config.chain_source_url.clone(), Some(esplora_cfg));
+            builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
             builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
-            builder.set_listening_addresses(vec![format!("127.0.0.1:{}", config.user_port).parse().unwrap()]).unwrap();
-            let _ = builder.set_node_alias(config.user_node_alias.clone());
+            builder.set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT).parse().unwrap()]).unwrap();
+            let _ = builder.set_node_alias(DEFAULT_USER_ALIAS.to_string());
 
             // Let's set up our LSP
-            let lsp_address = config.lsp_address
+            let lsp_address = DEFAULT_LSP_ADDRESS
                 .parse::<SocketAddress>()
                 .map_err(|e| format!("Invalid LSP address: {}", e))?;
                 
@@ -144,14 +122,14 @@
             println!("User node started: {}", node.node_id());
 
             // We try to connect to the "GATEWAY NODE" ... a well-connected Lightning node
-            if let (Ok(gateway_pubkey), Ok(gateway_address)) = (PublicKey::from_str(&config.gateway_pubkey), SocketAddress::from_str(&config.gateway_address)) {
+            if let (Ok(gateway_pubkey), Ok(gateway_address)) = (PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY), SocketAddress::from_str(DEFAULT_GATEWAY_ADDRESS)) {
                 if let Err(e) = node.connect(gateway_pubkey, gateway_address, true) {
                     println!("Failed to connect to Gateway node: {}", e);
                 }
             }
-            
+
             // And the LSP
-            if let Ok(socket_addr) = SocketAddress::from_str(&config.lsp_address) {
+            if let Ok(socket_addr) = SocketAddress::from_str(DEFAULT_LSP_ADDRESS) {
                 if let Err(e) = node.connect(lsp_pubkey, socket_addr, true) {
                     println!("Failed to connect to LSP node: {}", e);
                 }
@@ -168,8 +146,8 @@
                 channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]),
                 counterparty: lsp_pubkey,
                 is_stable_receiver: true,
-                expected_usd: USD::from_f64(config.expected_usd),
-                expected_btc: Bitcoin::from_usd(USD::from_f64(config.expected_usd), btc_price),
+                expected_usd: USD::from_f64(DEFAULT_EXPECTED_USD),
+                expected_btc: Bitcoin::from_usd(USD::from_f64(DEFAULT_EXPECTED_USD), btc_price),
                 stable_receiver_btc: Bitcoin::default(),
                 stable_receiver_usd: USD::default(),
                 stable_provider_btc: Bitcoin::default(),
@@ -217,7 +195,6 @@
                 balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
                 confirm_close_popup: false,
                 stable_message: String::new(),
-                config,
                 show_confirm_allocation: false,
                 ui_btc_allocation: 0, 
             };
@@ -317,8 +294,8 @@
             //     max_proportional_lsp_fee_limit_ppm_msat
             // );
             
-            let msats = USD::to_msats(USD::from_f64(self.config.expected_usd), latest_price);
-            
+            let msats = USD::to_msats(USD::from_f64(DEFAULT_EXPECTED_USD), latest_price);
+
             // Round to the nearest sat (i.e., nearest 1_000 msats); ties round up.
             let msats_rounded = ((msats.saturating_add(500)) / 1_000) * 1_000;
 
@@ -330,7 +307,7 @@
             );
 
             audit_event("JIT_INVOICE_ATTEMPT", json!({
-                "expected_usd": self.config.expected_usd,
+                "expected_usd": DEFAULT_EXPECTED_USD,
                 "btc_price": latest_price
             }));
 
@@ -339,7 +316,7 @@
                     self.invoice_result = invoice.to_string();
                     audit_event("JIT_INVOICE_GENERATED", json!({
                         "invoice": self.invoice_result,
-                        "amount_msats": USD::to_msats(USD::from_f64(self.config.expected_usd), latest_price)
+                        "amount_msats": USD::to_msats(USD::from_f64(DEFAULT_EXPECTED_USD), latest_price)
                     }));
                     let code = QrCode::new(&self.invoice_result).unwrap();
                     let bits = code.to_colors();
