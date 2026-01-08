@@ -17,7 +17,7 @@ Check out the latest releases in [Releases](https://github.com/toneloc/stable-ch
 
 ### Overview
 
-The Stable Channels Desktop Wallet runs a full Lightning node that lets users stabilize the money that they send to themselves during onboarding. 
+The Stable Channels Desktop Wallet runs a full Lightning node that lets users stabilize the bitcoin that they send to themselves during onboarding. 
 
 The LSP/Server keeps the user stable by overcollateralizing the Stable Channel by 100% at the time of channel creation. Each user (the stability receiver and the LSP/stability provider) puts in the same amount of bitcoin, and the stability mechanism is activated. 
 
@@ -29,7 +29,7 @@ The stability mechanism works like this: each node queries five exchange price f
 
 Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. 
 
-The project is in-progress and is built on LDK Node and Rust. Prior versions were compatible with LND and CLN. These legacy implementations can be found in `/legacy`. 
+The project is in-progress and is built on LDK Node and Rust. Prior versions were compatible with LND and CLN. These legacy implementations can be found here: https://github.com/toneloc/stable-channels-legacy.
 
 Links with examples:
 - **Basic example:** [Twitter thread](https://x.com/tonklaus/status/1729567459579945017)
