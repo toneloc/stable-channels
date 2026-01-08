@@ -1,5 +1,0 @@
-pyln-client 
-cachetools
-requests
-statistics
-apscheduler

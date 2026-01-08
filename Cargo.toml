@@ -41,9 +41,6 @@ once_cell = "1.19"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 futures-util = "0.3"
 
-# Environment variable loading
-dotenvy = "0.15"
-
 [lib]
 name = "stable_channels"
 path = "src/lib.rs"

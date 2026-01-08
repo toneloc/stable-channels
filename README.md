@@ -63,30 +63,7 @@ Logs and backup/key files can be found in these directories:
 
 ### Configuration
 
-The application works out of the box with smart defaults, but supports customization via environment variables or a `.env` file:
-
-#### Custom Configuration (Optional)
-```bash
-# Copy configuration template
-cp env.example .env
-
-# Edit with your values
-nano .env / vi .env
-
-# Run the application
-cargo run --bin stable-channels user
-```
-
-#### Environment Variables (Optional - has smart defaults)
-- `STABLE_CHANNELS_LSP_PUBKEY` - LSP node public key (default: included)
-- `STABLE_CHANNELS_LSP_ADDRESS` - LSP node address (default: `100.25.168.115:9737`)
-- `STABLE_CHANNELS_NETWORK` - Bitcoin network (`bitcoin`/`signet`)
-- `STABLE_CHANNELS_USER_NODE_ALIAS` - User node alias (`user`)
-- `STABLE_CHANNELS_USER_PORT` - User node port (`9736`)
-- `STABLE_CHANNELS_LSP_NODE_ALIAS` - LSP node alias (`lsp`)
-- `STABLE_CHANNELS_LSP_PORT` - LSP node port (`9737`)
-- `STABLE_CHANNELS_CHAIN_SOURCE_URL` - Bitcoin API endpoint (`https://blockstream.info/api`)
-- `STABLE_CHANNELS_EXPECTED_USD` - Expected USD amount (`100.0`)
+The application works out of the box with sensible defaults defined in `src/constants.rs`. To customize values like the LSP public key, address, or network settings, edit the constants directly in that file.
 
 #### Running Different Components
 

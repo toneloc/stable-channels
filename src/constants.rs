@@ -12,6 +12,27 @@ pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 // DEFAULT CONFIGURATION VALUES
 // ============================================================================
 
+/// Default network
+pub const DEFAULT_NETWORK: &str = "bitcoin";
+
+/// Default user node alias
+pub const DEFAULT_USER_ALIAS: &str = "user";
+
+/// Default user port
+pub const DEFAULT_USER_PORT: u16 = 9736;
+
+/// Default LSP node alias
+pub const DEFAULT_LSP_ALIAS: &str = "lsp";
+
+/// Default LSP port
+pub const DEFAULT_LSP_PORT: u16 = 9737;
+
+/// Default chain source URL
+pub const DEFAULT_CHAIN_URL: &str = "https://blockstream.info/api";
+
+/// Default expected USD value
+pub const DEFAULT_EXPECTED_USD: f64 = 100.0;
+
 /// Default LSP public key
 pub const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
 
@@ -141,4 +162,37 @@ pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
             vec!["USD", "last"],
         ),
     ]
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+use std::path::PathBuf;
+use dirs::data_dir;
+
+/// Get the user data directory
+pub fn get_user_data_dir() -> PathBuf {
+    data_dir()
+        .expect("Could not determine user data dir")
+        .join("StableChannels")
+        .join(DEFAULT_USER_ALIAS)
+}
+
+/// Get the LSP data directory
+pub fn get_lsp_data_dir() -> PathBuf {
+    data_dir()
+        .expect("Could not determine LSP data dir")
+        .join("StableChannels")
+        .join(DEFAULT_LSP_ALIAS)
+}
+
+/// Get the audit log path for a given mode ("user" or "lsp")
+pub fn audit_log_path_for(mode: &str) -> String {
+    let base_dir = match mode {
+        "user" => get_user_data_dir(),
+        "lsp" => get_lsp_data_dir(),
+        _ => panic!("Invalid mode for audit log path"),
+    };
+    base_dir.join("audit_log.txt").to_string_lossy().into_owned()
 }

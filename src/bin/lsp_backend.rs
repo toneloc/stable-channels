@@ -21,7 +21,6 @@
         use stable_channels::stable;
         use stable_channels::types::{USD, Bitcoin, StableChannel};
         use stable_channels::constants::*;
-        use stable_channels::config::AppConfig;
 
         // HTTP
         use axum::{routing::{get, post}, Json, Router};
@@ -30,8 +29,6 @@
         static APP: Lazy<Mutex<ServerApp>> = Lazy::new(|| {
             Mutex::new(ServerApp::new_with_mode("lsp"))
         });
-
-        // Configuration will be loaded from AppConfig
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
         struct StableChannelEntry {
@@ -47,7 +44,6 @@
             status_message: String,
             last_update: Instant,
             last_stability_check: Instant,
-            config: AppConfig,
 
             lightning_balance_btc: f64,
             onchain_balance_btc:    f64,
@@ -350,26 +346,14 @@
 
         impl ServerApp {
             pub fn new_with_mode(mode: &str) -> Self {
-                // Load configuration
-                let config = AppConfig::load().expect("Failed to load configuration");
-                
-                // Validate configuration
-                if let Err(errors) = config.validate() {
-                    eprintln!("Configuration validation errors:");
-                    for error in errors {
-                        eprintln!("  - {}", error);
-                    }
-                    eprintln!("Please set the required environment variables.");
-                }
-                
                 let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
-                    "lsp" => (config.get_lsp_data_dir(), config.lsp_node_alias.clone(), config.lsp_port),
+                    "lsp" => (get_lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
                     _ => panic!("Invalid mode"),
                 };
 
                 let mut builder = Builder::new();
 
-                let network = match config.network.to_lowercase().as_str() {
+                let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
                     "signet" => Network::Signet,
                     "testnet" => Network::Testnet,
                     "bitcoin" => Network::Bitcoin,
@@ -395,7 +379,7 @@
                 println!("[Init] Setting storage directory: {}", data_dir.display());
                 builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
 
-                let audit_log_path = config.get_audit_log_path("lsp");
+                let audit_log_path = audit_log_path_for("lsp");
                 set_audit_log_path(&audit_log_path);
 
                 let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
@@ -404,7 +388,7 @@
                 println!("[Init] Setting node alias: {}", node_alias);
                 let _ = builder.set_node_alias(node_alias.to_string()).ok();
 
-                if node_alias == config.lsp_node_alias {
+                if node_alias == DEFAULT_LSP_ALIAS {
                     println!("[Init] Configuring LSP parameters...");
                     let service_config = LSPS2ServiceConfig {
                         require_token: None,
@@ -440,47 +424,45 @@
                 let btc_price = get_cached_price();
                 println!("[Init] Initial BTC price: {}", btc_price);
 
-                let expected_usd = config.expected_usd;
                 let mut app = Self {
                     node,
                     btc_price,
                     status_message: String::new(),
                     last_update: Instant::now(),
                     last_stability_check: Instant::now(),
-                    config,
-                
+
                     lightning_balance_btc: 0.0,
                     onchain_balance_btc:   0.0,
                     total_balance_btc:     0.0,
                     lightning_balance_usd: 0.0,
                     onchain_balance_usd:   0.0,
                     total_balance_usd:     0.0,
-                
+
                     invoice_amount: String::new(),
                     invoice_result: String::new(),
                     invoice_to_pay: String::new(),
                     on_chain_address: String::new(),
                     on_chain_amount: String::new(),
-                
+
                     open_channel_node_id: String::new(),
                     open_channel_address: String::new(),
                     open_channel_amount:  String::new(),
-                
+
                     connect_node_id:     String::new(),
                     connect_node_address:String::new(),
-                
+
                     channel_id_to_close: String::new(),
-                
+
                     selected_channel_id:   String::new(),
-                    stable_channel_amount: expected_usd.to_string(),
-                
+                    stable_channel_amount: DEFAULT_EXPECTED_USD.to_string(),
+
                     stable_channels: Vec::new(),
                 };
 
                 app.update_balances();
                 app.update_channel_info();
 
-                if node_alias == app.config.lsp_node_alias {
+                if node_alias == DEFAULT_LSP_ALIAS {
                     app.load_stable_channels();
                 }
 
@@ -545,13 +527,13 @@
                                 // We need to divide this by 2.0 to account for how much the user put in
                                 let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64 * self.btc_price;
                                 let tolerance = STABLE_CHANNEL_TOLERANCE;
-                                let lower = self.config.expected_usd * (1.0 - tolerance);
-                                let upper = self.config.expected_usd * (1.0 + tolerance);
+                                let lower = DEFAULT_EXPECTED_USD * (1.0 - tolerance);
+                                let upper = DEFAULT_EXPECTED_USD * (1.0 + tolerance);
                         
                                 if funded_usd >= lower && funded_usd <= upper {
                                     // Good: within tolerance → designate as stable
                                     self.selected_channel_id   = channel_id.to_string();
-                                    self.stable_channel_amount = self.config.expected_usd.to_string();
+                                    self.stable_channel_amount = DEFAULT_EXPECTED_USD.to_string();
                                     self.edit_stable_channel(None);
                         
                                     audit_event("CHANNEL_READY_STABLE", json!({
@@ -560,7 +542,7 @@
                                     }));
                                     self.status_message = format!(
                                         "Channel {} is stable at ${} (funded ≈ ${:.2})",
-                                        channel_id, self.config.expected_usd, funded_usd
+                                        channel_id, DEFAULT_EXPECTED_USD, funded_usd
                                     );
                                 } else {
                                     // Outside tolerance → don’t designate
@@ -570,7 +552,7 @@
                                     }));
                                     self.status_message = format!(
                                         "Channel {} funded at ${:.2}, not within tolerance of ${}",
-                                        channel_id, funded_usd, self.config.expected_usd
+                                        channel_id, funded_usd, DEFAULT_EXPECTED_USD
                                     );
                                 }
                             }
@@ -942,7 +924,7 @@
                             payment_made: false,
                             timestamp: 0,
                             formatted_datetime: "".to_string(),
-                            sc_dir: self.config.get_lsp_data_dir().to_string_lossy().into_owned(),
+                            sc_dir: get_lsp_data_dir().to_string_lossy().into_owned(),
                             prices: "".to_string(),
                             onchain_btc: Bitcoin::from_sats(0),
                             onchain_usd: USD(0.0),
@@ -970,7 +952,7 @@
                         );
                         audit_event("STABLE_EDITED", json!({"channel_id": channel_id_str, "target_usd": amount}));
                         self.selected_channel_id.clear();
-                        self.stable_channel_amount = self.config.expected_usd.to_string();
+                        self.stable_channel_amount = DEFAULT_EXPECTED_USD.to_string();
                         return;
                     }
                 }
@@ -987,7 +969,7 @@
                     note: sc.note.clone(),  
                 }).collect();
             
-                let file_path = self.config.get_lsp_data_dir().join("stablechannels.json");
+                let file_path = get_lsp_data_dir().join("stablechannels.json");
             
                 if let Some(parent) = file_path.parent() {
                     fs::create_dir_all(parent).unwrap_or_else(|e| {
@@ -1013,7 +995,7 @@
             }
 
             pub fn load_stable_channels(&mut self) {
-                let file_path = self.config.get_lsp_data_dir().join("stablechannels.json");
+                let file_path = get_lsp_data_dir().join("stablechannels.json");
 
                 if !file_path.exists() {
                     println!("No existing stable channels file found.");
@@ -1053,7 +1035,7 @@
                                                 payment_made: false,
                                                 timestamp: 0,
                                                 formatted_datetime: "".to_string(),
-                                                sc_dir: self.config.get_lsp_data_dir().to_string_lossy().into_owned(),
+                                                sc_dir: get_lsp_data_dir().to_string_lossy().into_owned(),
                                                 prices: "".to_string(),
                                                 onchain_btc: Bitcoin::from_sats(0),
                                                 onchain_usd: USD(0.0),
