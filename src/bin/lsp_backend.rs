@@ -416,6 +416,7 @@
                         max_client_to_self_delay: DEFAULT_MAX_CLIENT_TO_SELF_DELAY,
                         min_payment_size_msat: MIN_PAYMENT_SIZE_MSAT,
                         max_payment_size_msat: MAX_PAYMENT_SIZE_MSAT,
+                        client_trusts_lsp: true,
                     };
                     builder.set_liquidity_provider_lsps2(service_config);
                 }
