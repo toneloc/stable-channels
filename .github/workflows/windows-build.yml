@@ -17,12 +17,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # ---- Rust toolchain ---------------------------------------------------
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: x86_64-pc-windows-msvc
-          profile: minimal
-          override: true
+          targets: x86_64-pc-windows-msvc
 
       # ---- Build ------------------------------------------------------------
       - name: Cargo build (release)

@@ -28,9 +28,7 @@ jobs:
       # ---------- Rust toolchain ----------
       - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          components: clippy,rustfmt   # optional
-          override: true
+          components: clippy,rustfmt
 
       # ---------- AppImage tooling ----------
       - name: Install AppImage tooling
