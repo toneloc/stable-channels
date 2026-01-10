@@ -41,7 +41,7 @@ jobs:
           VERSION="0.1.0"
           BIN_NAME="stable-channels"
           WRAPPER_NAME="$APP_NAME"
-          PNG_ICON="sc-icon-egui.png"
+          PNG_ICON="photos/sc-icon-egui.png"
           ICNS_NAME="AppIcon.icns"
 
           echo "▶ Installing targets…"
