@@ -39,8 +39,8 @@ jobs:
         shell: pwsh
         run: |
           choco install imagemagick.app -y                                   # installs `magick`
-          magick sc-icon-egui.png -define icon:auto-resize=256,128,64,32,16 `
-                 sc-icon-egui.ico
+          magick photos/sc-icon-egui.png -define icon:auto-resize=256,128,64,32,16 `
+                 photos/sc-icon-egui.ico
 
       # ---- Embed icon with rcedit -------------------------------------------
       - name: Set EXE icon
@@ -48,7 +48,7 @@ jobs:
         run: |
           Invoke-WebRequest https://github.com/electron/rcedit/releases/download/v1.1.1/rcedit-x64.exe -OutFile rcedit.exe
           ./rcedit.exe target\x86_64-pc-windows-msvc\release\stable-channels.exe `
-            --set-icon sc-icon-egui.ico
+            --set-icon photos/sc-icon-egui.ico
 
         # ---- Code-sign (requires secrets) -------------------------------------
       - name: Sign executable
