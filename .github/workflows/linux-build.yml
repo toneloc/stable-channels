@@ -55,7 +55,7 @@ jobs:
           APP_NAME="Stable Channels"
           BIN_NAME="stable-channels"
           VERSION="0.1.0"
-          PNG_ICON="sc-icon-egui.png"      # optional; 1024×1024 PNG in repo root
+          PNG_ICON="photos/sc-icon-egui.png"      
           ARCHS=(x86_64 aarch64)           # build for x86‑64 & AArch64
           DIST_DIR="dist"
           # ─────────────────────────────────────────────────────────────────
