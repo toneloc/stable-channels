@@ -146,3 +146,54 @@ pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
     println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
     Ok(median_price)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_price_feeds_returns_feeds() {
+        let feeds = set_price_feeds();
+        assert!(!feeds.is_empty());
+        assert!(feeds.iter().any(|f| f.name == "Bitstamp"));
+        assert!(feeds.iter().any(|f| f.name == "Coinbase"));
+    }
+
+    #[test]
+    fn test_price_feed_url_format_substitution() {
+        let feed = PriceFeed::new(
+            "Test",
+            "https://example.com/{currency_lc}/{currency}",
+            vec!["price"],
+        );
+        let url = feed.url_format
+            .replace("{currency_lc}", "usd")
+            .replace("{currency}", "USD");
+        assert_eq!(url, "https://example.com/usd/USD");
+    }
+
+    // Integration test (requires network)
+    #[test]
+    #[ignore] // Run with: cargo test -- --ignored
+    fn test_fetch_prices_live() {
+        let agent = Agent::new();
+        let feeds = set_price_feeds();
+        let result = fetch_prices(&agent, &feeds);
+        assert!(result.is_ok());
+        let prices = result.unwrap();
+        assert!(!prices.is_empty());
+        for (name, price) in &prices {
+            assert!(*price > 0.0, "{} returned invalid price", name);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_get_latest_price_returns_median() {
+        let agent = Agent::new();
+        let result = get_latest_price(&agent);
+        assert!(result.is_ok());
+        let price = result.unwrap();
+        assert!(price > 1000.0); // BTC should be > $1000
+    }
+}

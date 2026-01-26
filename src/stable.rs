@@ -75,13 +75,22 @@ pub fn update_balances<'update_balance_lifetime>(
         
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
-        
+
+        // Update native_channel_btc based on allocation
+        // This is the portion that floats with BTC price
+        let total_receiver_usd = sc.stable_receiver_usd.0;
+        let native_usd = USD::from_f64(total_receiver_usd * sc.allocation.btc_weight);
+        sc.native_channel_btc = Bitcoin::from_usd(native_usd, sc.latest_price);
+
         audit_event("BALANCE_UPDATE", json!({
             "channel_id": format!("{}", sc.channel_id),
             "stable_receiver_btc": sc.stable_receiver_btc.to_string(),
             "stable_provider_btc": sc.stable_provider_btc.to_string(),
             "stable_receiver_usd": sc.stable_receiver_usd.to_string(),
             "stable_provider_usd": sc.stable_provider_usd.to_string(),
+            "native_channel_btc": sc.native_channel_btc.to_string(),
+            "allocation_usd_weight": sc.allocation.usd_weight,
+            "allocation_btc_weight": sc.allocation.btc_weight,
             "btc_price": sc.latest_price
         }));
 
@@ -92,6 +101,15 @@ pub fn update_balances<'update_balance_lifetime>(
     (true, sc)
 }
 
+/// Check and enforce stability for a channel based on its allocation weights.
+///
+/// The stability logic now respects per-channel allocation:
+/// - allocation.usd_weight determines what portion of the channel value is stabilized
+/// - allocation.btc_weight portion floats with BTC price (native exposure)
+///
+/// For example, with allocation { usd_weight: 0.75, btc_weight: 0.25 }:
+/// - 75% of the channel value is kept stable in USD terms
+/// - 25% floats with the BTC market
 pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     let current_price = if price > 0.0 {
         price
@@ -117,9 +135,43 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
         return;
     }
 
-    let dollars_from_par = sc.stable_receiver_usd - sc.expected_usd;
-    let percent_from_par = ((dollars_from_par / sc.expected_usd) * 100.0).abs();
-    let is_receiver_below_expected = sc.stable_receiver_usd < sc.expected_usd;
+    // Skip stability check if allocation is 100% BTC (no USD to stabilize)
+    if sc.allocation.usd_weight < 0.001 {
+        audit_event("STABILITY_SKIP", json!({
+            "channel_id": format!("{}", sc.channel_id),
+            "reason": "allocation is 100% BTC, no USD to stabilize",
+            "allocation_usd_weight": sc.allocation.usd_weight
+        }));
+        return;
+    }
+
+    // Skip if expected_usd is zero or very small
+    if sc.expected_usd.0 < 0.01 {
+        audit_event("STABILITY_SKIP", json!({
+            "channel_id": format!("{}", sc.channel_id),
+            "reason": "expected_usd is too small",
+            "expected_usd": sc.expected_usd.0
+        }));
+        return;
+    }
+
+    // Calculate the current USD value of the stable portion
+    // The stable_receiver_usd includes the entire channel balance
+    // We only stabilize the usd_weight portion
+    let total_receiver_usd = sc.stable_receiver_usd.0;
+    let current_stable_usd = total_receiver_usd * sc.allocation.usd_weight;
+
+    // The target is expected_usd (which should be set based on allocation)
+    let target_usd = sc.expected_usd.0;
+
+    // Calculate deviation from the stable target
+    let dollars_from_par = USD::from_f64(current_stable_usd - target_usd);
+    let percent_from_par = if target_usd > 0.0 {
+        ((dollars_from_par.0 / target_usd) * 100.0).abs()
+    } else {
+        0.0
+    };
+    let is_receiver_below_expected = current_stable_usd < target_usd;
 
     let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
         "STABLE"
@@ -134,8 +186,11 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     };
 
     audit_event("STABILITY_CHECK", json!({
-        "expected_usd": sc.expected_usd.0,
-        "current_receiver_usd": sc.stable_receiver_usd.0,
+        "expected_usd": target_usd,
+        "current_stable_usd": current_stable_usd,
+        "total_receiver_usd": total_receiver_usd,
+        "allocation_usd_weight": sc.allocation.usd_weight,
+        "allocation_btc_weight": sc.allocation.btc_weight,
         "percent_from_par": percent_from_par,
         "btc_price": sc.latest_price,
         "action": action,
@@ -154,7 +209,8 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
             audit_event("STABILITY_PAYMENT_SENT", json!({
                 "amount_msats": amt,
                 "payment_id": payment_id.to_string(),
-                "counterparty": sc.counterparty.to_string()
+                "counterparty": sc.counterparty.to_string(),
+                "allocation_usd_weight": sc.allocation.usd_weight
             }));
         }
         Err(e) => {
@@ -164,5 +220,67 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
                 "counterparty": sc.counterparty.to_string()
             }));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_current_price_returns_non_negative() {
+        let agent = Agent::new();
+        let price = get_current_price(&agent);
+        assert!(price >= 0.0);
+    }
+
+    #[test]
+    fn test_usd_from_bitcoin_conversion() {
+        let btc = Bitcoin::from_sats(100_000_000); // 1 BTC
+        let price = 50_000.0;
+        let usd = USD::from_bitcoin(btc, price);
+        assert_eq!(usd.0, 50_000.0);
+    }
+
+    #[test]
+    fn test_usd_to_msats_conversion() {
+        let usd = USD::from_f64(50.0);
+        let price = 50_000.0;
+        // $50 at $50k/BTC = 0.001 BTC = 100,000 sats = 100,000,000 msats
+        let msats = USD::to_msats(usd, price);
+        assert_eq!(msats, 100_000_000);
+    }
+
+    #[test]
+    fn test_percent_from_par_calculation() {
+        let target_usd: f64 = 100.0;
+        let current_stable_usd: f64 = 99.0;
+        let dollars_from_par = current_stable_usd - target_usd;
+        let percent_from_par = ((dollars_from_par / target_usd) * 100.0).abs();
+        assert_eq!(percent_from_par, 1.0);
+    }
+
+    #[test]
+    fn test_stability_action_determination() {
+        // Test that small deviations result in STABLE action
+        let percent_from_par = 0.05; // 0.05% deviation
+        let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
+            "STABLE"
+        } else {
+            "CHECK"
+        };
+        assert_eq!(action, "STABLE");
+    }
+
+    #[test]
+    fn test_stability_action_above_threshold() {
+        // Test that large deviations don't result in STABLE action
+        let percent_from_par = 0.5; // 0.5% deviation
+        let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
+            "STABLE"
+        } else {
+            "CHECK"
+        };
+        assert_eq!(action, "CHECK");
     }
 }

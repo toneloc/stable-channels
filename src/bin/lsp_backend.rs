@@ -19,8 +19,35 @@
         use stable_channels::audit::{audit_event, set_audit_log_path};
         use stable_channels::price_feeds::get_cached_price;
         use stable_channels::stable;
-        use stable_channels::types::{USD, Bitcoin, StableChannel};
+        use stable_channels::types::{USD, Bitcoin, StableChannel, Allocation};
         use stable_channels::constants::*;
+
+        // ============================================================================
+        // ALLOCATION MESSAGE TYPES
+        // ============================================================================
+
+        /// Outer envelope for signed allocation messages
+        #[derive(Deserialize, Debug)]
+        struct AllocationSignedMessage {
+            payload: String,
+            signature: String,
+        }
+
+        /// Inner payload for allocation update messages
+        #[derive(Deserialize, Debug)]
+        struct AllocationPayload {
+            #[serde(rename = "type")]
+            kind: String,
+            channel_id: String,
+            allocation: AllocationWeights,
+        }
+
+        /// Allocation weights from the message
+        #[derive(Deserialize, Debug)]
+        struct AllocationWeights {
+            usd_weight: f64,
+            btc_weight: f64,
+        }
 
         // HTTP
         use axum::{routing::{get, post}, Json, Router};
@@ -30,12 +57,33 @@
             Mutex::new(ServerApp::new_with_mode("lsp"))
         });
 
+        /// Entry stored in stablechannels.json for persistence
         #[derive(Serialize, Deserialize, Clone, Debug)]
         struct StableChannelEntry {
             channel_id: String,
             expected_usd: f64,
+            #[serde(default)]
             native_btc: f64,
             note: Option<String>,
+            /// Per-channel allocation weights (optional for backward compatibility)
+            #[serde(default)]
+            allocation: Option<AllocationEntry>,
+        }
+
+        /// Allocation entry for JSON persistence
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        struct AllocationEntry {
+            usd_weight: f64,
+            btc_weight: f64,
+        }
+
+        impl Default for AllocationEntry {
+            fn default() -> Self {
+                Self {
+                    usd_weight: 1.0,
+                    btc_weight: 0.0,
+                }
+            }
         }
         pub struct ServerApp {
             // core + balances …
@@ -615,7 +663,7 @@
                 custom_records: Vec<CustomTlvRecord>,
             ) {
                 let mut decoded_payload: Option<String> = None;
-            
+
                 for tlv in custom_records {
                     if tlv.type_num == STABLE_CHANNEL_TLV_TYPE {
                         if let Ok(s) = String::from_utf8(tlv.value) {
@@ -623,18 +671,32 @@
                         }
                     }
                 }
-            
+
                 self.status_message = match &decoded_payload {
                     Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
                     None => format!("Received {} msats (no TLV)", amount_msat),
                 };
-            
+
+                // 1 msat payments are message/signaling payments
                 if amount_msat == 1 {
-                    // Special audit for 1 msat “message” payments
-                    audit_event("MESSAGE_RECEIVED", json!({
-                        "payment_hash": format!("{}", payment_hash),
-                        "message": decoded_payload,
-                    }));
+                    match &decoded_payload {
+                        Some(raw) => {
+                            // Log raw message
+                            audit_event("MESSAGE_RECEIVED", json!({
+                                "payment_hash": format!("{}", payment_hash),
+                                "raw": raw,
+                            }));
+
+                            // Try to parse as allocation update
+                            self.handle_allocation_message(raw, &payment_hash);
+                        }
+                        None => {
+                            audit_event("MESSAGE_RECEIVED_EMPTY_TLV", json!({
+                                "payment_hash": format!("{}", payment_hash),
+                                "amount_msat": amount_msat,
+                            }));
+                        }
+                    }
                 } else {
                     audit_event("PAYMENT_RECEIVED", json!({
                         "amount_msat": amount_msat,
@@ -642,8 +704,253 @@
                         "decoded_tlv": decoded_payload,
                     }));
                 }
-            
+
                 self.update_balances();
+            }
+
+            /// Handle allocation update message from client
+            fn handle_allocation_message(
+                &mut self,
+                raw_msg: &str,
+                payment_hash: &PaymentHash,
+            ) {
+                // 1) Parse outer envelope: {"payload":"...", "signature":"..."}
+                let signed: AllocationSignedMessage =
+                    match serde_json::from_str::<AllocationSignedMessage>(raw_msg) {
+                        Ok(v) => {
+                            audit_event("ALLOCATION_PARSED_SIGNED_OK", json!({
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                            v
+                        }
+                        Err(e) => {
+                            audit_event("ALLOCATION_PARSE_SIGNED_FAILED", json!({
+                                "error": format!("{e}"),
+                                "raw": raw_msg,
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                            self.status_message = "Allocation: malformed signed JSON".to_string();
+                            return;
+                        }
+                    };
+
+                // 2) Parse inner payload: type + channel_id + allocation
+                let payload: AllocationPayload =
+                    match serde_json::from_str::<AllocationPayload>(&signed.payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            audit_event("ALLOCATION_PARSE_PAYLOAD_FAILED", json!({
+                                "error": format!("{e}"),
+                                "payload": signed.payload,
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                            self.status_message = "Allocation: malformed payload".to_string();
+                            return;
+                        }
+                    };
+
+                audit_event("ALLOCATION_PARSED_PAYLOAD_OK", json!({
+                    "payment_hash": format!("{}", payment_hash),
+                    "payload_channel_id": &payload.channel_id,
+                    "payload_type": &payload.kind,
+                }));
+
+                // Check message type
+                if payload.kind != ALLOCATION_UPDATE_TYPE {
+                    audit_event("ALLOCATION_UNHANDLED_TYPE", json!({
+                        "kind": payload.kind,
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+                    self.status_message = format!("Allocation: ignoring type {}", payload.kind);
+                    return;
+                }
+
+                // 3) Validate allocation weights
+                let usd_weight = payload.allocation.usd_weight;
+                let btc_weight = payload.allocation.btc_weight;
+
+                // Weights must be non-negative
+                if usd_weight < 0.0 || btc_weight < 0.0 {
+                    audit_event("ALLOCATION_INVALID_WEIGHTS", json!({
+                        "usd_weight": usd_weight,
+                        "btc_weight": btc_weight,
+                        "reason": "negative weight",
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+                    self.status_message = "Allocation: negative weights not allowed".to_string();
+                    return;
+                }
+
+                // Weights must sum to approximately 1.0
+                let weight_sum = usd_weight + btc_weight;
+                if (weight_sum - 1.0).abs() > 0.01 {
+                    audit_event("ALLOCATION_WEIGHT_SUM_INVALID", json!({
+                        "usd_weight": usd_weight,
+                        "btc_weight": btc_weight,
+                        "sum": weight_sum,
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+                    self.status_message = format!("Allocation: weights sum to {} (must be 1.0)", weight_sum);
+                    return;
+                }
+
+                let chan_id_str = payload.channel_id.clone();
+
+                // 4) Find the channel to verify signature
+                let channel_opt = self
+                    .node
+                    .list_channels()
+                    .into_iter()
+                    .find(|c| c.channel_id.to_string() == chan_id_str);
+
+                let channel = match channel_opt {
+                    Some(ch) => ch,
+                    None => {
+                        audit_event("ALLOCATION_CHANNEL_NOT_FOUND", json!({
+                            "channel_id": chan_id_str,
+                            "usd_weight": usd_weight,
+                            "btc_weight": btc_weight,
+                            "payment_hash": format!("{}", payment_hash),
+                        }));
+                        self.status_message = format!("Allocation: unknown channel {}", chan_id_str);
+                        return;
+                    }
+                };
+
+                // 5) Verify signature using counterparty's pubkey
+                let pkey = channel.counterparty_node_id;
+                let sig_ok = self
+                    .node
+                    .verify_signature(signed.payload.as_bytes(), &signed.signature, &pkey);
+
+                if !sig_ok {
+                    audit_event("ALLOCATION_SIGNATURE_INVALID", json!({
+                        "channel_id": chan_id_str,
+                        "usd_weight": usd_weight,
+                        "btc_weight": btc_weight,
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+                    self.status_message = format!(
+                        "Allocation: signature NOT verified for channel {}",
+                        chan_id_str
+                    );
+                    println!("Allocation message signature NOT verified for channel {}", chan_id_str);
+                    return;
+                }
+
+                audit_event("ALLOCATION_SIGNATURE_VALID", json!({
+                    "channel_id": chan_id_str,
+                    "usd_weight": usd_weight,
+                    "btc_weight": btc_weight,
+                    "payment_hash": format!("{}", payment_hash),
+                }));
+
+                // 6) Apply allocation to StableChannel
+                let mut updated = false;
+                let mut applied_target_stable_usd: f64 = 0.0;
+                let mut applied_native_btc_str: String = String::new();
+
+                {
+                    if let Some(sc) = self
+                        .stable_channels
+                        .iter_mut()
+                        .find(|sc| sc.channel_id == channel.channel_id)
+                    {
+                        // Refresh balances to get current receiver USD
+                        let (ok, _) = stable::update_balances(&self.node, sc);
+                        if !ok {
+                            audit_event("ALLOCATION_BALANCE_UPDATE_FAILED", json!({
+                                "channel_id": chan_id_str,
+                                "payment_hash": format!("{}", payment_hash),
+                            }));
+                        } else {
+                            // Total receiver USD right now
+                            let total_receiver_usd = sc.stable_receiver_usd.0;
+
+                            // Create new allocation
+                            let new_allocation = match Allocation::new(usd_weight, btc_weight) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    audit_event("ALLOCATION_CREATE_FAILED", json!({
+                                        "error": e,
+                                        "channel_id": chan_id_str,
+                                        "payment_hash": format!("{}", payment_hash),
+                                    }));
+                                    return;
+                                }
+                            };
+
+                            // USD portion the user wants hedged
+                            let target_stable_usd = total_receiver_usd * new_allocation.usd_weight;
+
+                            // Update expected_usd to the new target
+                            sc.expected_usd = USD::from_f64(target_stable_usd);
+                            sc.allocation = new_allocation;
+
+                            // Remaining is native channel BTC exposure
+                            let target_native_usd = (total_receiver_usd - target_stable_usd).max(0.0);
+                            let native_usd = USD::from_f64(target_native_usd);
+                            sc.native_channel_btc = Bitcoin::from_usd(native_usd, sc.latest_price);
+
+                            // Update note with allocation info
+                            let mut new_note = format!(
+                                "Allocation: {}% USD / {}% BTC (via MESSAGE {})",
+                                new_allocation.usd_percent(),
+                                new_allocation.btc_percent(),
+                                payment_hash,
+                            );
+                            if let Some(existing) = sc.note.as_ref() {
+                                if !existing.trim().is_empty() {
+                                    new_note.push('\n');
+                                    new_note.push_str(existing);
+                                }
+                            }
+                            sc.note = Some(new_note);
+
+                            applied_target_stable_usd = target_stable_usd;
+                            applied_native_btc_str = sc.native_channel_btc.to_string();
+                            updated = true;
+                        }
+                    } else {
+                        audit_event("ALLOCATION_STABLE_ENTRY_NOT_FOUND", json!({
+                            "channel_id": chan_id_str,
+                            "usd_weight": usd_weight,
+                            "btc_weight": btc_weight,
+                            "payment_hash": format!("{}", payment_hash),
+                        }));
+                        self.status_message = format!(
+                            "Allocation: channel {} not in stable channels list",
+                            chan_id_str
+                        );
+                        return;
+                    }
+                }
+
+                if updated {
+                    self.save_stable_channels();
+
+                    audit_event("ALLOCATION_APPLIED", json!({
+                        "channel_id": chan_id_str,
+                        "usd_weight": usd_weight,
+                        "btc_weight": btc_weight,
+                        "target_stable_usd": applied_target_stable_usd,
+                        "native_channel_btc": applied_native_btc_str,
+                        "payment_hash": format!("{}", payment_hash),
+                    }));
+
+                    self.status_message = format!(
+                        "Allocation applied: {}% USD / {}% BTC for channel {}",
+                        (usd_weight * 100.0).round() as u8,
+                        (btc_weight * 100.0).round() as u8,
+                        &chan_id_str[..8.min(chan_id_str.len())],
+                    );
+                    println!(
+                        "Allocation applied: {}% USD / {}% BTC for channel {}",
+                        (usd_weight * 100.0).round() as u8,
+                        (btc_weight * 100.0).round() as u8,
+                        chan_id_str
+                    );
+                }
             }
             
             pub fn generate_invoice(&mut self) -> bool {
@@ -909,6 +1216,17 @@
                             }
                         }                        
             
+                        // Preserve existing allocation if channel already exists, otherwise default to 100% USD
+                        let allocation = self.stable_channels.iter()
+                            .find(|sc| sc.channel_id == channel.channel_id)
+                            .map(|sc| sc.allocation)
+                            .unwrap_or_default();
+
+                        let native_channel_btc = self.stable_channels.iter()
+                            .find(|sc| sc.channel_id == channel.channel_id)
+                            .map(|sc| sc.native_channel_btc)
+                            .unwrap_or_default();
+
                         let stable_channel = StableChannel {
                             channel_id: channel.channel_id,
                             counterparty: channel.counterparty_node_id,
@@ -929,6 +1247,8 @@
                             onchain_btc: Bitcoin::from_sats(0),
                             onchain_usd: USD(0.0),
                             note, // <-- use preserved note instead of wiping
+                            allocation,
+                            native_channel_btc,
                         };
             
                         let mut found = false;
@@ -965,8 +1285,12 @@
                 let entries: Vec<StableChannelEntry> = self.stable_channels.iter().map(|sc| StableChannelEntry {
                     channel_id: sc.channel_id.to_string(),
                     expected_usd: sc.expected_usd.0,
-                    native_btc: 0.0,                
-                    note: sc.note.clone(),  
+                    native_btc: sc.native_channel_btc.to_btc(),
+                    note: sc.note.clone(),
+                    allocation: Some(AllocationEntry {
+                        usd_weight: sc.allocation.usd_weight,
+                        btc_weight: sc.allocation.btc_weight,
+                    }),
                 }).collect();
             
                 let file_path = get_lsp_data_dir().join("stablechannels.json");
@@ -1020,6 +1344,15 @@
                                             let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
                                             let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
 
+                                            // Load allocation from entry, or use default (100% USD)
+                                            let allocation = entry.allocation.as_ref()
+                                                .map(|a| Allocation::new(a.usd_weight, a.btc_weight)
+                                                    .unwrap_or_default())
+                                                .unwrap_or_default();
+
+                                            // Load native BTC exposure
+                                            let native_channel_btc = Bitcoin::from_btc(entry.native_btc);
+
                                             let stable_channel = StableChannel {
                                                 channel_id: channel.channel_id,
                                                 counterparty: channel.counterparty_node_id,
@@ -1040,6 +1373,8 @@
                                                 onchain_btc: Bitcoin::from_sats(0),
                                                 onchain_usd: USD(0.0),
                                                 note: entry.note.clone(),
+                                                allocation,
+                                                native_channel_btc,
                                             };
 
                                             self.stable_channels.push(stable_channel);

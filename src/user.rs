@@ -22,6 +22,7 @@
     use crate::price_feeds::{get_cached_price, get_latest_price};
     use crate::stable;
     use crate::constants::*;
+    use std::fs;
 
     pub struct UserApp {
         pub node: Arc<Node>,
@@ -162,12 +163,14 @@
                 onchain_btc: Bitcoin::from_sats(0),
                 onchain_usd: USD(0.0),
                 note: Some(String::new()),
+                allocation: Allocation::default(),
+                native_channel_btc: Bitcoin::from_sats(0),
             };
             let stable_channel = Arc::new(Mutex::new(sc_init));
 
             let show_onboarding = node.list_channels().is_empty();
 
-            let app = Self {
+            let mut app = Self {
                 node: Arc::clone(&node),
                 status_message: String::new(),
                 invoice_result: String::new(),
@@ -205,39 +208,10 @@
                 update_balances(&app.node, &mut sc);
             }
 
-            let node_arc = Arc::clone(&app.node);
-            let sc_arc = Arc::clone(&app.stable_channel);
+            // Load persisted allocation from user's stablechannels.json
+            app.load_user_allocation();
 
-            std::thread::spawn(move || {
-                use std::{thread::sleep, time::{Duration, SystemTime, UNIX_EPOCH}};
-
-                fn current_unix_time() -> i64 {
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        .try_into()
-                        .unwrap_or(0)
-                }
-
-                loop {
-                    let price = match get_latest_price(&ureq::Agent::new()) {
-                        Ok(p) if p > 0.0 => p,
-                        _ => crate::price_feeds::get_cached_price()
-                    };
-
-                    if price > 0.0 {
-                        if let Ok(mut sc) = sc_arc.lock() {
-                            stable::check_stability(&*node_arc, &mut sc, price);
-                            update_balances(&*node_arc, &mut sc);
-
-                            sc.latest_price = price;
-                            sc.timestamp = current_unix_time();
-                        }
-                    }
-                    sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
-                }
-            });
+            // Background thread is started via start_background_if_needed() in the update loop
 
             Ok(app)
         }
@@ -251,22 +225,35 @@
             let sc_arc = Arc::clone(&self.stable_channel);
 
             std::thread::spawn(move || {
+                fn current_unix_time() -> i64 {
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        .try_into()
+                        .unwrap_or(0)
+                }
+
                 loop {
-                    // Always try to get the latest price first
+                    // Fetch price (network call) OUTSIDE of lock
                     let price = match crate::price_feeds::get_latest_price(&ureq::Agent::new()) {
                         Ok(p) if p > 0.0 => p,
                         _ => crate::price_feeds::get_cached_price()
                     };
 
-                    // Only proceed if we have a valid price and active channels
-                    if price > 0.0 && !node_arc.list_channels().is_empty() {
+                    // Only proceed if we have a valid price
+                    if price > 0.0 {
+                        // Brief lock to update values
                         if let Ok(mut sc) = sc_arc.lock() {
-                            crate::stable::check_stability(&*node_arc, &mut sc, price);
-                            crate::stable::update_balances(&*node_arc, &mut sc);
+                            if !node_arc.list_channels().is_empty() {
+                                crate::stable::check_stability(&*node_arc, &mut sc, price);
+                                crate::stable::update_balances(&*node_arc, &mut sc);
+                            }
+                            sc.latest_price = price;
+                            sc.timestamp = current_unix_time();
                         }
                     }
 
-                    // Sleep between checks, but be ready to interrupt if needed
                     std::thread::sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
                 }
             });
@@ -494,15 +481,199 @@
         //     }
         // }
 
-        fn change_allocation(&mut self, _btc_pct_i32: i32) {
-            // NO-OP: UI only. Intentionally does not modify StableChannel or targets.
-            // (Optional) Light feedback without changing state:
-            self.status_message = format!("(Preview only) Allocation set to {}% BTC / {}% USD",
-                _btc_pct_i32.clamp(0, 100),
-                (100 - _btc_pct_i32).clamp(0, 100)
-            );
-            // (Optional) audit only (still not changing biz logic):
-            audit_event("ALLOCATION_UI_CONFIRMED (Preview only)", serde_json::json!({ "btc_allocation_pct": _btc_pct_i32 }));
+        fn change_allocation(&mut self, btc_pct_i32: i32) {
+            // Clamp to [0, 100]
+            let pct_btc: u8 = btc_pct_i32.clamp(0, 100) as u8;
+            let pct_usd: u8 = 100 - pct_btc;
+
+            // Create the new allocation
+            let new_allocation = Allocation::from_btc_percent(pct_btc);
+
+            // Grab channel_id and counterparty from StableChannel (in memory)
+            let (channel_id_str, counterparty) = {
+                let sc = self.stable_channel.lock().unwrap();
+                (sc.channel_id.to_string(), sc.counterparty)
+            };
+
+            // Build payload that the LSP will parse
+            let payload = json!({
+                "type": ALLOCATION_UPDATE_TYPE,
+                "channel_id": channel_id_str,
+                "allocation": {
+                    "usd_weight": new_allocation.usd_weight,
+                    "btc_weight": new_allocation.btc_weight,
+                },
+            });
+
+            // Serialize payload and sign it with the node's key
+            let payload_str = payload.to_string();
+            let signature = self.node.sign_message(payload_str.as_bytes());
+
+            // Envelope we actually send over the wire:
+            // { "payload": "<JSON string above>", "signature": "<recoverable sig string>" }
+            let signed_msg = json!({
+                "payload": payload_str,
+                "signature": signature,
+            });
+
+            let signed_str = signed_msg.to_string();
+
+            // Build custom TLV record
+            let custom_tlv = ldk_node::CustomTlvRecord {
+                type_num: STABLE_CHANNEL_TLV_TYPE,
+                value: signed_str.as_bytes().to_vec(),
+            };
+
+            // 1 msat marker payment
+            let amt_msat: u64 = 1;
+
+            match self.node.spontaneous_payment().send_with_custom_tlvs(
+                amt_msat,
+                counterparty,
+                None,
+                vec![custom_tlv],
+            ) {
+                Ok(payment_id) => {
+                    // Update local stable channel with new allocation
+                    {
+                        let mut sc = self.stable_channel.lock().unwrap();
+                        sc.allocation = new_allocation;
+                        // Recalculate expected_usd based on current balance and new allocation
+                        let total_usd = sc.stable_receiver_usd.0;
+                        sc.expected_usd = USD::from_f64(total_usd * new_allocation.usd_weight);
+                        // Calculate native BTC exposure
+                        let native_usd = USD::from_f64(total_usd * new_allocation.btc_weight);
+                        sc.native_channel_btc = Bitcoin::from_usd(native_usd, sc.latest_price);
+                    }
+
+                    // Persist allocation to user's stablechannels.json
+                    self.save_user_allocation();
+
+                    self.status_message = format!(
+                        "Sent allocation update: {}% BTC / {}% USD",
+                        pct_btc, pct_usd,
+                    );
+                    audit_event("ALLOCATION_MESSAGE_SENT", json!({
+                        "payment_id": format!("{payment_id}"),
+                        "channel_id": channel_id_str,
+                        "pct_btc": pct_btc,
+                        "pct_usd": pct_usd,
+                        "usd_weight": new_allocation.usd_weight,
+                        "btc_weight": new_allocation.btc_weight,
+                    }));
+                }
+                Err(e) => {
+                    self.status_message = format!("Failed to send allocation update: {}", e);
+                    audit_event("ALLOCATION_MESSAGE_FAILED", json!({
+                        "channel_id": channel_id_str,
+                        "pct_btc": pct_btc,
+                        "pct_usd": pct_usd,
+                        "error": format!("{e}"),
+                    }));
+                }
+            }
+        }
+
+        /// Save user's stable channel allocation to stablechannels.json
+        fn save_user_allocation(&self) {
+            let sc = self.stable_channel.lock().unwrap();
+
+            // Only save if we have a valid channel
+            if sc.channel_id == ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]) {
+                return;
+            }
+
+            let entry = json!({
+                "channel_id": sc.channel_id.to_string(),
+                "expected_usd": sc.expected_usd.0,
+                "allocation": {
+                    "usd_weight": sc.allocation.usd_weight,
+                    "btc_weight": sc.allocation.btc_weight,
+                },
+                "note": sc.note,
+            });
+
+            let file_path = get_user_data_dir().join("stablechannels.json");
+
+            if let Some(parent) = file_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+
+            // Read existing entries to preserve other channels
+            let mut entries: Vec<serde_json::Value> = if file_path.exists() {
+                fs::read_to_string(&file_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            // Update or add the entry for this channel
+            let channel_id_str = sc.channel_id.to_string();
+            if let Some(existing) = entries.iter_mut().find(|e| {
+                e.get("channel_id").and_then(|v| v.as_str()) == Some(&channel_id_str)
+            }) {
+                *existing = entry;
+            } else {
+                entries.push(entry);
+            }
+
+            if let Ok(json) = serde_json::to_string_pretty(&entries) {
+                if let Err(e) = fs::write(&file_path, json) {
+                    eprintln!("Failed to save user allocation: {}", e);
+                }
+            }
+        }
+
+        /// Load user's stable channel allocation from stablechannels.json
+        fn load_user_allocation(&mut self) {
+            let file_path = get_user_data_dir().join("stablechannels.json");
+
+            if !file_path.exists() {
+                return;
+            }
+
+            let contents = match fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            let entries: Vec<serde_json::Value> = match serde_json::from_str(&contents) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+
+            let mut sc = self.stable_channel.lock().unwrap();
+            let channel_id_str = sc.channel_id.to_string();
+
+            // Find matching entry
+            if let Some(entry) = entries.iter().find(|e| {
+                e.get("channel_id").and_then(|v| v.as_str()) == Some(&channel_id_str)
+            }) {
+                // Load allocation if present
+                if let Some(alloc) = entry.get("allocation") {
+                    let usd_weight = alloc.get("usd_weight")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(1.0);
+                    let btc_weight = alloc.get("btc_weight")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+
+                    if let Ok(allocation) = Allocation::new(usd_weight, btc_weight) {
+                        sc.allocation = allocation;
+                        // Update UI slider to match loaded allocation
+                        drop(sc); // Release lock before updating UI state
+                        self.ui_btc_allocation = (btc_weight * 100.0).round() as i32;
+                        return;
+                    }
+                }
+
+                // Load expected_usd if present (backward compatibility)
+                if let Some(expected) = entry.get("expected_usd").and_then(|v| v.as_f64()) {
+                    sc.expected_usd = USD::from_f64(expected);
+                }
+            }
         }
 
         fn send_stable_message(&mut self) {
@@ -541,9 +712,12 @@
                             .and_then(|ch| ch.funding_txo.as_ref())
                             .map(|outpoint| outpoint.txid.to_string())
                             .unwrap_or_else(|| "unknown".to_string());
-                        
-                        let mut sc = self.stable_channel.lock().unwrap();
-                        update_balances(&self.node, &mut sc);
+
+                        {
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            update_balances(&self.node, &mut sc);
+                        }
+                        self.update_balances(); // Update UI immediately
 
                         audit_event("CHANNEL_READY", json!({
                             "channel_id": channel_id.to_string()
@@ -562,11 +736,14 @@
                     } => {
                         // stringify auxiliary fields without relying on `Serialize` impls
                         let temp_id_str = hex::encode(former_temporary_channel_id.0);
-                    
+
                         let funding_str = funding_txo.txid.as_raw_hash().to_string();
 
-                        let mut sc = self.stable_channel.lock().unwrap();
-                        update_balances(&self.node, &mut sc);
+                        {
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            update_balances(&self.node, &mut sc);
+                        }
+                        self.update_balances(); // Update UI immediately
                     
                         audit_event(
                             "CHANNEL_PENDING",
@@ -588,20 +765,26 @@
                             "payment_hash": format!("{payment_hash}")
                         }));
                         self.status_message = format!("Received payment of {} msats", amount_msat);
-                        let mut sc = self.stable_channel.lock().unwrap();
-                        update_balances(&self.node, &mut sc);
+                        {
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            update_balances(&self.node, &mut sc);
+                        }
+                        self.update_balances(); // Update UI immediately
                         self.show_onboarding = false;
                         self.waiting_for_payment = false;
                     }
-                    
-                    
+
+
                     Event::PaymentSuccessful { payment_id: _, payment_hash, payment_preimage: _, fee_paid_msat: _ } => {
                         audit_event("PAYMENT_SUCCESSFUL", json!({
                             "payment_hash": format!("{payment_hash}"),
                         }));
                         self.status_message = format!("Sent payment {}", payment_hash);
-                        let mut sc = self.stable_channel.lock().unwrap();
-                        update_balances(&self.node, &mut sc);
+                        {
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            update_balances(&self.node, &mut sc);
+                        }
+                        self.update_balances(); // Update UI immediately
                     }
         
                     Event::ChannelClosed { channel_id, reason, .. } => {
@@ -644,6 +827,62 @@
             format!("${}.{}", int_with_commas, frac)
         }
 
+        fn format_time_ago(secs: u64) -> String {
+            // Round to nearest 10 seconds
+            let rounded = ((secs + 5) / 10) * 10;
+
+            if rounded < 60 {
+                format!("{}s ago", rounded)
+            } else {
+                let mins = rounded / 60;
+                let remaining_secs = rounded % 60;
+                if remaining_secs == 0 {
+                    format!("{}m ago", mins)
+                } else {
+                    format!("{}m {}s ago", mins, remaining_secs)
+                }
+            }
+        }
+
+        fn show_price_info(&self, ui: &mut egui::Ui) {
+            let (price, timestamp) = {
+                let sc = self.stable_channel.lock().unwrap();
+                (sc.latest_price, sc.timestamp)
+            };
+
+            let price_ok = price.is_finite() && price > 0.0;
+
+            ui.vertical_centered(|ui| {
+                if price_ok {
+                    ui.label(
+                        egui::RichText::new(format!("BTC/USD: {}", Self::format_currency(price)))
+                            .size(14.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
+
+                    if timestamp > 0 {
+                        let secs = SystemTime::now()
+                            .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(timestamp as u64))
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        ui.label(
+                            egui::RichText::new(Self::format_time_ago(secs))
+                                .size(11.0)
+                                .color(egui::Color32::DARK_GRAY),
+                        );
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new("BTC/USD: Loading...")
+                            .italics()
+                            .color(egui::Color32::GRAY)
+                            .size(14.0),
+                    );
+                }
+            });
+        }
+
         fn show_waiting_for_payment_screen(&mut self, ctx: &egui::Context) {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_space(10.0);
@@ -662,7 +901,9 @@
                     } else {
                         ui.label("Lightning QR Missing");
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
+                    self.show_price_info(ui);
+                    ui.add_space(10.0);
                     ui.add(
                         egui::TextEdit::multiline(&mut self.invoice_result)
                             .frame(true)
@@ -789,11 +1030,10 @@
                             "Getting JIT channel invoice...".to_string();
                         self.get_jit_invoice(ctx);
                     }
-                    // if !self.status_message.is_empty() {
-                    //     ui.add_space(40.0);
-                    //     ui.label(self.status_message.clone());
-                    // }
-                    ui.add_space(50.0);
+
+                    ui.add_space(20.0);
+                    self.show_price_info(ui);
+                    ui.add_space(30.0);
 
                     ui.label(
                         egui::RichText::new("Stable Channels is for bitcoiners who only want bitcoin.")
@@ -933,108 +1173,152 @@
                             );
                         
                             ui.separator();
-                        
+
                             ui.label(
-                                RichText::new("Stable status:")
+                                RichText::new("Stability:")
                                     .strong()
                                     .color(Color32::from_rgb(247, 147, 26))
                             );
+
+                            // Calculate overcollateralization ratio
+                            let (_collateral_ratio, status_color, status_text) = {
+                                let sc = self.stable_channel.lock().unwrap();
+
+                                // Total channel value = user's side + LSP's side
+                                let total_channel_usd = sc.stable_receiver_usd.0 + sc.stable_provider_usd.0;
+
+                                // User's stable portion (the USD-pegged amount)
+                                let user_stable_usd = sc.stable_receiver_usd.0 * sc.allocation.usd_weight;
+
+                                if user_stable_usd < 1.0 {
+                                    (0.0, Color32::GRAY, "Waiting for balance...".to_string())
+                                } else {
+                                    // Ratio = total channel / stable requirement
+                                    let ratio = total_channel_usd / user_stable_usd;
+                                    let color = if ratio >= 1.7 {
+                                        Color32::GREEN      // 70%+ overcollateralized
+                                    } else if ratio >= 1.3 {
+                                        Color32::YELLOW     // 30-70% overcollateralized
+                                    } else {
+                                        Color32::RED        // Under 30% overcollateralized
+                                    };
+                                    let pct = ((ratio - 1.0) * 100.0).max(0.0);
+                                    let text = format!("{:.0}% overcollateralized\nChannel total: ${:.2}\nYour stable: ${:.2}", pct, total_channel_usd, user_stable_usd);
+                                    (ratio, color, text)
+                                }
+                            };
+
                             let dot_size = 12.0;
-                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(dot_size), Sense::hover());
+                            let (rect, response) = ui.allocate_exact_size(Vec2::splat(dot_size), Sense::hover());
                             ui.painter()
-                                .circle_filled(rect.center(), dot_size * 0.5, Color32::GREEN);
+                                .circle_filled(rect.center(), dot_size * 0.5, status_color);
+
+                            if response.hovered() {
+                                egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("stability_tooltip"), |ui| {
+                                    ui.label(&status_text);
+                                });
+                            }
                         });
                         ui.add_space(10.0);
                         ui.add_space(30.0);
         
                         ui.group(|ui| {
                             let sc = self.stable_channel.lock().unwrap();
-                        
-                            // Select correct stable values
-                            let stable_usd = if sc.is_stable_receiver {
+
+                            // Select correct values based on role
+                            let total_usd = if sc.is_stable_receiver {
                                 sc.stable_receiver_usd
                             } else {
                                 sc.stable_provider_usd
                             };
-                        
+
                             let pegged_btc = if sc.is_stable_receiver {
                                 sc.stable_receiver_btc
                             } else {
                                 sc.stable_provider_btc
                             };
-                                                
-                            // Main heading
-                            ui.heading("Stable Balance");
-                        
+
+                            // Calculate portions based on allocation
+                            let stable_usd_value = total_usd.0 * sc.allocation.usd_weight;
+                            let native_usd_value = total_usd.0 * sc.allocation.btc_weight;
+                            let total_btc_f64 = pegged_btc.to_btc() + self.onchain_balance_btc;
+
                             ui.add_space(8.0);
 
-                            // Show USD stable balance, or "---" if < MIN_DISPLAY_USD
-                            let stable_usd_display = if stable_usd.0 < MIN_DISPLAY_USD {
+                            // Total Balance - prominent display
+                            ui.heading("Your Balance");
+                            ui.add_space(6.0);
+
+                            let total_display = if total_usd.0 <= MIN_DISPLAY_USD {
                                 "---".to_string()
                             } else {
-                                format!("{:.2}", stable_usd.0)
-                            };                        
-                        
-                            ui.label(
-                                egui::RichText::new(stable_usd_display)
-                                    .size(24.0)
-                                    .strong(),
-                            );
-                        
-                            ui.add_space(12.0);
-                        
-                            // Agreed Peg USD
-                            ui.label(
-                                egui::RichText::new(format!("Agreed Peg USD: {:.2}", sc.expected_usd))
-                                    .size(14.0)
-                                    .color(egui::Color32::GRAY),
-                            );
-                        
-                            ui.add_space(8.0);
-                        
-                            ui.separator();
-                        
-                            ui.add_space(8.0);
-                        
-                            // Bitcoin Holdings
-                            ui.label(
-                                egui::RichText::new("Bitcoin Holdings")
-                                    .size(16.0)
-                                    .strong(),
-                            );
-                            ui.add_space(8.0);
-                        
-                            egui::Grid::new("bitcoin_holdings_grid")
-                                .spacing(Vec2::new(10.0, 6.0))
-                                .show(ui, |ui| {
-                                    // Use consistent sources (BTC as f64) and explicit formatting.
-                                    let pegged_btc_f64 = pegged_btc.to_btc();
-                                    let native_btc_f64 = self.onchain_balance_btc;
-                                    let total_btc_f64  = pegged_btc_f64 + native_btc_f64;
-                            
-                                    ui.label("Pegged Bitcoin (Lightning):");
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.8} BTC", pegged_btc_f64))
-                                            .monospace(),
-                                    );
-                                    ui.end_row();
-                            
-                                    ui.label("Native Bitcoin (On-Chain):");
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.8} BTC", native_btc_f64))
-                                            .monospace(),
-                                    );
-                                    ui.end_row();
-                            
-                                    ui.label("Total Bitcoin:");
-                                    ui.label(
-                                        egui::RichText::new(format!("{:.8} BTC", total_btc_f64))
-                                            .monospace()
-                                            .strong(),
-                                    );
-                                    ui.end_row();
-                            });
+                                format!("${:.2}", total_usd.0)
+                            };
 
+                            ui.label(
+                                egui::RichText::new(total_display)
+                                    .size(28.0)
+                                    .strong(),
+                            );
+
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("{:.8} BTC", total_btc_f64))
+                                    .size(13.0)
+                                    .color(egui::Color32::GRAY)
+                                    .monospace(),
+                            );
+
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            // Breakdown section
+                            if total_usd.0 > MIN_DISPLAY_USD {
+                                egui::Grid::new("balance_breakdown_grid")
+                                    .spacing(Vec2::new(12.0, 8.0))
+                                    .show(ui, |ui| {
+                                        // Stable USD row
+                                        ui.label(
+                                            egui::RichText::new(format!("Stable ({}%)", sc.allocation.usd_percent()))
+                                                .size(14.0)
+                                                .color(egui::Color32::from_rgb(100, 200, 100)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("${:.2}", stable_usd_value))
+                                                .size(14.0)
+                                                .strong(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new("pegged to USD")
+                                                .size(11.0)
+                                                .color(egui::Color32::DARK_GRAY),
+                                        );
+                                        ui.end_row();
+
+                                        // Native BTC row (only show if there's BTC allocation)
+                                        if sc.allocation.btc_percent() > 0 {
+                                            ui.label(
+                                                egui::RichText::new(format!("Native ({}%)", sc.allocation.btc_percent()))
+                                                    .size(14.0)
+                                                    .color(egui::Color32::from_rgb(247, 147, 26)),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(format!("${:.2}", native_usd_value))
+                                                    .size(14.0)
+                                                    .strong(),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new("floats with BTC")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::DARK_GRAY),
+                                            );
+                                            ui.end_row();
+                                        }
+                                    });
+                            }
+
+                            ui.add_space(8.0);
                         });
 
                         ui.add_space(20.0);
@@ -1043,7 +1327,7 @@
                         ui.group(|ui| {
                             ui.add_space(10.0);
                             ui.vertical_centered(|ui| {
-                                ui.heading("Portfolio (demo)");
+                                ui.heading("Portfolio Allocation");
                                 ui.add_space(20.0);
                         
                                 // Use UI-only state
@@ -1102,20 +1386,15 @@
                                 // Convert to USD for display
                                 let pegged_usd_now = pegged_btc_now * price;
                                 let native_usd_now = native_btc_now * price;
-                                let total_usd_gross = pegged_usd_now + native_usd_now;
-                        
-                                // Fee for display only
-                                let fee_pct = 0.25_f64;
-                                let fee_usd = total_usd_gross * (fee_pct / 100.0);
-                                let total_usd_net = (total_usd_gross - fee_usd).max(0.0);
-                        
-                                let target_btc_usd = total_usd_net * (btc_pct / 100.0);
-                                let target_usd_usd = total_usd_net - target_btc_usd;
+                                let total_usd = pegged_usd_now + native_usd_now;
+
+                                let target_btc_usd = total_usd * (btc_pct / 100.0);
+                                let target_usd_usd = total_usd - target_btc_usd;
                         
                                 let btc_amt_btc = if price > 0.0 { target_btc_usd / price } else { 0.0 };
                                 let usd_amt_btc = if price > 0.0 { target_usd_usd / price } else { 0.0 };
                         
-                                egui::Window::new("Confirm Allocation (Demo)")
+                                egui::Window::new("Confirm Allocation Change")
                                     .collapsible(false)
                                     .resizable(false)
                                     .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -1123,22 +1402,29 @@
                                         ui.separator();
                                         ui.add_space(8.0);
 
-                                        ui.label(egui::RichText::new("This is a TABConf preview of trading. No channel allocations are changed.").italics());
+                                        ui.label(egui::RichText::new("This will send an allocation update to the LSP.").italics());
                                         ui.add_space(6.0);
-                        
+
                                         ui.label("Are you sure you want to change your allocation?");
                                         ui.add_space(8.0);
-                        
+
                                         ui.monospace(format!("{:.0}% BTC  (${:.2})  ≈ {:.8} BTC", btc_pct, target_btc_usd, btc_amt_btc));
                                         ui.monospace(format!("{:.0}% USD  (${:.2})  ≈ {:.8} BTC", usd_pct, target_usd_usd, usd_amt_btc));
-                        
-                                        ui.add_space(6.0);
-                                        ui.label(egui::RichText::new(format!("{:.2}% fee (${:.2})", fee_pct, fee_usd)).small());
-                        
-                                        ui.add_space(10.0);
+
+                                        ui.add_space(12.0);
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Your app will auto-rebalance so that your balance\nstays at {:.0}% USD and {:.0}% BTC exposure.",
+                                                usd_pct, btc_pct
+                                            ))
+                                            .size(12.0)
+                                            .color(egui::Color32::GRAY)
+                                        );
+
+                                        ui.add_space(12.0);
                                         ui.horizontal(|ui| {
                                             if ui.button("Confirm").clicked() {
-                                                // UI-only call; does nothing to biz logic.
+                                                // Send allocation update to LSP
                                                 self.change_allocation(self.ui_btc_allocation);
                                                 self.show_confirm_allocation = false;
                                             }
@@ -1146,7 +1432,7 @@
                                                 self.show_confirm_allocation = false;
                                             }
                                         });
-                        
+
                                         ui.add_space(8.0);
                                         ui.separator();
                                     });
@@ -1161,41 +1447,40 @@
                             ui.heading("Bitcoin Price");
                             ui.add_space(10.0);
 
-
                             let price_ok = sc.latest_price.is_finite() && sc.latest_price > 0.0;
 
-                            if price_ok {
-                                ui.label(
-                                    egui::RichText::new(Self::format_currency(sc.latest_price))
-                                        .size(20.0)
-                                        .strong()
-                                );
-                            } else {
-                                ui.label(
-                                    egui::RichText::new("Fetching latest price ...")
-                                        .italics()
-                                        .color(egui::Color32::LIGHT_GRAY)
-                                        .size(16.0),
-                                );
-                            }
+                            ui.vertical_centered(|ui| {
+                                if price_ok {
+                                    ui.label(
+                                        egui::RichText::new(Self::format_currency(sc.latest_price))
+                                            .size(20.0)
+                                            .strong()
+                                    );
+
+                                    if sc.timestamp > 0 {
+                                        let secs = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64))
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0);
+
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            egui::RichText::new(Self::format_time_ago(secs))
+                                                .size(12.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    }
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new("Fetching latest price ...")
+                                            .italics()
+                                            .color(egui::Color32::LIGHT_GRAY)
+                                            .size(16.0),
+                                    );
+                                }
+                            });
 
                             ui.add_space(20.0);
-        
-                            let last_updated_text = if !price_ok || sc.timestamp == 0 {
-                                "Fetching latest price ...".to_string()
-                            } else {
-                                let secs = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(sc.timestamp as u64))
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
-                                format!("Last updated: {}s ago", secs)
-                            };
-                            
-                            ui.label(
-                                egui::RichText::new(last_updated_text)
-                                    .size(12.0)
-                                    .color(egui::Color32::GRAY),
-                            );
                         });
                         ui.add_space(20.0);
         

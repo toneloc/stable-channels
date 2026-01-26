@@ -25,9 +25,9 @@ dirs = "5.0"
 openssl = { version = "0.10", default-features = false, features = ["vendored"] }
 
 # GUI dependencies
-eframe = { version = "0.30.0" }
-egui = { version = "0.30.0", default-features = false, features = ["default_fonts", "color-hex"] }
-egui_extras = { version = "0.30.0", features = ["default"] }
+eframe = { version = "0.31.0" }
+egui = { version = "0.31.0", default-features = false, features = ["default_fonts", "color-hex"] }
+egui_extras = { version = "0.31.0", features = ["default"] }
 qrcode = { version = "0.14" }
 image = { version = "0.24" }
 
@@ -63,5 +63,6 @@ path = "src/bin/lsp_backend.rs"
 name = "lsp_frontend"
 path = "src/bin/lsp_frontend.rs"
 
-[patch.crates-io]
-winit = { git = "https://github.com/toneloc/toneloc-winit-mas.git", rev = "7653bd2b0863428075a57ff4d2dbaf900352812a" }
+[dev-dependencies]
+tempfile = "3"
+

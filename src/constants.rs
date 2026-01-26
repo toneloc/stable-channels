@@ -8,6 +8,9 @@ pub const SATS_IN_BTC: u64 = 100_000_000;
 /// Custom TLV type for stable channel messages
 pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 
+/// Allocation update message type identifier
+pub const ALLOCATION_UPDATE_TYPE: &str = "ALLOCATION_UPDATE_V1";
+
 // ============================================================================
 // DEFAULT CONFIGURATION VALUES
 // ============================================================================
@@ -195,4 +198,70 @@ pub fn audit_log_path_for(mode: &str) -> String {
         _ => panic!("Invalid mode for audit log path"),
     };
     base_dir.join("audit_log.txt").to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sats_in_btc_constant() {
+        assert_eq!(SATS_IN_BTC, 100_000_000);
+    }
+
+    #[test]
+    fn test_default_price_feeds_not_empty() {
+        let feeds = get_default_price_feeds();
+        assert!(!feeds.is_empty());
+    }
+
+    #[test]
+    fn test_price_feed_config_new() {
+        let feed = PriceFeedConfig::new("Test", "https://test.com", vec!["a", "b"]);
+        assert_eq!(feed.name, "Test");
+        assert_eq!(feed.json_path, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_get_user_data_dir() {
+        let path = get_user_data_dir();
+        assert!(path.to_string_lossy().contains("StableChannels"));
+        assert!(path.to_string_lossy().contains("user"));
+    }
+
+    #[test]
+    fn test_get_lsp_data_dir() {
+        let path = get_lsp_data_dir();
+        assert!(path.to_string_lossy().contains("StableChannels"));
+        assert!(path.to_string_lossy().contains("lsp"));
+    }
+
+    #[test]
+    fn test_audit_log_path_for_user() {
+        let path = audit_log_path_for("user");
+        assert!(path.contains("audit_log.txt"));
+    }
+
+    #[test]
+    fn test_audit_log_path_for_lsp() {
+        let path = audit_log_path_for("lsp");
+        assert!(path.contains("audit_log.txt"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid mode")]
+    fn test_audit_log_path_invalid_mode() {
+        audit_log_path_for("invalid");
+    }
+
+    #[test]
+    fn test_stability_threshold_is_reasonable() {
+        assert!(STABILITY_THRESHOLD_PERCENT > 0.0);
+        assert!(STABILITY_THRESHOLD_PERCENT < 10.0);
+    }
+
+    #[test]
+    fn test_max_risk_level_is_positive() {
+        assert!(MAX_RISK_LEVEL > 0);
+    }
 }
