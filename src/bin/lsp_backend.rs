@@ -392,10 +392,14 @@
 
 
 
+        // Hardcoded data directory
+        const LSP_DATA_DIR: &str = "data-2/lsp";
+
         impl ServerApp {
             pub fn new_with_mode(mode: &str) -> Self {
                 let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
-                    "lsp" => (get_lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
+                    // "lsp" => (get_lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
+                    "lsp" => (LSP_DATA_DIR, DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
                     _ => panic!("Invalid mode"),
                 };
 
@@ -424,10 +428,10 @@
                     "".into(),
                 );
 
-                println!("[Init] Setting storage directory: {}", data_dir.display());
-                builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
+                println!("[Init] Setting storage directory: {}", data_dir);
+                builder.set_storage_dir_path(data_dir.to_string());
 
-                let audit_log_path = audit_log_path_for("lsp");
+                let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
                 set_audit_log_path(&audit_log_path);
 
                 let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
@@ -1242,7 +1246,7 @@
                             payment_made: false,
                             timestamp: 0,
                             formatted_datetime: "".to_string(),
-                            sc_dir: get_lsp_data_dir().to_string_lossy().into_owned(),
+                            sc_dir: LSP_DATA_DIR.to_string(),
                             prices: "".to_string(),
                             onchain_btc: Bitcoin::from_sats(0),
                             onchain_usd: USD(0.0),
@@ -1293,7 +1297,7 @@
                     }),
                 }).collect();
             
-                let file_path = get_lsp_data_dir().join("stablechannels.json");
+                let file_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
             
                 if let Some(parent) = file_path.parent() {
                     fs::create_dir_all(parent).unwrap_or_else(|e| {
@@ -1319,7 +1323,7 @@
             }
 
             pub fn load_stable_channels(&mut self) {
-                let file_path = get_lsp_data_dir().join("stablechannels.json");
+                let file_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
 
                 if !file_path.exists() {
                     println!("No existing stable channels file found.");
@@ -1368,7 +1372,7 @@
                                                 payment_made: false,
                                                 timestamp: 0,
                                                 formatted_datetime: "".to_string(),
-                                                sc_dir: get_lsp_data_dir().to_string_lossy().into_owned(),
+                                                sc_dir: LSP_DATA_DIR.to_string(),
                                                 prices: "".to_string(),
                                                 onchain_btc: Bitcoin::from_sats(0),
                                                 onchain_usd: USD(0.0),
