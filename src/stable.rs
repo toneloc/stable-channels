@@ -101,6 +101,15 @@ pub fn update_balances<'update_balance_lifetime>(
     (true, sc)
 }
 
+/// Information about a stability payment that was sent
+#[derive(Debug, Clone)]
+pub struct StabilityPaymentInfo {
+    pub payment_id: String,
+    pub amount_msat: u64,
+    pub counterparty: String,
+    pub btc_price: f64,
+}
+
 /// Check and enforce stability for a channel based on its allocation weights.
 ///
 /// The stability logic now respects per-channel allocation:
@@ -110,7 +119,9 @@ pub fn update_balances<'update_balance_lifetime>(
 /// For example, with allocation { usd_weight: 0.75, btc_weight: 0.25 }:
 /// - 75% of the channel value is kept stable in USD terms
 /// - 25% floats with the BTC market
-pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
+///
+/// Returns Some(StabilityPaymentInfo) if a payment was sent, None otherwise.
+pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Option<StabilityPaymentInfo> {
     let current_price = if price > 0.0 {
         price
     } else {
@@ -121,7 +132,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
             audit_event("STABILITY_SKIP", json!({
                 "reason": "no valid price available"
             }));
-            return;
+            return None;
         }
     };
 
@@ -132,7 +143,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
         audit_event("BALANCE_UPDATE_FAILED", json!({
             "channel_id": format!("{}", sc.channel_id)
         }));
-        return;
+        return None;
     }
 
     // Skip stability check if allocation is 100% BTC (no USD to stabilize)
@@ -142,7 +153,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
             "reason": "allocation is 100% BTC, no USD to stabilize",
             "allocation_usd_weight": sc.allocation.usd_weight
         }));
-        return;
+        return None;
     }
 
     // Skip if expected_usd is zero or very small
@@ -152,7 +163,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
             "reason": "expected_usd is too small",
             "expected_usd": sc.expected_usd.0
         }));
-        return;
+        return None;
     }
 
     // Calculate the current USD value of the stable portion
@@ -199,19 +210,27 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
     }));
 
     if action != "PAY" {
-        return;
+        return None;
     }
 
     let amt = USD::to_msats(dollars_from_par, sc.latest_price);
     match node.spontaneous_payment().send(amt, sc.counterparty, None) {
         Ok(payment_id) => {
             sc.payment_made = true;
+            let payment_id_str = payment_id.to_string();
+            let counterparty_str = sc.counterparty.to_string();
             audit_event("STABILITY_PAYMENT_SENT", json!({
                 "amount_msats": amt,
-                "payment_id": payment_id.to_string(),
-                "counterparty": sc.counterparty.to_string(),
+                "payment_id": payment_id_str,
+                "counterparty": counterparty_str,
                 "allocation_usd_weight": sc.allocation.usd_weight
             }));
+            Some(StabilityPaymentInfo {
+                payment_id: payment_id_str,
+                amount_msat: amt,
+                counterparty: counterparty_str,
+                btc_price: sc.latest_price,
+            })
         }
         Err(e) => {
             audit_event("STABILITY_PAYMENT_FAILED", json!({
@@ -219,6 +238,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) {
                 "error": format!("{e}"),
                 "counterparty": sc.counterparty.to_string()
             }));
+            None
         }
     }
 }

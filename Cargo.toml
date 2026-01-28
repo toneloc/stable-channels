@@ -22,6 +22,7 @@ async-trait = "0.1"
 hex = "0.4.3"
 lazy_static = "1.4"
 dirs = "5.0"
+rusqlite = { version = "0.31", features = ["bundled"] }
 openssl = { version = "0.10", default-features = false, features = ["vendored"] }
 
 # GUI dependencies

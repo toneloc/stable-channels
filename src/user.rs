@@ -15,14 +15,15 @@
     use qrcode::{QrCode, Color};
     use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions, Vec2};
     use serde_json::json;
+    use chrono::{TimeZone, Utc};
 
-    use crate::audit::*;
-    use crate::stable::update_balances;
-    use crate::types::*;
-    use crate::price_feeds::{get_cached_price, get_cached_price_no_fetch, get_latest_price};
-    use crate::stable;
-    use crate::constants::*;
-    use std::fs;
+    use stable_channels::audit::*;
+    use stable_channels::stable::update_balances;
+    use stable_channels::types::*;
+    use stable_channels::price_feeds::{get_cached_price, get_cached_price_no_fetch};
+    use stable_channels::stable;
+    use stable_channels::constants::*;
+    use stable_channels::db::Database;
 
     #[derive(Clone, Debug)]
     pub enum TradeAction {
@@ -35,6 +36,40 @@
         pub action: TradeAction,
         pub amount_usd: f64,
         pub new_btc_percent: u8,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct PendingSplice {
+        pub direction: String,  // "in" or "out"
+        pub amount_sats: u64,
+        pub address: Option<String>,  // For splice_out
+    }
+
+    #[derive(Clone)]
+    struct Toast {
+        message: String,
+        emoji: String,
+        created_at: std::time::Instant,
+        duration_secs: f32,
+    }
+
+    impl Toast {
+        fn new(message: &str, emoji: &str, duration_secs: f32) -> Self {
+            Self {
+                message: message.to_string(),
+                emoji: emoji.to_string(),
+                created_at: std::time::Instant::now(),
+                duration_secs,
+            }
+        }
+
+        fn is_expired(&self) -> bool {
+            self.created_at.elapsed().as_secs_f32() > self.duration_secs
+        }
+
+        fn progress(&self) -> f32 {
+            (self.created_at.elapsed().as_secs_f32() / self.duration_secs).min(1.0)
+        }
     }
 
     pub struct UserApp {
@@ -57,6 +92,14 @@
         pub invoice_to_pay: String,
         pub on_chain_address: String,
         pub on_chain_amount: String,
+        pub onchain_send_address: String,
+        pub onchain_send_amount: String,
+        pub splice_in_amount: String,
+        pub splice_out_amount: String,
+        pub splice_out_address: String,
+        pending_splice: Option<PendingSplice>,
+        pub show_onchain_receive: bool,
+        pub show_onchain_send: bool,
         pub show_advanced: bool, 
         balance_last_update: std::time::Instant,
         confirm_close_popup: bool,
@@ -73,6 +116,15 @@
         pub onchain_balance_usd: f64,
         pub total_balance_btc: f64,
         pub total_balance_usd: f64,
+
+        // Database
+        db: Database,
+
+        // Toast notifications
+        toasts: Vec<Toast>,
+
+        // Network
+        network: Network,
     }
 
     impl UserApp {
@@ -191,6 +243,10 @@
 
             let show_onboarding = node.list_channels().is_empty();
 
+            // Initialize SQLite database
+            let db = Database::open(&data_dir)
+                .map_err(|e| format!("Failed to open database: {}", e))?;
+
             let mut app = Self {
                 node: Arc::clone(&node),
                 status_message: String::new(),
@@ -204,7 +260,15 @@
                 invoice_amount: "0".to_string(),        
                 invoice_to_pay: String::new(),
                 on_chain_address: String::new(),
-                on_chain_amount: "0".to_string(),  
+                on_chain_amount: "0".to_string(),
+                onchain_send_address: String::new(),
+                onchain_send_amount: String::new(),
+                splice_in_amount: String::new(),
+                splice_out_amount: String::new(),
+                splice_out_address: String::new(),
+                pending_splice: None,
+                show_onchain_receive: false,
+                show_onchain_send: false,
                 lightning_balance_btc: 0.0,
                 onchain_balance_btc: 0.0,
                 lightning_balance_usd: 0.0,
@@ -223,15 +287,31 @@
                 trade_amount_input: String::new(),
                 pending_trade: None,
                 trade_error: String::new(),
+                db,
+                toasts: Vec::new(),
+                network,
             };
 
             {
                 let mut sc = app.stable_channel.lock().unwrap();
-                stable::check_stability(&app.node, &mut sc, btc_price);
+                if let Some(payment_info) = stable::check_stability(&app.node, &mut sc, btc_price) {
+                    // Record sent stability payment
+                    let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0) * payment_info.btc_price;
+                    let _ = app.db.record_payment(
+                        Some(&payment_info.payment_id),
+                        "stability",
+                        "sent",
+                        payment_info.amount_msat,
+                        Some(amount_usd),
+                        Some(payment_info.btc_price),
+                        Some(&payment_info.counterparty),
+                        "completed",
+                    );
+                }
                 update_balances(&app.node, &mut sc);
             }
 
-            // Load persisted allocation from user's stablechannels.json
+            // Load persisted allocation from database
             app.load_user_allocation();
 
             // Background thread is started via start_background_if_needed() in the update loop
@@ -246,6 +326,7 @@
 
             let node_arc = Arc::clone(&self.node);
             let sc_arc = Arc::clone(&self.stable_channel);
+            let db = self.db.clone();
 
             std::thread::spawn(move || {
                 fn current_unix_time() -> i64 {
@@ -259,9 +340,9 @@
 
                 loop {
                     // Fetch price (network call) OUTSIDE of lock
-                    let price = match crate::price_feeds::get_latest_price(&ureq::Agent::new()) {
+                    let price = match stable_channels::price_feeds::get_latest_price(&ureq::Agent::new()) {
                         Ok(p) if p > 0.0 => p,
-                        _ => crate::price_feeds::get_cached_price()
+                        _ => stable_channels::price_feeds::get_cached_price()
                     };
 
                     // Only proceed if we have a valid price
@@ -269,8 +350,21 @@
                         // Brief lock to update values
                         if let Ok(mut sc) = sc_arc.lock() {
                             if !node_arc.list_channels().is_empty() {
-                                crate::stable::check_stability(&*node_arc, &mut sc, price);
-                                crate::stable::update_balances(&*node_arc, &mut sc);
+                                if let Some(payment_info) = stable_channels::stable::check_stability(&*node_arc, &mut sc, price) {
+                                    // Record sent stability payment
+                                    let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0) * payment_info.btc_price;
+                                    let _ = db.record_payment(
+                                        Some(&payment_info.payment_id),
+                                        "stability",
+                                        "sent",
+                                        payment_info.amount_msat,
+                                        Some(amount_usd),
+                                        Some(payment_info.btc_price),
+                                        Some(&payment_info.counterparty),
+                                        "completed",
+                                    );
+                                }
+                                stable_channels::stable::update_balances(&*node_arc, &mut sc);
                             }
                             sc.latest_price = price;
                             sc.timestamp = current_unix_time();
@@ -504,7 +598,7 @@
         //     }
         // }
 
-        fn change_allocation(&mut self, btc_pct_i32: i32, fee_usd: f64) {
+        fn change_allocation(&mut self, btc_pct_i32: i32, fee_usd: f64, trade_amount_usd: f64) {
             // Clamp to [0, 100]
             let pct_btc: u8 = btc_pct_i32.clamp(0, 100) as u8;
             let pct_usd: u8 = 100 - pct_btc;
@@ -512,11 +606,14 @@
             // Create the new allocation
             let new_allocation = Allocation::from_btc_percent(pct_btc);
 
-            // Grab channel_id, counterparty, and price from StableChannel (in memory)
-            let (channel_id_str, counterparty, price) = {
+            // Grab channel_id, counterparty, price, and old allocation from StableChannel
+            let (channel_id_str, counterparty, price, old_btc_pct) = {
                 let sc = self.stable_channel.lock().unwrap();
-                (sc.channel_id.to_string(), sc.counterparty, sc.latest_price)
+                (sc.channel_id.to_string(), sc.counterparty, sc.latest_price, sc.allocation.btc_percent())
             };
+
+            // Determine trade action
+            let action = if pct_btc > old_btc_pct { "buy" } else { "sell" };
 
             // Build payload that the LSP will parse
             let payload = json!({
@@ -576,15 +673,20 @@
                         sc.native_channel_btc = Bitcoin::from_usd(native_usd, sc.latest_price);
                     }
 
-                    // Persist allocation to user's stablechannels.json
+                    // Persist allocation to database
                     self.save_user_allocation();
 
+                    // Record the trade in database
+                    let payment_id_str = format!("{payment_id}");
+                    let amount_btc = if self.btc_price > 0.0 { trade_amount_usd / self.btc_price } else { 0.0 };
+                    self.record_trade(action, "BTC", trade_amount_usd, amount_btc, fee_usd, old_btc_pct, pct_btc, Some(&payment_id_str), "completed");
+
                     self.status_message = format!(
-                        "Sent allocation update: {}% BTC / {}% USD (fee: ${:.2})",
-                        pct_btc, pct_usd, fee_usd,
+                        "Sent trade order (fee: ${:.2})",
+                        fee_usd,
                     );
                     audit_event("ALLOCATION_MESSAGE_SENT", json!({
-                        "payment_id": format!("{payment_id}"),
+                        "payment_id": payment_id_str,
                         "channel_id": channel_id_str,
                         "pct_btc": pct_btc,
                         "pct_usd": pct_usd,
@@ -595,7 +697,11 @@
                     }));
                 }
                 Err(e) => {
-                    self.status_message = format!("Failed to send allocation update: {}", e);
+                    // Record the failed trade
+                    let amount_btc = if self.btc_price > 0.0 { trade_amount_usd / self.btc_price } else { 0.0 };
+                    self.record_trade(action, "BTC", trade_amount_usd, amount_btc, fee_usd, old_btc_pct, pct_btc, None, "failed");
+
+                    self.status_message = format!("Failed to send trade order: {}", e);
                     audit_event("ALLOCATION_MESSAGE_FAILED", json!({
                         "channel_id": channel_id_str,
                         "pct_btc": pct_btc,
@@ -606,7 +712,7 @@
             }
         }
 
-        /// Save user's stable channel allocation to stablechannels.json
+        /// Save user's stable channel allocation to database
         fn save_user_allocation(&self) {
             let sc = self.stable_channel.lock().unwrap();
 
@@ -615,58 +721,53 @@
                 return;
             }
 
-            let entry = json!({
-                "channel_id": sc.channel_id.to_string(),
-                "expected_usd": sc.expected_usd.0,
-                "allocation": {
-                    "usd_weight": sc.allocation.usd_weight,
-                    "btc_weight": sc.allocation.btc_weight,
-                },
-                "note": sc.note,
-            });
-
-            let file_path = get_user_data_dir().join("stablechannels.json");
-
-            if let Some(parent) = file_path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-
-            // Read existing entries to preserve other channels
-            let mut entries: Vec<serde_json::Value> = if file_path.exists() {
-                fs::read_to_string(&file_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            // Update or add the entry for this channel
             let channel_id_str = sc.channel_id.to_string();
-            if let Some(existing) = entries.iter_mut().find(|e| {
-                e.get("channel_id").and_then(|v| v.as_str()) == Some(&channel_id_str)
-            }) {
-                *existing = entry;
-            } else {
-                entries.push(entry);
-            }
+            let note_ref = sc.note.as_deref();
 
-            if let Ok(json) = serde_json::to_string_pretty(&entries) {
-                if let Err(e) = fs::write(&file_path, json) {
-                    eprintln!("Failed to save user allocation: {}", e);
-                }
+            if let Err(e) = self.db.save_channel(
+                &channel_id_str,
+                sc.allocation.usd_weight,
+                sc.allocation.btc_weight,
+                sc.expected_usd.0,
+                note_ref,
+            ) {
+                eprintln!("Failed to save channel allocation: {}", e);
             }
         }
 
-        /// Load user's stable channel allocation from stablechannels.json
+        /// Load user's stable channel allocation from database
         fn load_user_allocation(&mut self) {
+            let channel_id_str = {
+                let sc = self.stable_channel.lock().unwrap();
+                sc.channel_id.to_string()
+            };
+
+            // Try to load from database first
+            if let Ok(Some(record)) = self.db.load_channel(&channel_id_str) {
+                let mut sc = self.stable_channel.lock().unwrap();
+                if let Ok(allocation) = Allocation::new(record.usd_weight, record.btc_weight) {
+                    sc.allocation = allocation;
+                    sc.expected_usd = USD::from_f64(record.expected_usd);
+                    if record.note.is_some() {
+                        sc.note = record.note;
+                    }
+                    return;
+                }
+            }
+
+            // Fallback: migrate from legacy JSON file if it exists
+            self.migrate_from_json();
+        }
+
+        /// Migrate data from legacy stablechannels.json to SQLite
+        fn migrate_from_json(&mut self) {
             let file_path = get_user_data_dir().join("stablechannels.json");
 
             if !file_path.exists() {
                 return;
             }
 
-            let contents = match fs::read_to_string(&file_path) {
+            let contents = match std::fs::read_to_string(&file_path) {
                 Ok(c) => c,
                 Err(_) => return,
             };
@@ -679,29 +780,69 @@
             let mut sc = self.stable_channel.lock().unwrap();
             let channel_id_str = sc.channel_id.to_string();
 
-            // Find matching entry
+            // Find matching entry and migrate
             if let Some(entry) = entries.iter().find(|e| {
                 e.get("channel_id").and_then(|v| v.as_str()) == Some(&channel_id_str)
             }) {
-                // Load allocation if present
+                let mut usd_weight = 1.0;
+                let mut btc_weight = 0.0;
+                let mut expected_usd = 0.0;
+                let note: Option<String> = entry.get("note")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
                 if let Some(alloc) = entry.get("allocation") {
-                    let usd_weight = alloc.get("usd_weight")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(1.0);
-                    let btc_weight = alloc.get("btc_weight")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
+                    usd_weight = alloc.get("usd_weight").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                    btc_weight = alloc.get("btc_weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                }
 
-                    if let Ok(allocation) = Allocation::new(usd_weight, btc_weight) {
-                        sc.allocation = allocation;
-                        return;
+                if let Some(exp) = entry.get("expected_usd").and_then(|v| v.as_f64()) {
+                    expected_usd = exp;
+                }
+
+                // Apply to current state
+                if let Ok(allocation) = Allocation::new(usd_weight, btc_weight) {
+                    sc.allocation = allocation;
+                    sc.expected_usd = USD::from_f64(expected_usd);
+                    if note.is_some() {
+                        sc.note = note.clone();
                     }
-                }
 
-                // Load expected_usd if present (backward compatibility)
-                if let Some(expected) = entry.get("expected_usd").and_then(|v| v.as_f64()) {
-                    sc.expected_usd = USD::from_f64(expected);
+                    // Save to database
+                    let _ = self.db.save_channel(
+                        &channel_id_str,
+                        usd_weight,
+                        btc_weight,
+                        expected_usd,
+                        note.as_deref(),
+                    );
+
+                    println!("Migrated channel {} from JSON to SQLite", channel_id_str);
                 }
+            }
+        }
+
+        /// Record a trade in the database
+        fn record_trade(&self, action: &str, asset_type: &str, amount_usd: f64, amount_btc: f64, fee_usd: f64, old_btc_pct: u8, new_btc_pct: u8, payment_id: Option<&str>, status: &str) {
+            let channel_id_str = {
+                let sc = self.stable_channel.lock().unwrap();
+                sc.channel_id.to_string()
+            };
+
+            if let Err(e) = self.db.record_trade(
+                &channel_id_str,
+                action,
+                asset_type,
+                amount_usd,
+                amount_btc,
+                self.btc_price,
+                fee_usd,
+                Some(old_btc_pct),
+                Some(new_btc_pct),
+                payment_id,
+                status,
+            ) {
+                eprintln!("Failed to record trade: {}", e);
             }
         }
 
@@ -793,6 +934,29 @@
                             "amount_msat": amount_msat,
                             "payment_hash": format!("{payment_hash}")
                         }));
+
+                        // Record payment in database
+                        let (amount_usd, btc_price) = {
+                            let sc = self.stable_channel.lock().unwrap();
+                            let price = sc.latest_price;
+                            let usd = if price > 0.0 {
+                                Some((amount_msat as f64 / 1000.0 / 100_000_000.0) * price)
+                            } else {
+                                None
+                            };
+                            (usd, if price > 0.0 { Some(price) } else { None })
+                        };
+                        let _ = self.db.record_payment(
+                            Some(&format!("{payment_hash}")),
+                            "stability",
+                            "received",
+                            amount_msat,
+                            amount_usd,
+                            btc_price,
+                            None,
+                            "completed",
+                        );
+
                         self.status_message = format!("Received payment of {} msats", amount_msat);
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
@@ -801,6 +965,15 @@
                         self.update_balances(); // Update UI immediately
                         self.show_onboarding = false;
                         self.waiting_for_payment = false;
+
+                        // Show toast notification
+                        let sats = amount_msat / 1000;
+                        let toast_msg = if let Some(usd) = amount_usd {
+                            format!("Received {} sats (${:.2})", sats, usd)
+                        } else {
+                            format!("Received {} sats", sats)
+                        };
+                        self.show_toast(&toast_msg, "+");
                     }
 
 
@@ -808,12 +981,20 @@
                         audit_event("PAYMENT_SUCCESSFUL", json!({
                             "payment_hash": format!("{payment_hash}"),
                         }));
+
+                        // Note: We record outgoing trades separately in change_allocation
+                        // This captures other outgoing payments (invoices, etc.)
+                        // For now we don't record here to avoid double-counting trade fees
+
                         self.status_message = format!("Sent payment {}", payment_hash);
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
                             update_balances(&self.node, &mut sc);
                         }
                         self.update_balances(); // Update UI immediately
+
+                        // Show toast for sent payment
+                        self.show_toast("Payment sent", "-");
                     }
         
                     Event::ChannelClosed { channel_id, reason, .. } => {
@@ -827,7 +1008,44 @@
                             self.waiting_for_payment = false;
                         }
                     }
-        
+
+                    Event::SplicePending { channel_id, new_funding_txo, .. } => {
+                        audit_event("SPLICE_PENDING", json!({
+                            "channel_id": format!("{channel_id}"),
+                            "funding_txo": format!("{new_funding_txo}")
+                        }));
+
+                        // Record the on-chain transaction if we have pending splice info
+                        if let Some(splice) = self.pending_splice.take() {
+                            let btc_price = {
+                                let sc = self.stable_channel.lock().unwrap();
+                                if sc.latest_price > 0.0 { Some(sc.latest_price) } else { None }
+                            };
+                            let _ = self.db.record_onchain_tx(
+                                &new_funding_txo.txid.to_string(),
+                                &splice.direction,
+                                splice.amount_sats,
+                                splice.address.as_deref(),
+                                btc_price,
+                                "pending",
+                            );
+                        }
+
+                        self.status_message = format!("Splice pending - tx: {}", new_funding_txo.txid);
+                        self.show_toast("Splice pending", "~");
+                        self.update_balances();
+                    }
+
+                    Event::SpliceFailed { channel_id, user_channel_id, .. } => {
+                        audit_event("SPLICE_FAILED", json!({
+                            "channel_id": format!("{channel_id}"),
+                            "user_channel_id": format!("{:?}", user_channel_id)
+                        }));
+                        self.pending_splice = None;  // Clear pending splice on failure
+                        self.status_message = "Splice failed".to_string();
+                        self.show_toast("Splice failed", "!");
+                    }
+
                     _ => {
                         audit_event("EVENT_IGNORED", json!({
                             "event_type": format!("{:?}", event)
@@ -870,6 +1088,100 @@
                 } else {
                     format!("{}m {}s ago", mins, remaining_secs)
                 }
+            }
+        }
+
+        /// Format a unix timestamp as a UTC datetime string
+        fn format_timestamp(timestamp: i64) -> String {
+            match Utc.timestamp_opt(timestamp, 0) {
+                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M UTC").to_string(),
+                _ => "Invalid time".to_string(),
+            }
+        }
+
+        /// Format a price with comma separators (e.g., 100000 -> "100,000")
+        fn format_price(price: f64) -> String {
+            let price_int = price as i64;
+            let formatted = price_int.to_string()
+                .as_bytes()
+                .rchunks(3)
+                .rev()
+                .map(|chunk| std::str::from_utf8(chunk).unwrap())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("${}", formatted)
+        }
+
+        /// Show a toast notification
+        fn show_toast(&mut self, message: &str, emoji: &str) {
+            self.toasts.push(Toast::new(message, emoji, 6.0));
+        }
+
+        /// Render toast notifications
+        fn render_toasts(&mut self, ctx: &egui::Context) {
+            // Remove expired toasts
+            self.toasts.retain(|t| !t.is_expired());
+
+            if self.toasts.is_empty() {
+                return;
+            }
+
+            // Request repaint for animation
+            ctx.request_repaint();
+
+            let screen_rect = ctx.screen_rect();
+            let toast_width = 280.0;
+            let toast_height = 60.0;
+            let margin = 20.0;
+            let spacing = 10.0;
+
+            for (i, toast) in self.toasts.iter().enumerate() {
+                let y_offset = margin + (i as f32 * (toast_height + spacing));
+                let progress = toast.progress();
+
+                // Fade in/out animation
+                let alpha = if progress < 0.1 {
+                    (progress / 0.1).min(1.0)
+                } else if progress > 0.8 {
+                    ((1.0 - progress) / 0.2).max(0.0)
+                } else {
+                    1.0
+                };
+
+                let bg_color = egui::Color32::from_rgba_unmultiplied(40, 120, 60, (220.0 * alpha) as u8);
+                let text_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * alpha) as u8);
+
+                egui::Area::new(egui::Id::new(format!("toast_{}", i)))
+                    .fixed_pos(egui::pos2(
+                        screen_rect.right() - toast_width - margin,
+                        screen_rect.top() + y_offset,
+                    ))
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(bg_color)
+                            .rounding(12.0)
+                            .inner_margin(egui::Margin::symmetric(16, 12))
+                            .shadow(egui::epaint::Shadow {
+                                offset: [0, 2],
+                                blur: 8,
+                                spread: 0,
+                                color: egui::Color32::from_black_alpha(60),
+                            })
+                            .show(ui, |ui| {
+                                ui.set_min_width(toast_width - 32.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&toast.emoji).size(24.0));
+                                    ui.add_space(8.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new(&toast.message)
+                                            .size(14.0)
+                                            .color(text_color)
+                                            .strong());
+                                    });
+                                });
+                            });
+                    });
             }
         }
 
@@ -1136,7 +1448,7 @@
 
                                 if ui.button("Withdraw all to address").clicked() {
                                     match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
-                                        Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
+                                        Ok(addr) => match addr.require_network(self.network) {
                                             Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
                                                 Ok(txid) => {
                                                     self.status_message = format!("On-chain TX sent: {}", txid);
@@ -1275,7 +1587,7 @@
                             ui.add_space(8.0);
 
                             // Total Balance - prominent display
-                            ui.heading("Your Balance");
+                            ui.heading("Your Total Balance");
                             ui.add_space(6.0);
 
                             let total_display = if total_usd.0 <= MIN_DISPLAY_USD {
@@ -1307,9 +1619,9 @@
                                 egui::Grid::new("balance_breakdown_grid")
                                     .spacing(Vec2::new(12.0, 8.0))
                                     .show(ui, |ui| {
-                                        // Stable USD row
+                                        // Stabilized BTC row
                                         ui.label(
-                                            egui::RichText::new("Stable")
+                                            egui::RichText::new("Stabilized BTC (USD)")
                                                 .size(14.0)
                                                 .color(egui::Color32::from_rgb(100, 200, 100)),
                                         );
@@ -1318,17 +1630,12 @@
                                                 .size(14.0)
                                                 .strong(),
                                         );
-                                        ui.label(
-                                            egui::RichText::new("pegged to USD")
-                                                .size(11.0)
-                                                .color(egui::Color32::DARK_GRAY),
-                                        );
                                         ui.end_row();
 
-                                        // Native BTC row (only show if there's BTC allocation)
+                                        // Bitcoin BTC row (only show if there's BTC allocation)
                                         if sc.allocation.btc_percent() > 0 {
                                             ui.label(
-                                                egui::RichText::new("Native")
+                                                egui::RichText::new("Bitcoin (BTC)")
                                                     .size(14.0)
                                                     .color(egui::Color32::from_rgb(247, 147, 26)),
                                             );
@@ -1336,11 +1643,6 @@
                                                 egui::RichText::new(format!("${:.2}", native_usd_value))
                                                     .size(14.0)
                                                     .strong(),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new("floats with BTC")
-                                                    .size(11.0)
-                                                    .color(egui::Color32::DARK_GRAY),
                                             );
                                             ui.end_row();
                                         }
@@ -1372,10 +1674,11 @@
 
                                 // Amount input
                                 ui.horizontal(|ui| {
-                                    ui.label("Amount: $");
+                                    ui.label(egui::RichText::new("$").size(18.0));
                                     let response = ui.add(
                                         egui::TextEdit::singleline(&mut self.trade_amount_input)
-                                            .desired_width(80.0)
+                                            .desired_width(100.0)
+                                            .font(egui::TextStyle::Heading)
                                             .hint_text("0.00")
                                     );
                                     if response.changed() {
@@ -1405,14 +1708,14 @@
                                 let can_buy = current_usd_pct > 0 && stable_usd > 0.01;
                                 let can_sell = current_btc_pct > 0 && native_usd > 0.01;
 
+                                // Buy BTC row
                                 ui.horizontal(|ui| {
-                                    // Buy BTC button
                                     let buy_btn = egui::Button::new(
                                         egui::RichText::new("Buy BTC")
                                             .size(14.0)
                                             .color(if can_buy { egui::Color32::WHITE } else { egui::Color32::DARK_GRAY })
                                     )
-                                    .min_size(egui::vec2(80.0, 35.0))
+                                    .min_size(egui::vec2(100.0, 35.0))
                                     .fill(if can_buy { buy_green } else { buy_green_disabled });
 
                                     if ui.add_enabled(can_buy, buy_btn).clicked() {
@@ -1440,15 +1743,20 @@
                                         }
                                     }
 
-                                    // Buy Max link
+                                    ui.add_space(10.0);
+
+                                    // Buy Max button with frame
                                     if can_buy {
-                                        if ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new("Max")
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(100, 180, 100))
-                                            ).sense(egui::Sense::click())
-                                        ).clicked() {
+                                        let buy_max_btn = egui::Button::new(
+                                            egui::RichText::new("Buy Max")
+                                                .size(12.0)
+                                                .color(egui::Color32::from_rgb(100, 180, 100))
+                                        )
+                                        .min_size(egui::vec2(70.0, 28.0))
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 180, 100)));
+
+                                        if ui.add(buy_max_btn).clicked() {
                                             self.trade_error.clear();
                                             self.pending_trade = Some(PendingTrade {
                                                 action: TradeAction::BuyBtc,
@@ -1458,16 +1766,18 @@
                                             self.show_confirm_trade = true;
                                         }
                                     }
+                                });
 
-                                    ui.add_space(15.0);
+                                ui.add_space(8.0);
 
-                                    // Sell BTC button
+                                // Sell BTC row
+                                ui.horizontal(|ui| {
                                     let sell_btn = egui::Button::new(
                                         egui::RichText::new("Sell BTC")
                                             .size(14.0)
                                             .color(if can_sell { egui::Color32::WHITE } else { egui::Color32::DARK_GRAY })
                                     )
-                                    .min_size(egui::vec2(80.0, 35.0))
+                                    .min_size(egui::vec2(100.0, 35.0))
                                     .fill(if can_sell { sell_red } else { sell_red_disabled });
 
                                     if ui.add_enabled(can_sell, sell_btn).clicked() {
@@ -1495,15 +1805,20 @@
                                         }
                                     }
 
-                                    // Sell Max link
+                                    ui.add_space(10.0);
+
+                                    // Sell Max button with frame
                                     if can_sell {
-                                        if ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new("Max")
-                                                    .size(11.0)
-                                                    .color(egui::Color32::from_rgb(200, 120, 120))
-                                            ).sense(egui::Sense::click())
-                                        ).clicked() {
+                                        let sell_max_btn = egui::Button::new(
+                                            egui::RichText::new("Sell Max")
+                                                .size(12.0)
+                                                .color(egui::Color32::from_rgb(200, 120, 120))
+                                        )
+                                        .min_size(egui::vec2(70.0, 28.0))
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 120, 120)));
+
+                                        if ui.add(sell_max_btn).clicked() {
                                             self.trade_error.clear();
                                             self.pending_trade = Some(PendingTrade {
                                                 action: TradeAction::SellBtc,
@@ -1517,6 +1832,290 @@
 
                                 ui.add_space(10.0);
                             });
+
+                            // On-chain & Splice section
+                            ui.add_space(20.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("On-chain").size(16.0).strong());
+                                ui.add_space(10.0);
+                                ui.label(egui::RichText::new(format!("{:.8} BTC", self.onchain_balance_btc)).size(14.0).color(egui::Color32::GRAY));
+                            });
+
+                            ui.add_space(10.0);
+
+                            ui.horizontal(|ui| {
+                                // Deposit (Splice In) button
+                                let deposit_btn = egui::Button::new(
+                                    egui::RichText::new("Deposit")
+                                        .size(13.0)
+                                        .color(egui::Color32::WHITE)
+                                )
+                                .min_size(egui::vec2(90.0, 32.0))
+                                .fill(egui::Color32::from_rgb(70, 130, 180));
+
+                                if ui.add(deposit_btn).clicked() {
+                                    self.show_onchain_receive = !self.show_onchain_receive;
+                                    self.show_onchain_send = false;
+                                    if self.show_onchain_receive && self.on_chain_address.is_empty() {
+                                        self.get_address();
+                                    }
+                                }
+
+                                ui.add_space(10.0);
+
+                                // Withdraw (Splice Out) button
+                                let withdraw_btn = egui::Button::new(
+                                    egui::RichText::new("Withdraw")
+                                        .size(13.0)
+                                        .color(egui::Color32::WHITE)
+                                )
+                                .min_size(egui::vec2(90.0, 32.0))
+                                .fill(egui::Color32::from_rgb(180, 100, 70));
+
+                                if ui.add(withdraw_btn).clicked() {
+                                    self.show_onchain_send = !self.show_onchain_send;
+                                    self.show_onchain_receive = false;
+                                }
+                            });
+
+                            // Deposit section (Splice In)
+                            if self.show_onchain_receive {
+                                ui.add_space(10.0);
+                                ui.group(|ui| {
+                                    ui.label(egui::RichText::new("Deposit to Channel (Splice In)").strong());
+                                    ui.add_space(5.0);
+
+                                    // Show on-chain address for receiving
+                                    ui.label(egui::RichText::new("1. Send BTC to this address:").size(12.0));
+                                    ui.add_space(3.0);
+
+                                    if self.on_chain_address.is_empty() {
+                                        if ui.button("Generate Address").clicked() {
+                                            self.get_address();
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(&self.on_chain_address)
+                                                .monospace()
+                                                .size(10.0)
+                                        );
+
+                                        ui.add_space(5.0);
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Copy").clicked() {
+                                                ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                                                self.status_message = "Address copied!".to_string();
+                                            }
+                                            if ui.button("New Address").clicked() {
+                                                self.get_address();
+                                            }
+                                        });
+
+                                        // QR Code
+                                        ui.add_space(10.0);
+                                        if let Ok(qr) = QrCode::new(self.on_chain_address.as_bytes()) {
+                                            let qr_size = 150;
+                                            let module_size = qr_size / qr.width();
+                                            let mut img = GrayImage::new(qr_size as u32, qr_size as u32);
+
+                                            for y in 0..qr.width() {
+                                                for x in 0..qr.width() {
+                                                    let color = if qr[(x, y)] == Color::Dark {
+                                                        Luma([0u8])
+                                                    } else {
+                                                        Luma([255u8])
+                                                    };
+                                                    for dy in 0..module_size {
+                                                        for dx in 0..module_size {
+                                                            let px = x * module_size + dx;
+                                                            let py = y * module_size + dy;
+                                                            if px < qr_size && py < qr_size {
+                                                                img.put_pixel(px as u32, py as u32, color);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            let pixels: Vec<egui::Color32> = img
+                                                .pixels()
+                                                .map(|p| {
+                                                    let v = p.0[0];
+                                                    egui::Color32::from_rgb(v, v, v)
+                                                })
+                                                .collect();
+
+                                            let texture = ctx.load_texture(
+                                                "onchain_qr",
+                                                egui::ColorImage {
+                                                    size: [qr_size, qr_size],
+                                                    pixels,
+                                                },
+                                                TextureOptions::NEAREST,
+                                            );
+                                            ui.image(&texture);
+                                        }
+                                    }
+
+                                    // Splice In section
+                                    ui.add_space(15.0);
+                                    ui.separator();
+                                    ui.add_space(10.0);
+
+                                    ui.label(egui::RichText::new("2. Splice funds into channel:").size(12.0));
+                                    ui.add_space(5.0);
+
+                                    ui.label(
+                                        egui::RichText::new(format!("On-chain balance: {} sats", (self.onchain_balance_btc * 100_000_000.0) as u64))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY)
+                                    );
+
+                                    ui.add_space(5.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Amount (sats):");
+                                        let amount_edit = egui::TextEdit::singleline(&mut self.splice_in_amount)
+                                            .desired_width(120.0)
+                                            .hint_text("0");
+                                        ui.add(amount_edit);
+                                    });
+
+                                    ui.add_space(8.0);
+
+                                    if ui.button("Splice In to Channel").clicked() {
+                                        if let Ok(amount_sats) = self.splice_in_amount.parse::<u64>() {
+                                            let target_channel_id = {
+                                                let sc = self.stable_channel.lock().unwrap();
+                                                sc.channel_id
+                                            };
+
+                                            // Find the channel to get its user_channel_id
+                                            let channel_info = self.node.list_channels()
+                                                .into_iter()
+                                                .find(|ch| ch.channel_id == target_channel_id);
+
+                                            if let Some(ch) = channel_info {
+                                                match self.node.splice_in(&ch.user_channel_id, ch.counterparty_node_id, amount_sats) {
+                                                    Ok(()) => {
+                                                        self.pending_splice = Some(PendingSplice {
+                                                            direction: "in".to_string(),
+                                                            amount_sats,
+                                                            address: None,
+                                                        });
+                                                        self.status_message = format!("Splice-in initiated: {} sats", amount_sats);
+                                                        self.show_toast("Splice-in started", "+");
+                                                        self.splice_in_amount.clear();
+                                                        self.update_balances();
+                                                    }
+                                                    Err(e) => {
+                                                        self.status_message = format!("Splice-in failed: {}", e);
+                                                    }
+                                                }
+                                            } else {
+                                                self.status_message = "No channel found".to_string();
+                                            }
+                                        } else {
+                                            self.status_message = "Enter a valid amount".to_string();
+                                        }
+                                    }
+                                });
+                            }
+
+                            // Withdraw section (Splice Out)
+                            if self.show_onchain_send {
+                                ui.add_space(10.0);
+                                ui.group(|ui| {
+                                    ui.label(egui::RichText::new("Withdraw from Channel (Splice Out)").strong());
+                                    ui.add_space(5.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("To address:");
+                                    });
+                                    let addr_edit = egui::TextEdit::singleline(&mut self.splice_out_address)
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(280.0)
+                                        .hint_text("bc1q...");
+                                    ui.add(addr_edit);
+
+                                    ui.add_space(5.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Amount (sats):");
+                                        let amount_edit = egui::TextEdit::singleline(&mut self.splice_out_amount)
+                                            .desired_width(120.0)
+                                            .hint_text("0");
+                                        ui.add(amount_edit);
+                                    });
+
+                                    ui.add_space(8.0);
+
+                                    if ui.button("Splice Out from Channel").clicked() {
+                                        if let Ok(amount_sats) = self.splice_out_amount.parse::<u64>() {
+                                            match ldk_node::bitcoin::Address::from_str(&self.splice_out_address) {
+                                                Ok(addr) => match addr.require_network(self.network) {
+                                                    Ok(valid_addr) => {
+                                                        let target_channel_id = {
+                                                            let sc = self.stable_channel.lock().unwrap();
+                                                            sc.channel_id
+                                                        };
+
+                                                        // Find the channel to get its user_channel_id
+                                                        let channel_info = self.node.list_channels()
+                                                            .into_iter()
+                                                            .find(|ch| ch.channel_id == target_channel_id);
+
+                                                        if let Some(ch) = channel_info {
+                                                            let out_address = self.splice_out_address.clone();
+                                                            match self.node.splice_out(&ch.user_channel_id, ch.counterparty_node_id, &valid_addr, amount_sats) {
+                                                                Ok(()) => {
+                                                                    self.pending_splice = Some(PendingSplice {
+                                                                        direction: "out".to_string(),
+                                                                        amount_sats,
+                                                                        address: Some(out_address),
+                                                                    });
+                                                                    self.status_message = format!("Splice-out initiated: {} sats", amount_sats);
+                                                                    self.show_toast("Splice-out started", "-");
+                                                                    self.splice_out_address.clear();
+                                                                    self.splice_out_amount.clear();
+                                                                    self.update_balances();
+                                                                }
+                                                                Err(e) => {
+                                                                    self.status_message = format!("Splice-out failed: {}", e);
+                                                                }
+                                                            }
+                                                        } else {
+                                                            self.status_message = "No channel found".to_string();
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        self.status_message = format!("Invalid network: {}", e);
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    self.status_message = format!("Invalid address: {}", e);
+                                                }
+                                            }
+                                        } else {
+                                            self.status_message = "Enter a valid amount".to_string();
+                                        }
+                                    }
+
+                                    ui.add_space(10.0);
+
+                                    let channel_balance_sats = (self.lightning_balance_btc * 100_000_000.0) as u64;
+                                    ui.label(
+                                        egui::RichText::new(format!("Channel balance: {} sats", channel_balance_sats))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY)
+                                    );
+                                });
+                            }
+
+                            ui.add_space(10.0);
 
                             // Confirmation dialog
                             if self.show_confirm_trade {
@@ -1583,7 +2182,7 @@
                                             ui.add_space(12.0);
                                             ui.horizontal(|ui| {
                                                 if ui.button("Confirm").clicked() {
-                                                    self.change_allocation(new_btc_pct as i32, fee);
+                                                    self.change_allocation(new_btc_pct as i32, fee, trade_amount);
                                                     self.show_confirm_trade = false;
                                                     self.pending_trade = None;
                                                     self.trade_amount_input.clear();
@@ -1691,7 +2290,7 @@
                                 
                                     if ui.button("Send On-chain").clicked() {
                                         match ldk_node::bitcoin::Address::from_str(&self.on_chain_address) {
-                                            Ok(addr) => match addr.require_network(ldk_node::bitcoin::Network::Bitcoin) {
+                                            Ok(addr) => match addr.require_network(self.network) {
                                                 Ok(valid_addr) => match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
                                                     Ok(txid) => {
                                                         self.status_message = format!("On-chain TX sent: {}", txid);
@@ -1725,6 +2324,186 @@
                                                 ch.channel_id,
                                                 ch.channel_value_sats
                                             ));
+                                        }
+                                    }
+                                });
+                                ui.add_space(20.0);
+
+                                // Trade History section
+                                ui.group(|ui| {
+                                    ui.heading("Trade History");
+                                    ui.add_space(5.0);
+
+                                    let channel_id_str = {
+                                        let sc = self.stable_channel.lock().unwrap();
+                                        sc.channel_id.to_string()
+                                    };
+
+                                    match self.db.get_recent_trades(&channel_id_str, 10) {
+                                        Ok(trades) if trades.is_empty() => {
+                                            ui.label(egui::RichText::new("No trades yet").color(egui::Color32::GRAY));
+                                        }
+                                        Ok(trades) => {
+                                            egui::Grid::new("trades_grid")
+                                                .striped(true)
+                                                .spacing(egui::vec2(8.0, 4.0))
+                                                .show(ui, |ui| {
+                                                    // Header
+                                                    ui.label(egui::RichText::new("ID").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Action").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("USD").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("BTC").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Price").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Fee").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Time (UTC)").strong().size(11.0));
+                                                    ui.end_row();
+
+                                                    for trade in trades.iter().take(5) {
+                                                        let action_color = if trade.action == "buy" {
+                                                            egui::Color32::from_rgb(100, 200, 100)
+                                                        } else {
+                                                            egui::Color32::from_rgb(200, 100, 100)
+                                                        };
+                                                        // Use payment_id as trade ID if available, otherwise show db id
+                                                        let trade_id = trade.payment_id.as_ref()
+                                                            .map(|pid| pid.chars().take(8).collect::<String>())
+                                                            .unwrap_or_else(|| format!("#{}", trade.id));
+                                                        ui.label(egui::RichText::new(&trade_id).size(11.0).color(egui::Color32::GRAY));
+                                                        ui.label(egui::RichText::new(trade.action.to_uppercase()).size(11.0).color(action_color));
+                                                        ui.label(egui::RichText::new(format!("${:.2}", trade.amount_usd)).size(11.0));
+                                                        ui.label(egui::RichText::new(format!("{:.8}", trade.amount_btc)).size(11.0));
+                                                        ui.label(egui::RichText::new(Self::format_price(trade.btc_price)).size(11.0));
+                                                        ui.label(egui::RichText::new(format!("${:.2}", trade.fee_usd)).size(11.0));
+                                                        ui.label(egui::RichText::new(Self::format_timestamp(trade.created_at)).size(11.0).color(egui::Color32::GRAY));
+                                                        ui.end_row();
+                                                    }
+                                                });
+                                        }
+                                        Err(_) => {
+                                            ui.label(egui::RichText::new("Error loading trades").color(egui::Color32::RED));
+                                        }
+                                    }
+                                });
+                                ui.add_space(20.0);
+
+                                // Payments section
+                                ui.group(|ui| {
+                                    ui.heading("Recent Payments");
+                                    ui.add_space(5.0);
+
+                                    match self.db.get_recent_payments(10) {
+                                        Ok(payments) if payments.is_empty() => {
+                                            ui.label(egui::RichText::new("No payments yet").color(egui::Color32::GRAY));
+                                        }
+                                        Ok(payments) => {
+                                            egui::Grid::new("payments_grid")
+                                                .striped(true)
+                                                .spacing(egui::vec2(8.0, 4.0))
+                                                .show(ui, |ui| {
+                                                    // Header
+                                                    ui.label(egui::RichText::new("ID").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Type").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Direction").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Amount").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("USD").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Time (UTC)").strong().size(11.0));
+                                                    ui.end_row();
+
+                                                    for payment in payments.iter().take(5) {
+                                                        let (dir_color, dir_label) = if payment.direction == "received" {
+                                                            (egui::Color32::from_rgb(100, 200, 100), "Received")
+                                                        } else {
+                                                            (egui::Color32::from_rgb(200, 150, 100), "Sent")
+                                                        };
+
+                                                        let type_label = if payment.payment_type == "stability" {
+                                                            "Stability"
+                                                        } else {
+                                                            "Manual"
+                                                        };
+
+                                                        // Payment ID (truncated)
+                                                        let id_display = payment.payment_id.as_ref()
+                                                            .map(|id| if id.len() > 8 { format!("{}...", &id[..8]) } else { id.clone() })
+                                                            .unwrap_or_else(|| format!("#{}", payment.id));
+                                                        ui.label(egui::RichText::new(id_display).size(11.0).color(egui::Color32::GRAY));
+
+                                                        ui.label(egui::RichText::new(type_label).size(11.0));
+                                                        ui.label(egui::RichText::new(dir_label).size(11.0).color(dir_color));
+                                                        ui.label(egui::RichText::new(format!("{} sats", payment.amount_msat / 1000)).size(11.0));
+
+                                                        if let Some(usd) = payment.amount_usd {
+                                                            ui.label(egui::RichText::new(format!("${:.2}", usd)).size(11.0));
+                                                        } else {
+                                                            ui.label(egui::RichText::new("—").size(11.0));
+                                                        }
+
+                                                        ui.label(egui::RichText::new(Self::format_timestamp(payment.created_at)).size(11.0).color(egui::Color32::GRAY));
+                                                        ui.end_row();
+                                                    }
+                                                });
+                                        }
+                                        Err(_) => {
+                                            ui.label(egui::RichText::new("Error loading payments").color(egui::Color32::RED));
+                                        }
+                                    }
+                                });
+                                ui.add_space(20.0);
+
+                                // On-chain transactions section
+                                ui.group(|ui| {
+                                    ui.heading("On-chain Transactions");
+                                    ui.add_space(5.0);
+
+                                    match self.db.get_recent_onchain_txs(10) {
+                                        Ok(txs) if txs.is_empty() => {
+                                            ui.label(egui::RichText::new("No on-chain transactions yet").color(egui::Color32::GRAY));
+                                        }
+                                        Ok(txs) => {
+                                            egui::Grid::new("onchain_txs_grid")
+                                                .striped(true)
+                                                .spacing(egui::vec2(8.0, 4.0))
+                                                .show(ui, |ui| {
+                                                    // Header
+                                                    ui.label(egui::RichText::new("TxID").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Type").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Amount").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Status").strong().size(11.0));
+                                                    ui.label(egui::RichText::new("Time (UTC)").strong().size(11.0));
+                                                    ui.end_row();
+
+                                                    for tx in txs.iter().take(5) {
+                                                        let (dir_color, dir_label) = if tx.direction == "in" {
+                                                            (egui::Color32::from_rgb(100, 200, 100), "Deposit")
+                                                        } else {
+                                                            (egui::Color32::from_rgb(200, 150, 100), "Withdraw")
+                                                        };
+
+                                                        // TxID (truncated)
+                                                        let txid_display = if tx.txid.len() > 12 {
+                                                            format!("{}...", &tx.txid[..12])
+                                                        } else {
+                                                            tx.txid.clone()
+                                                        };
+                                                        ui.label(egui::RichText::new(txid_display).size(11.0).color(egui::Color32::GRAY));
+
+                                                        ui.label(egui::RichText::new(dir_label).size(11.0).color(dir_color));
+                                                        ui.label(egui::RichText::new(format!("{} sats", tx.amount_sats)).size(11.0));
+
+                                                        let status_color = match tx.status.as_str() {
+                                                            "confirmed" => egui::Color32::from_rgb(100, 200, 100),
+                                                            "pending" => egui::Color32::from_rgb(200, 200, 100),
+                                                            _ => egui::Color32::GRAY,
+                                                        };
+                                                        ui.label(egui::RichText::new(&tx.status).size(11.0).color(status_color));
+
+                                                        ui.label(egui::RichText::new(Self::format_timestamp(tx.created_at)).size(11.0).color(egui::Color32::GRAY));
+                                                        ui.end_row();
+                                                    }
+                                                });
+                                        }
+                                        Err(_) => {
+                                            ui.label(egui::RichText::new("Error loading transactions").color(egui::Color32::RED));
                                         }
                                     }
                                 });
@@ -1868,6 +2647,9 @@
                 self.show_main_screen(ctx);
             }
             self.show_log_window_if_open(ctx);
+
+            // Render toast notifications on top
+            self.render_toasts(ctx);
 
             ctx.request_repaint_after(Duration::from_millis(100));
         }
