@@ -25,6 +25,13 @@ pub struct PriceCache {
 // Re-export from constants module
 pub use crate::constants::{PriceFeedConfig as PriceFeed, get_default_price_feeds};
 
+/// Get the raw cached price without triggering a network fetch.
+/// Use this for non-blocking startup. Returns 0.0 if no price is cached.
+pub fn get_cached_price_no_fetch() -> f64 {
+    let cache = PRICE_CACHE.lock().unwrap();
+    cache.price
+}
+
 // Get cached price or fetch a new one if needed
 pub fn get_cached_price() -> f64 {
     let should_update = {

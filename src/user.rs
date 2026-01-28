@@ -19,10 +19,23 @@
     use crate::audit::*;
     use crate::stable::update_balances;
     use crate::types::*;
-    use crate::price_feeds::{get_cached_price, get_latest_price};
+    use crate::price_feeds::{get_cached_price, get_cached_price_no_fetch, get_latest_price};
     use crate::stable;
     use crate::constants::*;
     use std::fs;
+
+    #[derive(Clone, Debug)]
+    pub enum TradeAction {
+        BuyBtc,
+        SellBtc,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct PendingTrade {
+        pub action: TradeAction,
+        pub amount_usd: f64,
+        pub new_btc_percent: u8,
+    }
 
     pub struct UserApp {
         pub node: Arc<Node>,
@@ -48,8 +61,10 @@
         balance_last_update: std::time::Instant,
         confirm_close_popup: bool,
         pub stable_message: String,
-        show_confirm_allocation: bool, 
-        ui_btc_allocation: i32, // for UI purposes for now - does not touch biz logic
+        show_confirm_trade: bool,
+        trade_amount_input: String,
+        pending_trade: Option<PendingTrade>,
+        trade_error: String,
 
         // Balance fields
         pub lightning_balance_btc: f64,
@@ -136,12 +151,18 @@
                 }
             }
 
-            let mut btc_price = crate::price_feeds::get_cached_price();
-            if btc_price <= 0.0 {
-                if let Ok(price) = get_latest_price(&ureq::Agent::new()) {
-                    btc_price = price;
-                }
-            }
+            // Use non-blocking cache read at startup - background thread will fetch price
+            let btc_price = get_cached_price_no_fetch();
+
+            // Set initial timestamp if we have a valid cached price
+            let initial_timestamp = if btc_price > 0.0 {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             let sc_init = StableChannel {
                 channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]),
@@ -156,7 +177,7 @@
                 latest_price: btc_price,
                 risk_level: 0,
                 payment_made: false,
-                timestamp: 0,
+                timestamp: initial_timestamp,
                 formatted_datetime: "2021-06-01 12:00:00".to_string(),
                 sc_dir: "/".to_string(),
                 prices: String::new(),
@@ -198,8 +219,10 @@
                 balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
                 confirm_close_popup: false,
                 stable_message: String::new(),
-                show_confirm_allocation: false,
-                ui_btc_allocation: 0, 
+                show_confirm_trade: false,
+                trade_amount_input: String::new(),
+                pending_trade: None,
+                trade_error: String::new(),
             };
 
             {
@@ -481,7 +504,7 @@
         //     }
         // }
 
-        fn change_allocation(&mut self, btc_pct_i32: i32) {
+        fn change_allocation(&mut self, btc_pct_i32: i32, fee_usd: f64) {
             // Clamp to [0, 100]
             let pct_btc: u8 = btc_pct_i32.clamp(0, 100) as u8;
             let pct_usd: u8 = 100 - pct_btc;
@@ -489,10 +512,10 @@
             // Create the new allocation
             let new_allocation = Allocation::from_btc_percent(pct_btc);
 
-            // Grab channel_id and counterparty from StableChannel (in memory)
-            let (channel_id_str, counterparty) = {
+            // Grab channel_id, counterparty, and price from StableChannel (in memory)
+            let (channel_id_str, counterparty, price) = {
                 let sc = self.stable_channel.lock().unwrap();
-                (sc.channel_id.to_string(), sc.counterparty)
+                (sc.channel_id.to_string(), sc.counterparty, sc.latest_price)
             };
 
             // Build payload that the LSP will parse
@@ -524,8 +547,15 @@
                 value: signed_str.as_bytes().to_vec(),
             };
 
-            // 1 msat marker payment
-            let amt_msat: u64 = 1;
+            // Calculate fee in msats (1% fee sent to LSP)
+            let fee_msats = if price > 0.0 && fee_usd > 0.0 {
+                let fee_btc = fee_usd / price;
+                let fee_sats = (fee_btc * 100_000_000.0) as u64;
+                fee_sats * 1000 // convert to msats
+            } else {
+                1 // minimum 1 msat if no fee
+            };
+            let amt_msat: u64 = fee_msats.max(1);
 
             match self.node.spontaneous_payment().send_with_custom_tlvs(
                 amt_msat,
@@ -550,8 +580,8 @@
                     self.save_user_allocation();
 
                     self.status_message = format!(
-                        "Sent allocation update: {}% BTC / {}% USD",
-                        pct_btc, pct_usd,
+                        "Sent allocation update: {}% BTC / {}% USD (fee: ${:.2})",
+                        pct_btc, pct_usd, fee_usd,
                     );
                     audit_event("ALLOCATION_MESSAGE_SENT", json!({
                         "payment_id": format!("{payment_id}"),
@@ -560,6 +590,8 @@
                         "pct_usd": pct_usd,
                         "usd_weight": new_allocation.usd_weight,
                         "btc_weight": new_allocation.btc_weight,
+                        "fee_usd": fee_usd,
+                        "fee_msats": amt_msat,
                     }));
                 }
                 Err(e) => {
@@ -662,9 +694,6 @@
 
                     if let Ok(allocation) = Allocation::new(usd_weight, btc_weight) {
                         sc.allocation = allocation;
-                        // Update UI slider to match loaded allocation
-                        drop(sc); // Release lock before updating UI state
-                        self.ui_btc_allocation = (btc_weight * 100.0).round() as i32;
                         return;
                     }
                 }
@@ -1280,7 +1309,7 @@
                                     .show(ui, |ui| {
                                         // Stable USD row
                                         ui.label(
-                                            egui::RichText::new(format!("Stable ({}%)", sc.allocation.usd_percent()))
+                                            egui::RichText::new("Stable")
                                                 .size(14.0)
                                                 .color(egui::Color32::from_rgb(100, 200, 100)),
                                         );
@@ -1299,7 +1328,7 @@
                                         // Native BTC row (only show if there's BTC allocation)
                                         if sc.allocation.btc_percent() > 0 {
                                             ui.label(
-                                                egui::RichText::new(format!("Native ({}%)", sc.allocation.btc_percent()))
+                                                egui::RichText::new("Native")
                                                     .size(14.0)
                                                     .color(egui::Color32::from_rgb(247, 147, 26)),
                                             );
@@ -1323,119 +1352,251 @@
 
                         ui.add_space(20.0);
 
-                        // Stability Allocation
+                        // Buy/Sell BTC Section
                         ui.group(|ui| {
                             ui.add_space(10.0);
                             ui.vertical_centered(|ui| {
-                                ui.heading("Portfolio Allocation");
-                                ui.add_space(20.0);
-                        
-                                // Use UI-only state
-                                ui.scope(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.add_space((ui.available_width() * 0.10).round());
-                                        ui.style_mut().spacing.slider_width = (ui.available_width() * 0.80_f32).round();
-                                        ui.add(egui::Slider::new(&mut self.ui_btc_allocation, 0..=100).show_value(false));
-                                    });
+                                ui.heading("Buy / Sell BTC");
+                                ui.add_space(15.0);
+
+                                // Get current allocation info
+                                let (current_btc_pct, current_usd_pct, stable_usd, native_usd, total_usd) = {
+                                    let sc = self.stable_channel.lock().unwrap();
+                                    let total = sc.stable_receiver_usd.0;
+                                    let usd_pct = sc.allocation.usd_percent();
+                                    let btc_pct = sc.allocation.btc_percent();
+                                    let stable = total * sc.allocation.usd_weight;
+                                    let native = total * sc.allocation.btc_weight;
+                                    (btc_pct, usd_pct, stable, native, total)
+                                };
+
+                                // Amount input
+                                ui.horizontal(|ui| {
+                                    ui.label("Amount: $");
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(&mut self.trade_amount_input)
+                                            .desired_width(80.0)
+                                            .hint_text("0.00")
+                                    );
+                                    if response.changed() {
+                                        self.trade_error.clear();
+                                    }
                                 });
-                        
-                                ui.add_space(10.0);
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}% BTC, {}% USD",
-                                        self.ui_btc_allocation,
-                                        100 - self.ui_btc_allocation
-                                    ))
-                                    .size(16.0)
-                                    .color(egui::Color32::GRAY),
-                                );
-                        
-                                ui.add_space(20.0);
-                        
-                                if ui.add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Set Allocation")
-                                            .size(16.0)
-                                            .color(egui::Color32::WHITE)
-                                    )
-                                    .min_size(egui::vec2(150.0, 40.0))
-                                    .fill(egui::Color32::from_rgb(247, 147, 26))
-                                    .rounding(6.0)
-                                ).clicked() {
-                                    self.show_confirm_allocation = true;
+
+                                // Show error if any
+                                if !self.trade_error.is_empty() {
+                                    ui.add_space(5.0);
+                                    ui.label(
+                                        egui::RichText::new(&self.trade_error)
+                                            .size(12.0)
+                                            .color(egui::Color32::from_rgb(255, 100, 100))
+                                    );
                                 }
-                        
+
+                                ui.add_space(15.0);
+
+                                // Softer colors
+                                let buy_green = egui::Color32::from_rgb(46, 125, 50);
+                                let buy_green_disabled = egui::Color32::from_rgb(40, 60, 40);
+                                let sell_red = egui::Color32::from_rgb(183, 28, 28);
+                                let sell_red_disabled = egui::Color32::from_rgb(60, 40, 40);
+
+                                // Buy/Sell buttons
+                                let can_buy = current_usd_pct > 0 && stable_usd > 0.01;
+                                let can_sell = current_btc_pct > 0 && native_usd > 0.01;
+
+                                ui.horizontal(|ui| {
+                                    // Buy BTC button
+                                    let buy_btn = egui::Button::new(
+                                        egui::RichText::new("Buy BTC")
+                                            .size(14.0)
+                                            .color(if can_buy { egui::Color32::WHITE } else { egui::Color32::DARK_GRAY })
+                                    )
+                                    .min_size(egui::vec2(80.0, 35.0))
+                                    .fill(if can_buy { buy_green } else { buy_green_disabled });
+
+                                    if ui.add_enabled(can_buy, buy_btn).clicked() {
+                                        self.trade_error.clear();
+                                        match self.trade_amount_input.parse::<f64>() {
+                                            Ok(amount) if amount <= 0.0 => {
+                                                self.trade_error = "Enter a positive amount".to_string();
+                                            }
+                                            Ok(amount) if amount > stable_usd => {
+                                                self.trade_error = format!("Max ${:.2} available", stable_usd);
+                                            }
+                                            Ok(amount) => {
+                                                let new_native_usd = native_usd + amount;
+                                                let new_btc_pct = ((new_native_usd / total_usd) * 100.0).round() as u8;
+                                                self.pending_trade = Some(PendingTrade {
+                                                    action: TradeAction::BuyBtc,
+                                                    amount_usd: amount,
+                                                    new_btc_percent: new_btc_pct.min(100),
+                                                });
+                                                self.show_confirm_trade = true;
+                                            }
+                                            Err(_) => {
+                                                self.trade_error = "Enter a valid number".to_string();
+                                            }
+                                        }
+                                    }
+
+                                    // Buy Max link
+                                    if can_buy {
+                                        if ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new("Max")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(100, 180, 100))
+                                            ).sense(egui::Sense::click())
+                                        ).clicked() {
+                                            self.trade_error.clear();
+                                            self.pending_trade = Some(PendingTrade {
+                                                action: TradeAction::BuyBtc,
+                                                amount_usd: stable_usd,
+                                                new_btc_percent: 100,
+                                            });
+                                            self.show_confirm_trade = true;
+                                        }
+                                    }
+
+                                    ui.add_space(15.0);
+
+                                    // Sell BTC button
+                                    let sell_btn = egui::Button::new(
+                                        egui::RichText::new("Sell BTC")
+                                            .size(14.0)
+                                            .color(if can_sell { egui::Color32::WHITE } else { egui::Color32::DARK_GRAY })
+                                    )
+                                    .min_size(egui::vec2(80.0, 35.0))
+                                    .fill(if can_sell { sell_red } else { sell_red_disabled });
+
+                                    if ui.add_enabled(can_sell, sell_btn).clicked() {
+                                        self.trade_error.clear();
+                                        match self.trade_amount_input.parse::<f64>() {
+                                            Ok(amount) if amount <= 0.0 => {
+                                                self.trade_error = "Enter a positive amount".to_string();
+                                            }
+                                            Ok(amount) if amount > native_usd => {
+                                                self.trade_error = format!("Max ${:.2} available", native_usd);
+                                            }
+                                            Ok(amount) => {
+                                                let new_native_usd = native_usd - amount;
+                                                let new_btc_pct = ((new_native_usd / total_usd) * 100.0).round() as u8;
+                                                self.pending_trade = Some(PendingTrade {
+                                                    action: TradeAction::SellBtc,
+                                                    amount_usd: amount,
+                                                    new_btc_percent: new_btc_pct,
+                                                });
+                                                self.show_confirm_trade = true;
+                                            }
+                                            Err(_) => {
+                                                self.trade_error = "Enter a valid number".to_string();
+                                            }
+                                        }
+                                    }
+
+                                    // Sell Max link
+                                    if can_sell {
+                                        if ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new("Max")
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(200, 120, 120))
+                                            ).sense(egui::Sense::click())
+                                        ).clicked() {
+                                            self.trade_error.clear();
+                                            self.pending_trade = Some(PendingTrade {
+                                                action: TradeAction::SellBtc,
+                                                amount_usd: native_usd,
+                                                new_btc_percent: 0,
+                                            });
+                                            self.show_confirm_trade = true;
+                                        }
+                                    }
+                                });
+
                                 ui.add_space(10.0);
                             });
-                        
-                            if self.show_confirm_allocation {
-                                // Read-only peek for preview math (safe to read SC)
-                                let pegged_btc_now = {
-                                    let sc = self.stable_channel.lock().unwrap();
-                                    if sc.is_stable_receiver { sc.stable_receiver_btc } else { sc.stable_provider_btc }
-                                }.to_btc();
-                        
-                                let price = self.btc_price.max(0.0);
-                                let btc_pct = self.ui_btc_allocation as f64;
-                                let usd_pct = (100 - self.ui_btc_allocation) as f64;
-                        
-                                let total_ln_btc = self.lightning_balance_btc;
-                                let unstabilized_ln_btc = (total_ln_btc - pegged_btc_now).max(0.0);
-                                let native_btc_now = self.onchain_balance_btc + unstabilized_ln_btc;
-                        
-                                // Convert to USD for display
-                                let pegged_usd_now = pegged_btc_now * price;
-                                let native_usd_now = native_btc_now * price;
-                                let total_usd = pegged_usd_now + native_usd_now;
 
-                                let target_btc_usd = total_usd * (btc_pct / 100.0);
-                                let target_usd_usd = total_usd - target_btc_usd;
-                        
-                                let btc_amt_btc = if price > 0.0 { target_btc_usd / price } else { 0.0 };
-                                let usd_amt_btc = if price > 0.0 { target_usd_usd / price } else { 0.0 };
-                        
-                                egui::Window::new("Confirm Allocation Change")
-                                    .collapsible(false)
-                                    .resizable(false)
-                                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                                    .show(ctx, |ui| {
-                                        ui.separator();
-                                        ui.add_space(8.0);
+                            // Confirmation dialog
+                            if self.show_confirm_trade {
+                                if let Some(trade) = self.pending_trade.clone() {
+                                    let price = self.btc_price.max(1.0);
+                                    let action_str = match trade.action {
+                                        TradeAction::BuyBtc => "Buy",
+                                        TradeAction::SellBtc => "Sell",
+                                    };
+                                    let new_btc_pct = trade.new_btc_percent;
+                                    let trade_amount = trade.amount_usd;
 
-                                        ui.label(egui::RichText::new("This will send an allocation update to the LSP.").italics());
-                                        ui.add_space(6.0);
+                                    egui::Window::new(format!("Confirm {} BTC", action_str))
+                                        .collapsible(false)
+                                        .resizable(false)
+                                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                                        .show(ctx, |ui| {
+                                            ui.add_space(8.0);
 
-                                        ui.label("Are you sure you want to change your allocation?");
-                                        ui.add_space(8.0);
+                                            let fee = trade_amount * 0.01;
+                                            let amount_after_fee = trade_amount - fee;
+                                            let btc_after_fee = amount_after_fee / price;
 
-                                        ui.monospace(format!("{:.0}% BTC  (${:.2})  ≈ {:.8} BTC", btc_pct, target_btc_usd, btc_amt_btc));
-                                        ui.monospace(format!("{:.0}% USD  (${:.2})  ≈ {:.8} BTC", usd_pct, target_usd_usd, usd_amt_btc));
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} ${:.2} worth of BTC",
+                                                    action_str, trade_amount
+                                                ))
+                                                .size(16.0)
+                                                .strong()
+                                            );
 
-                                        ui.add_space(12.0);
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "Your app will auto-rebalance so that your balance\nstays at {:.0}% USD and {:.0}% BTC exposure.",
-                                                usd_pct, btc_pct
-                                            ))
-                                            .size(12.0)
-                                            .color(egui::Color32::GRAY)
-                                        );
+                                            ui.add_space(10.0);
 
-                                        ui.add_space(12.0);
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Confirm").clicked() {
-                                                // Send allocation update to LSP
-                                                self.change_allocation(self.ui_btc_allocation);
-                                                self.show_confirm_allocation = false;
-                                            }
-                                            if ui.button("Cancel").clicked() {
-                                                self.show_confirm_allocation = false;
-                                            }
+                                            egui::Grid::new("trade_details")
+                                                .spacing(egui::vec2(10.0, 4.0))
+                                                .show(ui, |ui| {
+                                                    ui.label("Amount:");
+                                                    ui.label(format!("${:.2}", trade_amount));
+                                                    ui.end_row();
+
+                                                    ui.label("Fee (1%):");
+                                                    ui.label(
+                                                        egui::RichText::new(format!("-${:.2}", fee))
+                                                            .color(egui::Color32::from_rgb(200, 150, 100))
+                                                    );
+                                                    ui.end_row();
+
+                                                    ui.label("You receive:");
+                                                    ui.label(
+                                                        egui::RichText::new(format!("≈ {:.8} BTC", btc_after_fee))
+                                                            .strong()
+                                                    );
+                                                    ui.end_row();
+
+                                                    ui.label("Price:");
+                                                    ui.label(
+                                                        egui::RichText::new(format!("${:.2}/BTC", price))
+                                                            .color(egui::Color32::GRAY)
+                                                    );
+                                                    ui.end_row();
+                                                });
+
+                                            ui.add_space(12.0);
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Confirm").clicked() {
+                                                    self.change_allocation(new_btc_pct as i32, fee);
+                                                    self.show_confirm_trade = false;
+                                                    self.pending_trade = None;
+                                                    self.trade_amount_input.clear();
+                                                }
+                                                if ui.button("Cancel").clicked() {
+                                                    self.show_confirm_trade = false;
+                                                    self.pending_trade = None;
+                                                }
+                                            });
+
+                                            ui.add_space(8.0);
                                         });
-
-                                        ui.add_space(8.0);
-                                        ui.separator();
-                                    });
+                                }
                             }
                         });
                         
