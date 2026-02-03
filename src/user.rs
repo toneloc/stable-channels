@@ -483,10 +483,6 @@
         }
 
         fn get_jit_invoice(&mut self, ctx: &egui::Context) {
-            let latest_price = {
-                let sc = self.stable_channel.lock().unwrap();
-                sc.latest_price
-            };
             let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
                 ldk_node::lightning_invoice::Description::new(
                     "Stable Channel Wallet onboarding".to_string(),
@@ -494,29 +490,15 @@
                 .unwrap(),
             );
 
-            // let max_proportional_lsp_fee_limit_ppm_msat = Some(20_000);
-
-            // let result = self.node.bolt11_payment().receive_variable_amount_via_jit_channel(
-            //     &description, 
-            //     3600, 
-            //     max_proportional_lsp_fee_limit_ppm_msat
-            // );
-            
-            let msats = USD::to_msats(USD::from_f64(DEFAULT_EXPECTED_USD), latest_price);
-
-            // Round to the nearest sat (i.e., nearest 1_000 msats); ties round up.
-            let msats_rounded = ((msats.saturating_add(500)) / 1_000) * 1_000;
-
-            let result = self.node.bolt11_payment().receive_via_jit_channel(
-                msats_rounded,
+            // Variable amount invoice - user pays any amount they want
+            let result = self.node.bolt11_payment().receive_variable_amount_via_jit_channel(
                 &description,
                 INVOICE_EXPIRY_SECS,
                 Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT)
             );
 
             audit_event("JIT_INVOICE_ATTEMPT", json!({
-                "expected_usd": DEFAULT_EXPECTED_USD,
-                "btc_price": latest_price
+                "type": "variable_amount"
             }));
 
             match result {
@@ -524,7 +506,7 @@
                     self.invoice_result = invoice.to_string();
                     audit_event("JIT_INVOICE_GENERATED", json!({
                         "invoice": self.invoice_result,
-                        "amount_msats": USD::to_msats(USD::from_f64(DEFAULT_EXPECTED_USD), latest_price)
+                        "type": "variable_amount"
                     }));
                     let code = QrCode::new(&self.invoice_result).unwrap();
                     let bits = code.to_colors();

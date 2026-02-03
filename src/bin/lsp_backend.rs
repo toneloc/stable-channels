@@ -542,43 +542,28 @@
             pub fn poll_events(&mut self) {
                 while let Some(event) = self.node.next_event() {
                     match event {
-                        // We check that the payment is with 1%
+                        // Create stable channel entry with $0 stabilized - user must opt-in via trade message
                         Event::ChannelReady { channel_id, .. } => {
                             if let Some(chan) = self.node.list_channels()
                                 .into_iter()
                                 .find(|c| c.channel_id == channel_id)
                             {
-                                // We need to divide this by 2.0 to account for how much the user put in
                                 let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64 * self.btc_price;
-                                let tolerance = STABLE_CHANNEL_TOLERANCE;
-                                let lower = DEFAULT_EXPECTED_USD * (1.0 - tolerance);
-                                let upper = DEFAULT_EXPECTED_USD * (1.0 + tolerance);
-                        
-                                if funded_usd >= lower && funded_usd <= upper {
-                                    // Good: within tolerance → designate as stable
-                                    self.selected_channel_id   = channel_id.to_string();
-                                    self.stable_channel_amount = DEFAULT_EXPECTED_USD.to_string();
-                                    self.edit_stable_channel(None);
-                        
-                                    audit_event("CHANNEL_READY_STABLE", json!({
-                                        "channel_id": channel_id.to_string(),
-                                        "funded_usd": funded_usd
-                                    }));
-                                    self.status_message = format!(
-                                        "Channel {} is stable at ${} (funded ≈ ${:.2})",
-                                        channel_id, DEFAULT_EXPECTED_USD, funded_usd
-                                    );
-                                } else {
-                                    // Outside tolerance → don’t designate
-                                    audit_event("CHANNEL_READY_NOT_STABLE", json!({
-                                        "channel_id": channel_id.to_string(),
-                                        "funded_usd": funded_usd
-                                    }));
-                                    self.status_message = format!(
-                                        "Channel {} funded at ${:.2}, not within tolerance of ${}",
-                                        channel_id, funded_usd, DEFAULT_EXPECTED_USD
-                                    );
-                                }
+
+                                // Create channel entry with $0 stabilized (user opts in via trade message)
+                                self.selected_channel_id = channel_id.to_string();
+                                self.stable_channel_amount = "0".to_string();
+                                self.edit_stable_channel(None);
+
+                                audit_event("CHANNEL_READY", json!({
+                                    "channel_id": channel_id.to_string(),
+                                    "funded_usd": funded_usd,
+                                    "stabilized_usd": 0.0
+                                }));
+                                self.status_message = format!(
+                                    "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
+                                    channel_id, funded_usd
+                                );
                             }
                             self.update_balances();
                         }
