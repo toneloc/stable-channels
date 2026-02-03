@@ -76,10 +76,9 @@ pub fn update_balances<'update_balance_lifetime>(
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
 
-        // Update native_channel_btc based on allocation
-        // This is the portion that floats with BTC price
+        // Native BTC is the portion not stabilized (total - expected_usd)
         let total_receiver_usd = sc.stable_receiver_usd.0;
-        let native_usd = USD::from_f64(total_receiver_usd * sc.allocation.btc_weight);
+        let native_usd = USD::from_f64((total_receiver_usd - sc.expected_usd.0).max(0.0));
         sc.native_channel_btc = Bitcoin::from_usd(native_usd, sc.latest_price);
 
         audit_event("BALANCE_UPDATE", json!({
@@ -110,15 +109,11 @@ pub struct StabilityPaymentInfo {
     pub btc_price: f64,
 }
 
-/// Check and enforce stability for a channel based on its allocation weights.
+/// Check and enforce stability for a channel.
 ///
-/// The stability logic now respects per-channel allocation:
-/// - allocation.usd_weight determines what portion of the channel value is stabilized
-/// - allocation.btc_weight portion floats with BTC price (native exposure)
-///
-/// For example, with allocation { usd_weight: 0.75, btc_weight: 0.25 }:
-/// - 75% of the channel value is kept stable in USD terms
-/// - 25% floats with the BTC market
+/// The stability logic keeps the user's expected_usd amount stable:
+/// - expected_usd is the USD amount to keep stable
+/// - The rest of the channel balance floats with BTC price
 ///
 /// Returns Some(StabilityPaymentInfo) if a payment was sent, None otherwise.
 pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Option<StabilityPaymentInfo> {
@@ -146,17 +141,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
         return None;
     }
 
-    // Skip stability check if allocation is 100% BTC (no USD to stabilize)
-    if sc.allocation.usd_weight < 0.001 {
-        audit_event("STABILITY_SKIP", json!({
-            "channel_id": format!("{}", sc.channel_id),
-            "reason": "allocation is 100% BTC, no USD to stabilize",
-            "allocation_usd_weight": sc.allocation.usd_weight
-        }));
-        return None;
-    }
-
-    // Skip if expected_usd is zero or very small
+    // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {
         audit_event("STABILITY_SKIP", json!({
             "channel_id": format!("{}", sc.channel_id),
@@ -166,23 +151,19 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
         return None;
     }
 
-    // Calculate the current USD value of the stable portion
-    // The stable_receiver_usd includes the entire channel balance
-    // We only stabilize the usd_weight portion
-    let total_receiver_usd = sc.stable_receiver_usd.0;
-    let current_stable_usd = total_receiver_usd * sc.allocation.usd_weight;
-
-    // The target is expected_usd (which should be set based on allocation)
+    // The target is expected_usd
     let target_usd = sc.expected_usd.0;
+    let total_receiver_usd = sc.stable_receiver_usd.0;
 
-    // Calculate deviation from the stable target
-    let dollars_from_par = USD::from_f64(current_stable_usd - target_usd);
+    // Calculate deviation: how much the stable portion has drifted
+    // Due to price changes, the BTC backing the stable portion may be worth more or less
+    let dollars_from_par = USD::from_f64(total_receiver_usd - target_usd);
     let percent_from_par = if target_usd > 0.0 {
         ((dollars_from_par.0 / target_usd) * 100.0).abs()
     } else {
         0.0
     };
-    let is_receiver_below_expected = current_stable_usd < target_usd;
+    let is_receiver_below_expected = total_receiver_usd < target_usd;
 
     let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
         "STABLE"
@@ -198,10 +179,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
 
     audit_event("STABILITY_CHECK", json!({
         "expected_usd": target_usd,
-        "current_stable_usd": current_stable_usd,
         "total_receiver_usd": total_receiver_usd,
-        "allocation_usd_weight": sc.allocation.usd_weight,
-        "allocation_btc_weight": sc.allocation.btc_weight,
         "percent_from_par": percent_from_par,
         "btc_price": sc.latest_price,
         "action": action,
@@ -223,7 +201,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
                 "amount_msats": amt,
                 "payment_id": payment_id_str,
                 "counterparty": counterparty_str,
-                "allocation_usd_weight": sc.allocation.usd_weight
+                "expected_usd": target_usd
             }));
             Some(StabilityPaymentInfo {
                 payment_id: payment_id_str,

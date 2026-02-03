@@ -8,6 +8,7 @@
 use rusqlite::{Connection, Result as SqliteResult, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use chrono::{Utc, Duration as ChronoDuration};
 
 /// Database file name
 pub const DB_FILENAME: &str = "stablechannels.db";
@@ -167,6 +168,28 @@ impl Database {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created
              ON onchain_txs(created_at DESC)",
+            [],
+        )?;
+
+        // Daily prices table - stores daily OHLC data for long-term charts
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS daily_prices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL UNIQUE,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL,
+                source TEXT
+            )",
+            [],
+        )?;
+
+        // Create index for faster daily price queries
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_daily_prices_date
+             ON daily_prices(date DESC)",
             [],
         )?;
 
@@ -381,6 +404,114 @@ impl Database {
     }
 
     // =========================================================================
+    // Daily Price Operations (for long-term charts)
+    // =========================================================================
+
+    /// Record or update a daily price (OHLC)
+    pub fn record_daily_price(
+        &self,
+        date: &str,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: Option<f64>,
+        source: Option<&str>,
+    ) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![date, open, high, low, close, volume, source],
+        )?;
+        Ok(())
+    }
+
+    /// Bulk insert daily prices (for seeding historical data)
+    pub fn bulk_insert_daily_prices(&self, prices: &[(String, f64, f64, f64, f64, Option<f64>)]) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut count = 0;
+        for (date, open, high, low, close, volume) in prices {
+            conn.execute(
+                "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, volume, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'seed')",
+                params![date, open, high, low, close, volume],
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Get daily prices for chart (returns prices within the given number of days from today)
+    pub fn get_daily_prices(&self, days: u32) -> SqliteResult<Vec<DailyPriceRecord>> {
+        let conn = self.conn.lock().unwrap();
+
+        // Calculate the cutoff date
+        let cutoff_date = Utc::now()
+            .checked_sub_signed(ChronoDuration::days(days as i64))
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "2000-01-01".to_string());
+
+        let mut stmt = conn.prepare(
+            "SELECT date, open, high, low, close, volume
+             FROM daily_prices
+             WHERE date >= ?1
+             ORDER BY date ASC"
+        )?;
+
+        let rows = stmt.query_map(params![cutoff_date], |row| {
+            Ok(DailyPriceRecord {
+                date: row.get(0)?,
+                open: row.get(1)?,
+                high: row.get(2)?,
+                low: row.get(3)?,
+                close: row.get(4)?,
+                volume: row.get(5)?,
+            })
+        })?;
+
+        rows.collect()
+    }
+
+    /// Get the most recent daily price date
+    pub fn get_latest_daily_price_date(&self) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1"
+        )?;
+
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the oldest daily price date
+    pub fn get_oldest_daily_price_date(&self) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1"
+        )?;
+
+        let mut rows = stmt.query([])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get daily price count
+    pub fn get_daily_price_count(&self) -> SqliteResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT COUNT(*) FROM daily_prices")?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    // =========================================================================
     // Payment Operations
     // =========================================================================
 
@@ -563,6 +694,16 @@ pub struct OnchainTxRecord {
     pub status: String,
     pub confirmations: u32,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DailyPriceRecord {
+    pub date: String,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: Option<f64>,
 }
 
 // =============================================================================

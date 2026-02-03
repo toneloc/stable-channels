@@ -154,6 +154,64 @@ pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
     Ok(median_price)
 }
 
+/// Fetch daily OHLC data from Kraken
+/// Returns Vec of (date_string, open, high, low, close, volume)
+pub fn fetch_kraken_ohlc(agent: &Agent, since_timestamp: Option<i64>) -> Result<Vec<(String, f64, f64, f64, f64, Option<f64>)>, Box<dyn Error>> {
+    let mut url = "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1440".to_string();
+    if let Some(since) = since_timestamp {
+        url = format!("{}&since={}", url, since);
+    }
+
+    let response = agent.get(&url).call()
+        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
+
+    let json: Value = response.into_json()?;
+
+    // Check for errors
+    if let Some(errors) = json.get("error").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("Kraken API error: {:?}", errors).into());
+        }
+    }
+
+    let mut prices = Vec::new();
+
+    // Get the OHLC data - it's under result.XXBTZUSD (or similar key)
+    if let Some(result) = json.get("result") {
+        // Find the OHLC array (key varies, but it's the array, not "last")
+        for (key, value) in result.as_object().unwrap_or(&serde_json::Map::new()) {
+            if key == "last" {
+                continue;
+            }
+            if let Some(ohlc_array) = value.as_array() {
+                for candle in ohlc_array {
+                    if let Some(arr) = candle.as_array() {
+                        // Kraken OHLC format: [time, open, high, low, close, vwap, volume, count]
+                        if arr.len() >= 7 {
+                            let timestamp = arr[0].as_i64().unwrap_or(0);
+                            let date = chrono::DateTime::from_timestamp(timestamp, 0)
+                                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                                .unwrap_or_default();
+
+                            let open = arr[1].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let high = arr[2].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let low = arr[3].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let close = arr[4].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let volume = arr[6].as_str().and_then(|s| s.parse::<f64>().ok());
+
+                            if !date.is_empty() && close > 0.0 {
+                                prices.push((date, open, high, low, close, volume));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(prices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

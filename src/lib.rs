@@ -4,3 +4,4 @@ pub mod stable;
 pub mod price_feeds;
 pub mod constants;
 pub mod db;
+pub mod historical_prices;

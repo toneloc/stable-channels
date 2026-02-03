@@ -8,8 +8,8 @@ pub const SATS_IN_BTC: u64 = 100_000_000;
 /// Custom TLV type for stable channel messages
 pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 
-/// Allocation update message type identifier
-pub const ALLOCATION_UPDATE_TYPE: &str = "ALLOCATION_UPDATE_V1";
+/// Trade message type identifier
+pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
 // ============================================================================
 // DEFAULT CONFIGURATION VALUES
