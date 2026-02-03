@@ -16,7 +16,7 @@
     use std::path::Path;
     use image::{GrayImage, Luma};
     use qrcode::{QrCode, Color};
-    use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions, Vec2};
+    use egui::{CollapsingHeader, Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
     use serde_json::json;
     use chrono::{TimeZone, Utc};
 
@@ -295,8 +295,8 @@
                 channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]),
                 counterparty: lsp_pubkey,
                 is_stable_receiver: true,
-                expected_usd: USD::from_f64(DEFAULT_EXPECTED_USD),
-                expected_btc: Bitcoin::from_usd(USD::from_f64(DEFAULT_EXPECTED_USD), btc_price),
+                expected_usd: USD::from_f64(0.0),
+                expected_btc: Bitcoin::from_sats(0),
                 stable_receiver_btc: Bitcoin::default(),
                 stable_receiver_usd: USD::default(),
                 stable_provider_btc: Bitcoin::default(),
@@ -311,7 +311,6 @@
                 onchain_btc: Bitcoin::from_sats(0),
                 onchain_usd: USD(0.0),
                 note: Some(String::new()),
-                allocation: Allocation::default(),
                 native_channel_btc: Bitcoin::from_sats(0),
             };
             let stable_channel = Arc::new(Mutex::new(sc_init));
@@ -415,8 +414,8 @@
                 update_balances(&app.node, &mut sc);
             }
 
-            // Load persisted allocation from database
-            app.load_user_allocation();
+            // Load persisted channel settings from database
+            app.load_channel_settings();
 
             // Background thread is started via start_background_if_needed() in the update loop
 
@@ -837,7 +836,7 @@
                     }
 
                     // Persist to database
-                    self.save_user_allocation();
+                    self.save_channel_settings();
 
                     let payment_id_str = format!("{payment_id}");
 
@@ -868,7 +867,7 @@
         }
 
         /// Save user's stable channel to database
-        fn save_user_allocation(&self) {
+        fn save_channel_settings(&self) {
             let sc = self.stable_channel.lock().unwrap();
 
             // Only save if we have a valid channel
@@ -879,11 +878,8 @@
             let channel_id_str = sc.channel_id.to_string();
             let note_ref = sc.note.as_deref();
 
-            // Save with default allocation weights (1.0, 0.0) - we now just track expected_usd
             if let Err(e) = self.db.save_channel(
                 &channel_id_str,
-                1.0, // usd_weight (legacy, unused)
-                0.0, // btc_weight (legacy, unused)
                 sc.expected_usd.0,
                 note_ref,
             ) {
@@ -892,7 +888,7 @@
         }
 
         /// Load user's stable channel from database
-        fn load_user_allocation(&mut self) {
+        fn load_channel_settings(&mut self) {
             let channel_id_str = {
                 let sc = self.stable_channel.lock().unwrap();
                 sc.channel_id.to_string()
@@ -937,41 +933,29 @@
             if let Some(entry) = entries.iter().find(|e| {
                 e.get("channel_id").and_then(|v| v.as_str()) == Some(&channel_id_str)
             }) {
-                let mut usd_weight = 1.0;
-                let mut btc_weight = 0.0;
                 let mut expected_usd = 0.0;
                 let note: Option<String> = entry.get("note")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-
-                if let Some(alloc) = entry.get("allocation") {
-                    usd_weight = alloc.get("usd_weight").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                    btc_weight = alloc.get("btc_weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                }
 
                 if let Some(exp) = entry.get("expected_usd").and_then(|v| v.as_f64()) {
                     expected_usd = exp;
                 }
 
                 // Apply to current state
-                if let Ok(allocation) = Allocation::new(usd_weight, btc_weight) {
-                    sc.allocation = allocation;
-                    sc.expected_usd = USD::from_f64(expected_usd);
-                    if note.is_some() {
-                        sc.note = note.clone();
-                    }
-
-                    // Save to database
-                    let _ = self.db.save_channel(
-                        &channel_id_str,
-                        usd_weight,
-                        btc_weight,
-                        expected_usd,
-                        note.as_deref(),
-                    );
-
-                    println!("Migrated channel {} from JSON to SQLite", channel_id_str);
+                sc.expected_usd = USD::from_f64(expected_usd);
+                if note.is_some() {
+                    sc.note = note.clone();
                 }
+
+                // Save to database
+                let _ = self.db.save_channel(
+                    &channel_id_str,
+                    expected_usd,
+                    note.as_deref(),
+                );
+
+                println!("Migrated channel {} from JSON to SQLite", channel_id_str);
             }
         }
 
@@ -1135,7 +1119,7 @@
                             "payment_hash": format!("{payment_hash}"),
                         }));
 
-                        // Note: We record outgoing trades separately in change_allocation
+                        // Note: We record outgoing trades separately via send_trade
                         // This captures other outgoing payments (invoices, etc.)
                         // For now we don't record here to avoid double-counting trade fees
 

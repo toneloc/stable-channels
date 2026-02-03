@@ -33,9 +33,6 @@ pub const DEFAULT_LSP_PORT: u16 = 9737;
 /// Default chain source URL
 pub const DEFAULT_CHAIN_URL: &str = "https://blockstream.info/api";
 
-/// Default expected USD value
-pub const DEFAULT_EXPECTED_USD: f64 = 100.0;
-
 /// Default LSP public key
 pub const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
 
@@ -84,9 +81,6 @@ pub const MAX_RISK_LEVEL: i32 = 100;
 
 /// Stability check thresholds
 pub const STABILITY_THRESHOLD_PERCENT: f64 = 0.1; // 0.1% from par
-
-/// Stable channel tolerance (1% tolerance)
-pub const STABLE_CHANNEL_TOLERANCE: f64 = 0.01;
 
 /// Minimum USD amount to display in UI
 pub const MIN_DISPLAY_USD: f64 = 2.0;

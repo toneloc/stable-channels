@@ -19,7 +19,7 @@
         use stable_channels::audit::{audit_event, set_audit_log_path};
         use stable_channels::price_feeds::get_cached_price;
         use stable_channels::stable;
-        use stable_channels::types::{USD, Bitcoin, StableChannel, Allocation};
+        use stable_channels::types::{USD, Bitcoin, StableChannel};
         use stable_channels::constants::*;
 
         // ============================================================================
@@ -478,7 +478,7 @@
                     channel_id_to_close: String::new(),
 
                     selected_channel_id:   String::new(),
-                    stable_channel_amount: DEFAULT_EXPECTED_USD.to_string(),
+                    stable_channel_amount: "0".to_string(),
 
                     stable_channels: Vec::new(),
                 };
@@ -788,84 +788,77 @@
                 }));
 
                 // 6) Apply new expected_usd to StableChannel
-                let mut updated = false;
-                let mut old_expected_usd: f64 = 0.0;
-
+                let old_expected_usd = if let Some(sc) = self
+                    .stable_channels
+                    .iter_mut()
+                    .find(|sc| sc.channel_id == channel.channel_id)
                 {
-                    if let Some(sc) = self
-                        .stable_channels
-                        .iter_mut()
-                        .find(|sc| sc.channel_id == channel.channel_id)
-                    {
-                        // Refresh balances to get current receiver USD
-                        let (ok, _) = stable::update_balances(&self.node, sc);
-                        if !ok {
-                            audit_event("TRADE_BALANCE_UPDATE_FAILED", json!({
-                                "channel_id": chan_id_str,
-                                "payment_hash": format!("{}", payment_hash),
-                            }));
-                            self.status_message = "Trade: failed to update balances".to_string();
-                            return;
-                        }
+                    // Refresh balances to get current receiver USD
+                    let (ok, _) = stable::update_balances(&self.node, sc);
+                    if !ok {
+                        audit_event("TRADE_BALANCE_UPDATE_FAILED", json!({
+                            "channel_id": chan_id_str,
+                            "payment_hash": format!("{}", payment_hash),
+                        }));
+                        self.status_message = "Trade: failed to update balances".to_string();
+                        return;
+                    }
 
-                        // Validate: can't stabilize more than the user's channel balance
-                        let receiver_usd = sc.stable_receiver_usd.0;
-                        if new_expected_usd > receiver_usd {
-                            audit_event("TRADE_EXCEEDS_BALANCE", json!({
-                                "channel_id": chan_id_str,
-                                "expected_usd": new_expected_usd,
-                                "receiver_usd": receiver_usd,
-                                "payment_hash": format!("{}", payment_hash),
-                            }));
-                            self.status_message = format!(
-                                "Trade: expected_usd ${:.2} exceeds receiver balance ${:.2}",
-                                new_expected_usd, receiver_usd
-                            );
-                            return;
-                        }
-
-                        old_expected_usd = sc.expected_usd.0;
-
-                        // Update expected_usd to the new target
-                        sc.expected_usd = USD::from_f64(new_expected_usd);
-                        updated = true;
-                    } else {
-                        audit_event("TRADE_STABLE_ENTRY_NOT_FOUND", json!({
+                    // Validate: can't stabilize more than the user's channel balance
+                    let receiver_usd = sc.stable_receiver_usd.0;
+                    if new_expected_usd > receiver_usd {
+                        audit_event("TRADE_EXCEEDS_BALANCE", json!({
                             "channel_id": chan_id_str,
                             "expected_usd": new_expected_usd,
+                            "receiver_usd": receiver_usd,
                             "payment_hash": format!("{}", payment_hash),
                         }));
                         self.status_message = format!(
-                            "Trade: channel {} not in stable channels list",
-                            chan_id_str
+                            "Trade: expected_usd ${:.2} exceeds receiver balance ${:.2}",
+                            new_expected_usd, receiver_usd
                         );
                         return;
                     }
-                }
 
-                if updated {
-                    self.save_stable_channels();
+                    let old = sc.expected_usd.0;
 
-                    audit_event("TRADE_APPLIED", json!({
+                    // Update expected_usd to the new target
+                    sc.expected_usd = USD::from_f64(new_expected_usd);
+                    old
+                } else {
+                    audit_event("TRADE_STABLE_ENTRY_NOT_FOUND", json!({
                         "channel_id": chan_id_str,
-                        "old_expected_usd": old_expected_usd,
-                        "new_expected_usd": new_expected_usd,
+                        "expected_usd": new_expected_usd,
                         "payment_hash": format!("{}", payment_hash),
                     }));
-
                     self.status_message = format!(
-                        "Trade applied: ${:.2} -> ${:.2} for channel {}",
-                        old_expected_usd,
-                        new_expected_usd,
-                        &chan_id_str[..8.min(chan_id_str.len())],
-                    );
-                    println!(
-                        "Trade applied: ${:.2} -> ${:.2} for channel {}",
-                        old_expected_usd,
-                        new_expected_usd,
+                        "Trade: channel {} not in stable channels list",
                         chan_id_str
                     );
-                }
+                    return;
+                };
+
+                self.save_stable_channels();
+
+                audit_event("TRADE_APPLIED", json!({
+                    "channel_id": chan_id_str,
+                    "old_expected_usd": old_expected_usd,
+                    "new_expected_usd": new_expected_usd,
+                    "payment_hash": format!("{}", payment_hash),
+                }));
+
+                self.status_message = format!(
+                    "Trade applied: ${:.2} -> ${:.2} for channel {}",
+                    old_expected_usd,
+                    new_expected_usd,
+                    &chan_id_str[..8.min(chan_id_str.len())],
+                );
+                println!(
+                    "Trade applied: ${:.2} -> ${:.2} for channel {}",
+                    old_expected_usd,
+                    new_expected_usd,
+                    chan_id_str
+                );
             }
             
             pub fn generate_invoice(&mut self) -> bool {
@@ -1151,7 +1144,6 @@
                             onchain_btc: Bitcoin::from_sats(0),
                             onchain_usd: USD(0.0),
                             note,
-                            allocation: Allocation::default(),
                             native_channel_btc: Bitcoin::from_sats(0),
                         };
             
@@ -1176,7 +1168,7 @@
                         );
                         audit_event("STABLE_EDITED", json!({"channel_id": channel_id_str, "target_usd": amount}));
                         self.selected_channel_id.clear();
-                        self.stable_channel_amount = DEFAULT_EXPECTED_USD.to_string();
+                        self.stable_channel_amount = "0".to_string();
                         return;
                     }
                 }
@@ -1263,7 +1255,6 @@
                                                 onchain_btc: Bitcoin::from_sats(0),
                                                 onchain_usd: USD(0.0),
                                                 note: entry.note.clone(),
-                                                allocation: Allocation::default(),
                                                 native_channel_btc: Bitcoin::from_sats(0),
                                             };
 

@@ -88,8 +88,6 @@ pub fn update_balances<'update_balance_lifetime>(
             "stable_receiver_usd": sc.stable_receiver_usd.to_string(),
             "stable_provider_usd": sc.stable_provider_usd.to_string(),
             "native_channel_btc": sc.native_channel_btc.to_string(),
-            "allocation_usd_weight": sc.allocation.usd_weight,
-            "allocation_btc_weight": sc.allocation.btc_weight,
             "btc_price": sc.latest_price
         }));
 

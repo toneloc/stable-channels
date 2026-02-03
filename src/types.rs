@@ -164,74 +164,6 @@ impl std::fmt::Display for USD {
     }
 }
 
-/// Allocation represents a portfolio weight vector for a channel.
-/// Weights are between 0.0 and 1.0 and must sum to 1.0.
-/// Example: { usd_weight: 0.25, btc_weight: 0.75 } means 25% USD, 75% BTC exposure.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Allocation {
-    pub usd_weight: f64,
-    pub btc_weight: f64,
-}
-
-impl Default for Allocation {
-    fn default() -> Self {
-        // Default to 100% USD stability (legacy behavior)
-        Self {
-            usd_weight: 1.0,
-            btc_weight: 0.0,
-        }
-    }
-}
-
-impl Allocation {
-    /// Create a new allocation with the given weights.
-    /// Weights will be normalized to sum to 1.0.
-    pub fn new(usd_weight: f64, btc_weight: f64) -> Result<Self, &'static str> {
-        if usd_weight < 0.0 || btc_weight < 0.0 {
-            return Err("Weights cannot be negative");
-        }
-        if usd_weight > 1.0 || btc_weight > 1.0 {
-            return Err("Weights cannot exceed 1.0");
-        }
-
-        let sum = usd_weight + btc_weight;
-        if sum == 0.0 {
-            return Err("Weights cannot both be zero");
-        }
-
-        // Normalize to sum to 1.0
-        Ok(Self {
-            usd_weight: usd_weight / sum,
-            btc_weight: btc_weight / sum,
-        })
-    }
-
-    /// Create allocation from BTC percentage (0-100)
-    pub fn from_btc_percent(btc_pct: u8) -> Self {
-        let btc_pct = btc_pct.min(100) as f64 / 100.0;
-        Self {
-            usd_weight: 1.0 - btc_pct,
-            btc_weight: btc_pct,
-        }
-    }
-
-    /// Returns true if the allocation is valid (weights sum to ~1.0)
-    pub fn is_valid(&self) -> bool {
-        let sum = self.usd_weight + self.btc_weight;
-        (sum - 1.0).abs() < 0.001 && self.usd_weight >= 0.0 && self.btc_weight >= 0.0
-    }
-
-    /// Get USD percentage (0-100)
-    pub fn usd_percent(&self) -> u8 {
-        (self.usd_weight * 100.0).round() as u8
-    }
-
-    /// Get BTC percentage (0-100)
-    pub fn btc_percent(&self) -> u8 {
-        (self.btc_weight * 100.0).round() as u8
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StableChannel {
     #[serde(with = "channel_id_serde")]
@@ -255,9 +187,6 @@ pub struct StableChannel {
     pub onchain_btc: Bitcoin,
     pub onchain_usd: USD,
     pub note: Option<String>,
-    /// Per-channel allocation weights (defaults to 100% USD for backward compatibility)
-    #[serde(default)]
-    pub allocation: Allocation,
     /// Native BTC exposure (the portion of the channel that floats with BTC price)
     #[serde(default)]
     pub native_channel_btc: Bitcoin,
@@ -333,69 +262,12 @@ mod tests {
         assert_eq!(result.0, 25.0);
     }
 
-    // Allocation tests
-    #[test]
-    fn test_allocation_new_normalizes() {
-        let alloc = Allocation::new(0.5, 0.5).unwrap();
-        assert_eq!(alloc.usd_weight, 0.5);
-        assert_eq!(alloc.btc_weight, 0.5);
-    }
-
-    #[test]
-    fn test_allocation_new_normalizes_uneven() {
-        // Weights must be <= 1.0, then they get normalized to sum to 1.0
-        let alloc = Allocation::new(0.2, 0.6).unwrap();
-        assert!((alloc.usd_weight - 0.25).abs() < 0.001);
-        assert!((alloc.btc_weight - 0.75).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_allocation_rejects_negative() {
-        let result = Allocation::new(-0.5, 0.5);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_allocation_rejects_both_zero() {
-        let result = Allocation::new(0.0, 0.0);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_allocation_from_btc_percent() {
-        let alloc = Allocation::from_btc_percent(75);
-        assert_eq!(alloc.btc_percent(), 75);
-        assert_eq!(alloc.usd_percent(), 25);
-    }
-
-    #[test]
-    fn test_allocation_from_btc_percent_clamps() {
-        let alloc = Allocation::from_btc_percent(150); // over 100
-        assert_eq!(alloc.btc_percent(), 100);
-    }
-
-    #[test]
-    fn test_allocation_is_valid() {
-        let valid = Allocation { usd_weight: 0.6, btc_weight: 0.4 };
-        let invalid = Allocation { usd_weight: 0.5, btc_weight: 0.3 };
-        assert!(valid.is_valid());
-        assert!(!invalid.is_valid());
-    }
-
-    #[test]
-    fn test_allocation_default_is_100_usd() {
-        let alloc = Allocation::default();
-        assert_eq!(alloc.usd_weight, 1.0);
-        assert_eq!(alloc.btc_weight, 0.0);
-    }
-
     #[test]
     fn test_stable_channel_default() {
         let sc = StableChannel::default();
         assert!(sc.is_stable_receiver);
         assert_eq!(sc.expected_usd.0, 0.0);
         assert_eq!(sc.risk_level, 0);
-        assert!(sc.allocation.is_valid());
     }
 }
 
@@ -430,7 +302,6 @@ impl Default for StableChannel {
             onchain_btc: Bitcoin::from_sats(0),
             onchain_usd: USD(0.0),
             note: Some("".to_string()),
-            allocation: Allocation::default(),
             native_channel_btc: Bitcoin::from_sats(0),
         }
     }

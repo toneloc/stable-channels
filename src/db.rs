@@ -1,7 +1,7 @@
 //! SQLite database layer for Stable Channels user data.
 //!
 //! This module provides isolated database operations for storing:
-//! - Channel allocations and settings
+//! - Channel settings (expected_usd, notes)
 //! - Trade history
 //! - Price history (for charts and analytics)
 
@@ -54,7 +54,7 @@ impl Database {
     fn init_schema(&self) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
 
-        // Channels table - stores allocation settings per channel
+        // Channels table - stores channel settings
         conn.execute(
             "CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
@@ -68,7 +68,7 @@ impl Database {
             [],
         )?;
 
-        // Trades table - stores trade/allocation change history
+        // Trades table - stores trade history
         conn.execute(
             "CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,35 +200,31 @@ impl Database {
     // Channel Operations
     // =========================================================================
 
-    /// Save or update channel allocation
+    /// Save or update channel settings
     pub fn save_channel(
         &self,
         channel_id: &str,
-        usd_weight: f64,
-        btc_weight: f64,
         expected_usd: f64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO channels (channel_id, usd_weight, btc_weight, expected_usd, note)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+             VALUES (?1, 1.0, 0.0, ?2, ?3)
              ON CONFLICT(channel_id) DO UPDATE SET
-                usd_weight = ?2,
-                btc_weight = ?3,
-                expected_usd = ?4,
-                note = ?5,
+                expected_usd = ?2,
+                note = ?3,
                 updated_at = strftime('%s', 'now')",
-            params![channel_id, usd_weight, btc_weight, expected_usd, note],
+            params![channel_id, expected_usd, note],
         )?;
         Ok(())
     }
 
-    /// Load channel allocation
+    /// Load channel settings
     pub fn load_channel(&self, channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, usd_weight, btc_weight, expected_usd, note
+            "SELECT channel_id, expected_usd, note
              FROM channels WHERE channel_id = ?1"
         )?;
 
@@ -237,10 +233,8 @@ impl Database {
         if let Some(row) = rows.next()? {
             Ok(Some(ChannelRecord {
                 channel_id: row.get(0)?,
-                usd_weight: row.get(1)?,
-                btc_weight: row.get(2)?,
-                expected_usd: row.get(3)?,
-                note: row.get(4)?,
+                expected_usd: row.get(1)?,
+                note: row.get(2)?,
             }))
         } else {
             Ok(None)
@@ -638,8 +632,6 @@ impl Database {
 #[derive(Debug, Clone)]
 pub struct ChannelRecord {
     pub channel_id: String,
-    pub usd_weight: f64,
-    pub btc_weight: f64,
     pub expected_usd: f64,
     pub note: Option<String>,
 }
@@ -724,13 +716,11 @@ mod tests {
     fn test_save_and_load_channel() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("test_channel_123", 0.75, 0.25, 100.0, Some("test note"))
+        db.save_channel("test_channel_123", 100.0, Some("test note"))
             .unwrap();
 
         let loaded = db.load_channel("test_channel_123").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "test_channel_123");
-        assert!((loaded.usd_weight - 0.75).abs() < 0.001);
-        assert!((loaded.btc_weight - 0.25).abs() < 0.001);
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.note, Some("test note".to_string()));
     }
@@ -739,11 +729,10 @@ mod tests {
     fn test_channel_upsert() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("ch1", 1.0, 0.0, 50.0, None).unwrap();
-        db.save_channel("ch1", 0.5, 0.5, 100.0, Some("updated")).unwrap();
+        db.save_channel("ch1", 50.0, None).unwrap();
+        db.save_channel("ch1", 100.0, Some("updated")).unwrap();
 
         let loaded = db.load_channel("ch1").unwrap().unwrap();
-        assert!((loaded.usd_weight - 0.5).abs() < 0.001);
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
     }
 

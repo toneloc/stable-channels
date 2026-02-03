@@ -1,5 +1,4 @@
 use eframe::{egui, App, NativeOptions};
-use egui::{RichText, CollapsingHeader};
 use futures_util::FutureExt; // now_or_never
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -18,6 +17,7 @@ struct Balance {
     onchain_sats:   u64,
     onchain_usd:    f64,
 }
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ChannelInfo {
     id: String,
@@ -28,13 +28,14 @@ struct ChannelInfo {
     remote_balance_sats: u64,
     remote_balance_usd:  f64,
     status: String,
-    is_channel_ready: bool,  
-    is_usable: bool,         
-    is_stable: bool,   
+    is_channel_ready: bool,
+    is_usable: bool,
+    is_stable: bool,
     expected_usd: Option<f64>,
     note: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PaymentInfo {
     amount_msat: u64,
@@ -43,6 +44,7 @@ struct PaymentInfo {
     timestamp:   String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 struct InvoiceInfo {
     amount_sats: u64,
@@ -51,6 +53,7 @@ struct InvoiceInfo {
     timestamp:   String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 struct EditStableChannelRes {
     ok: bool,
@@ -66,6 +69,7 @@ struct EditStableChannelReq {
 
 /* ---------- GUI State ------------------------------------------ */
 
+#[allow(dead_code)]
 struct Dashboard {
     rt: Runtime,
     client: Client,
