@@ -178,7 +178,7 @@
                             app.last_stability_check = Instant::now();
                         }
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             });
 

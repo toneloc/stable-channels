@@ -484,6 +484,7 @@
         }
 
         fn get_jit_invoice(&mut self, ctx: &egui::Context) {
+            println!("[DEBUG] get_jit_invoice called");
             let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
                 ldk_node::lightning_invoice::Description::new(
                     "Stable Channel Wallet onboarding".to_string(),
@@ -492,11 +493,13 @@
             );
 
             // Variable amount invoice - user pays any amount they want
+            println!("[DEBUG] Calling receive_variable_amount_via_jit_channel");
             let result = self.node.bolt11_payment().receive_variable_amount_via_jit_channel(
                 &description,
                 INVOICE_EXPIRY_SECS,
                 Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT)
             );
+            println!("[DEBUG] JIT invoice result: {:?}", result.is_ok());
 
             audit_event("JIT_INVOICE_ATTEMPT", json!({
                 "type": "variable_amount"
@@ -556,11 +559,13 @@
                     self.waiting_for_payment = true;
                 }
                 Err(e) => {
+                    println!("[DEBUG] JIT invoice ERROR: {:?}", e);
                     audit_event("JIT_INVOICE_FAILED", json!({
                         "error": format!("{e}")
                     }));
                     self.invoice_result = format!("Error: {e:?}");
                     self.status_message = format!("Failed to generate invoice: {}", e);
+                    self.show_toast("Invoice failed", "!");
                 }
             }
         }
@@ -2107,6 +2112,7 @@
                             .corner_radius(25.0)
                             .min_size(egui::vec2(280.0, 55.0));
                         if ui.add(fund_btn).clicked() {
+                            println!("[DEBUG] Fund Your Wallet button clicked");
                             self.trigger_fund_wallet = true;
                         }
 
@@ -3883,8 +3889,10 @@
             // Handle trigger_fund_wallet flag from "Fund Your Wallet" button
             if self.trigger_fund_wallet {
                 self.trigger_fund_wallet = false;
+                println!("[DEBUG] Fund wallet triggered, calling get_jit_invoice");
                 self.status_message = "Getting JIT channel invoice...".to_string();
                 self.get_jit_invoice(ctx);
+                println!("[DEBUG] get_jit_invoice returned, waiting_for_payment={}", self.waiting_for_payment);
             }
 
             // Show the appropriate base screen
