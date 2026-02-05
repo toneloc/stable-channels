@@ -56,6 +56,8 @@
             channel_id: String,
             expected_usd: f64,
             note: Option<String>,
+            #[serde(default)]
+            stable_sats: u64,
         }
         pub struct ServerApp {
             // core + balances …
@@ -824,6 +826,13 @@
 
                     // Update expected_usd to the new target
                     sc.expected_usd = USD::from_f64(new_expected_usd);
+
+                    // Update stable_sats to track the BTC amount backing the stable portion
+                    if sc.latest_price > 0.0 {
+                        let btc_amount = new_expected_usd / sc.latest_price;
+                        sc.stable_sats = (btc_amount * 100_000_000.0) as u64;
+                    }
+
                     old
                 } else {
                     audit_event("TRADE_STABLE_ENTRY_NOT_FOUND", json!({
@@ -1124,6 +1133,14 @@
                             }
                         }
 
+                        // Calculate stable_sats: BTC amount backing the stable portion
+                        let stable_sats = if self.btc_price > 0.0 {
+                            let btc_amount = amount / self.btc_price;
+                            (btc_amount * 100_000_000.0) as u64
+                        } else {
+                            0
+                        };
+
                         let stable_channel = StableChannel {
                             channel_id: channel.channel_id,
                             counterparty: channel.counterparty_node_id,
@@ -1145,6 +1162,7 @@
                             onchain_usd: USD(0.0),
                             note,
                             native_channel_btc: Bitcoin::from_sats(0),
+                            stable_sats,
                         };
             
                         let mut found = false;
@@ -1182,6 +1200,7 @@
                     channel_id: sc.channel_id.to_string(),
                     expected_usd: sc.expected_usd.0,
                     note: sc.note.clone(),
+                    stable_sats: sc.stable_sats,
                 }).collect();
             
                 let file_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
@@ -1256,6 +1275,7 @@
                                                 onchain_usd: USD(0.0),
                                                 note: entry.note.clone(),
                                                 native_channel_btc: Bitcoin::from_sats(0),
+                                                stable_sats: entry.stable_sats,
                                             };
 
                                             self.stable_channels.push(stable_channel);

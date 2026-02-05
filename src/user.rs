@@ -312,20 +312,18 @@
                 onchain_usd: USD(0.0),
                 note: Some(String::new()),
                 native_channel_btc: Bitcoin::from_sats(0),
+                stable_sats: 0,
             };
             let stable_channel = Arc::new(Mutex::new(sc_init));
 
-            // Show onboarding only if no channels AND no pending/claimable balances
-            // Only consider truly pending funds (not AwaitingThresholdConfirmations which are already confirmed)
+            // Show onboarding only if no channels AND no funds at all (pending or on-chain)
             let balances = node.list_balances();
-            let has_pending_funds = balances.pending_balances_from_channel_closures.iter().any(|p| {
-                    matches!(p, ldk_node::PendingSweepBalance::PendingBroadcast { .. }
-                              | ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { .. })
-                })
+            let has_any_funds = !balances.pending_balances_from_channel_closures.is_empty()
                 || balances.lightning_balances.iter().any(|b| {
                     !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
-                });
-            let show_onboarding = node.list_channels().is_empty() && !has_pending_funds;
+                })
+                || balances.total_onchain_balance_sats > 0;
+            let show_onboarding = node.list_channels().is_empty() && !has_any_funds;
 
             // Initialize SQLite database
             let db = Database::open(&data_dir)
@@ -833,10 +831,16 @@
                 vec![custom_tlv],
             ) {
                 Ok(payment_id) => {
-                    // Update local stable channel with new expected_usd
+                    // Update local stable channel with new expected_usd and stable_sats
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
                         sc.expected_usd = USD::from_f64(new_expected_usd);
+                        // Calculate stable_sats: the BTC amount backing the stable portion
+                        // stable_sats = expected_usd / price (in sats)
+                        if price > 0.0 {
+                            let btc_amount = new_expected_usd / price;
+                            sc.stable_sats = (btc_amount * 100_000_000.0) as u64;
+                        }
                     }
 
                     // Persist to database
@@ -885,6 +889,7 @@
             if let Err(e) = self.db.save_channel(
                 &channel_id_str,
                 sc.expected_usd.0,
+                sc.stable_sats,
                 note_ref,
             ) {
                 eprintln!("Failed to save channel: {}", e);
@@ -902,6 +907,7 @@
             if let Ok(Some(record)) = self.db.load_channel(&channel_id_str) {
                 let mut sc = self.stable_channel.lock().unwrap();
                 sc.expected_usd = USD::from_f64(record.expected_usd);
+                sc.stable_sats = record.stable_sats;
                 if record.note.is_some() {
                     sc.note = record.note;
                 }
@@ -952,10 +958,21 @@
                     sc.note = note.clone();
                 }
 
+                // For migrated channels, calculate stable_sats if we have price
+                // Otherwise default to 0 (will be set on next trade)
+                let stable_sats = if sc.latest_price > 0.0 && expected_usd > 0.0 {
+                    let btc_amount = expected_usd / sc.latest_price;
+                    (btc_amount * 100_000_000.0) as u64
+                } else {
+                    0
+                };
+                sc.stable_sats = stable_sats;
+
                 // Save to database
                 let _ = self.db.save_channel(
                     &channel_id_str,
                     expected_usd,
+                    stable_sats,
                     note.as_deref(),
                 );
 
@@ -1875,8 +1892,10 @@
 
             // Buy modal
             if self.show_buy_modal {
+                println!("Showing buy modal");
                 self.show_buy_modal_ui(ctx);
                 if self.check_click_outside_modal(ctx) {
+                    println!("Click outside detected - closing buy modal");
                     self.show_buy_modal = false;
                     self.show_confirm_trade = false;
                     self.pending_trade = None;
@@ -1887,8 +1906,10 @@
 
             // Sell modal
             if self.show_sell_modal {
+                println!("Showing sell modal");
                 self.show_sell_modal_ui(ctx);
                 if self.check_click_outside_modal(ctx) {
+                    println!("Click outside detected - closing sell modal");
                     self.show_sell_modal = false;
                     self.show_confirm_trade = false;
                     self.pending_trade = None;
@@ -2031,8 +2052,11 @@
                         !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
                     });
 
-                // If no channel but has pending funds, show compact layout
-                if !has_channel && has_pending_funds {
+                // If no channel but has any funds (pending, awaiting confirmations, or onchain), show compact layout
+                let has_onchain_balance = balances_for_check.total_onchain_balance_sats > 0;
+                let has_any_pending = !balances_for_check.pending_balances_from_channel_closures.is_empty()
+                    || !balances_for_check.lightning_balances.is_empty();
+                if !has_channel && (has_pending_funds || has_onchain_balance || has_any_pending) {
                     ui.add_space(15.0);
 
                     // Compact pending funds summary
@@ -2252,6 +2276,7 @@
                         .corner_radius(25.0)
                         .min_size(egui::vec2(btn_width, btn_height));
                     if ui.add(buy_btn).clicked() {
+                        println!("Buy button clicked!");
                         self.show_buy_modal = true;
                     }
 
@@ -2263,6 +2288,7 @@
                         .corner_radius(25.0)
                         .min_size(egui::vec2(btn_width, btn_height));
                     if ui.add(sell_btn).clicked() {
+                        println!("Sell button clicked!");
                         self.show_sell_modal = true;
                     }
 
@@ -3833,19 +3859,16 @@
             
             self.process_events();
 
-            // Show onboarding only if no channels AND no pending/claimable balances
-            // Only consider truly pending funds (not AwaitingThresholdConfirmations which are already confirmed)
+            // Show onboarding only if no channels AND no funds at all (pending or on-chain)
             let balances = self.node.list_balances();
-            let has_pending_funds = balances.pending_balances_from_channel_closures.iter().any(|p| {
-                    matches!(p, ldk_node::PendingSweepBalance::PendingBroadcast { .. }
-                              | ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { .. })
-                })
+            let has_any_funds = !balances.pending_balances_from_channel_closures.is_empty()
                 || balances.lightning_balances.iter().any(|b| {
                     !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
-                });
+                })
+                || balances.total_onchain_balance_sats > 0;
             self.show_onboarding = self.node.list_channels().is_empty()
                 && !self.waiting_for_payment
-                && !has_pending_funds;
+                && !has_any_funds;
 
             self.start_background_if_needed();
 

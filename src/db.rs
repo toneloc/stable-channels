@@ -100,6 +100,13 @@ impl Database {
             [],
         ); // Ignore error if column already exists
 
+        // Migration: Add stable_sats column to channels table if missing
+        // stable_sats tracks the BTC backing the stable portion (excludes native BTC)
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN stable_sats INTEGER NOT NULL DEFAULT 0",
+            [],
+        ); // Ignore error if column already exists
+
         // Price history table - stores historical prices for charts
         conn.execute(
             "CREATE TABLE IF NOT EXISTS price_history (
@@ -205,17 +212,19 @@ impl Database {
         &self,
         channel_id: &str,
         expected_usd: f64,
+        stable_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO channels (channel_id, usd_weight, btc_weight, expected_usd, note)
-             VALUES (?1, 1.0, 0.0, ?2, ?3)
+            "INSERT INTO channels (channel_id, usd_weight, btc_weight, expected_usd, stable_sats, note)
+             VALUES (?1, 1.0, 0.0, ?2, ?3, ?4)
              ON CONFLICT(channel_id) DO UPDATE SET
                 expected_usd = ?2,
-                note = ?3,
+                stable_sats = ?3,
+                note = ?4,
                 updated_at = strftime('%s', 'now')",
-            params![channel_id, expected_usd, note],
+            params![channel_id, expected_usd, stable_sats as i64, note],
         )?;
         Ok(())
     }
@@ -224,17 +233,19 @@ impl Database {
     pub fn load_channel(&self, channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, expected_usd, note
+            "SELECT channel_id, expected_usd, note, stable_sats
              FROM channels WHERE channel_id = ?1"
         )?;
 
         let mut rows = stmt.query(params![channel_id])?;
 
         if let Some(row) = rows.next()? {
+            let stable_sats: i64 = row.get(3).unwrap_or(0);
             Ok(Some(ChannelRecord {
                 channel_id: row.get(0)?,
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
+                stable_sats: stable_sats as u64,
             }))
         } else {
             Ok(None)
@@ -644,6 +655,7 @@ pub struct ChannelRecord {
     pub channel_id: String,
     pub expected_usd: f64,
     pub note: Option<String>,
+    pub stable_sats: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -726,12 +738,14 @@ mod tests {
     fn test_save_and_load_channel() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("test_channel_123", 100.0, Some("test note"))
+        // stable_sats = 100_000 (backing $100 at some price)
+        db.save_channel("test_channel_123", 100.0, 100_000, Some("test note"))
             .unwrap();
 
         let loaded = db.load_channel("test_channel_123").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "test_channel_123");
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
+        assert_eq!(loaded.stable_sats, 100_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
     }
 
@@ -739,11 +753,12 @@ mod tests {
     fn test_channel_upsert() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("ch1", 50.0, None).unwrap();
-        db.save_channel("ch1", 100.0, Some("updated")).unwrap();
+        db.save_channel("ch1", 50.0, 50_000, None).unwrap();
+        db.save_channel("ch1", 100.0, 100_000, Some("updated")).unwrap();
 
         let loaded = db.load_channel("ch1").unwrap().unwrap();
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
+        assert_eq!(loaded.stable_sats, 100_000);
     }
 
     #[test]

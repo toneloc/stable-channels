@@ -151,17 +151,27 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
 
     // The target is expected_usd
     let target_usd = sc.expected_usd.0;
-    let total_receiver_usd = sc.stable_receiver_usd.0;
 
-    // Calculate deviation: how much the stable portion has drifted
+    // Use stable_sats to calculate the current value of the stable portion only
+    // This excludes the native BTC position from stability calculations
+    let stable_usd_value = if sc.stable_sats > 0 {
+        // stable_sats tracks the BTC backing the stable portion
+        (sc.stable_sats as f64 / 100_000_000.0) * current_price
+    } else {
+        // Fallback for channels without stable_sats set yet - use total balance
+        // but only if expected_usd is set (means user has a stable position)
+        sc.stable_receiver_usd.0
+    };
+
+    // Calculate deviation: how much the stable portion has drifted from target
     // Due to price changes, the BTC backing the stable portion may be worth more or less
-    let dollars_from_par = USD::from_f64(total_receiver_usd - target_usd);
+    let dollars_from_par = USD::from_f64(stable_usd_value - target_usd);
     let percent_from_par = if target_usd > 0.0 {
         ((dollars_from_par.0 / target_usd) * 100.0).abs()
     } else {
         0.0
     };
-    let is_receiver_below_expected = total_receiver_usd < target_usd;
+    let is_receiver_below_expected = stable_usd_value < target_usd;
 
     let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
         "STABLE"
@@ -177,7 +187,9 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
 
     audit_event("STABILITY_CHECK", json!({
         "expected_usd": target_usd,
-        "total_receiver_usd": total_receiver_usd,
+        "stable_usd_value": stable_usd_value,
+        "stable_sats": sc.stable_sats,
+        "total_receiver_usd": sc.stable_receiver_usd.0,
         "percent_from_par": percent_from_par,
         "btc_price": sc.latest_price,
         "action": action,

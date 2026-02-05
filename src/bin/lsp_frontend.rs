@@ -294,9 +294,10 @@ impl Dashboard {
                             // ── headers ───────────────────────────────────────────
                             for h in [
                                 "Notes","ID", "Peer", "Capacity",
-                                "Local", "USD",           // local sats / local USD
-                                "Remote", "USD",          // remote sats / remote USD
-                                "Status", "Ready", "Usable", "Stable $"
+                                "LSP Sats", "LSP $",      // local sats / local USD
+                                "User Sats", "User $",    // remote sats / remote USD
+                                "Stable $",               // target stable balance
+                                "Status", "Ready", "Usable"
                             ] {
                                 ui.label(RichText::new(h).strong().small());
                             }
@@ -333,24 +334,28 @@ impl Dashboard {
     
                                 ui.label(ch.capacity_sats.to_string());
     
-                                // Local sats + USD
+                                // LSP sats + USD
                                 ui.label(ch.local_balance_sats.to_string());
                                 ui.label(format!("{:.2}", ch.local_balance_usd));
-    
-                                // Remote sats + USD
+
+                                // User sats + USD
                                 ui.label(ch.remote_balance_sats.to_string());
                                 ui.label(format!("{:.2}", ch.remote_balance_usd));
-    
+
+                                // Stable target USD - highlight in green if set
+                                let stable_text = ch.expected_usd
+                                    .map(|v| format!("${:.2}", v))
+                                    .unwrap_or_else(|| "---".into());
+                                let stable_color = if ch.expected_usd.is_some() {
+                                    egui::Color32::from_rgb(34, 139, 34)
+                                } else {
+                                    egui::Color32::GRAY
+                                };
+                                ui.label(RichText::new(stable_text).color(stable_color).strong());
+
                                 ui.label(&ch.status);
                                 ui.label(ch.is_channel_ready.to_string());
                                 ui.label(ch.is_usable.to_string());
-    
-                                // Stable target USD (Option<f64>)
-                                ui.label(
-                                    ch.expected_usd
-                                        .map(|v| format!("{:.2}", v))
-                                        .unwrap_or_else(|| "n/a".into()),
-                                );
     
                                 ui.end_row();
                             }
