@@ -509,6 +509,16 @@ impl Database {
     // Payment Operations
     // =========================================================================
 
+    /// Check if a payment with the given payment_id already exists
+    pub fn payment_exists(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1"
+        )?;
+        let exists = stmt.exists(params![payment_id])?;
+        Ok(exists)
+    }
+
     /// Record a payment
     /// payment_type should be "stability" or "manual"
     pub fn record_payment(
