@@ -161,7 +161,7 @@
             // ── periodic upkeep task ───────────────────────────────────────────────
             tokio::spawn(async {
                 loop {
-                    {
+                    let payment_sent = {
                         let mut app = APP.lock().unwrap();
 
                         app.poll_events();
@@ -174,10 +174,20 @@
                         }
 
                         if app.last_stability_check.elapsed() >= Duration::from_secs(STABILITY_CHECK_INTERVAL_SECS) {
-                            app.check_and_update_stable_channels();
+                            let sent = app.check_and_update_stable_channels();
                             app.last_stability_check = Instant::now();
+                            sent
+                        } else {
+                            false
                         }
+                    }; // MutexGuard dropped here
+
+                    // After a stability payment, wait for LDK's background processor
+                    // to persist the ChannelManager before continuing.
+                    if payment_sent {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
+
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             });
@@ -516,33 +526,39 @@
                 self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
             }
 
-            pub fn check_and_update_stable_channels(&mut self) {
+            pub fn check_and_update_stable_channels(&mut self) -> bool {
                 let current_price = get_cached_price();
                 if current_price > 0.0 {
                     self.btc_price = current_price;
                 }
-            
+
                 let mut channels_updated = false;
+                let mut payment_sent = false;
                 for sc in &mut self.stable_channels {
                     if !stable::channel_exists(&self.node, &sc.channel_id) {
                         continue;
                     }
-            
+
                     sc.latest_price = current_price;
-                    stable::check_stability(&self.node, sc, current_price);
-            
+                    if stable::check_stability(&self.node, sc, current_price).is_some() {
+                        payment_sent = true;
+                    }
+
                     if sc.payment_made {
                         channels_updated = true;
                     }
                 }
-            
+
                 if channels_updated {
                     self.save_stable_channels();
                 }
+
+                payment_sent
             }
 
             pub fn poll_events(&mut self) {
                 while let Some(event) = self.node.next_event() {
+                    println!("[LSP EVENT] {:?}", event);
                     match event {
                         // Create stable channel entry with $0 stabilized - user must opt-in via trade message
                         Event::ChannelReady { channel_id, .. } => {

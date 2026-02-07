@@ -343,6 +343,16 @@ impl Database {
         Ok(())
     }
 
+    /// Record a price with a specific timestamp (for backfill)
+    pub fn record_price_at(&self, price: f64, timestamp: i64, source: Option<&str>) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO price_history (price, source, timestamp) VALUES (?1, ?2, ?3)",
+            params![price, source, timestamp],
+        )?;
+        Ok(())
+    }
+
     /// Get price history for the last N hours
     pub fn get_price_history(&self, hours: u32) -> SqliteResult<Vec<PriceRecord>> {
         let conn = self.conn.lock().unwrap();

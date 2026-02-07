@@ -212,6 +212,57 @@ pub fn fetch_kraken_ohlc(agent: &Agent, since_timestamp: Option<i64>) -> Result<
     Ok(prices)
 }
 
+/// Fetch intraday OHLC data from Kraken (15-minute candles, last 24 hours)
+/// Returns Vec of (unix_timestamp, close_price)
+pub fn fetch_kraken_intraday(agent: &Agent) -> Result<Vec<(i64, f64)>, Box<dyn Error>> {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64 - 86400;
+
+    let url = format!(
+        "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=15&since={}",
+        since
+    );
+
+    let response = agent.get(&url).call()
+        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
+
+    let json: Value = response.into_json()?;
+
+    if let Some(errors) = json.get("error").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("Kraken API error: {:?}", errors).into());
+        }
+    }
+
+    let mut prices = Vec::new();
+
+    if let Some(result) = json.get("result") {
+        for (key, value) in result.as_object().unwrap_or(&serde_json::Map::new()) {
+            if key == "last" { continue; }
+            if let Some(ohlc_array) = value.as_array() {
+                for candle in ohlc_array {
+                    if let Some(arr) = candle.as_array() {
+                        if arr.len() >= 5 {
+                            let timestamp = arr[0].as_i64().unwrap_or(0);
+                            let close = arr[4].as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            if timestamp > 0 && close > 0.0 {
+                                prices.push((timestamp, close));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    prices.sort_by_key(|(ts, _)| *ts);
+    Ok(prices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

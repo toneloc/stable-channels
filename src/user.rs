@@ -183,6 +183,7 @@
         show_transfer_modal: bool,
         show_buy_modal: bool,
         show_sell_modal: bool,
+        modal_opened_at: std::time::Instant,
 
         // Lightning receive state
         show_lightning_receive: bool,
@@ -378,6 +379,7 @@
                 show_transfer_modal: false,
                 show_buy_modal: false,
                 show_sell_modal: false,
+                modal_opened_at: std::time::Instant::now() - Duration::from_secs(10),
                 show_lightning_receive: false,
                 lightning_receive_amount: String::new(),
                 lightning_receive_invoice: String::new(),
@@ -393,6 +395,9 @@
 
             // Seed historical price data if needed
             app.seed_historical_prices();
+
+            // Backfill intraday data from Kraken for the 1D chart
+            app.backfill_intraday_prices();
 
             // Load initial chart data
             app.load_chart_data();
@@ -452,6 +457,8 @@
 
                     // Only proceed if we have a valid price
                     if price > 0.0 {
+                        let mut payment_sent = false;
+
                         // Brief lock to update values
                         if let Ok(mut sc) = sc_arc.lock() {
                             if !node_arc.list_channels().is_empty() {
@@ -468,11 +475,20 @@
                                         Some(&payment_info.counterparty),
                                         "completed",
                                     );
+                                    payment_sent = true;
                                 }
                                 stable_channels::stable::update_balances(&*node_arc, &mut sc);
                             }
                             sc.latest_price = price;
                             sc.timestamp = current_unix_time();
+                        }
+
+                        // After a stability payment, drop the lock and wait for
+                        // LDK's background processor to persist the ChannelManager.
+                        // Without this, a crash/restart can find the ChannelMonitor
+                        // ahead of the ChannelManager, causing a force close.
+                        if payment_sent {
+                            std::thread::sleep(Duration::from_secs(2));
                         }
                     }
 
@@ -708,8 +724,8 @@
             let current_price = get_cached_price_no_fetch();
             if current_price > 0.0 {
                 self.btc_price = current_price;
-                // Record price for 1D chart (every 2 minutes to avoid excessive writes)
-                if self.last_price_record.elapsed() >= Duration::from_secs(120) {
+                // Record price for 1D chart (every 30s for granular intraday data)
+                if self.last_price_record.elapsed() >= Duration::from_secs(30) {
                     let _ = self.db.record_price(current_price, Some("cached"));
                     self.last_price_record = std::time::Instant::now();
                 }
@@ -1382,6 +1398,40 @@
             }
         }
 
+        /// Backfill intraday price data from Kraken (15-min candles) if we have gaps
+        fn backfill_intraday_prices(&self) {
+            // Check how many points we have in the last 24 hours
+            let existing = self.db.get_price_history(24).unwrap_or_default();
+            if existing.len() >= 80 {
+                println!("[Chart] Intraday data sufficient ({} points), skipping backfill", existing.len());
+                return;
+            }
+
+            println!("[Chart] Backfilling intraday prices from Kraken (have {} points)...", existing.len());
+            let agent = ureq::Agent::new();
+            match stable_channels::price_feeds::fetch_kraken_intraday(&agent) {
+                Ok(prices) => {
+                    // Build a set of existing timestamps (rounded to nearest minute) to avoid dupes
+                    let existing_ts: std::collections::HashSet<i64> = existing.iter()
+                        .map(|p| p.timestamp / 60 * 60) // round to minute
+                        .collect();
+
+                    let mut inserted = 0;
+                    for (ts, price) in &prices {
+                        let rounded = ts / 60 * 60;
+                        if !existing_ts.contains(&rounded) {
+                            let _ = self.db.record_price_at(*price, *ts, Some("kraken"));
+                            inserted += 1;
+                        }
+                    }
+                    println!("[Chart] Backfilled {} intraday price points from Kraken", inserted);
+                }
+                Err(e) => {
+                    eprintln!("[Chart] Failed to backfill intraday prices: {}", e);
+                }
+            }
+        }
+
         /// Load chart data based on current period selection
         fn load_chart_data(&mut self) {
             let days = self.chart_period.days();
@@ -1458,6 +1508,10 @@
 
         /// Check if user clicked outside the modal area. Returns true if so.
         fn check_click_outside_modal(&self, ctx: &egui::Context) -> bool {
+            // Debounce: ignore the click that opened the modal
+            if self.modal_opened_at.elapsed() < Duration::from_millis(300) {
+                return false;
+            }
             // Check if clicked outside modal (modal windows are ~340px wide, centered)
             let screen_rect = ctx.screen_rect();
             let modal_rect = egui::Rect::from_center_size(screen_rect.center(), egui::vec2(360.0, 550.0));
@@ -1775,6 +1829,7 @@
                         if ui.add(transfer_btn).clicked() {
                             self.onchain_send_address.clear();
                             self.show_transfer_modal = true;
+                            self.modal_opened_at = std::time::Instant::now();
                         }
                     }
 
@@ -1887,41 +1942,7 @@
                     }
                 });
 
-            // Transfer modal
-            if self.show_transfer_modal {
-                self.show_transfer_modal_ui(ctx);
-                if self.check_click_outside_modal(ctx) {
-                    self.show_transfer_modal = false;
-                }
-            }
-
-            // Buy modal
-            if self.show_buy_modal {
-                println!("Showing buy modal");
-                self.show_buy_modal_ui(ctx);
-                if self.check_click_outside_modal(ctx) {
-                    println!("Click outside detected - closing buy modal");
-                    self.show_buy_modal = false;
-                    self.show_confirm_trade = false;
-                    self.pending_trade = None;
-                    self.trade_amount_input.clear();
-                    self.trade_error.clear();
-                }
-            }
-
-            // Sell modal
-            if self.show_sell_modal {
-                println!("Showing sell modal");
-                self.show_sell_modal_ui(ctx);
-                if self.check_click_outside_modal(ctx) {
-                    println!("Click outside detected - closing sell modal");
-                    self.show_sell_modal = false;
-                    self.show_confirm_trade = false;
-                    self.pending_trade = None;
-                    self.trade_amount_input.clear();
-                    self.trade_error.clear();
-                }
-            }
+            // Modals are rendered in `update` so they draw on top of all screens
 
             // Close channel confirmation popup
             if self.confirm_close_popup {
@@ -2127,6 +2148,7 @@
                             if ui.add(send_btn).clicked() {
                                 self.onchain_send_address.clear();
                                 self.show_transfer_modal = true;
+                                self.modal_opened_at = std::time::Instant::now();
                             }
                         }
                     });
@@ -2139,28 +2161,51 @@
                     let (rect, _response) = ui.allocate_exact_size(egui::vec2(chart_width, chart_height), Sense::hover());
 
                     let painter = ui.painter();
-                    let prices: Vec<f64> = if self.chart_period == ChartPeriod::Day1 {
-                        self.intraday_prices.iter().map(|(_, p)| *p).collect()
+
+                    if self.chart_period == ChartPeriod::Day1 {
+                        // Time-based 1D mini chart
+                        let now_ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                        let t_start = now_ts - 24 * 3600;
+                        let pts: Vec<(f64, f64)> = self.intraday_prices.iter()
+                            .filter(|(ts, _)| *ts >= t_start)
+                            .map(|(ts, p)| (*ts as f64, *p))
+                            .collect();
+                        if pts.len() >= 2 {
+                            let min_p = pts.iter().map(|(_, p)| *p).fold(f64::INFINITY, f64::min);
+                            let max_p = pts.iter().map(|(_, p)| *p).fold(f64::NEG_INFINITY, f64::max);
+                            let range = max_p - min_p;
+                            let is_up = pts.last().unwrap().1 >= pts.first().unwrap().1;
+                            let color = if is_up { Color32::from_rgb(34, 197, 94) } else { Color32::from_rgb(239, 68, 68) };
+                            let points: Vec<egui::Pos2> = pts.iter().map(|(ts, p)| {
+                                let x_frac = ((*ts - t_start as f64) / (24.0 * 3600.0)).clamp(0.0, 1.0) as f32;
+                                let y_frac = if range > 0.0 { ((*p - min_p) / range) as f32 } else { 0.5 };
+                                egui::Pos2::new(
+                                    rect.left() + x_frac * rect.width(),
+                                    rect.bottom() - y_frac * (chart_height - 20.0) - 10.0,
+                                )
+                            }).collect();
+                            for i in 0..points.len().saturating_sub(1) {
+                                painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.0, color));
+                            }
+                        }
                     } else {
-                        self.chart_prices.iter().map(|p| p.close).collect()
-                    };
-
-                    if prices.len() >= 2 {
-                        let min_price = prices.iter().cloned().fold(f64::INFINITY, f64::min);
-                        let max_price = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                        let price_range = max_price - min_price;
-                        let is_up = prices.last().unwrap_or(&0.0) >= prices.first().unwrap_or(&0.0);
-                        let chart_color = if is_up { Color32::from_rgb(34, 197, 94) } else { Color32::from_rgb(239, 68, 68) };
-
-                        let points: Vec<egui::Pos2> = prices.iter().enumerate().map(|(i, price)| {
-                            let x = rect.left() + (i as f32 / (prices.len() - 1).max(1) as f32) * rect.width();
-                            let normalized = if price_range > 0.0 { (price - min_price) / price_range } else { 0.5 };
-                            let y = rect.bottom() - (normalized as f32 * (chart_height - 20.0)) - 10.0;
-                            egui::Pos2::new(x, y)
-                        }).collect();
-
-                        for i in 0..points.len().saturating_sub(1) {
-                            painter.line_segment([points[i], points[i+1]], egui::Stroke::new(2.0, chart_color));
+                        let prices: Vec<f64> = self.chart_prices.iter().map(|p| p.close).collect();
+                        if prices.len() >= 2 {
+                            let min_price = prices.iter().cloned().fold(f64::INFINITY, f64::min);
+                            let max_price = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                            let price_range = max_price - min_price;
+                            let is_up = prices.last().unwrap_or(&0.0) >= prices.first().unwrap_or(&0.0);
+                            let chart_color = if is_up { Color32::from_rgb(34, 197, 94) } else { Color32::from_rgb(239, 68, 68) };
+                            let points: Vec<egui::Pos2> = prices.iter().enumerate().map(|(i, price)| {
+                                let x = rect.left() + (i as f32 / (prices.len() - 1).max(1) as f32) * rect.width();
+                                let normalized = if price_range > 0.0 { (price - min_price) / price_range } else { 0.5 };
+                                let y = rect.bottom() - (normalized as f32 * (chart_height - 20.0)) - 10.0;
+                                egui::Pos2::new(x, y)
+                            }).collect();
+                            for i in 0..points.len().saturating_sub(1) {
+                                painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.0, chart_color));
+                            }
                         }
                     }
 
@@ -2176,70 +2221,167 @@
 
                 let painter = ui.painter();
 
-                // Get price data based on chart period
-                let prices: Vec<f64> = if self.chart_period == ChartPeriod::Day1 {
-                    // Use intraday prices
-                    self.intraday_prices.iter().map(|(_, p)| *p).collect()
-                } else {
-                    // Use daily close prices
-                    self.chart_prices.iter().map(|p| p.close).collect()
-                };
+                if self.chart_period == ChartPeriod::Day1 {
+                    // ── 1D chart: time-based x-axis ──────────────────────────
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                    let window_secs: i64 = 24 * 3600;
+                    let t_start = now_ts - window_secs;
 
-                if prices.len() >= 2 {
-                    let min_price = prices.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let max_price = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let price_range = max_price - min_price;
+                    let pts: Vec<(f64, f64)> = self.intraday_prices.iter()
+                        .filter(|(ts, _)| *ts >= t_start)
+                        .map(|(ts, p)| (*ts as f64, *p))
+                        .collect();
 
-                    // Determine chart color based on price direction
-                    let is_up = prices.last().unwrap_or(&0.0) >= prices.first().unwrap_or(&0.0);
-                    let chart_color = if is_up {
-                        Color32::from_rgb(34, 197, 94)  // Green
-                    } else {
-                        Color32::from_rgb(239, 68, 68)  // Red
-                    };
+                    if pts.len() >= 2 {
+                        let min_price = pts.iter().map(|(_, p)| *p).fold(f64::INFINITY, f64::min);
+                        let max_price = pts.iter().map(|(_, p)| *p).fold(f64::NEG_INFINITY, f64::max);
+                        let price_range = max_price - min_price;
 
-                    // Generate chart points from real data
-                    let points: Vec<egui::Pos2> = prices.iter().enumerate().map(|(i, price)| {
-                        let x = rect.left() + (i as f32 / (prices.len() - 1).max(1) as f32) * rect.width();
-                        let normalized = if price_range > 0.0 {
-                            (price - min_price) / price_range
+                        let is_up = pts.last().unwrap().1 >= pts.first().unwrap().1;
+                        let chart_color = if is_up {
+                            Color32::from_rgb(34, 197, 94)
                         } else {
-                            0.5
+                            Color32::from_rgb(239, 68, 68)
                         };
-                        let y = rect.bottom() - (normalized as f32 * (chart_height - 20.0)) - 10.0;
-                        egui::Pos2::new(x, y)
-                    }).collect();
 
-                    // Draw chart line
-                    for i in 0..points.len().saturating_sub(1) {
-                        painter.line_segment([points[i], points[i+1]], egui::Stroke::new(2.5, chart_color));
+                        let chart_top = rect.top() + 10.0;
+                        let chart_bottom = rect.bottom() - 20.0; // room for time labels
+                        let chart_h = chart_bottom - chart_top;
+
+                        let to_pos = |ts: f64, price: f64| -> egui::Pos2 {
+                            let x_frac = ((ts - t_start as f64) / window_secs as f64).clamp(0.0, 1.0) as f32;
+                            let x = rect.left() + x_frac * rect.width();
+                            let y_frac = if price_range > 0.0 {
+                                ((price - min_price) / price_range) as f32
+                            } else {
+                                0.5
+                            };
+                            let y = chart_bottom - y_frac * chart_h;
+                            egui::Pos2::new(x, y)
+                        };
+
+                        let points: Vec<egui::Pos2> = pts.iter()
+                            .map(|(ts, p)| to_pos(*ts, *p))
+                            .collect();
+
+                        for i in 0..points.len().saturating_sub(1) {
+                            painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.5, chart_color));
+                        }
+
+                        // Price labels
+                        let label_color = Color32::GRAY;
+                        painter.text(
+                            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("${:.0}", max_price),
+                            egui::FontId::proportional(10.0),
+                            label_color,
+                        );
+                        painter.text(
+                            egui::pos2(rect.left() + 4.0, chart_bottom - 12.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("${:.0}", min_price),
+                            egui::FontId::proportional(10.0),
+                            label_color,
+                        );
+
+                        // Time labels along x-axis (every 6 hours)
+                        for h_offset in &[0, 6, 12, 18, 24] {
+                            let label_ts = t_start + (*h_offset as i64) * 3600;
+                            let x_frac = (*h_offset as f32) / 24.0;
+                            let x = rect.left() + x_frac * rect.width();
+
+                            // Format as local hour
+                            let dt = chrono::DateTime::from_timestamp(label_ts, 0);
+                            let label = if let Some(dt) = dt {
+                                let local = dt.with_timezone(&chrono::Local);
+                                local.format("%-I%P").to_string()
+                            } else {
+                                format!("{}h", h_offset)
+                            };
+
+                            let align = if *h_offset == 0 {
+                                egui::Align2::LEFT_TOP
+                            } else if *h_offset == 24 {
+                                egui::Align2::RIGHT_TOP
+                            } else {
+                                egui::Align2::CENTER_TOP
+                            };
+                            painter.text(
+                                egui::pos2(x, rect.bottom() - 12.0),
+                                align,
+                                label,
+                                egui::FontId::proportional(9.0),
+                                Color32::GRAY,
+                            );
+                        }
+                    } else {
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Collecting price data...",
+                            egui::FontId::proportional(14.0),
+                            Color32::GRAY,
+                        );
                     }
-
-                    // Draw price labels (min/max)
-                    let label_color = Color32::GRAY;
-                    painter.text(
-                        egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("${:.0}", max_price),
-                        egui::FontId::proportional(10.0),
-                        label_color,
-                    );
-                    painter.text(
-                        egui::pos2(rect.left() + 4.0, rect.bottom() - 12.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("${:.0}", min_price),
-                        egui::FontId::proportional(10.0),
-                        label_color,
-                    );
                 } else {
-                    // No data - show message
-                    painter.text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "No price data available",
-                        egui::FontId::proportional(14.0),
-                        Color32::GRAY,
-                    );
+                    // ── Longer periods: index-based x-axis ───────────────────
+                    let prices: Vec<f64> = self.chart_prices.iter().map(|p| p.close).collect();
+
+                    if prices.len() >= 2 {
+                        let min_price = prices.iter().cloned().fold(f64::INFINITY, f64::min);
+                        let max_price = prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        let price_range = max_price - min_price;
+
+                        let is_up = prices.last().unwrap_or(&0.0) >= prices.first().unwrap_or(&0.0);
+                        let chart_color = if is_up {
+                            Color32::from_rgb(34, 197, 94)
+                        } else {
+                            Color32::from_rgb(239, 68, 68)
+                        };
+
+                        let points: Vec<egui::Pos2> = prices.iter().enumerate().map(|(i, price)| {
+                            let x = rect.left() + (i as f32 / (prices.len() - 1).max(1) as f32) * rect.width();
+                            let normalized = if price_range > 0.0 {
+                                (price - min_price) / price_range
+                            } else {
+                                0.5
+                            };
+                            let y = rect.bottom() - (normalized as f32 * (chart_height - 20.0)) - 10.0;
+                            egui::Pos2::new(x, y)
+                        }).collect();
+
+                        for i in 0..points.len().saturating_sub(1) {
+                            painter.line_segment([points[i], points[i + 1]], egui::Stroke::new(2.5, chart_color));
+                        }
+
+                        let label_color = Color32::GRAY;
+                        painter.text(
+                            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("${:.0}", max_price),
+                            egui::FontId::proportional(10.0),
+                            label_color,
+                        );
+                        painter.text(
+                            egui::pos2(rect.left() + 4.0, rect.bottom() - 12.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("${:.0}", min_price),
+                            egui::FontId::proportional(10.0),
+                            label_color,
+                        );
+                    } else {
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No price data available",
+                            egui::FontId::proportional(14.0),
+                            Color32::GRAY,
+                        );
+                    }
                 }
 
                 ui.add_space(20.0);
@@ -2282,8 +2424,8 @@
                         .corner_radius(25.0)
                         .min_size(egui::vec2(btn_width, btn_height));
                     if ui.add(buy_btn).clicked() {
-                        println!("Buy button clicked!");
                         self.show_buy_modal = true;
+                        self.modal_opened_at = std::time::Instant::now();
                     }
 
                     ui.add_space(10.0);
@@ -2294,8 +2436,8 @@
                         .corner_radius(25.0)
                         .min_size(egui::vec2(btn_width, btn_height));
                     if ui.add(sell_btn).clicked() {
-                        println!("Sell button clicked!");
                         self.show_sell_modal = true;
+                        self.modal_opened_at = std::time::Instant::now();
                     }
 
                     ui.add_space(10.0);
@@ -2308,6 +2450,7 @@
                     if ui.add(transfer_btn).clicked() {
                         self.onchain_send_address.clear();
                         self.show_transfer_modal = true;
+                        self.modal_opened_at = std::time::Instant::now();
                     }
                 });
 
@@ -3883,6 +4026,13 @@
                 self.balance_last_update = std::time::Instant::now();
             }
 
+            // Auto-refresh 1D chart data every 30s so new price points appear in real-time
+            if self.chart_period == ChartPeriod::Day1
+                && self.chart_last_update.elapsed() >= Duration::from_secs(30)
+            {
+                self.load_chart_data();
+            }
+
             // Update daily price data periodically (rate-limited internally)
             self.update_daily_prices();
 
@@ -3904,11 +4054,31 @@
                 self.show_main_screen(ctx);
             }
 
-            // Transfer modal - show on top of any screen (including onboarding)
+            // Modals - show on top of any screen
             if self.show_transfer_modal {
                 self.show_transfer_modal_ui(ctx);
                 if self.check_click_outside_modal(ctx) {
                     self.show_transfer_modal = false;
+                }
+            }
+            if self.show_buy_modal {
+                self.show_buy_modal_ui(ctx);
+                if self.check_click_outside_modal(ctx) {
+                    self.show_buy_modal = false;
+                    self.show_confirm_trade = false;
+                    self.pending_trade = None;
+                    self.trade_amount_input.clear();
+                    self.trade_error.clear();
+                }
+            }
+            if self.show_sell_modal {
+                self.show_sell_modal_ui(ctx);
+                if self.check_click_outside_modal(ctx) {
+                    self.show_sell_modal = false;
+                    self.show_confirm_trade = false;
+                    self.pending_trade = None;
+                    self.trade_amount_input.clear();
+                    self.trade_error.clear();
                 }
             }
 

@@ -60,7 +60,13 @@ pub fn update_balances<'update_balance_lifetime>(
             sc.channel_id = channel.channel_id;
             println!("Set active channel ID to: {}", sc.channel_id);
         }
-        
+
+        // Skip balance update if channel is not ready yet — during ChannelPending,
+        // outbound_capacity_msat is 0, which produces a misleading near-zero balance.
+        if !channel.is_channel_ready {
+            return (true, sc);
+        }
+
         let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
         let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
         let their_balance_sats = channel.channel_value_sats - our_balance_sats;
