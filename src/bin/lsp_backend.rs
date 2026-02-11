@@ -3,6 +3,7 @@
             bitcoin::{Network, Address, secp256k1::PublicKey},
             lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
             lightning::ln::msgs::SocketAddress,
+            lightning::ln::types::ChannelId,
             config::ChannelConfig,
             lightning_types::payment::PaymentHash,
             Builder, Node, Event, liquidity::LSPS2ServiceConfig, CustomTlvRecord,
@@ -58,7 +59,7 @@
             expected_usd: f64,
             note: Option<String>,
             #[serde(default)]
-            stable_sats: u64,
+            backing_sats: u64,
         }
         pub struct ServerApp {
             // core + balances …
@@ -628,6 +629,20 @@
                         Event::PaymentReceived { amount_msat, payment_hash, custom_records, payment_id: _ } => {
                             self.handle_payment_received(amount_msat, payment_hash, custom_records)
                         }
+                        Event::PaymentForwarded {
+                            prev_channel_id,
+                            next_channel_id,
+                            outbound_amount_forwarded_msat,
+                            total_fee_earned_msat,
+                            ..
+                        } => {
+                            self.handle_payment_forwarded(
+                                prev_channel_id,
+                                next_channel_id,
+                                outbound_amount_forwarded_msat,
+                                total_fee_earned_msat,
+                            );
+                        }
                         Event::ChannelClosed { channel_id, reason, .. } => {
                             audit_event("CHANNEL_CLOSED", json!({"channel_id": format!("{}", channel_id), "reason": format!("{:?}", reason)}));
                             self.status_message = format!("Channel {} has been closed", channel_id);
@@ -679,6 +694,100 @@
                             "amount_msat": amount_msat,
                             "payment_hash": format!("{}", payment_hash),
                         }));
+                    }
+                }
+
+                self.update_balances();
+            }
+
+            /// Handle a forwarded payment — if it came from a stable channel,
+            /// deduct from native BTC first, then overflow into the stabilized portion.
+            fn handle_payment_forwarded(
+                &mut self,
+                prev_channel_id: ChannelId,
+                next_channel_id: ChannelId,
+                outbound_amount_forwarded_msat: Option<u64>,
+                total_fee_earned_msat: Option<u64>,
+            ) {
+                let forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
+                let fee_msat = total_fee_earned_msat.unwrap_or(0);
+                let total_msat = forwarded_msat + fee_msat;
+                let total_sats = total_msat / 1000;
+
+                audit_event("PAYMENT_FORWARDED", json!({
+                    "prev_channel_id": prev_channel_id.to_string(),
+                    "next_channel_id": next_channel_id.to_string(),
+                    "forwarded_msat": forwarded_msat,
+                    "fee_msat": fee_msat,
+                    "total_sats": total_sats,
+                }));
+
+                // Check if the payment came FROM a stable channel (user sent payment out)
+                if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.channel_id == prev_channel_id) {
+                    if sc.expected_usd.0 <= 0.0 || self.btc_price <= 0.0 {
+                        return;
+                    }
+
+                    // Get the user's current channel balance (remote side from LSP perspective)
+                    let user_total_sats = self.node.list_channels()
+                        .iter()
+                        .find(|c| c.channel_id == prev_channel_id)
+                        .map(|c| {
+                            let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
+                            let lsp_sats = (c.outbound_capacity_msat / 1000) + unspendable;
+                            c.channel_value_sats.saturating_sub(lsp_sats)
+                        })
+                        .unwrap_or(0);
+
+                    // Native BTC = user's total sats minus what's backing the stable position
+                    let native_sats = user_total_sats.saturating_sub(sc.backing_sats);
+
+                    // Spend from native first, overflow into stable
+                    let overflow_sats = total_sats.saturating_sub(native_sats);
+
+                    if overflow_sats == 0 {
+                        // Entire payment covered by native BTC — stable position untouched
+                        println!(
+                            "[forwarded] channel {} spent {} sats from native BTC ({} native available), stable ${:.2} unchanged",
+                            prev_channel_id, total_sats, native_sats, sc.expected_usd.0
+                        );
+                        audit_event("FORWARDED_FROM_NATIVE", json!({
+                            "channel_id": prev_channel_id.to_string(),
+                            "sats_spent": total_sats,
+                            "native_sats": native_sats,
+                            "expected_usd": sc.expected_usd.0,
+                        }));
+                    } else {
+                        // Overflow eats into the stable position
+                        let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * self.btc_price;
+                        let old_expected = sc.expected_usd.0;
+                        let new_expected = (old_expected - usd_to_deduct).max(0.0);
+
+                        sc.expected_usd = USD::from_f64(new_expected);
+
+                        // Recalculate backing_sats
+                        if self.btc_price > 0.0 {
+                            let btc_amount = new_expected / self.btc_price;
+                            sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+                        }
+
+                        println!(
+                            "[forwarded] channel {} spent {} sats ({} native, {} from stable), expected_usd: ${:.2} -> ${:.2}",
+                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, new_expected
+                        );
+
+                        audit_event("STABLE_SPEND_DEDUCTED", json!({
+                            "channel_id": prev_channel_id.to_string(),
+                            "total_sats_spent": total_sats,
+                            "native_sats_spent": native_sats,
+                            "stable_sats_spent": overflow_sats,
+                            "usd_deducted": usd_to_deduct,
+                            "old_expected_usd": old_expected,
+                            "new_expected_usd": new_expected,
+                            "btc_price": self.btc_price,
+                        }));
+
+                        self.save_stable_channels();
                     }
                 }
 
@@ -842,10 +951,10 @@
                     // Update expected_usd to the new target
                     sc.expected_usd = USD::from_f64(new_expected_usd);
 
-                    // Update stable_sats to track the BTC amount backing the stable portion
+                    // Update backing_sats to track the BTC amount backing the stable portion
                     if sc.latest_price > 0.0 {
                         let btc_amount = new_expected_usd / sc.latest_price;
-                        sc.stable_sats = (btc_amount * 100_000_000.0) as u64;
+                        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
                     }
 
                     old
@@ -1152,8 +1261,8 @@
                             }
                         }
 
-                        // Calculate stable_sats: BTC amount backing the stable portion
-                        let stable_sats = if self.btc_price > 0.0 {
+                        // Calculate backing_sats: BTC amount backing the stable portion
+                        let backing_sats = if self.btc_price > 0.0 {
                             let btc_amount = amount / self.btc_price;
                             (btc_amount * 100_000_000.0) as u64
                         } else {
@@ -1181,7 +1290,7 @@
                             onchain_usd: USD(0.0),
                             note,
                             native_channel_btc: Bitcoin::from_sats(0),
-                            stable_sats,
+                            backing_sats,
                         };
             
                         let mut found = false;
@@ -1217,11 +1326,11 @@
             pub fn save_stable_channels(&mut self) {
                 for sc in &self.stable_channels {
                     let ch_id = sc.channel_id.to_string();
-                    println!("[save_stable] saving channel={} expected_usd={} stable_sats={}", ch_id, sc.expected_usd.0, sc.stable_sats);
+                    println!("[save_stable] saving channel={} expected_usd={} backing_sats={}", ch_id, sc.expected_usd.0, sc.backing_sats);
                     if let Err(e) = self.db.save_channel(
                         &ch_id,
                         sc.expected_usd.0,
-                        sc.stable_sats,
+                        sc.backing_sats,
                         sc.note.as_deref(),
                     ) {
                         eprintln!("[save_stable] ERROR saving channel {} to DB: {}", ch_id, e);
@@ -1240,7 +1349,7 @@
                                 let _ = self.db.save_channel(
                                     &entry.channel_id,
                                     entry.expected_usd,
-                                    entry.stable_sats,
+                                    entry.backing_sats,
                                     entry.note.as_deref(),
                                 );
                             }
@@ -1303,7 +1412,7 @@
                                 onchain_usd: USD(0.0),
                                 note: entry.note.clone(),
                                 native_channel_btc: Bitcoin::from_sats(0),
-                                stable_sats: entry.stable_sats,
+                                backing_sats: entry.backing_sats,
                             };
 
                             self.stable_channels.push(stable_channel);

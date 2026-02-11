@@ -332,7 +332,7 @@
                 onchain_usd: USD(0.0),
                 note: Some(String::new()),
                 native_channel_btc: Bitcoin::from_sats(0),
-                stable_sats: 0,
+                backing_sats: 0,
             };
             let stable_channel = Arc::new(Mutex::new(sc_init));
 
@@ -986,15 +986,15 @@
                 vec![custom_tlv],
             ) {
                 Ok(payment_id) => {
-                    // Update local stable channel with new expected_usd and stable_sats
+                    // Update local stable channel with new expected_usd and backing_sats
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
                         sc.expected_usd = USD::from_f64(new_expected_usd);
-                        // Calculate stable_sats: the BTC amount backing the stable portion
-                        // stable_sats = expected_usd / price (in sats)
+                        // Calculate backing_sats: the BTC amount backing the stable portion
+                        // backing_sats = expected_usd / price (in sats)
                         if price > 0.0 {
                             let btc_amount = new_expected_usd / price;
-                            sc.stable_sats = (btc_amount * 100_000_000.0) as u64;
+                            sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
                         }
                     }
 
@@ -1044,7 +1044,7 @@
             if let Err(e) = self.db.save_channel(
                 &channel_id_str,
                 sc.expected_usd.0,
-                sc.stable_sats,
+                sc.backing_sats,
                 note_ref,
             ) {
                 eprintln!("Failed to save channel: {}", e);
@@ -1062,7 +1062,7 @@
             if let Ok(Some(record)) = self.db.load_channel(&channel_id_str) {
                 let mut sc = self.stable_channel.lock().unwrap();
                 sc.expected_usd = USD::from_f64(record.expected_usd);
-                sc.stable_sats = record.stable_sats;
+                sc.backing_sats = record.backing_sats;
                 if record.note.is_some() {
                     sc.note = record.note;
                 }
@@ -1113,21 +1113,21 @@
                     sc.note = note.clone();
                 }
 
-                // For migrated channels, calculate stable_sats if we have price
+                // For migrated channels, calculate backing_sats if we have price
                 // Otherwise default to 0 (will be set on next trade)
-                let stable_sats = if sc.latest_price > 0.0 && expected_usd > 0.0 {
+                let backing_sats = if sc.latest_price > 0.0 && expected_usd > 0.0 {
                     let btc_amount = expected_usd / sc.latest_price;
                     (btc_amount * 100_000_000.0) as u64
                 } else {
                     0
                 };
-                sc.stable_sats = stable_sats;
+                sc.backing_sats = backing_sats;
 
                 // Save to database
                 let _ = self.db.save_channel(
                     &channel_id_str,
                     expected_usd,
-                    stable_sats,
+                    backing_sats,
                     note.as_deref(),
                 );
 

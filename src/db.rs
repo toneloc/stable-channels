@@ -212,7 +212,7 @@ impl Database {
         &self,
         channel_id: &str,
         expected_usd: f64,
-        stable_sats: u64,
+        backing_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
@@ -224,7 +224,7 @@ impl Database {
                 stable_sats = ?3,
                 note = ?4,
                 updated_at = strftime('%s', 'now')",
-            params![channel_id, expected_usd, stable_sats as i64, note],
+            params![channel_id, expected_usd, backing_sats as i64, note],
         )?;
         Ok(())
     }
@@ -240,12 +240,12 @@ impl Database {
         let mut rows = stmt.query(params![channel_id])?;
 
         if let Some(row) = rows.next()? {
-            let stable_sats: i64 = row.get(3).unwrap_or(0);
+            let backing_sats: i64 = row.get(3).unwrap_or(0);
             Ok(Some(ChannelRecord {
                 channel_id: row.get(0)?,
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
-                stable_sats: stable_sats as u64,
+                backing_sats: backing_sats as u64,
             }))
         } else {
             Ok(None)
@@ -260,12 +260,12 @@ impl Database {
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let stable_sats: i64 = row.get(3).unwrap_or(0);
+            let backing_sats: i64 = row.get(3).unwrap_or(0);
             Ok(ChannelRecord {
                 channel_id: row.get(0)?,
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
-                stable_sats: stable_sats as u64,
+                backing_sats: backing_sats as u64,
             })
         })?;
 
@@ -689,7 +689,7 @@ pub struct ChannelRecord {
     pub channel_id: String,
     pub expected_usd: f64,
     pub note: Option<String>,
-    pub stable_sats: u64,
+    pub backing_sats: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -772,14 +772,14 @@ mod tests {
     fn test_save_and_load_channel() {
         let db = Database::open_in_memory().unwrap();
 
-        // stable_sats = 100_000 (backing $100 at some price)
+        // backing_sats = 100_000 (backing $100 at some price)
         db.save_channel("test_channel_123", 100.0, 100_000, Some("test note"))
             .unwrap();
 
         let loaded = db.load_channel("test_channel_123").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "test_channel_123");
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
-        assert_eq!(loaded.stable_sats, 100_000);
+        assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
     }
 
@@ -792,7 +792,7 @@ mod tests {
 
         let loaded = db.load_channel("ch1").unwrap().unwrap();
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
-        assert_eq!(loaded.stable_sats, 100_000);
+        assert_eq!(loaded.backing_sats, 100_000);
     }
 
     #[test]

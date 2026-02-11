@@ -193,7 +193,7 @@ pub struct StableChannel {
     /// Sats backing the stable portion (used for stability calculations)
     /// When expected_usd changes, this should be set to expected_usd / current_price
     #[serde(default)]
-    pub stable_sats: u64,
+    pub backing_sats: u64,
 }
 
 #[cfg(test)]
@@ -307,7 +307,7 @@ impl Default for StableChannel {
             onchain_usd: USD(0.0),
             note: Some("".to_string()),
             native_channel_btc: Bitcoin::from_sats(0),
-            stable_sats: 0,
+            backing_sats: 0,
         }
     }
 }

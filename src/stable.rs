@@ -158,13 +158,13 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
     // The target is expected_usd
     let target_usd = sc.expected_usd.0;
 
-    // Use stable_sats to calculate the current value of the stable portion only
+    // Use backing_sats to calculate the current value of the stable portion only
     // This excludes the native BTC position from stability calculations
-    let stable_usd_value = if sc.stable_sats > 0 {
-        // stable_sats tracks the BTC backing the stable portion
-        (sc.stable_sats as f64 / 100_000_000.0) * current_price
+    let stable_usd_value = if sc.backing_sats > 0 {
+        // backing_sats tracks the BTC backing the stable portion
+        (sc.backing_sats as f64 / 100_000_000.0) * current_price
     } else {
-        // Fallback for channels without stable_sats set yet - use total balance
+        // Fallback for channels without backing_sats set yet - use total balance
         // but only if expected_usd is set (means user has a stable position)
         sc.stable_receiver_usd.0
     };
@@ -194,7 +194,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
     audit_event("STABILITY_CHECK", json!({
         "expected_usd": target_usd,
         "stable_usd_value": stable_usd_value,
-        "stable_sats": sc.stable_sats,
+        "backing_sats": sc.backing_sats,
         "total_receiver_usd": sc.stable_receiver_usd.0,
         "percent_from_par": percent_from_par,
         "btc_price": sc.latest_price,
