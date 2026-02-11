@@ -440,6 +440,8 @@
                         Some(&payment_info.counterparty),
                         "completed",
                     );
+                    // Persist updated backing_sats
+                    app.save_channel_settings();
                 }
                 update_balances(&app.node, &mut sc);
             }
@@ -499,6 +501,17 @@
                                         "completed",
                                     );
                                     payment_sent = true;
+
+                                    // Persist updated backing_sats to DB
+                                    let ch_id = sc.channel_id.to_string();
+                                    if sc.expected_usd.0 > 0.0 {
+                                        let _ = db.save_channel(
+                                            &ch_id,
+                                            sc.expected_usd.0,
+                                            sc.backing_sats,
+                                            sc.note.as_deref(),
+                                        );
+                                    }
                                 }
                                 stable_channels::stable::update_balances(&*node_arc, &mut sc);
                             }

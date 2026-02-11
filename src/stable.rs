@@ -211,13 +211,23 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
     match node.spontaneous_payment().send(amt, sc.counterparty, None) {
         Ok(payment_id) => {
             sc.payment_made = true;
+
+            // Recalculate backing_sats to new equilibrium after payment.
+            // Without this, the same drift is detected every check cycle,
+            // causing repeated one-directional payments.
+            if current_price > 0.0 {
+                let btc_amount = target_usd / current_price;
+                sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+            }
+
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
             audit_event("STABILITY_PAYMENT_SENT", json!({
                 "amount_msats": amt,
                 "payment_id": payment_id_str,
                 "counterparty": counterparty_str,
-                "expected_usd": target_usd
+                "expected_usd": target_usd,
+                "new_backing_sats": sc.backing_sats
             }));
             Some(StabilityPaymentInfo {
                 payment_id: payment_id_str,
