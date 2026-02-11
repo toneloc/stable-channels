@@ -723,8 +723,14 @@
                 }));
 
                 // Check if the payment came FROM a stable channel (user sent payment out)
+                println!("[forwarded] looking for prev_channel_id={} in {} stable channels", prev_channel_id, self.stable_channels.len());
+                for sc in &self.stable_channels {
+                    println!("[forwarded]   have channel: {} expected_usd={}", sc.channel_id, sc.expected_usd.0);
+                }
                 if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.channel_id == prev_channel_id) {
+                    println!("[forwarded] matched! expected_usd={} btc_price={}", sc.expected_usd.0, self.btc_price);
                     if sc.expected_usd.0 <= 0.0 || self.btc_price <= 0.0 {
+                        println!("[forwarded] skipping: expected_usd={} btc_price={}", sc.expected_usd.0, self.btc_price);
                         return;
                     }
 
@@ -789,6 +795,8 @@
 
                         self.save_stable_channels();
                     }
+                } else {
+                    println!("[forwarded] no stable channel matched prev_channel_id={}", prev_channel_id);
                 }
 
                 self.update_balances();
