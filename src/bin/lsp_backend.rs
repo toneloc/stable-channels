@@ -662,32 +662,24 @@
                     None => format!("Received {} msats (no TLV)", amount_msat),
                 };
 
-                // 1 msat payments are message/signaling payments
-                if amount_msat == 1 {
-                    match &decoded_payload {
-                        Some(raw) => {
-                            // Log raw message
-                            audit_event("MESSAGE_RECEIVED", json!({
-                                "payment_hash": format!("{}", payment_hash),
-                                "raw": raw,
-                            }));
+                // Check for trade TLV on any payment
+                match &decoded_payload {
+                    Some(raw) => {
+                        audit_event("MESSAGE_RECEIVED", json!({
+                            "payment_hash": format!("{}", payment_hash),
+                            "amount_msat": amount_msat,
+                            "raw": raw,
+                        }));
 
-                            // Try to parse as trade message
-                            self.handle_trade_message(raw, &payment_hash);
-                        }
-                        None => {
-                            audit_event("MESSAGE_RECEIVED_EMPTY_TLV", json!({
-                                "payment_hash": format!("{}", payment_hash),
-                                "amount_msat": amount_msat,
-                            }));
-                        }
+                        // Try to parse as trade message
+                        self.handle_trade_message(raw, &payment_hash);
                     }
-                } else {
-                    audit_event("PAYMENT_RECEIVED", json!({
-                        "amount_msat": amount_msat,
-                        "payment_hash": format!("{}", payment_hash),
-                        "decoded_tlv": decoded_payload,
-                    }));
+                    None => {
+                        audit_event("PAYMENT_RECEIVED", json!({
+                            "amount_msat": amount_msat,
+                            "payment_hash": format!("{}", payment_hash),
+                        }));
+                    }
                 }
 
                 self.update_balances();
