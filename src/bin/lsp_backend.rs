@@ -1260,11 +1260,20 @@
                     }
                 };
 
+                let ldk_channels = self.node.list_channels();
+                println!("[load_stable] DB has {} entries, LDK has {} channels", entries.len(), ldk_channels.len());
+                for ch in &ldk_channels {
+                    println!("[load_stable]   LDK channel: {}", ch.channel_id);
+                }
+
                 self.stable_channels.clear();
 
                 for entry in entries {
-                    for channel in self.node.list_channels() {
+                    println!("[load_stable] DB entry: channel_id={}, expected_usd={}", entry.channel_id, entry.expected_usd);
+                    let mut matched = false;
+                    for channel in &ldk_channels {
                         if channel.channel_id.to_string() == entry.channel_id {
+                            matched = true;
                             let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
                             let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
                             let their_balance_sats = channel.channel_value_sats - our_balance_sats;
@@ -1301,6 +1310,9 @@
                             self.stable_channels.push(stable_channel);
                             break;
                         }
+                    }
+                    if !matched {
+                        println!("[load_stable] WARNING: no LDK channel matched DB entry {}", entry.channel_id);
                     }
                 }
 
