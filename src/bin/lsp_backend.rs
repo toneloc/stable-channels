@@ -21,6 +21,7 @@
         use stable_channels::stable;
         use stable_channels::types::{USD, Bitcoin, StableChannel};
         use stable_channels::constants::*;
+        use stable_channels::db::Database;
 
         // ============================================================================
         // TRADE MESSAGE TYPES
@@ -96,6 +97,7 @@
 
             // stable-channel bookkeeping
             stable_channels: Vec<StableChannel>,
+            db: Database,
         }
 
 
@@ -460,6 +462,9 @@
                 let btc_price = get_cached_price();
                 println!("[Init] Initial BTC price: {}", btc_price);
 
+                let db = Database::open(std::path::Path::new(LSP_DATA_DIR))
+                    .expect("Failed to open LSP database");
+
                 let mut app = Self {
                     node,
                     btc_price,
@@ -493,6 +498,7 @@
                     stable_channel_amount: "0".to_string(),
 
                     stable_channels: Vec::new(),
+                    db,
                 };
 
                 app.update_balances();
@@ -1212,108 +1218,94 @@
             }            
 
             pub fn save_stable_channels(&mut self) {
-                let entries: Vec<StableChannelEntry> = self.stable_channels.iter().map(|sc| StableChannelEntry {
-                    channel_id: sc.channel_id.to_string(),
-                    expected_usd: sc.expected_usd.0,
-                    note: sc.note.clone(),
-                    stable_sats: sc.stable_sats,
-                }).collect();
-            
-                let file_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
-            
-                if let Some(parent) = file_path.parent() {
-                    fs::create_dir_all(parent).unwrap_or_else(|e| {
-                        eprintln!("Failed to create directory: {}", e);
-                    });
-                }
-            
-                match serde_json::to_string_pretty(&entries) {
-                    Ok(json) => {
-                        if let Err(e) = fs::write(&file_path, json) {
-                            eprintln!("Error writing stable channels file: {}", e);
-                            self.status_message = format!("Failed to save stable channels: {}", e);
-                        } else {
-                            println!("Saved stable channels to {}", file_path.display());
-                            self.status_message = "Stable channels saved successfully".to_string();
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error serializing stable channels: {}", e);
-                        self.status_message = format!("Failed to serialize stable channels: {}", e);
+                for sc in &self.stable_channels {
+                    if let Err(e) = self.db.save_channel(
+                        &sc.channel_id.to_string(),
+                        sc.expected_usd.0,
+                        sc.stable_sats,
+                        sc.note.as_deref(),
+                    ) {
+                        eprintln!("Error saving channel {} to DB: {}", sc.channel_id, e);
                     }
                 }
+                println!("Saved {} stable channels to DB", self.stable_channels.len());
             }
 
             pub fn load_stable_channels(&mut self) {
-                let file_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
-
-                if !file_path.exists() {
-                    println!("No existing stable channels file found.");
-                    return;
-                }
-
-                match fs::read_to_string(&file_path) {
-                    Ok(contents) => {
-                        match serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
-                            Ok(entries) => {
-                                self.stable_channels.clear();
-
-                                for entry in entries {
-                                    for channel in self.node.list_channels() {
-                                        if channel.channel_id.to_string() == entry.channel_id {
-                                            let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
-                                            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
-                                            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-
-                                            let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
-                                            let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
-                                            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
-                                            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
-
-                                            let stable_channel = StableChannel {
-                                                channel_id: channel.channel_id,
-                                                counterparty: channel.counterparty_node_id,
-                                                is_stable_receiver: false,
-                                                expected_usd: USD::from_f64(entry.expected_usd),
-                                                expected_btc: Bitcoin::from_btc(0.0),
-                                                stable_receiver_btc,
-                                                stable_receiver_usd,
-                                                stable_provider_btc,
-                                                stable_provider_usd,
-                                                latest_price: self.btc_price,
-                                                risk_level: 0,
-                                                payment_made: false,
-                                                timestamp: 0,
-                                                formatted_datetime: "".to_string(),
-                                                sc_dir: LSP_DATA_DIR.to_string(),
-                                                prices: "".to_string(),
-                                                onchain_btc: Bitcoin::from_sats(0),
-                                                onchain_usd: USD(0.0),
-                                                note: entry.note.clone(),
-                                                native_channel_btc: Bitcoin::from_sats(0),
-                                                stable_sats: entry.stable_sats,
-                                            };
-
-                                            self.stable_channels.push(stable_channel);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                println!("Loaded {} stable channels", self.stable_channels.len());
-                                self.status_message = format!("Loaded {} stable channels", self.stable_channels.len());
+                // Migrate from legacy JSON if it exists
+                let json_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
+                if json_path.exists() {
+                    if let Ok(contents) = fs::read_to_string(&json_path) {
+                        if let Ok(entries) = serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
+                            for entry in &entries {
+                                let _ = self.db.save_channel(
+                                    &entry.channel_id,
+                                    entry.expected_usd,
+                                    entry.stable_sats,
+                                    entry.note.as_deref(),
+                                );
                             }
-                            Err(e) => {
-                                eprintln!("Error parsing stable channels file: {}", e);
-                                self.status_message = format!("Failed to parse stable channels: {}", e);
-                            }
+                            println!("Migrated {} channels from JSON to DB", entries.len());
+                            let _ = fs::remove_file(&json_path);
                         }
                     }
+                }
+
+                // Load from DB
+                let entries = match self.db.load_all_channels() {
+                    Ok(e) => e,
                     Err(e) => {
-                        eprintln!("Error reading stable channels file: {}", e);
-                        self.status_message = format!("Failed to read stable channels file: {}", e);
+                        eprintln!("Error loading channels from DB: {}", e);
+                        return;
+                    }
+                };
+
+                self.stable_channels.clear();
+
+                for entry in entries {
+                    for channel in self.node.list_channels() {
+                        if channel.channel_id.to_string() == entry.channel_id {
+                            let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+                            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+                            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+
+                            let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+                            let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+                            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
+                            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+
+                            let stable_channel = StableChannel {
+                                channel_id: channel.channel_id,
+                                counterparty: channel.counterparty_node_id,
+                                is_stable_receiver: false,
+                                expected_usd: USD::from_f64(entry.expected_usd),
+                                expected_btc: Bitcoin::from_btc(0.0),
+                                stable_receiver_btc,
+                                stable_receiver_usd,
+                                stable_provider_btc,
+                                stable_provider_usd,
+                                latest_price: self.btc_price,
+                                risk_level: 0,
+                                payment_made: false,
+                                timestamp: 0,
+                                formatted_datetime: "".to_string(),
+                                sc_dir: LSP_DATA_DIR.to_string(),
+                                prices: "".to_string(),
+                                onchain_btc: Bitcoin::from_sats(0),
+                                onchain_usd: USD(0.0),
+                                note: entry.note.clone(),
+                                native_channel_btc: Bitcoin::from_sats(0),
+                                stable_sats: entry.stable_sats,
+                            };
+
+                            self.stable_channels.push(stable_channel);
+                            break;
+                        }
                     }
                 }
+
+                println!("Loaded {} stable channels from DB", self.stable_channels.len());
+                self.status_message = format!("Loaded {} stable channels", self.stable_channels.len());
             }
             
             pub fn connect_to_node(&mut self) -> bool {

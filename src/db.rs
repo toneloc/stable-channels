@@ -252,6 +252,30 @@ impl Database {
         }
     }
 
+    /// Load all channel records from the database
+    pub fn load_all_channels(&self) -> SqliteResult<Vec<ChannelRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel_id, expected_usd, note, stable_sats FROM channels"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let stable_sats: i64 = row.get(3).unwrap_or(0);
+            Ok(ChannelRecord {
+                channel_id: row.get(0)?,
+                expected_usd: row.get(1)?,
+                note: row.get(2)?,
+                stable_sats: stable_sats as u64,
+            })
+        })?;
+
+        let mut channels = Vec::new();
+        for row in rows {
+            channels.push(row?);
+        }
+        Ok(channels)
+    }
+
     // =========================================================================
     // Trade Operations
     // =========================================================================
