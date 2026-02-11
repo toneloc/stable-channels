@@ -2,11 +2,12 @@
     use ldk_node::bitcoin::Network;
     use ldk_node::lightning_invoice::Bolt11Invoice;
     use ldk_node::{Builder, Event, Node};
+    use ldk_node::lightning::offers::offer::Offer;
     use ldk_node::{
         bitcoin::secp256k1::PublicKey,
         lightning::ln::msgs::SocketAddress,
     };
-    use ldk_node::config::{EsploraSyncConfig, BackgroundSyncConfig};
+    use ldk_node::config::{Config, EsploraSyncConfig, BackgroundSyncConfig, AnchorChannelsConfig};
 
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
@@ -34,6 +35,13 @@
         Home,
         Settings,
         History,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum TransferTab {
+        Send,
+        Receive,
+        Convert,
     }
 
     #[derive(Clone, Debug)]
@@ -184,6 +192,10 @@
         show_buy_modal: bool,
         show_sell_modal: bool,
         modal_opened_at: std::time::Instant,
+        transfer_tab: TransferTab,
+        send_input: String,
+        send_error: String,
+        bolt12_offer: String,
 
         // Lightning receive state
         show_lightning_receive: bool,
@@ -216,7 +228,14 @@
             let audit_log_path = audit_log_path_for("user");
             set_audit_log_path(&audit_log_path);
 
-            let mut builder = Builder::new();
+            // Trust the LSP peer so no on-chain anchor reserve is held for their channel
+            let mut config = Config::default();
+            config.anchor_channels_config = Some(AnchorChannelsConfig {
+                trusted_peers_no_reserve: vec![lsp_pubkey],
+                per_channel_reserve_sats: 25_000,
+            });
+
+            let mut builder = Builder::from_config(config);
 
             let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
                 "signet" => Network::Signet,
@@ -380,6 +399,10 @@
                 show_buy_modal: false,
                 show_sell_modal: false,
                 modal_opened_at: std::time::Instant::now() - Duration::from_secs(10),
+                transfer_tab: TransferTab::Send,
+                send_input: String::new(),
+                send_error: String::new(),
+                bolt12_offer: String::new(),
                 show_lightning_receive: false,
                 lightning_receive_amount: String::new(),
                 lightning_receive_invoice: String::new(),
@@ -717,6 +740,117 @@
                     false
                 }
             }
+        }
+
+        /// Unified send: auto-detects bolt11, bolt12, or on-chain address from self.send_input
+        fn send_unified(&mut self) -> bool {
+            let input = self.send_input.trim().to_string();
+            if input.is_empty() {
+                self.send_error = "Paste an address, invoice, or offer".to_string();
+                return false;
+            }
+
+            // Auto-fix double-paste
+            let input = {
+                let len = input.len();
+                if len > 60 && len % 2 == 0 {
+                    let (first, second) = input.split_at(len / 2);
+                    if first == second { first.to_string() } else { input }
+                } else {
+                    input
+                }
+            };
+
+            let lower = input.to_lowercase();
+
+            // Try Bolt11 invoice
+            if lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lightning:") {
+                let invoice_str = if lower.starts_with("lightning:") { &input[10..] } else { &input };
+                match Bolt11Invoice::from_str(invoice_str) {
+                    Ok(invoice) => {
+                        match self.node.bolt11_payment().send(&invoice, None) {
+                            Ok(payment_id) => {
+                                self.status_message = format!("Payment sent, ID: {}", payment_id);
+                                self.send_input.clear();
+                                self.send_error.clear();
+                                self.update_balances();
+                                return true;
+                            }
+                            Err(e) => {
+                                self.send_error = format!("Payment failed: {}", e);
+                                return false;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.send_error = format!("Invalid invoice: {}", e);
+                        return false;
+                    }
+                }
+            }
+
+            // Try Bolt12 offer
+            if lower.starts_with("lno1") {
+                match Offer::from_str(&input) {
+                    Ok(offer) => {
+                        match self.node.bolt12_payment().send(&offer, None, None, None) {
+                            Ok(payment_id) => {
+                                self.status_message = format!("Bolt12 payment sent, ID: {}", payment_id);
+                                self.send_input.clear();
+                                self.send_error.clear();
+                                self.update_balances();
+                                return true;
+                            }
+                            Err(e) => {
+                                self.send_error = format!("Bolt12 payment failed: {}", e);
+                                return false;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.send_error = format!("Invalid offer: {:?}", e);
+                        return false;
+                    }
+                }
+            }
+
+            // Try on-chain address
+            if lower.starts_with("bc1") || lower.starts_with("tb1")
+                || lower.starts_with("1") || lower.starts_with("3")
+                || lower.starts_with("bcrt1")
+            {
+                match ldk_node::bitcoin::Address::from_str(&input) {
+                    Ok(addr) => match addr.require_network(self.network) {
+                        Ok(valid_addr) => {
+                            match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
+                                Ok(txid) => {
+                                    self.show_toast("Sent!", "OK");
+                                    self.status_message = format!("On-chain TX: {}", txid);
+                                    self.send_input.clear();
+                                    self.send_error.clear();
+                                    self.update_balances();
+                                    return true;
+                                }
+                                Err(e) => {
+                                    self.send_error = format!("Send failed: {}", e);
+                                    return false;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            self.send_error = "Wrong network for this address".to_string();
+                            return false;
+                        }
+                    }
+                    Err(_) => {
+                        self.send_error = "Invalid address".to_string();
+                        return false;
+                    }
+                }
+            }
+
+            self.send_error = "Unrecognized format. Paste a bitcoin address, bolt11 invoice, or bolt12 offer.".to_string();
+            false
         }
 
         pub fn update_balances(&mut self) {
@@ -1827,7 +1961,8 @@
                         .corner_radius(8.0);
 
                         if ui.add(transfer_btn).clicked() {
-                            self.onchain_send_address.clear();
+                            self.send_input.clear();
+                            self.send_error.clear();
                             self.show_transfer_modal = true;
                             self.modal_opened_at = std::time::Instant::now();
                         }
@@ -1952,8 +2087,8 @@
 
         fn show_home_tab(&mut self, ui: &mut egui::Ui) {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // Check if we have an active channel
-                let has_active_channel = !self.node.list_channels().is_empty();
+                // Check if we have an active, ready channel (not just pending)
+                let has_active_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
 
                 // Get fresh balances
                 let balances = self.node.list_balances();
@@ -2097,16 +2232,51 @@
                         })
                         .sum();
 
-                    let total_claimable: u64 = balances_for_check.lightning_balances.iter()
-                        .filter_map(|b| match b {
-                            ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, .. } => Some(*amount_satoshis),
-                            ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, .. } => Some(*amount_satoshis),
-                            ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, .. } => Some(*amount_satoshis),
-                            ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, .. } => Some(*amount_satoshis),
-                            ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => Some(*amount_satoshis),
-                            _ => None,
-                        })
-                        .sum();
+                    let mut total_claimable: u64 = 0;
+                    let mut claimable_height: Option<u32> = None;
+                    for b in &balances_for_check.lightning_balances {
+                        match b {
+                            ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                total_claimable += amount_satoshis;
+                                let h = *confirmation_height;
+                                claimable_height = Some(claimable_height.map_or(h, |prev: u32| prev.min(h)));
+                            }
+                            ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
+                                total_claimable += amount_satoshis;
+                                let h = *timeout_height;
+                                claimable_height = Some(claimable_height.map_or(h, |prev: u32| prev.min(h)));
+                            }
+                            ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height: ch, .. } => {
+                                total_claimable += amount_satoshis;
+                                let h = *ch;
+                                claimable_height = Some(claimable_height.map_or(h, |prev: u32| prev.min(h)));
+                            }
+                            ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, .. } => {
+                                total_claimable += amount_satoshis;
+                            }
+                            ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
+                                total_claimable += amount_satoshis;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Also check pending sweep confirmation heights
+                    let mut sweep_height: Option<u32> = None;
+                    for p in &balances_for_check.pending_balances_from_channel_closures {
+                        if let ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { confirmation_height, .. } = p {
+                            let h = *confirmation_height;
+                            sweep_height = Some(sweep_height.map_or(h, |prev: u32| prev.min(h)));
+                        }
+                    }
+
+                    // Earliest block at which any funds become available
+                    let earliest_height = match (claimable_height, sweep_height) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    };
 
                     if total_pending > 0 || total_claimable > 0 {
                         ui.group(|ui| {
@@ -2120,6 +2290,9 @@
                             }
                             if total_claimable > 0 {
                                 ui.label(RichText::new(format!("{} sats awaiting confirmation", total_claimable)).size(12.0).color(Color32::DARK_GRAY));
+                            }
+                            if let Some(height) = earliest_height {
+                                ui.label(RichText::new(format!("Recoverable at block {}", height)).size(12.0).color(Color32::from_rgb(0, 120, 200)));
                             }
                         });
                     }
@@ -2146,7 +2319,8 @@
                                 .corner_radius(8.0)
                                 .min_size(egui::vec2(140.0, 40.0));
                             if ui.add(send_btn).clicked() {
-                                self.onchain_send_address.clear();
+                                self.send_input.clear();
+                                self.send_error.clear();
                                 self.show_transfer_modal = true;
                                 self.modal_opened_at = std::time::Instant::now();
                             }
@@ -2448,7 +2622,8 @@
                         .corner_radius(25.0)
                         .min_size(egui::vec2(btn_width, btn_height));
                     if ui.add(transfer_btn).clicked() {
-                        self.onchain_send_address.clear();
+                        self.send_input.clear();
+                        self.send_error.clear();
                         self.show_transfer_modal = true;
                         self.modal_opened_at = std::time::Instant::now();
                     }
@@ -2787,331 +2962,36 @@
                     ui.set_min_width(320.0);
                     ui.add_space(10.0);
 
-                    ui.vertical_centered(|ui| {
-                        ui.heading(RichText::new("Send & Receive").color(Color32::BLACK));
-                    });
-                    ui.add_space(20.0);
-
-                    // Receive section
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Receive Bitcoin").strong().color(Color32::BLACK));
-                        ui.add_space(5.0);
-
-                        // Info message about overcollateralization
-                        ui.label(
-                            RichText::new("Tip: For larger amounts, use the Add Bitcoin option below.")
-                                .size(11.0)
-                                .italics()
-                                .color(Color32::from_rgb(100, 100, 100))
-                        );
-                        ui.add_space(8.0);
-
-                        if self.show_lightning_receive && !self.lightning_receive_invoice.is_empty() {
-                            // Show QR code and invoice (constrained size)
-                            ui.vertical_centered(|ui| {
-                                if let Some(ref qr) = self.lightning_receive_qr {
-                                    let img = egui::Image::from_texture(qr).max_size(egui::vec2(180.0, 180.0));
-                                    ui.add(img);
-                                }
-                                ui.add_space(6.0);
-                                ui.label(RichText::new(&self.lightning_receive_invoice[..40.min(self.lightning_receive_invoice.len())])
-                                    .monospace().size(10.0).color(Color32::DARK_GRAY));
-                                ui.add_space(8.0);
-                                ui.horizontal(|ui| {
-                                    if ui.button("Copy Invoice").clicked() {
-                                        ui.output_mut(|o| o.copied_text = self.lightning_receive_invoice.clone());
-                                        self.show_toast("Copied!", "OK");
-                                    }
-                                    if ui.button("Done").clicked() {
-                                        self.show_lightning_receive = false;
-                                        self.lightning_receive_invoice.clear();
-                                        self.lightning_receive_qr = None;
-                                        self.lightning_receive_error.clear();
-                                    }
-                                });
-                            });
-                        } else {
-                            // Amount input and generate button
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Amount (sats):").color(Color32::DARK_GRAY));
-                                let amount_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount)
-                                    .hint_text("10000")
-                                    .desired_width(100.0);
-                                ui.add(amount_edit);
-                            });
-                            ui.add_space(8.0);
-                            if ui.button("Generate Invoice").clicked() {
-                                let amount = self.lightning_receive_amount.trim();
-                                if amount.is_empty() || amount == "0" || amount.parse::<u64>().unwrap_or(0) == 0 {
-                                    self.lightning_receive_error = "Please enter an amount.".to_string();
-                                } else {
-                                    self.lightning_receive_error.clear();
-                                    self.generate_lightning_receive_invoice(ctx);
-                                }
-                            }
-                            if !self.lightning_receive_error.is_empty() {
-                                ui.add_space(5.0);
-                                ui.label(RichText::new(&self.lightning_receive_error).color(Color32::from_rgb(220, 50, 50)));
+                    // Tab bar
+                    ui.horizontal(|ui| {
+                        let tabs = [
+                            (TransferTab::Send, "Send"),
+                            (TransferTab::Receive, "Receive"),
+                            (TransferTab::Convert, "Convert"),
+                        ];
+                        for (tab, label) in &tabs {
+                            let is_selected = self.transfer_tab == *tab;
+                            let btn = if is_selected {
+                                egui::Button::new(RichText::new(*label).size(15.0).color(Color32::WHITE).strong())
+                                    .fill(Color32::from_rgb(30, 30, 30))
+                                    .corner_radius(8.0)
+                            } else {
+                                egui::Button::new(RichText::new(*label).size(15.0).color(Color32::from_rgb(80, 80, 80)))
+                                    .fill(Color32::from_rgb(240, 240, 240))
+                                    .corner_radius(8.0)
+                            };
+                            if ui.add(btn).clicked() {
+                                self.transfer_tab = tab.clone();
                             }
                         }
                     });
 
                     ui.add_space(15.0);
 
-                    // On-chain receive section
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Receive on-chain").strong().color(Color32::BLACK));
-                        ui.add_space(8.0);
-
-                        if ui.button("Get Address").clicked() {
-                            self.get_address();
-                            self.show_toast("Address ready!", "OK");
-                        }
-
-                        if !self.on_chain_address.is_empty() {
-                            ui.add_space(5.0);
-                            ui.label(RichText::new(&self.on_chain_address).monospace().size(10.0).color(Color32::DARK_GRAY));
-                            if ui.small_button("Copy").clicked() {
-                                ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
-                                self.show_toast("Copied!", "OK");
-                            }
-                        }
-                    });
-
-                    ui.add_space(15.0);
-
-                    // Send section
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Send").strong().color(Color32::BLACK));
-                        ui.add_space(8.0);
-
-                        // Pay Lightning Invoice
-                        ui.label(RichText::new("Pay Invoice:").size(12.0).color(Color32::DARK_GRAY));
-                        let invoice_edit = egui::TextEdit::singleline(&mut self.invoice_to_pay)
-                            .hint_text("lnbc...")
-                            .desired_width(260.0);
-                        ui.add(invoice_edit);
-
-                        ui.add_space(5.0);
-                        if ui.button("Pay Invoice").clicked() {
-                            if self.pay_invoice() {
-                                self.show_toast("Payment sent!", "OK");
-                            }
-                            self.show_transfer_modal = false;
-                        }
-
-                        // Send onchain - show if there's onchain balance
-                        let onchain_balance = self.node.list_balances().total_onchain_balance_sats;
-                        if onchain_balance > 0 {
-                            ui.add_space(12.0);
-                            ui.separator();
-                            ui.add_space(8.0);
-
-                            ui.label(RichText::new("Send on-chain:").size(12.0).color(Color32::DARK_GRAY));
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Available:").size(11.0).color(Color32::GRAY));
-                                ui.label(RichText::new(format!("{} sats", onchain_balance)).size(11.0).color(Color32::BLACK));
-                            });
-                            ui.add_space(4.0);
-
-                            ui.label(RichText::new("To address:").size(12.0).color(Color32::DARK_GRAY));
-                            let addr_edit = egui::TextEdit::singleline(&mut self.onchain_send_address)
-                                .hint_text("bc1...")
-                                .desired_width(260.0);
-                            ui.add(addr_edit);
-
-                            ui.add_space(5.0);
-                            if ui.button("Send All").clicked() {
-                                let mut addr_trimmed = self.onchain_send_address.trim().to_string();
-                                // Auto-fix duplicated addresses (double-paste issue)
-                                let len = addr_trimmed.len();
-                                if len > 60 && len % 2 == 0 {
-                                    let (first, second) = addr_trimmed.split_at(len / 2);
-                                    if first == second {
-                                        addr_trimmed = first.to_string();
-                                    }
-                                }
-                                if addr_trimmed.is_empty() {
-                                    self.show_toast("Enter address", "!");
-                                } else {
-                                    match ldk_node::bitcoin::Address::from_str(&addr_trimmed) {
-                                        Ok(addr) => match addr.require_network(self.network) {
-                                            Ok(valid_addr) => {
-                                                match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
-                                                    Ok(txid) => {
-                                                        self.show_toast("Sent!", "OK");
-                                                        self.status_message = format!("On-chain TX: {}", txid);
-                                                        self.onchain_send_address.clear();
-                                                        self.show_transfer_modal = false;
-                                                    }
-                                                    Err(e) => {
-                                                        self.show_toast("Send failed", "!");
-                                                        self.status_message = format!("Error: {}", e);
-                                                    }
-                                                }
-                                            }
-                                            Err(_) => self.show_toast("Wrong network", "!"),
-                                        }
-                                        Err(_) => self.show_toast("Invalid address", "!"),
-                                    }
-                                }
-                            }
-                        }
-                    });
-
-                    ui.add_space(15.0);
-
-                    // Deposit/Withdraw (Splice)
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Add or Withdraw").strong().color(Color32::BLACK));
-                        ui.add_space(8.0);
-
-                        // Show on-chain balance if any
-                        let onchain_sats = (self.onchain_balance_btc * 100_000_000.0) as u64;
-                        let fee_reserve: u64 = 1000; // Reserve sats for on-chain fee
-                        if onchain_sats > fee_reserve {
-                            let splice_amount = onchain_sats - fee_reserve;
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("On-chain balance:").size(12.0).color(Color32::DARK_GRAY));
-                                ui.label(RichText::new(format!("{} sats", onchain_sats)).size(12.0).color(Color32::BLACK).strong());
-                            });
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new("Add bitcoin to your stable wallet.")
-                                    .size(11.0)
-                                    .italics()
-                                    .color(Color32::from_rgb(100, 100, 100))
-                            );
-                            ui.add_space(6.0);
-                            if ui.button(format!("Splice In {} sats", splice_amount)).clicked() {
-                                self.splice_in_amount = splice_amount.to_string();
-                                self.do_splice_in();
-                            }
-                            ui.add_space(8.0);
-                            ui.separator();
-                            ui.add_space(8.0);
-                        }
-
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Deposit (sats):").size(12.0).color(Color32::DARK_GRAY));
-                            let splice_in_edit = egui::TextEdit::singleline(&mut self.splice_in_amount)
-                                .hint_text("0")
-                                .desired_width(100.0);
-                            ui.add(splice_in_edit);
-                            if ui.button("Deposit").clicked() {
-                                self.do_splice_in();
-                            }
-                        });
-
-                        ui.add_space(5.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Withdraw to:").size(12.0).color(Color32::DARK_GRAY));
-                        });
-                        let addr_edit = egui::TextEdit::singleline(&mut self.splice_out_address)
-                            .hint_text("bc1q...")
-                            .desired_width(260.0);
-                        ui.add(addr_edit);
-
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
-                            let splice_out_edit = egui::TextEdit::singleline(&mut self.splice_out_amount)
-                                .hint_text("0")
-                                .desired_width(100.0);
-                            ui.add(splice_out_edit);
-                            if ui.button("Withdraw").clicked() {
-                                self.do_splice_out();
-                            }
-                        });
-                    });
-
-                    // Show pending balances from channel closures
-                    let balances = self.node.list_balances();
-                    if !balances.pending_balances_from_channel_closures.is_empty() {
-                        ui.add_space(15.0);
-                        ui.group(|ui| {
-                            ui.label(RichText::new("Pending from Channel Closures").strong().color(Color32::from_rgb(200, 120, 0)));
-                            ui.add_space(8.0);
-
-                            let mut total_pending: u64 = 0;
-                            for pending in &balances.pending_balances_from_channel_closures {
-                                let (status, amount) = match pending {
-                                    ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } => {
-                                        ("Pending broadcast", *amount_satoshis)
-                                    },
-                                    ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, latest_spending_txid, .. } => {
-                                        let status = format!("Awaiting confirmation ({}...)", &latest_spending_txid.to_string()[..8]);
-                                        (status.leak() as &str, *amount_satoshis)
-                                    },
-                                    ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { amount_satoshis, confirmation_height, .. } => {
-                                        let status = format!("Confirming (height {})", confirmation_height);
-                                        (status.leak() as &str, *amount_satoshis)
-                                    },
-                                };
-                                total_pending += amount;
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} sats", amount)).size(12.0).color(Color32::BLACK).strong());
-                                    ui.label(RichText::new(format!("- {}", status)).size(11.0).color(Color32::DARK_GRAY));
-                                });
-                            }
-
-                            if balances.pending_balances_from_channel_closures.len() > 1 {
-                                ui.add_space(5.0);
-                                ui.separator();
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new("Total pending:").size(12.0).color(Color32::DARK_GRAY));
-                                    ui.label(RichText::new(format!("{} sats", total_pending)).size(12.0).color(Color32::BLACK).strong());
-                                });
-                            }
-                        });
-                    }
-
-                    // Show lightning balances that are claimable but not yet swept
-                    let has_claimable = balances.lightning_balances.iter().any(|b| {
-                        !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
-                    });
-                    if has_claimable {
-                        ui.add_space(15.0);
-                        ui.group(|ui| {
-                            ui.label(RichText::new("Claimable Balances").strong().color(Color32::from_rgb(0, 120, 200)));
-                            ui.add_space(8.0);
-
-                            for balance in &balances.lightning_balances {
-                                match balance {
-                                    ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                            ui.label(RichText::new(format!("- claimable at block {}", confirmation_height)).size(11.0).color(Color32::DARK_GRAY));
-                                        });
-                                    },
-                                    ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                            ui.label(RichText::new(format!("- claimable at height {}", timeout_height)).size(11.0).color(Color32::DARK_GRAY));
-                                        });
-                                    },
-                                    ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                            ui.label(RichText::new(format!("- HTLC claimable at {}", claimable_height)).size(11.0).color(Color32::DARK_GRAY));
-                                        });
-                                    },
-                                    ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                            ui.label(RichText::new(format!("- needs preimage, expires {}", expiry_height)).size(11.0).color(Color32::DARK_GRAY));
-                                        });
-                                    },
-                                    ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
-                                        ui.horizontal(|ui| {
-                                            ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                            ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(Color32::from_rgb(200, 50, 50)));
-                                        });
-                                    },
-                                    _ => {} // ClaimableOnChannelClose is for open channels, skip
-                                }
-                            }
-                        });
+                    match self.transfer_tab {
+                        TransferTab::Send => self.show_send_tab(ui),
+                        TransferTab::Receive => self.show_receive_tab(ui, ctx),
+                        TransferTab::Convert => self.show_convert_tab(ui),
                     }
 
                     ui.add_space(15.0);
@@ -3119,15 +2999,385 @@
                     ui.vertical_centered(|ui| {
                         if ui.button("Close").clicked() {
                             self.show_transfer_modal = false;
-                            // Reset lightning receive state
                             self.show_lightning_receive = false;
                             self.lightning_receive_invoice.clear();
                             self.lightning_receive_qr = None;
+                            self.send_error.clear();
                         }
                     });
 
                     ui.add_space(10.0);
                 });
+        }
+
+        fn show_send_tab(&mut self, ui: &mut egui::Ui) {
+            ui.label(
+                RichText::new("Paste an on-chain address, bolt11 invoice, or bolt12 offer")
+                    .size(12.0)
+                    .italics()
+                    .color(Color32::from_rgb(100, 100, 100))
+            );
+            ui.add_space(10.0);
+
+            let input_edit = egui::TextEdit::multiline(&mut self.send_input)
+                .hint_text("bc1..., lnbc..., or lno1...")
+                .desired_width(300.0)
+                .desired_rows(3);
+            ui.add(input_edit);
+
+            ui.add_space(10.0);
+
+            // Auto-detect indicator
+            let input_lower = self.send_input.trim().to_lowercase();
+            if !input_lower.is_empty() {
+                let detected = if input_lower.starts_with("lnbc") || input_lower.starts_with("lntb") || input_lower.starts_with("lightning:") {
+                    "Bolt11 Invoice"
+                } else if input_lower.starts_with("lno1") {
+                    "Bolt12 Offer"
+                } else if input_lower.starts_with("bc1") || input_lower.starts_with("tb1")
+                    || input_lower.starts_with("1") || input_lower.starts_with("3")
+                    || input_lower.starts_with("bcrt1")
+                {
+                    "On-chain Address"
+                } else {
+                    "Unknown"
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Detected:").size(11.0).color(Color32::DARK_GRAY));
+                    let color = if detected == "Unknown" {
+                        Color32::from_rgb(200, 100, 100)
+                    } else {
+                        Color32::from_rgb(34, 139, 34)
+                    };
+                    ui.label(RichText::new(detected).size(11.0).color(color).strong());
+                });
+                ui.add_space(8.0);
+            }
+
+            let send_btn = egui::Button::new(RichText::new("Send").size(16.0).color(Color32::WHITE).strong())
+                .fill(Color32::from_rgb(30, 30, 30))
+                .corner_radius(10.0)
+                .min_size(egui::vec2(280.0, 44.0));
+            if ui.add(send_btn).clicked() {
+                if self.send_unified() {
+                    self.show_toast("Payment sent!", "OK");
+                    self.show_transfer_modal = false;
+                }
+            }
+
+            if !self.send_error.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(&self.send_error).size(12.0).color(Color32::from_rgb(220, 50, 50)));
+            }
+        }
+
+        fn show_receive_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+            // On-chain address
+            ui.group(|ui| {
+                ui.label(RichText::new("On-chain Address").strong().color(Color32::BLACK));
+                ui.add_space(6.0);
+
+                if ui.button("Generate Address").clicked() {
+                    self.get_address();
+                    self.show_toast("Address ready!", "OK");
+                }
+
+                if !self.on_chain_address.is_empty() {
+                    ui.add_space(5.0);
+                    ui.label(RichText::new(&self.on_chain_address).monospace().size(10.0).color(Color32::DARK_GRAY));
+                    if ui.small_button("Copy").clicked() {
+                        ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                        self.show_toast("Copied!", "OK");
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+
+            // Bolt11 invoice
+            ui.group(|ui| {
+                ui.label(RichText::new("Lightning Invoice (Bolt11)").strong().color(Color32::BLACK));
+                ui.add_space(6.0);
+
+                if self.show_lightning_receive && !self.lightning_receive_invoice.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        if let Some(ref qr) = self.lightning_receive_qr {
+                            let img = egui::Image::from_texture(qr).max_size(egui::vec2(180.0, 180.0));
+                            ui.add(img);
+                        }
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&self.lightning_receive_invoice[..40.min(self.lightning_receive_invoice.len())])
+                            .monospace().size(10.0).color(Color32::DARK_GRAY));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Copy Invoice").clicked() {
+                                ui.output_mut(|o| o.copied_text = self.lightning_receive_invoice.clone());
+                                self.show_toast("Copied!", "OK");
+                            }
+                            if ui.button("Done").clicked() {
+                                self.show_lightning_receive = false;
+                                self.lightning_receive_invoice.clear();
+                                self.lightning_receive_qr = None;
+                                self.lightning_receive_error.clear();
+                            }
+                        });
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Amount (sats):").color(Color32::DARK_GRAY));
+                        let amount_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount)
+                            .hint_text("10000")
+                            .desired_width(100.0);
+                        ui.add(amount_edit);
+                    });
+                    ui.add_space(8.0);
+                    if ui.button("Generate Invoice").clicked() {
+                        let amount = self.lightning_receive_amount.trim();
+                        if amount.is_empty() || amount == "0" || amount.parse::<u64>().unwrap_or(0) == 0 {
+                            self.lightning_receive_error = "Please enter an amount.".to_string();
+                        } else {
+                            self.lightning_receive_error.clear();
+                            self.generate_lightning_receive_invoice(ctx);
+                        }
+                    }
+                    if !self.lightning_receive_error.is_empty() {
+                        ui.add_space(5.0);
+                        ui.label(RichText::new(&self.lightning_receive_error).color(Color32::from_rgb(220, 50, 50)));
+                    }
+                }
+            });
+
+            ui.add_space(10.0);
+
+            // Bolt12 offer
+            ui.group(|ui| {
+                ui.label(RichText::new("Lightning Offer (Bolt12)").strong().color(Color32::BLACK));
+                ui.add_space(6.0);
+
+                if !self.bolt12_offer.is_empty() {
+                    ui.label(RichText::new(&self.bolt12_offer[..60.min(self.bolt12_offer.len())])
+                        .monospace().size(10.0).color(Color32::DARK_GRAY));
+                    ui.add_space(5.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Copy Offer").clicked() {
+                            ui.output_mut(|o| o.copied_text = self.bolt12_offer.clone());
+                            self.show_toast("Copied!", "OK");
+                        }
+                        if ui.button("Done").clicked() {
+                            self.bolt12_offer.clear();
+                        }
+                    });
+                } else {
+                    ui.label(
+                        RichText::new("Reusable, no amount required from sender")
+                            .size(11.0).italics().color(Color32::from_rgb(100, 100, 100))
+                    );
+                    ui.add_space(6.0);
+                    if ui.button("Generate Offer").clicked() {
+                        match self.node.bolt12_payment().receive_variable_amount("Stable Channels", None) {
+                            Ok(offer) => {
+                                self.bolt12_offer = offer.to_string();
+                                self.show_toast("Offer ready!", "OK");
+                            }
+                            Err(e) => {
+                                self.show_toast("Offer failed", "!");
+                                self.status_message = format!("Bolt12 error: {}", e);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        fn show_convert_tab(&mut self, ui: &mut egui::Ui) {
+            // Fetch fee rate if not cached
+            if self.cached_fee_rate.is_none() {
+                self.fetch_fee_rate();
+            }
+
+            // Splice In (Deposit)
+            ui.group(|ui| {
+                ui.label(RichText::new("Deposit to Channel").strong().color(Color32::BLACK));
+                ui.add_space(6.0);
+
+                let balances = self.node.list_balances();
+                let total_onchain = balances.total_onchain_balance_sats;
+                let spendable_onchain = balances.spendable_onchain_balance_sats;
+
+                // Estimate fee: splice tx ~350 vB (2-in-2-out with witness),
+                // plus 20% margin for LDK's internal overhead
+                let estimated_fee: u64 = match self.cached_fee_rate {
+                    Some(rate) => ((rate * 350) * 6 / 5).max(1_000),
+                    None => 10_000, // conservative fallback
+                };
+                let anchor_reserve = balances.total_anchor_channels_reserve_sats;
+                let max_deposit = spendable_onchain.saturating_sub(estimated_fee);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("On-chain balance:").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new(format!("{} sats", spendable_onchain)).size(12.0).color(Color32::BLACK).strong());
+                    if anchor_reserve > 0 {
+                        ui.label(RichText::new(format!("({} reserved)", anchor_reserve)).size(10.0).color(Color32::GRAY));
+                    }
+                });
+
+                if max_deposit > 0 {
+                    let fee_label = match self.cached_fee_rate {
+                        Some(rate) => format!("~{} sats fee ({} sat/vB)", estimated_fee, rate),
+                        None => format!("~{} sats fee (estimate)", estimated_fee),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Max deposit:").size(11.0).color(Color32::DARK_GRAY));
+                        ui.label(RichText::new(format!("{} sats", max_deposit)).size(11.0).color(Color32::from_rgb(34, 139, 34)).strong());
+                    });
+                    ui.label(RichText::new(fee_label).size(10.0).color(Color32::GRAY));
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Move on-chain bitcoin into your Lightning channel.")
+                            .size(11.0).italics().color(Color32::from_rgb(100, 100, 100))
+                    );
+                    ui.add_space(6.0);
+                    if ui.button(format!("Deposit Max ({} sats)", max_deposit)).clicked() {
+                        self.splice_in_amount = max_deposit.to_string();
+                        self.do_splice_in();
+                    }
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                } else if total_onchain > 0 {
+                    ui.label(
+                        RichText::new(format!("Balance too low to cover tx fee (~{} sats)", estimated_fee))
+                            .size(11.0).color(Color32::from_rgb(200, 100, 100))
+                    );
+                    ui.add_space(8.0);
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Custom amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                    let splice_in_edit = egui::TextEdit::singleline(&mut self.splice_in_amount)
+                        .hint_text("0")
+                        .desired_width(100.0);
+                    ui.add(splice_in_edit);
+                    if ui.button("Deposit").clicked() {
+                        self.do_splice_in();
+                    }
+                });
+            });
+
+            ui.add_space(10.0);
+
+            // Splice Out (Withdraw)
+            ui.group(|ui| {
+                ui.label(RichText::new("Withdraw from Channel").strong().color(Color32::BLACK));
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("To address:").size(12.0).color(Color32::DARK_GRAY));
+                let addr_edit = egui::TextEdit::singleline(&mut self.splice_out_address)
+                    .hint_text("bc1q...")
+                    .desired_width(260.0);
+                ui.add(addr_edit);
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                    let splice_out_edit = egui::TextEdit::singleline(&mut self.splice_out_amount)
+                        .hint_text("0")
+                        .desired_width(100.0);
+                    ui.add(splice_out_edit);
+                    if ui.button("Withdraw").clicked() {
+                        self.do_splice_out();
+                    }
+                });
+            });
+
+            // Pending balances from channel closures
+            let balances = self.node.list_balances();
+            if !balances.pending_balances_from_channel_closures.is_empty() {
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.label(RichText::new("Pending from Channel Closures").strong().color(Color32::from_rgb(200, 120, 0)));
+                    ui.add_space(8.0);
+
+                    let mut total_pending: u64 = 0;
+                    for pending in &balances.pending_balances_from_channel_closures {
+                        let (status, amount) = match pending {
+                            ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } => {
+                                ("Pending broadcast", *amount_satoshis)
+                            },
+                            ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, latest_spending_txid, .. } => {
+                                let status = format!("Awaiting confirmation ({}...)", &latest_spending_txid.to_string()[..8]);
+                                (status.leak() as &str, *amount_satoshis)
+                            },
+                            ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                let status = format!("Confirming (height {})", confirmation_height);
+                                (status.leak() as &str, *amount_satoshis)
+                            },
+                        };
+                        total_pending += amount;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{} sats", amount)).size(12.0).color(Color32::BLACK).strong());
+                            ui.label(RichText::new(format!("- {}", status)).size(11.0).color(Color32::DARK_GRAY));
+                        });
+                    }
+
+                    if balances.pending_balances_from_channel_closures.len() > 1 {
+                        ui.add_space(5.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Total pending:").size(12.0).color(Color32::DARK_GRAY));
+                            ui.label(RichText::new(format!("{} sats", total_pending)).size(12.0).color(Color32::BLACK).strong());
+                        });
+                    }
+                });
+            }
+
+            // Claimable lightning balances
+            let has_claimable = balances.lightning_balances.iter().any(|b| {
+                !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
+            });
+            if has_claimable {
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.label(RichText::new("Claimable Balances").strong().color(Color32::from_rgb(0, 120, 200)));
+                    ui.add_space(8.0);
+
+                    for balance in &balances.lightning_balances {
+                        match balance {
+                            ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                    ui.label(RichText::new(format!("- claimable at block {}", confirmation_height)).size(11.0).color(Color32::DARK_GRAY));
+                                });
+                            },
+                            ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                    ui.label(RichText::new(format!("- claimable at height {}", timeout_height)).size(11.0).color(Color32::DARK_GRAY));
+                                });
+                            },
+                            ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                    ui.label(RichText::new(format!("- HTLC claimable at {}", claimable_height)).size(11.0).color(Color32::DARK_GRAY));
+                                });
+                            },
+                            ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                    ui.label(RichText::new(format!("- needs preimage, expires {}", expiry_height)).size(11.0).color(Color32::DARK_GRAY));
+                                });
+                            },
+                            ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                    ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(Color32::from_rgb(200, 50, 50)));
+                                });
+                            },
+                            _ => {}
+                        }
+                    }
+                });
+            }
         }
 
         fn show_buy_modal_ui(&mut self, ctx: &egui::Context) {
@@ -3802,90 +4052,120 @@
         }
 
         fn do_splice_in(&mut self) {
-            if let Ok(amount_sats) = self.splice_in_amount.parse::<u64>() {
-                let target_channel_id = {
-                    let sc = self.stable_channel.lock().unwrap();
-                    sc.channel_id
-                };
-
-                let channel_info = self.node.list_channels()
-                    .into_iter()
-                    .find(|ch| ch.channel_id == target_channel_id);
-
-                if let Some(ch) = channel_info {
-                    match self.node.splice_in(&ch.user_channel_id, ch.counterparty_node_id, amount_sats) {
-                        Ok(()) => {
-                            self.pending_splice = Some(PendingSplice {
-                                direction: "in".to_string(),
-                                amount_sats,
-                                address: None,
-                            });
-                            self.status_message = format!("Splice-in initiated: {} sats", amount_sats);
-                            self.show_toast("Deposit started", "+");
-                            self.splice_in_amount.clear();
-                            self.update_balances();
-                        }
-                        Err(e) => {
-                            self.status_message = format!("Splice-in failed: {}", e);
-                            self.show_toast("Deposit failed", "!");
-                        }
-                    }
-                } else {
-                    self.status_message = "No channel found".to_string();
+            let amount_sats = match self.splice_in_amount.parse::<u64>() {
+                Ok(0) => {
+                    self.show_toast("Enter an amount", "!");
+                    return;
                 }
-            } else {
-                self.status_message = "Enter a valid amount".to_string();
+                Ok(v) => v,
+                Err(_) => {
+                    self.show_toast("Enter a valid amount", "!");
+                    return;
+                }
+            };
+
+            let target_channel_id = {
+                let sc = self.stable_channel.lock().unwrap();
+                sc.channel_id
+            };
+
+            let channel_info = self.node.list_channels()
+                .into_iter()
+                .find(|ch| ch.channel_id == target_channel_id);
+
+            let ch = match channel_info {
+                Some(ch) => ch,
+                None => {
+                    self.show_toast("No channel found", "!");
+                    return;
+                }
+            };
+
+            match self.node.splice_in(&ch.user_channel_id, ch.counterparty_node_id, amount_sats) {
+                Ok(()) => {
+                    self.pending_splice = Some(PendingSplice {
+                        direction: "in".to_string(),
+                        amount_sats,
+                        address: None,
+                    });
+                    self.status_message = format!("Splice-in initiated: {} sats", amount_sats);
+                    self.show_toast("Deposit started", "+");
+                    self.splice_in_amount.clear();
+                    self.update_balances();
+                }
+                Err(e) => {
+                    self.status_message = format!("Splice-in failed: {}", e);
+                    self.show_toast(&format!("Deposit failed: {}", e), "!");
+                }
             }
         }
 
         fn do_splice_out(&mut self) {
-            if let Ok(amount_sats) = self.splice_out_amount.parse::<u64>() {
-                match ldk_node::bitcoin::Address::from_str(self.splice_out_address.trim()) {
-                    Ok(addr) => match addr.require_network(self.network) {
-                        Ok(valid_addr) => {
-                            let target_channel_id = {
-                                let sc = self.stable_channel.lock().unwrap();
-                                sc.channel_id
-                            };
-
-                            let channel_info = self.node.list_channels()
-                                .into_iter()
-                                .find(|ch| ch.channel_id == target_channel_id);
-
-                            if let Some(ch) = channel_info {
-                                let out_address = self.splice_out_address.clone();
-                                match self.node.splice_out(&ch.user_channel_id, ch.counterparty_node_id, &valid_addr, amount_sats) {
-                                    Ok(()) => {
-                                        self.pending_splice = Some(PendingSplice {
-                                            direction: "out".to_string(),
-                                            amount_sats,
-                                            address: Some(out_address),
-                                        });
-                                        self.status_message = format!("Splice-out initiated: {} sats", amount_sats);
-                                        self.show_toast("Withdrawal started", "-");
-                                        self.splice_out_address.clear();
-                                        self.splice_out_amount.clear();
-                                        self.update_balances();
-                                    }
-                                    Err(e) => {
-                                        self.status_message = format!("Splice-out failed: {}", e);
-                                        self.show_toast("Withdrawal failed", "!");
-                                    }
-                                }
-                            } else {
-                                self.status_message = "No channel found".to_string();
-                            }
-                        }
-                        Err(e) => {
-                            self.status_message = format!("Invalid network: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        self.status_message = format!("Invalid address: {}", e);
-                    }
+            let amount_sats = match self.splice_out_amount.parse::<u64>() {
+                Ok(0) => {
+                    self.show_toast("Enter an amount", "!");
+                    return;
                 }
-            } else {
-                self.status_message = "Enter a valid amount".to_string();
+                Ok(v) => v,
+                Err(_) => {
+                    self.show_toast("Enter a valid amount", "!");
+                    return;
+                }
+            };
+
+            if self.splice_out_address.trim().is_empty() {
+                self.show_toast("Enter an address", "!");
+                return;
+            }
+
+            let valid_addr = match ldk_node::bitcoin::Address::from_str(self.splice_out_address.trim()) {
+                Ok(addr) => match addr.require_network(self.network) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        self.show_toast("Wrong network", "!");
+                        return;
+                    }
+                },
+                Err(_) => {
+                    self.show_toast("Invalid address", "!");
+                    return;
+                }
+            };
+
+            let target_channel_id = {
+                let sc = self.stable_channel.lock().unwrap();
+                sc.channel_id
+            };
+
+            let ch = match self.node.list_channels()
+                .into_iter()
+                .find(|ch| ch.channel_id == target_channel_id)
+            {
+                Some(ch) => ch,
+                None => {
+                    self.show_toast("No channel found", "!");
+                    return;
+                }
+            };
+
+            let out_address = self.splice_out_address.clone();
+            match self.node.splice_out(&ch.user_channel_id, ch.counterparty_node_id, &valid_addr, amount_sats) {
+                Ok(()) => {
+                    self.pending_splice = Some(PendingSplice {
+                        direction: "out".to_string(),
+                        amount_sats,
+                        address: Some(out_address),
+                    });
+                    self.status_message = format!("Splice-out initiated: {} sats", amount_sats);
+                    self.show_toast("Withdrawal started", "-");
+                    self.splice_out_address.clear();
+                    self.splice_out_amount.clear();
+                    self.update_balances();
+                }
+                Err(e) => {
+                    self.status_message = format!("Splice-out failed: {}", e);
+                    self.show_toast(&format!("Withdrawal failed: {}", e), "!");
+                }
             }
         }
 
