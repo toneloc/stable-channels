@@ -845,6 +845,7 @@
                     }
 
                     let old = sc.expected_usd.0;
+                    println!("[trade] updating expected_usd: {} -> {} for channel {}", old, new_expected_usd, sc.channel_id);
 
                     // Update expected_usd to the new target
                     sc.expected_usd = USD::from_f64(new_expected_usd);
@@ -857,6 +858,10 @@
 
                     old
                 } else {
+                    println!("[trade] ERROR: channel {} not found in stable_channels list ({} entries)", chan_id_str, self.stable_channels.len());
+                    for sc in &self.stable_channels {
+                        println!("[trade]   have: {}", sc.channel_id);
+                    }
                     audit_event("TRADE_STABLE_ENTRY_NOT_FOUND", json!({
                         "channel_id": chan_id_str,
                         "expected_usd": new_expected_usd,
@@ -1219,16 +1224,18 @@
 
             pub fn save_stable_channels(&mut self) {
                 for sc in &self.stable_channels {
+                    let ch_id = sc.channel_id.to_string();
+                    println!("[save_stable] saving channel={} expected_usd={} stable_sats={}", ch_id, sc.expected_usd.0, sc.stable_sats);
                     if let Err(e) = self.db.save_channel(
-                        &sc.channel_id.to_string(),
+                        &ch_id,
                         sc.expected_usd.0,
                         sc.stable_sats,
                         sc.note.as_deref(),
                     ) {
-                        eprintln!("Error saving channel {} to DB: {}", sc.channel_id, e);
+                        eprintln!("[save_stable] ERROR saving channel {} to DB: {}", ch_id, e);
                     }
                 }
-                println!("Saved {} stable channels to DB", self.stable_channels.len());
+                println!("[save_stable] Saved {} stable channels to DB", self.stable_channels.len());
             }
 
             pub fn load_stable_channels(&mut self) {
