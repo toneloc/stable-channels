@@ -194,6 +194,8 @@
         modal_opened_at: std::time::Instant,
         transfer_tab: TransferTab,
         send_input: String,
+        send_all: bool,
+        send_amount: String,
         send_error: String,
         bolt12_offer: String,
 
@@ -401,6 +403,8 @@
                 modal_opened_at: std::time::Instant::now() - Duration::from_secs(10),
                 transfer_tab: TransferTab::Send,
                 send_input: String::new(),
+                send_all: true,
+                send_amount: String::new(),
                 send_error: String::new(),
                 bolt12_offer: String::new(),
                 show_lightning_receive: false,
@@ -835,12 +839,31 @@
                 match ldk_node::bitcoin::Address::from_str(&input) {
                     Ok(addr) => match addr.require_network(self.network) {
                         Ok(valid_addr) => {
-                            match self.node.onchain_payment().send_all_to_address(&valid_addr, false, None) {
+                            let result = if self.send_all {
+                                self.node.onchain_payment().send_all_to_address(&valid_addr, false, None)
+                            } else {
+                                match self.send_amount.trim().parse::<u64>() {
+                                    Ok(amount_sats) if amount_sats > 0 => {
+                                        self.node.onchain_payment().send_to_address(&valid_addr, amount_sats, None)
+                                    }
+                                    _ => {
+                                        self.send_error = "Enter a valid amount in sats".to_string();
+                                        return false;
+                                    }
+                                }
+                            };
+                            match result {
                                 Ok(txid) => {
                                     self.show_toast("Sent!", "OK");
                                     self.status_message = format!("On-chain TX: {}", txid);
                                     self.send_input.clear();
+                                    self.send_amount.clear();
                                     self.send_error.clear();
+                                    // Trigger a wallet sync so balance updates immediately
+                                    let node_clone = Arc::clone(&self.node);
+                                    std::thread::spawn(move || {
+                                        let _ = node_clone.sync_wallets();
+                                    });
                                     self.update_balances();
                                     return true;
                                 }
@@ -2106,18 +2129,32 @@
                 // Get fresh balances
                 let balances = self.node.list_balances();
 
-                // Pending sweep: only count PendingBroadcast (not yet broadcast)
-                // BroadcastAwaitingConfirmation and AwaitingThresholdConfirmations
-                // are already included in total_onchain_balance_sats
-                let pending_broadcast_sats: u64 = balances.pending_balances_from_channel_closures.iter()
+                // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
+                // These funds are NOT yet in total_onchain_balance_sats
+                // AwaitingThresholdConfirmations IS included in total_onchain_balance_sats
+                let pending_sweep_sats: u64 = balances.pending_balances_from_channel_closures.iter()
                     .map(|p| match p {
                         ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } => *amount_satoshis,
-                        _ => 0, // Already counted in onchain balance
+                        ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, .. } => *amount_satoshis,
+                        _ => 0, // AwaitingThresholdConfirmations: already in onchain balance
                     })
                     .sum();
-                let pending_sweep_btc = pending_broadcast_sats as f64 / 100_000_000.0;
+                let pending_sweep_btc = pending_sweep_sats as f64 / 100_000_000.0;
 
-                // Total onchain balance (includes confirmed + awaiting confirmation)
+                // Claimable lightning balances (from channel closures not yet swept)
+                let claimable_lightning_sats: u64 = balances.lightning_balances.iter()
+                    .map(|b| match b {
+                        ldk_node::LightningBalance::ClaimableOnChannelClose { .. } => 0, // still in active channel
+                        ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, .. } => *amount_satoshis,
+                        ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, .. } => *amount_satoshis,
+                        ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, .. } => *amount_satoshis,
+                        ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, .. } => *amount_satoshis,
+                        ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => *amount_satoshis,
+                    })
+                    .sum();
+                let claimable_lightning_btc = claimable_lightning_sats as f64 / 100_000_000.0;
+
+                // Total onchain balance (includes confirmed + AwaitingThresholdConfirmations)
                 let total_onchain_sats = balances.total_onchain_balance_sats;
                 let spendable_onchain_btc = total_onchain_sats as f64 / 100_000_000.0;
 
@@ -2136,12 +2173,12 @@
                 };
 
                 // If no active channel, stability is gone - show $0 stabilized
-                // All funds become native BTC (pending sweep + confirmed onchain)
+                // Claimable lightning balances are NOT added to total because they overlap
+                // with pending_sweep or onchain once the sweep tx is broadcast/confirmed.
                 let stabilized_usd = if has_active_channel { expected_usd } else { 0.0 };
                 let total_usd = if has_active_channel {
                     channel_usd + (spendable_onchain_btc * btc_price)
                 } else {
-                    // No double counting: pending + confirmed spendable
                     (pending_sweep_btc + spendable_onchain_btc) * btc_price
                 };
 
@@ -2177,7 +2214,18 @@
                         });
                     }
 
-                    // Bitcoin (pending) - show pending sweep from channel closure
+                    // Bitcoin (claimable) - from channel closure, waiting to be swept
+                    if claimable_lightning_btc > 0.000000001 {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Bitcoin (claimable)").size(14.0).color(Color32::from_rgb(200, 120, 0)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(format!("{:.8} BTC", claimable_lightning_btc)).size(14.0).color(Color32::BLACK).strong());
+                            });
+                        });
+                    }
+
+                    // Bitcoin (pending) - sweep tx broadcast, awaiting confirmation
                     if pending_sweep_btc > 0.000000001 {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
@@ -2752,7 +2800,7 @@
                     ui.label(RichText::new("Send Message").size(16.0).strong().color(Color32::BLACK));
                     ui.add_space(10.0);
 
-                    ui.label(RichText::new("Send a message to support").color(Color32::DARK_GRAY).size(12.0));
+                    ui.label(RichText::new("Send a message to the wallet devs.").color(Color32::DARK_GRAY).size(12.0));
                     ui.add_space(5.0);
 
                     ui.horizontal(|ui| {
@@ -3064,6 +3112,30 @@
                     };
                     ui.label(RichText::new(detected).size(11.0).color(color).strong());
                 });
+                ui.add_space(8.0);
+            }
+
+            // Show "Send all" checkbox for on-chain addresses
+            let is_onchain = {
+                let l = self.send_input.trim().to_lowercase();
+                l.starts_with("bc1") || l.starts_with("tb1")
+                    || l.starts_with("1") || l.starts_with("3")
+                    || l.starts_with("bcrt1")
+            };
+
+            if is_onchain {
+                ui.checkbox(&mut self.send_all, RichText::new("Send all").size(13.0));
+
+                if !self.send_all {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                        let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
+                            .hint_text("e.g. 50000")
+                            .desired_width(140.0);
+                        ui.add(amount_edit);
+                    });
+                }
                 ui.add_space(8.0);
             }
 
