@@ -38,6 +38,12 @@
     }
 
     #[derive(Clone, Debug, PartialEq)]
+    pub enum FundTab {
+        Lightning,
+        Onchain,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
     pub enum TransferTab {
         Send,
         Receive,
@@ -134,8 +140,10 @@
         pub btc_price: f64,
         show_onboarding: bool,
         qr_texture: Option<egui::TextureHandle>,
+        onchain_qr_texture: Option<egui::TextureHandle>,
         waiting_for_payment: bool,
         trigger_fund_wallet: bool,
+        fund_tab: FundTab,
         stable_channel: Arc<Mutex<StableChannel>>,
         background_started: bool,
         audit_log_path: String,
@@ -357,8 +365,10 @@
                 invoice_result: String::new(),
                 show_onboarding,
                 qr_texture: None,
+                onchain_qr_texture: None,
                 waiting_for_payment: false,
                 trigger_fund_wallet: false,
+                fund_tab: FundTab::Lightning,
                 stable_channel: Arc::clone(&stable_channel),
                 background_started: false,
                 btc_price,
@@ -785,6 +795,12 @@
                 let invoice_str = if lower.starts_with("lightning:") { &input[10..] } else { &input };
                 match Bolt11Invoice::from_str(invoice_str) {
                     Ok(invoice) => {
+                        // Check if we have an active channel before attempting payment
+                        let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+                        if !has_channel {
+                            self.send_error = "No Lightning channel open. Fund your wallet first.".to_string();
+                            return false;
+                        }
                         match self.node.bolt11_payment().send(&invoice, None) {
                             Ok(payment_id) => {
                                 self.status_message = format!("Payment sent, ID: {}", payment_id);
@@ -808,6 +824,11 @@
 
             // Try Bolt12 offer
             if lower.starts_with("lno1") {
+                let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+                if !has_channel {
+                    self.send_error = "No Lightning channel open. Fund your wallet first.".to_string();
+                    return false;
+                }
                 match Offer::from_str(&input) {
                     Ok(offer) => {
                         match self.node.bolt12_payment().send(&offer, None, None, None) {
@@ -952,6 +973,42 @@
                     false
                 }
             }
+        }
+
+        fn generate_qr_texture(data: &str, ctx: &egui::Context, name: &str) -> Option<egui::TextureHandle> {
+            let code = QrCode::new(data).ok()?;
+            let bits = code.to_colors();
+            let width = code.width();
+            let scale = 4usize;
+            let border = scale * 2;
+            let img_size = (width * scale) as u32;
+            let bordered_size = img_size + (border * 2) as u32;
+            let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255]));
+            for y in 0..width {
+                for x in 0..width {
+                    let color = if bits[y * width + x] == qrcode::Color::Dark { 0 } else { 255 };
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            imgbuf.put_pixel(
+                                (x * scale + dx) as u32 + border as u32,
+                                (y * scale + dy) as u32 + border as u32,
+                                Luma([color]),
+                            );
+                        }
+                    }
+                }
+            }
+            let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
+            let mut rgba = Vec::with_capacity(w * h * 4);
+            for p in imgbuf.pixels() {
+                let lum = p[0];
+                rgba.extend_from_slice(&[lum, lum, lum, 255]);
+            }
+            Some(ctx.load_texture(
+                name,
+                egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
+                TextureOptions::LINEAR,
+            ))
         }
 
         // TODO - for onchain deposits ...
@@ -1338,23 +1395,90 @@
                     }
 
 
-                    Event::PaymentSuccessful { payment_id: _, payment_hash, payment_preimage: _, fee_paid_msat: _ } => {
-                        audit_event("PAYMENT_SUCCESSFUL", json!({
-                            "payment_hash": format!("{payment_hash}"),
-                        }));
+                    Event::PaymentSuccessful { payment_id: _, payment_hash, payment_preimage: _, fee_paid_msat } => {
+                        let payment_hash_str = format!("{payment_hash}");
 
-                        // Note: We record outgoing trades separately via send_trade
-                        // This captures other outgoing payments (invoices, etc.)
-                        // For now we don't record here to avoid double-counting trade fees
+                        // Skip if already recorded (stability/trade payments record themselves)
+                        let already_recorded = self.db.payment_exists(&payment_hash_str).unwrap_or(false);
 
-                        self.status_message = format!("Sent payment {}", payment_hash);
+                        // Snapshot balance before refreshing so we can compute amount spent
+                        let balance_before_sats = {
+                            let sc = self.stable_channel.lock().unwrap();
+                            sc.stable_receiver_btc.sats
+                        };
+
+                        // Refresh channel balances from LDK
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
                             update_balances(&self.node, &mut sc);
                         }
-                        self.update_balances(); // Update UI immediately
 
-                        // Show toast for sent payment
+                        let (amount_sats, price) = {
+                            let sc = self.stable_channel.lock().unwrap();
+                            (balance_before_sats.saturating_sub(sc.stable_receiver_btc.sats), sc.latest_price)
+                        };
+
+                        audit_event("PAYMENT_SUCCESSFUL", json!({
+                            "payment_hash": payment_hash_str,
+                            "amount_sats": amount_sats,
+                            "fee_paid_msat": fee_paid_msat,
+                            "already_recorded": already_recorded,
+                        }));
+
+                        if !already_recorded {
+                            // Reconcile stable balance: if backing_sats exceeds user's
+                            // actual channel balance, the payment ate into the stable portion.
+                            {
+                                let mut sc = self.stable_channel.lock().unwrap();
+                                if sc.expected_usd.0 > 0.01 && sc.backing_sats > 0 {
+                                    let user_sats = sc.stable_receiver_btc.sats;
+                                    if sc.backing_sats > user_sats {
+                                        let overflow_sats = sc.backing_sats - user_sats;
+                                        if price > 0.0 {
+                                            let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
+                                            let old_expected = sc.expected_usd.0;
+                                            let new_expected = (old_expected - usd_to_deduct).max(0.0);
+
+                                            sc.expected_usd = USD::from_f64(new_expected);
+                                            let btc_amount = new_expected / price;
+                                            sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+
+                                            audit_event("OUTGOING_STABLE_DEDUCTED", json!({
+                                                "payment_hash": payment_hash_str,
+                                                "overflow_sats": overflow_sats,
+                                                "usd_deducted": usd_to_deduct,
+                                                "old_expected_usd": old_expected,
+                                                "new_expected_usd": new_expected,
+                                                "btc_price": price,
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Record outgoing payment in DB
+                            let amount_msat = amount_sats * 1000;
+                            let amount_usd = if price > 0.0 && amount_sats > 0 {
+                                Some(amount_sats as f64 / SATS_IN_BTC as f64 * price)
+                            } else {
+                                None
+                            };
+                            let _ = self.db.record_payment(
+                                Some(&payment_hash_str),
+                                "lightning",
+                                "sent",
+                                amount_msat,
+                                amount_usd,
+                                if price > 0.0 { Some(price) } else { None },
+                                None,
+                                "completed",
+                            );
+
+                            self.save_channel_settings();
+                        }
+
+                        self.update_balances();
+                        self.status_message = format!("Sent payment {}", payment_hash);
                         self.show_toast("Payment sent", "-");
                     }
         
@@ -1824,56 +1948,158 @@
                                 .strong()
                                 .color(egui::Color32::BLACK),
                         );
-                        ui.add_space(5.0);
+                        ui.add_space(3.0);
                         ui.label(
-                            egui::RichText::new("Send any amount of bitcoin here")
-                                .size(13.0)
-                                .color(egui::Color32::DARK_GRAY),
+                            egui::RichText::new("Get started for free")
+                                .size(14.0)
+                                .color(Color32::from_rgb(34, 139, 34)),
                         );
                         ui.add_space(12.0);
 
-                        if let Some(ref qr) = self.qr_texture {
-                            let img = egui::Image::from_texture(qr).max_size(egui::vec2(200.0, 200.0));
-                            ui.add(img);
-                        } else {
-                            ui.label("Loading QR...");
-                        }
+                        // Tab bar
+                        ui.columns(2, |cols| {
+                            let lightning_selected = self.fund_tab == FundTab::Lightning;
+                            let onchain_selected = self.fund_tab == FundTab::Onchain;
 
-                        ui.add_space(10.0);
+                            cols[0].vertical_centered(|ui| {
+                                let lightning_btn = egui::Button::new(
+                                    egui::RichText::new("Lightning").size(14.0)
+                                        .color(if lightning_selected { Color32::WHITE } else { Color32::BLACK })
+                                )
+                                .fill(if lightning_selected { Color32::from_rgb(30, 30, 30) } else { Color32::from_rgb(230, 230, 230) })
+                                .corner_radius(8.0)
+                                .min_size(egui::vec2(130.0, 34.0));
 
-                        // Truncated invoice display
-                        let invoice_display = if self.invoice_result.len() > 40 {
-                            format!("{}...", &self.invoice_result[..40])
-                        } else {
-                            self.invoice_result.clone()
-                        };
-                        ui.label(
-                            egui::RichText::new(invoice_display)
-                                .monospace()
-                                .size(10.0)
-                                .color(egui::Color32::DARK_GRAY),
-                        );
+                                if ui.add(lightning_btn).clicked() {
+                                    self.fund_tab = FundTab::Lightning;
+                                }
+                            });
 
-                        ui.add_space(15.0);
+                            cols[1].vertical_centered(|ui| {
+                                let onchain_btn = egui::Button::new(
+                                    egui::RichText::new("On-chain").size(14.0)
+                                        .color(if onchain_selected { Color32::WHITE } else { Color32::BLACK })
+                                )
+                                .fill(if onchain_selected { Color32::from_rgb(30, 30, 30) } else { Color32::from_rgb(230, 230, 230) })
+                                .corner_radius(8.0)
+                                .min_size(egui::vec2(130.0, 34.0));
 
-                        // Copy button
-                        let copy_btn = egui::Button::new(
-                                egui::RichText::new("Copy")
-                                    .color(egui::Color32::WHITE)
-                                    .size(15.0),
-                            )
-                            .min_size(egui::vec2(200.0, 42.0))
-                            .fill(egui::Color32::BLACK)
-                            .corner_radius(21.0);
+                                if ui.add(onchain_btn).clicked() {
+                                    self.fund_tab = FundTab::Onchain;
+                                    if self.on_chain_address.is_empty() {
+                                        self.get_address();
+                                    }
+                                    if self.onchain_qr_texture.is_none() && !self.on_chain_address.is_empty() {
+                                        self.onchain_qr_texture = Self::generate_qr_texture(&self.on_chain_address, ctx, "onchain_qr");
+                                    }
+                                }
+                            });
+                        });
 
-                        if ui.add(copy_btn).clicked() {
-                            ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
-                            self.show_toast("Copied!", "OK");
+                        ui.add_space(12.0);
+
+                        match self.fund_tab {
+                            FundTab::Lightning => {
+                                ui.label(
+                                    egui::RichText::new("Send any amount of bitcoin via Lightning")
+                                        .size(12.0)
+                                        .color(egui::Color32::DARK_GRAY),
+                                );
+                                ui.add_space(10.0);
+
+                                if let Some(ref qr) = self.qr_texture {
+                                    let img = egui::Image::from_texture(qr).max_size(egui::vec2(200.0, 200.0));
+                                    ui.add(img);
+                                } else {
+                                    ui.label("Loading QR...");
+                                }
+
+                                ui.add_space(10.0);
+
+                                let invoice_display = if self.invoice_result.len() > 40 {
+                                    format!("{}...", &self.invoice_result[..40])
+                                } else {
+                                    self.invoice_result.clone()
+                                };
+                                ui.label(
+                                    egui::RichText::new(invoice_display)
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(egui::Color32::DARK_GRAY),
+                                );
+
+                                ui.add_space(15.0);
+
+                                let copy_btn = egui::Button::new(
+                                        egui::RichText::new("Copy Invoice")
+                                            .color(egui::Color32::WHITE)
+                                            .size(15.0),
+                                    )
+                                    .min_size(egui::vec2(200.0, 42.0))
+                                    .fill(egui::Color32::BLACK)
+                                    .corner_radius(21.0);
+
+                                if ui.add(copy_btn).clicked() {
+                                    ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                                    self.show_toast("Copied!", "OK");
+                                }
+                            }
+                            FundTab::Onchain => {
+                                ui.label(
+                                    egui::RichText::new("Send bitcoin to this on-chain address")
+                                        .size(12.0)
+                                        .color(egui::Color32::DARK_GRAY),
+                                );
+                                ui.add_space(10.0);
+
+                                if !self.on_chain_address.is_empty() {
+                                    // Generate QR if not yet created
+                                    if self.onchain_qr_texture.is_none() {
+                                        self.onchain_qr_texture = Self::generate_qr_texture(&self.on_chain_address, ctx, "onchain_qr");
+                                    }
+
+                                    if let Some(ref qr) = self.onchain_qr_texture {
+                                        let img = egui::Image::from_texture(qr).max_size(egui::vec2(200.0, 200.0));
+                                        ui.add(img);
+                                    }
+
+                                    ui.add_space(10.0);
+
+                                    let addr_display = if self.on_chain_address.len() > 40 {
+                                        format!("{}...", &self.on_chain_address[..40])
+                                    } else {
+                                        self.on_chain_address.clone()
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(addr_display)
+                                            .monospace()
+                                            .size(10.0)
+                                            .color(egui::Color32::DARK_GRAY),
+                                    );
+
+                                    ui.add_space(15.0);
+
+                                    let copy_btn = egui::Button::new(
+                                            egui::RichText::new("Copy Address")
+                                                .color(egui::Color32::WHITE)
+                                                .size(15.0),
+                                        )
+                                        .min_size(egui::vec2(200.0, 42.0))
+                                        .fill(egui::Color32::BLACK)
+                                        .corner_radius(21.0);
+
+                                    if ui.add(copy_btn).clicked() {
+                                        ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                                        self.show_toast("Copied!", "OK");
+                                    }
+                                } else {
+                                    ui.spinner();
+                                }
+                            }
                         }
 
                         ui.add_space(8.0);
 
-                        // Cancel link
                         if ui.link(egui::RichText::new("Cancel").size(14.0).color(Color32::DARK_GRAY)).clicked() {
                             self.waiting_for_payment = false;
                         }
@@ -1916,7 +2142,13 @@
 
                     // Main headline
                     ui.label(
-                        egui::RichText::new("Bitcoin that holds its value")
+                        egui::RichText::new("Everything you need.")
+                            .size(28.0)
+                            .strong()
+                            .color(egui::Color32::BLACK),
+                    );
+                    ui.label(
+                        egui::RichText::new("Bitcoin only.")
                             .size(28.0)
                             .strong()
                             .color(egui::Color32::BLACK),
@@ -1926,12 +2158,12 @@
 
                     // One-liner explanation
                     ui.label(
-                        egui::RichText::new("Put in $100 of bitcoin today,")
+                        egui::RichText::new("Send, receive, save, and stabilize")
                             .size(16.0)
                             .color(egui::Color32::DARK_GRAY),
                     );
                     ui.label(
-                        egui::RichText::new("it's still worth $100 tomorrow.")
+                        egui::RichText::new("your bitcoin in one place.")
                             .size(16.0)
                             .color(egui::Color32::DARK_GRAY),
                     );
@@ -1940,19 +2172,19 @@
 
                     // Simple steps
                     ui.label(
-                        egui::RichText::new("1. Add bitcoin")
+                        egui::RichText::new("1. Fund your wallet with bitcoin")
                             .size(18.0)
                             .color(egui::Color32::BLACK),
                     );
                     ui.add_space(12.0);
                     ui.label(
-                        egui::RichText::new("2. It stays worth the same in dollars")
+                        egui::RichText::new("2. Trade into a stable dollar balance")
                             .size(18.0)
                             .color(egui::Color32::BLACK),
                     );
                     ui.add_space(12.0);
                     ui.label(
-                        egui::RichText::new("3. Withdraw anytime")
+                        egui::RichText::new("3. Trade out and withdraw anytime")
                             .size(18.0)
                             .color(egui::Color32::BLACK),
                     );
@@ -3122,6 +3354,8 @@
                     || l.starts_with("1") || l.starts_with("3")
                     || l.starts_with("bcrt1")
             };
+            let is_bolt11 = input_lower.starts_with("lnbc") || input_lower.starts_with("lntb") || input_lower.starts_with("lightning:");
+            let is_bolt12 = input_lower.starts_with("lno1");
 
             if is_onchain {
                 ui.checkbox(&mut self.send_all, RichText::new("Send all").size(13.0));
@@ -3139,16 +3373,63 @@
                 ui.add_space(8.0);
             }
 
-            let send_btn = egui::Button::new(RichText::new("Send").size(16.0).color(Color32::WHITE).strong())
-                .fill(Color32::from_rgb(30, 30, 30))
-                .corner_radius(10.0)
-                .min_size(egui::vec2(280.0, 44.0));
-            if ui.add(send_btn).clicked() {
-                if self.send_unified() {
-                    self.show_toast("Payment sent!", "OK");
-                    self.show_transfer_modal = false;
+            // Fee estimation
+            if !input_lower.is_empty() && (is_onchain || is_bolt11 || is_bolt12) {
+                if self.cached_fee_rate.is_none() {
+                    self.fetch_fee_rate();
+                }
+
+                let fee_text = if is_onchain {
+                    // On-chain: ~140 vB for simple send, ~250 vB for send-all (more inputs)
+                    let vbytes: u64 = if self.send_all { 250 } else { 140 };
+                    match self.cached_fee_rate {
+                        Some(rate) => {
+                            let estimated_fee = rate * vbytes;
+                            format!("Estimated fee: ~{} sats ({} sat/vB)", estimated_fee, rate)
+                        }
+                        None => "Estimating fee...".to_string(),
+                    }
+                } else if is_bolt11 {
+                    // Try to parse invoice and show amount + routing fee estimate
+                    let invoice_str = if input_lower.starts_with("lightning:") {
+                        &self.send_input.trim()[10..]
+                    } else {
+                        self.send_input.trim()
+                    };
+                    match Bolt11Invoice::from_str(invoice_str) {
+                        Ok(invoice) => {
+                            if let Some(amount_msat) = invoice.amount_milli_satoshis() {
+                                let amount_sats = amount_msat / 1000;
+                                let fee_estimate = (amount_sats / 100).max(1); // ~1% estimate
+                                format!("Amount: {} sats + ~{} sats routing fee", amount_sats, fee_estimate)
+                            } else {
+                                "Variable amount invoice (no fee estimate)".to_string()
+                            }
+                        }
+                        Err(_) => String::new(),
+                    }
+                } else {
+                    "Routing fee: typically < 1%".to_string()
+                };
+
+                if !fee_text.is_empty() {
+                    ui.label(RichText::new(&fee_text).size(11.0).color(Color32::DARK_GRAY));
+                    ui.add_space(8.0);
                 }
             }
+
+            ui.vertical_centered(|ui| {
+                let send_btn = egui::Button::new(RichText::new("Send").size(14.0).color(Color32::WHITE).strong())
+                    .fill(Color32::from_rgb(30, 30, 30))
+                    .corner_radius(10.0)
+                    .min_size(egui::vec2(200.0, 38.0));
+                if ui.add(send_btn).clicked() {
+                    if self.send_unified() {
+                        self.show_toast("Payment sent!", "OK");
+                        self.show_transfer_modal = false;
+                    }
+                }
+            });
 
             if !self.send_error.is_empty() {
                 ui.add_space(8.0);
