@@ -801,10 +801,25 @@
                             self.send_error = "No Lightning channel open. Fund your wallet first.".to_string();
                             return false;
                         }
-                        match self.node.bolt11_payment().send(&invoice, None) {
+                        let result = if invoice.amount_milli_satoshis().is_none() {
+                            // Variable-amount invoice — use amount from input
+                            match self.send_amount.trim().parse::<u64>() {
+                                Ok(sats) if sats > 0 => {
+                                    self.node.bolt11_payment().send_using_amount(&invoice, sats * 1000, None)
+                                }
+                                _ => {
+                                    self.send_error = "Enter an amount in sats".to_string();
+                                    return false;
+                                }
+                            }
+                        } else {
+                            self.node.bolt11_payment().send(&invoice, None)
+                        };
+                        match result {
                             Ok(payment_id) => {
                                 self.status_message = format!("Payment sent, ID: {}", payment_id);
                                 self.send_input.clear();
+                                self.send_amount.clear();
                                 self.send_error.clear();
                                 self.update_balances();
                                 return true;
@@ -831,10 +846,18 @@
                 }
                 match Offer::from_str(&input) {
                     Ok(offer) => {
-                        match self.node.bolt12_payment().send(&offer, None, None, None) {
+                        let amount_msat = match self.send_amount.trim().parse::<u64>() {
+                            Ok(sats) if sats > 0 => sats * 1000,
+                            _ => {
+                                self.send_error = "Enter an amount in sats".to_string();
+                                return false;
+                            }
+                        };
+                        match self.node.bolt12_payment().send_using_amount(&offer, amount_msat, None, None, None) {
                             Ok(payment_id) => {
                                 self.status_message = format!("Bolt12 payment sent, ID: {}", payment_id);
                                 self.send_input.clear();
+                                self.send_amount.clear();
                                 self.send_error.clear();
                                 self.update_balances();
                                 return true;
@@ -1378,7 +1401,17 @@
                             {
                                 let mut sc = self.stable_channel.lock().unwrap();
                                 update_balances(&self.node, &mut sc);
+
+                                // Recalculate backing_sats to equilibrium after receiving
+                                // a payment. Without this, incoming stability payments from
+                                // the LSP pile up as "native BTC" instead of being recognized
+                                // as part of the stable position.
+                                if sc.expected_usd.0 > 0.01 && sc.latest_price > 0.0 {
+                                    let btc_amount = sc.expected_usd.0 / sc.latest_price;
+                                    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+                                }
                             }
+                            self.save_channel_settings();
                             self.update_balances(); // Update UI immediately
                             self.show_onboarding = false;
                             self.waiting_for_payment = false;
@@ -2391,25 +2424,25 @@
                 let spendable_onchain_btc = total_onchain_sats as f64 / 100_000_000.0;
 
                 // Get balance info
-                let (channel_usd, btc_price, last_update, expected_usd, native_btc_from_channel) = {
+                let (btc_price, last_update, expected_usd, native_btc_from_channel) = {
                     let sc = self.stable_channel.lock().unwrap();
-                    let usd = if sc.is_stable_receiver {
-                        sc.stable_receiver_usd.0
-                    } else {
-                        sc.stable_provider_usd.0
-                    };
                     let timestamp = sc.timestamp;
                     // Native BTC in channel = channel value - stabilized portion
                     let native_channel_btc = sc.native_channel_btc.to_btc();
-                    (usd, sc.latest_price, timestamp, sc.expected_usd.0, native_channel_btc)
+                    (sc.latest_price, timestamp, sc.expected_usd.0, native_channel_btc)
                 };
 
                 // If no active channel, stability is gone - show $0 stabilized
                 // Claimable lightning balances are NOT added to total because they overlap
                 // with pending_sweep or onchain once the sweep tx is broadcast/confirmed.
                 let stabilized_usd = if has_active_channel { expected_usd } else { 0.0 };
+                // Use total_lightning_balance_sats (from get_claimable_balances) for Total Balance
+                // because outbound_capacity_msat excludes commit tx fees and fee-spike buffer,
+                // creating a persistent gap vs expected_usd. total_lightning_balance_sats
+                // includes those overhead sats (what you'd actually receive on close).
+                let lightning_usd = balances.total_lightning_balance_sats as f64 / 100_000_000.0 * btc_price;
                 let total_usd = if has_active_channel {
-                    channel_usd + (spendable_onchain_btc * btc_price)
+                    lightning_usd + (spendable_onchain_btc * btc_price)
                 } else {
                     (pending_sweep_btc + spendable_onchain_btc) * btc_price
                 };
@@ -3370,6 +3403,34 @@
                         ui.add(amount_edit);
                     });
                 }
+                ui.add_space(8.0);
+            }
+
+            // Amount field for Lightning (Bolt12 always needs it; Bolt11 for variable-amount invoices)
+            let needs_ln_amount = if is_bolt12 {
+                true
+            } else if is_bolt11 {
+                let inv_str = if input_lower.starts_with("lightning:") {
+                    &self.send_input.trim()[10..]
+                } else {
+                    self.send_input.trim()
+                };
+                Bolt11Invoice::from_str(inv_str)
+                    .map(|inv| inv.amount_milli_satoshis().is_none())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if needs_ln_amount {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                    let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
+                        .hint_text("e.g. 5000")
+                        .desired_width(140.0);
+                    ui.add(amount_edit);
+                });
                 ui.add_space(8.0);
             }
 
