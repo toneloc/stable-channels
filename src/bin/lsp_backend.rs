@@ -694,6 +694,20 @@
                             "amount_msat": amount_msat,
                             "payment_hash": format!("{}", payment_hash),
                         }));
+
+                        // Non-TLV payment is likely a stability payment from the user.
+                        // Reset backing_sats to equilibrium so the next check_stability
+                        // uses the correct baseline. Without this, backing_sats stays
+                        // stale after receiving, causing the LSP to underpay on the
+                        // next price swing.
+                        let current_price = get_cached_price();
+                        for sc in &mut self.stable_channels {
+                            if current_price > 0.0 {
+                                sc.latest_price = current_price;
+                            }
+                            stable::reconcile_incoming(sc);
+                        }
+                        self.save_stable_channels();
                     }
                 }
 
@@ -745,14 +759,29 @@
                         })
                         .unwrap_or(0);
 
-                    // Native BTC = user's total sats minus what's backing the stable position
+                    let old_expected = sc.expected_usd.0;
                     let native_sats = user_total_sats.saturating_sub(sc.backing_sats);
 
-                    // Spend from native first, overflow into stable
-                    let overflow_sats = total_sats.saturating_sub(native_sats);
+                    if let Some(usd_deducted) = stable::reconcile_forwarded(sc, user_total_sats, total_sats, self.btc_price) {
+                        let overflow_sats = total_sats.saturating_sub(native_sats);
+                        println!(
+                            "[forwarded] channel {} spent {} sats ({} native, {} from stable), expected_usd: ${:.2} -> ${:.2}",
+                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, sc.expected_usd.0
+                        );
 
-                    if overflow_sats == 0 {
-                        // Entire payment covered by native BTC — stable position untouched
+                        audit_event("STABLE_SPEND_DEDUCTED", json!({
+                            "channel_id": prev_channel_id.to_string(),
+                            "total_sats_spent": total_sats,
+                            "native_sats_spent": native_sats,
+                            "stable_sats_spent": overflow_sats,
+                            "usd_deducted": usd_deducted,
+                            "old_expected_usd": old_expected,
+                            "new_expected_usd": sc.expected_usd.0,
+                            "btc_price": self.btc_price,
+                        }));
+
+                        self.save_stable_channels();
+                    } else {
                         println!(
                             "[forwarded] channel {} spent {} sats from native BTC ({} native available), stable ${:.2} unchanged",
                             prev_channel_id, total_sats, native_sats, sc.expected_usd.0
@@ -763,37 +792,6 @@
                             "native_sats": native_sats,
                             "expected_usd": sc.expected_usd.0,
                         }));
-                    } else {
-                        // Overflow eats into the stable position
-                        let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * self.btc_price;
-                        let old_expected = sc.expected_usd.0;
-                        let new_expected = (old_expected - usd_to_deduct).max(0.0);
-
-                        sc.expected_usd = USD::from_f64(new_expected);
-
-                        // Recalculate backing_sats
-                        if self.btc_price > 0.0 {
-                            let btc_amount = new_expected / self.btc_price;
-                            sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-                        }
-
-                        println!(
-                            "[forwarded] channel {} spent {} sats ({} native, {} from stable), expected_usd: ${:.2} -> ${:.2}",
-                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, new_expected
-                        );
-
-                        audit_event("STABLE_SPEND_DEDUCTED", json!({
-                            "channel_id": prev_channel_id.to_string(),
-                            "total_sats_spent": total_sats,
-                            "native_sats_spent": native_sats,
-                            "stable_sats_spent": overflow_sats,
-                            "usd_deducted": usd_to_deduct,
-                            "old_expected_usd": old_expected,
-                            "new_expected_usd": new_expected,
-                            "btc_price": self.btc_price,
-                        }));
-
-                        self.save_stable_channels();
                     }
                 } else {
                     println!("[forwarded] no stable channel matched prev_channel_id={}", prev_channel_id);
@@ -956,14 +954,7 @@
                     let old = sc.expected_usd.0;
                     println!("[trade] updating expected_usd: {} -> {} for channel {}", old, new_expected_usd, sc.channel_id);
 
-                    // Update expected_usd to the new target
-                    sc.expected_usd = USD::from_f64(new_expected_usd);
-
-                    // Update backing_sats to track the BTC amount backing the stable portion
-                    if sc.latest_price > 0.0 {
-                        let btc_amount = new_expected_usd / sc.latest_price;
-                        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-                    }
+                    stable::apply_trade(sc, new_expected_usd, sc.latest_price);
 
                     old
                 } else {
