@@ -1105,13 +1105,7 @@
                     // Update local stable channel with new expected_usd and backing_sats
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
-                        sc.expected_usd = USD::from_f64(new_expected_usd);
-                        // Calculate backing_sats: the BTC amount backing the stable portion
-                        // backing_sats = expected_usd / price (in sats)
-                        if price > 0.0 {
-                            let btc_amount = new_expected_usd / price;
-                            sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-                        }
+                        stable::apply_trade(&mut sc, new_expected_usd, price);
                     }
 
                     // Persist to database
@@ -1401,15 +1395,7 @@
                             {
                                 let mut sc = self.stable_channel.lock().unwrap();
                                 update_balances(&self.node, &mut sc);
-
-                                // Recalculate backing_sats to equilibrium after receiving
-                                // a payment. Without this, incoming stability payments from
-                                // the LSP pile up as "native BTC" instead of being recognized
-                                // as part of the stable position.
-                                if sc.expected_usd.0 > 0.01 && sc.latest_price > 0.0 {
-                                    let btc_amount = sc.expected_usd.0 / sc.latest_price;
-                                    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-                                }
+                                stable::reconcile_incoming(&mut sc);
                             }
                             self.save_channel_settings();
                             self.update_balances(); // Update UI immediately
@@ -1463,29 +1449,15 @@
                             // actual channel balance, the payment ate into the stable portion.
                             {
                                 let mut sc = self.stable_channel.lock().unwrap();
-                                if sc.expected_usd.0 > 0.01 && sc.backing_sats > 0 {
-                                    let user_sats = sc.stable_receiver_btc.sats;
-                                    if sc.backing_sats > user_sats {
-                                        let overflow_sats = sc.backing_sats - user_sats;
-                                        if price > 0.0 {
-                                            let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
-                                            let old_expected = sc.expected_usd.0;
-                                            let new_expected = (old_expected - usd_to_deduct).max(0.0);
-
-                                            sc.expected_usd = USD::from_f64(new_expected);
-                                            let btc_amount = new_expected / price;
-                                            sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-
-                                            audit_event("OUTGOING_STABLE_DEDUCTED", json!({
-                                                "payment_hash": payment_hash_str,
-                                                "overflow_sats": overflow_sats,
-                                                "usd_deducted": usd_to_deduct,
-                                                "old_expected_usd": old_expected,
-                                                "new_expected_usd": new_expected,
-                                                "btc_price": price,
-                                            }));
-                                        }
-                                    }
+                                let old_expected = sc.expected_usd.0;
+                                if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
+                                    audit_event("OUTGOING_STABLE_DEDUCTED", json!({
+                                        "payment_hash": payment_hash_str,
+                                        "usd_deducted": usd_deducted,
+                                        "old_expected_usd": old_expected,
+                                        "new_expected_usd": sc.expected_usd.0,
+                                        "btc_price": price,
+                                    }));
                                 }
                             }
 
