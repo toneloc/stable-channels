@@ -32,6 +32,15 @@ pub fn get_cached_price_no_fetch() -> f64 {
     cache.price
 }
 
+/// Set the cached price directly — for regtest/integration testing.
+/// Bypasses all network price fetching.
+pub fn set_cached_price(price: f64) {
+    let mut cache = PRICE_CACHE.lock().unwrap();
+    cache.price = price;
+    cache.last_update = Instant::now();
+    cache.updating = false;
+}
+
 // Get cached price or fetch a new one if needed
 pub fn get_cached_price() -> f64 {
     let should_update = {

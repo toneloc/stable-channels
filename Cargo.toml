@@ -8,6 +8,7 @@ default = []
 user = []
 lsp = []
 exchange = []
+regtest = []
 
 [dependencies]
 chrono = "0.4"
@@ -67,4 +68,7 @@ path = "src/bin/lsp_frontend.rs"
 
 [dev-dependencies]
 tempfile = "3"
+electrsd = { version = "0.36.1", features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
+electrum-client = "0.24.0"
+rand = "0.9"
 
