@@ -229,6 +229,13 @@ impl Database {
         Ok(())
     }
 
+    /// Delete channel settings (e.g. after channel close)
+    pub fn delete_channel(&self, channel_id: &str) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM channels WHERE channel_id = ?1", params![channel_id])?;
+        Ok(())
+    }
+
     /// Load channel settings
     pub fn load_channel(&self, channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
