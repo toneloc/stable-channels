@@ -1493,6 +1493,18 @@
                             "reason": format!("{:?}", reason)
                         }));
                         self.status_message = format!("Channel {channel_id} has been closed");
+
+                        // Clear stable state so a new channel starts fresh
+                        {
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            if sc.channel_id == channel_id {
+                                let _ = self.db.delete_channel(&sc.channel_id.to_string());
+                                sc.expected_usd = USD::from_f64(0.0);
+                                sc.backing_sats = 0;
+                                sc.channel_id = ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]);
+                            }
+                        }
+
                         if self.node.list_channels().is_empty() {
                             self.show_onboarding = true;
                             self.waiting_for_payment = false;
