@@ -194,6 +194,9 @@ pub struct StableChannel {
     /// When expected_usd changes, this should be set to expected_usd / current_price
     #[serde(default)]
     pub backing_sats: u64,
+    /// Unix timestamp (seconds) of the last stability payment sent on this channel
+    #[serde(default)]
+    pub last_stability_payment: i64,
 }
 
 #[cfg(test)]
@@ -308,6 +311,7 @@ impl Default for StableChannel {
             note: Some("".to_string()),
             native_channel_btc: Bitcoin::from_sats(0),
             backing_sats: 0,
+            last_stability_payment: 0,
         }
     }
 }

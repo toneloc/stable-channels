@@ -82,6 +82,9 @@ pub const MAX_RISK_LEVEL: i32 = 100;
 /// Stability check thresholds
 pub const STABILITY_THRESHOLD_PERCENT: f64 = 0.1; // 0.1% from par
 
+/// Minimum seconds between stability payments on the same channel (cooldown)
+pub const STABILITY_PAYMENT_COOLDOWN_SECS: u64 = 120;
+
 /// Minimum USD amount to display in UI
 pub const MIN_DISPLAY_USD: f64 = 2.0;
 

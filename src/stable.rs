@@ -5,7 +5,8 @@ use ldk_node::{
 use ureq::Agent;
 use crate::price_feeds::get_cached_price;
 use crate::audit::audit_event;
-use crate::constants::{STABILITY_THRESHOLD_PERCENT, MAX_RISK_LEVEL, SATS_IN_BTC};
+use crate::constants::{STABILITY_THRESHOLD_PERCENT, MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS};
+use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
 
 // ================================================================
@@ -38,6 +39,7 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
     sc.expected_usd = USD::from_f64(new_expected);
     let btc_amount = new_expected / price;
     sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    recompute_native(sc);
 
     Some(usd_to_deduct)
 }
@@ -74,8 +76,16 @@ pub fn reconcile_forwarded(
         let btc_amount = new_expected / price;
         sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
     }
+    recompute_native(sc);
 
     Some(usd_to_deduct)
+}
+
+/// Recompute native_channel_btc from receiver sats and backing_sats.
+/// Call this after any mutation to backing_sats to keep native in sync.
+pub fn recompute_native(sc: &mut StableChannel) {
+    let native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+    sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 }
 
 /// Reconcile an incoming payment — reset backing_sats to equilibrium.
@@ -88,6 +98,7 @@ pub fn reconcile_incoming(sc: &mut StableChannel) {
         let btc_amount = sc.expected_usd.0 / sc.latest_price;
         sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
     }
+    recompute_native(sc);
 }
 
 /// Apply a trade — set new expected_usd and recalculate backing_sats.
@@ -101,6 +112,7 @@ pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
         let btc_amount = new_expected_usd / price;
         sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
     }
+    recompute_native(sc);
 }
 
 /// Get the current BTC/USD price, preferring cached value when available
@@ -129,13 +141,12 @@ pub fn update_balances<'update_balance_lifetime>(
     node: &Node,
     sc: &'update_balance_lifetime mut StableChannel,
 ) -> (bool, &'update_balance_lifetime mut StableChannel) {
-    if sc.latest_price == 0.0 {
-        sc.latest_price = get_cached_price();
-        
-        if sc.latest_price == 0.0 {
-            let agent = Agent::new();
-            sc.latest_price = get_current_price(&agent);
-        }
+    let cached = get_cached_price();
+    if cached > 0.0 {
+        sc.latest_price = cached;
+    } else if sc.latest_price == 0.0 {
+        let agent = Agent::new();
+        sc.latest_price = get_current_price(&agent);
     }
 
     // --- Update On-chain ---
@@ -177,10 +188,9 @@ pub fn update_balances<'update_balance_lifetime>(
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
 
-        // Native BTC is the portion not stabilized (total - expected_usd)
-        let total_receiver_usd = sc.stable_receiver_usd.0;
-        let native_usd = USD::from_f64((total_receiver_usd - sc.expected_usd.0).max(0.0));
-        sc.native_channel_btc = Bitcoin::from_usd(native_usd, sc.latest_price);
+        // Native BTC is the portion not backing the stable position
+        let native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+        sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 
         audit_event("BALANCE_UPDATE", json!({
             "channel_id": format!("{}", sc.channel_id),
@@ -302,10 +312,27 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
         return None;
     }
 
+    // Enforce cooldown between stability payments
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    if sc.last_stability_payment > 0
+        && (now - sc.last_stability_payment) < STABILITY_PAYMENT_COOLDOWN_SECS as i64
+    {
+        audit_event("STABILITY_COOLDOWN", json!({
+            "channel_id": format!("{}", sc.channel_id),
+            "seconds_since_last": now - sc.last_stability_payment,
+            "cooldown_secs": STABILITY_PAYMENT_COOLDOWN_SECS,
+        }));
+        return None;
+    }
+
     let amt = USD::to_msats(dollars_from_par, sc.latest_price);
     match node.spontaneous_payment().send(amt, sc.counterparty, None) {
         Ok(payment_id) => {
             sc.payment_made = true;
+            sc.last_stability_payment = now;
 
             // Recalculate backing_sats to new equilibrium after payment.
             // Without this, the same drift is detected every check cycle,
@@ -314,6 +341,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
                 let btc_amount = target_usd / current_price;
                 sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
             }
+            recompute_native(sc);
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
@@ -659,5 +687,67 @@ mod tests {
         apply_trade(&mut sc, 1000.0, 100_000.0);
         assert_eq!(sc.expected_usd.0, 1000.0);
         assert_eq!(sc.backing_sats, 1_000_000);
+    }
+
+    // ================================================================
+    // recompute_native
+    // ================================================================
+
+    #[test]
+    fn native_half_stable_half_native() {
+        // $500 stable out of 1M sats ($1000) → backing 500k, native 500k
+        let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
+        recompute_native(&mut sc);
+        assert_eq!(sc.native_channel_btc.sats, 500_000);
+    }
+
+    #[test]
+    fn native_fully_stabilized() {
+        // $1000 stable out of 1M sats → backing 1M, native 0
+        let mut sc = test_sc(1000.0, 100_000.0, 1_000_000);
+        recompute_native(&mut sc);
+        assert_eq!(sc.native_channel_btc.sats, 0);
+    }
+
+    #[test]
+    fn native_backing_exceeds_receiver_saturates() {
+        // Edge case: backing > receiver (stale backing) → native saturates to 0
+        let mut sc = test_sc(1000.0, 100_000.0, 800_000);
+        recompute_native(&mut sc);
+        assert_eq!(sc.native_channel_btc.sats, 0);
+    }
+
+    #[test]
+    fn native_updated_after_reconcile_incoming() {
+        // Simulate stability payment: receiver gained sats, reconcile should fix native
+        let mut sc = test_sc(500.0, 100_000.0, 1_200_000);
+        sc.backing_sats = 600_000; // drifted
+        reconcile_incoming(&mut sc);
+        // After reconcile: backing = 500k at $100k, native = 1.2M - 500k = 700k
+        assert_eq!(sc.native_channel_btc.sats, 1_200_000 - 500_000);
+    }
+
+    #[test]
+    fn native_updated_after_apply_trade() {
+        // Sell BTC: increase stable from $500 to $800
+        let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
+        apply_trade(&mut sc, 800.0, 100_000.0);
+        let expected_backing = (800.0 / 100_000.0 * 100_000_000.0) as u64;
+        assert_eq!(sc.native_channel_btc.sats, 1_000_000 - expected_backing);
+    }
+
+    #[test]
+    fn native_updated_after_reconcile_outgoing() {
+        // $1000 stable, backing 1M, user spent 100k → receiver now 900k
+        let mut sc = test_sc(1000.0, 100_000.0, 900_000);
+        reconcile_outgoing(&mut sc, 100_000.0);
+        // expected_usd reduced to ~$900, backing ~900k, native ≈ 0 (±1 sat from f64 truncation)
+        assert!(sc.native_channel_btc.sats <= 1, "native should be ~0, got {}", sc.native_channel_btc.sats);
+    }
+
+    #[test]
+    fn cooldown_field_default() {
+        let sc = StableChannel::default();
+        assert_eq!(sc.last_stability_payment, 0);
     }
 }

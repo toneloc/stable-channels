@@ -696,17 +696,49 @@
                         }));
 
                         // Non-TLV payment is likely a stability payment from the user.
-                        // Reset backing_sats to equilibrium so the next check_stability
-                        // uses the correct baseline. Without this, backing_sats stays
-                        // stale after receiving, causing the LSP to underpay on the
-                        // next price swing.
+                        // Identify which channel received it by comparing balances,
+                        // then reconcile only that channel.
                         let current_price = get_cached_price();
-                        for sc in &mut self.stable_channels {
+
+                        // Snapshot LSP-side balances before refresh
+                        let balances_before: Vec<(ldk_node::lightning::ln::types::ChannelId, u64)> =
+                            self.node.list_channels().iter().map(|c| {
+                                let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
+                                (c.channel_id, (c.outbound_capacity_msat / 1000) + unspendable)
+                            }).collect();
+
+                        // Refresh channel state
+                        self.update_balances();
+
+                        // Find which channel's LSP balance increased (received sats from user)
+                        let mut reconciled = false;
+                        for (ch_id, old_lsp_sats) in &balances_before {
+                            if let Some(chan) = self.node.list_channels().iter().find(|c| c.channel_id == *ch_id) {
+                                let unspendable = chan.unspendable_punishment_reserve.unwrap_or(0);
+                                let new_lsp_sats = (chan.outbound_capacity_msat / 1000) + unspendable;
+                                if new_lsp_sats > *old_lsp_sats {
+                                    if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.channel_id == *ch_id) {
+                                        if current_price > 0.0 {
+                                            sc.latest_price = current_price;
+                                        }
+                                        stable::reconcile_incoming(sc);
+                                        reconciled = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Fallback: if we couldn't identify the channel, reconcile
+                        // the only stable channel if there's exactly one
+                        if !reconciled && self.stable_channels.len() == 1 {
+                            let sc = &mut self.stable_channels[0];
                             if current_price > 0.0 {
                                 sc.latest_price = current_price;
                             }
                             stable::reconcile_incoming(sc);
                         }
+
                         self.save_stable_channels();
                     }
                 }
@@ -1290,8 +1322,9 @@
                             note,
                             native_channel_btc: Bitcoin::from_sats(0),
                             backing_sats,
+                            last_stability_payment: 0,
                         };
-            
+
                         let mut found = false;
                         for sc in &mut self.stable_channels {
                             if sc.channel_id == channel.channel_id {
@@ -1412,6 +1445,7 @@
                                 note: entry.note.clone(),
                                 native_channel_btc: Bitcoin::from_sats(0),
                                 backing_sats: entry.backing_sats,
+                                last_stability_payment: 0,
                             };
 
                             self.stable_channels.push(stable_channel);

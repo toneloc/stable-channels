@@ -343,6 +343,7 @@
                 note: Some(String::new()),
                 native_channel_btc: Bitcoin::from_sats(0),
                 backing_sats: 0,
+                last_stability_payment: 0,
             };
             let stable_channel = Arc::new(Mutex::new(sc_init));
 
