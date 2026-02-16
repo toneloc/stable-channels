@@ -1498,18 +1498,23 @@
                         // Clear stable state so a new channel starts fresh
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
-                            if sc.channel_id == channel_id {
+                            // Always clear if this is our channel OR if no channels remain
+                            if sc.channel_id == channel_id || self.node.list_channels().is_empty() {
                                 let _ = self.db.delete_channel(&sc.channel_id.to_string());
                                 sc.expected_usd = USD::from_f64(0.0);
                                 sc.backing_sats = 0;
+                                sc.native_channel_btc = Bitcoin::from_sats(0);
+                                sc.stable_receiver_btc = Bitcoin::from_sats(0);
+                                sc.stable_receiver_usd = USD::from_f64(0.0);
                                 sc.channel_id = ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]);
                             }
                         }
 
-                        if self.node.list_channels().is_empty() {
-                            self.show_onboarding = true;
-                            self.waiting_for_payment = false;
-                        }
+                        // Don't show onboarding after close — the update() loop
+                        // already checks for on-chain/pending funds before deciding.
+                        // Setting it here would flash the onboarding screen before
+                        // the closed channel's funds appear on-chain.
+                        self.waiting_for_payment = false;
                     }
 
                     Event::SplicePending { channel_id, new_funding_txo, .. } => {
@@ -2391,18 +2396,8 @@
                     .sum();
                 let pending_sweep_btc = pending_sweep_sats as f64 / 100_000_000.0;
 
-                // Claimable lightning balances (from channel closures not yet swept)
-                let claimable_lightning_sats: u64 = balances.lightning_balances.iter()
-                    .map(|b| match b {
-                        ldk_node::LightningBalance::ClaimableOnChannelClose { .. } => 0, // still in active channel
-                        ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, .. } => *amount_satoshis,
-                        ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, .. } => *amount_satoshis,
-                        ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, .. } => *amount_satoshis,
-                        ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, .. } => *amount_satoshis,
-                        ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => *amount_satoshis,
-                    })
-                    .sum();
-                let claimable_lightning_btc = claimable_lightning_sats as f64 / 100_000_000.0;
+                // NOTE: lightning_balances (claimable) intentionally not displayed —
+                // LDK reports stale entries long after sweep confirms and funds are spent.
 
                 // Total onchain balance (includes confirmed + AwaitingThresholdConfirmations)
                 let total_onchain_sats = balances.total_onchain_balance_sats;
@@ -2445,13 +2440,15 @@
                 ui.group(|ui| {
                     ui.set_min_width(280.0);
 
-                    // Stabilized Bitcoin - always show (will be $0 if no active channel)
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Stabilized Bitcoin").size(14.0).color(Color32::DARK_GRAY));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(Self::format_price(stabilized_usd)).size(14.0).color(Color32::BLACK).strong());
+                    // Stabilized Bitcoin - only show when there's an active stable position
+                    if stabilized_usd > 0.01 {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Stabilized Bitcoin").size(14.0).color(Color32::DARK_GRAY));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(Self::format_price(stabilized_usd)).size(14.0).color(Color32::BLACK).strong());
+                            });
                         });
-                    });
+                    }
 
                     // Bitcoin (channel) - only show if active channel and > 0
                     if has_active_channel && native_btc_from_channel > 0.000000001 {
@@ -2464,16 +2461,10 @@
                         });
                     }
 
-                    // Bitcoin (claimable) - from channel closure, waiting to be swept
-                    if claimable_lightning_btc > 0.000000001 {
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Bitcoin (claimable)").size(14.0).color(Color32::from_rgb(200, 120, 0)));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(format!("{:.8} BTC", claimable_lightning_btc)).size(14.0).color(Color32::BLACK).strong());
-                            });
-                        });
-                    }
+                    // NOTE: "Bitcoin (claimable)" removed — LDK's lightning_balances()
+                    // reports stale ClaimableAwaitingConfirmations entries long after the
+                    // sweep tx confirms and funds are spent. The on-chain balance already
+                    // reflects spendable sats; "Bitcoin (pending)" covers in-flight sweeps.
 
                     // Bitcoin (pending) - sweep tx broadcast, awaiting confirmation
                     if pending_sweep_btc > 0.000000001 {
@@ -2589,7 +2580,7 @@
                         (None, None) => None,
                     };
 
-                    if total_pending > 0 || total_claimable > 0 {
+                    if total_pending > 0 {
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("⏳").size(14.0));
