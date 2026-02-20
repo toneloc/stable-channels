@@ -58,8 +58,6 @@ impl Database {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
-                usd_weight REAL NOT NULL DEFAULT 1.0,
-                btc_weight REAL NOT NULL DEFAULT 0.0,
                 expected_usd REAL NOT NULL DEFAULT 0.0,
                 note TEXT,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
@@ -74,25 +72,16 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel_id TEXT NOT NULL,
                 action TEXT NOT NULL,
-                asset_type TEXT NOT NULL DEFAULT 'BTC',
                 amount_usd REAL NOT NULL,
                 amount_btc REAL NOT NULL DEFAULT 0.0,
                 btc_price REAL NOT NULL,
                 fee_usd REAL NOT NULL DEFAULT 0.0,
-                old_btc_percent INTEGER,
-                new_btc_percent INTEGER,
                 payment_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )",
             [],
         )?;
-
-        // Migration: Add asset_type column to existing trades table if missing
-        let _ = conn.execute(
-            "ALTER TABLE trades ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'BTC'",
-            [],
-        ); // Ignore error if column already exists
 
         // Migration: Add amount_btc column to existing trades table if missing
         let _ = conn.execute(
@@ -145,6 +134,12 @@ impl Database {
         // Migration: Add payment_type column to existing payments table if missing
         let _ = conn.execute(
             "ALTER TABLE payments ADD COLUMN payment_type TEXT NOT NULL DEFAULT 'manual'",
+            [],
+        ); // Ignore error if column already exists
+
+        // Migration: Add fee_msat column to existing payments table if missing
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN fee_msat INTEGER NOT NULL DEFAULT 0",
             [],
         ); // Ignore error if column already exists
 
@@ -217,8 +212,8 @@ impl Database {
     ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO channels (channel_id, usd_weight, btc_weight, expected_usd, stable_sats, note)
-             VALUES (?1, 1.0, 0.0, ?2, ?3, ?4)
+            "INSERT INTO channels (channel_id, expected_usd, stable_sats, note)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(channel_id) DO UPDATE SET
                 expected_usd = ?2,
                 stable_sats = ?3,
@@ -292,25 +287,20 @@ impl Database {
         &self,
         channel_id: &str,
         action: &str,
-        asset_type: &str,
         amount_usd: f64,
         amount_btc: f64,
         btc_price: f64,
         fee_usd: f64,
-        old_btc_percent: Option<u8>,
-        new_btc_percent: Option<u8>,
         payment_id: Option<&str>,
         status: &str,
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO trades (channel_id, action, asset_type, amount_usd, amount_btc, btc_price, fee_usd,
-                                 old_btc_percent, new_btc_percent, payment_id, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO trades (channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
+                                 payment_id, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                channel_id, action, asset_type, amount_usd, amount_btc, btc_price, fee_usd,
-                old_btc_percent.map(|v| v as i32),
-                new_btc_percent.map(|v| v as i32),
+                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
                 payment_id, status
             ],
         )?;
@@ -331,8 +321,8 @@ impl Database {
     pub fn get_recent_trades(&self, channel_id: &str, limit: usize) -> SqliteResult<Vec<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, channel_id, action, asset_type, amount_usd, amount_btc, btc_price, fee_usd,
-                    old_btc_percent, new_btc_percent, payment_id, status, created_at
+            "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
+                    payment_id, status, created_at
              FROM trades
              WHERE channel_id = ?1
              ORDER BY id DESC
@@ -344,16 +334,13 @@ impl Database {
                 id: row.get(0)?,
                 channel_id: row.get(1)?,
                 action: row.get(2)?,
-                asset_type: row.get(3)?,
-                amount_usd: row.get(4)?,
-                amount_btc: row.get(5)?,
-                btc_price: row.get(6)?,
-                fee_usd: row.get(7)?,
-                old_btc_percent: row.get::<_, Option<i32>>(8)?.map(|v| v as u8),
-                new_btc_percent: row.get::<_, Option<i32>>(9)?.map(|v| v as u8),
-                payment_id: row.get(10)?,
-                status: row.get(11)?,
-                created_at: row.get(12)?,
+                amount_usd: row.get(3)?,
+                amount_btc: row.get(4)?,
+                btc_price: row.get(5)?,
+                fee_usd: row.get(6)?,
+                payment_id: row.get(7)?,
+                status: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
 
@@ -593,11 +580,45 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Update payment status (pending -> completed/failed) and optionally set fee
+    pub fn update_payment_status(&self, payment_db_id: i64, status: &str, fee_msat: Option<u64>) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        if let Some(fee) = fee_msat {
+            conn.execute(
+                "UPDATE payments SET status = ?1, fee_msat = ?2 WHERE id = ?3",
+                params![status, fee as i64, payment_db_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE payments SET status = ?1 WHERE id = ?2",
+                params![status, payment_db_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Update payment status by payment_id string and optionally set fee
+    pub fn update_payment_status_by_pid(&self, payment_id: &str, status: &str, fee_msat: Option<u64>) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = if let Some(fee) = fee_msat {
+            conn.execute(
+                "UPDATE payments SET status = ?1, fee_msat = ?2 WHERE payment_id = ?3 AND status = 'pending'",
+                params![status, fee as i64, payment_id],
+            )?
+        } else {
+            conn.execute(
+                "UPDATE payments SET status = ?1 WHERE payment_id = ?2 AND status = 'pending'",
+                params![status, payment_id],
+            )?
+        };
+        Ok(rows)
+    }
+
     /// Get recent payments
     pub fn get_recent_payments(&self, limit: usize) -> SqliteResult<Vec<PaymentRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at
+            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat
              FROM payments
              ORDER BY id DESC
              LIMIT ?1"
@@ -615,6 +636,7 @@ impl Database {
                 counterparty: row.get(7)?,
                 status: row.get(8)?,
                 created_at: row.get(9)?,
+                fee_msat: row.get::<_, i64>(10).unwrap_or(0) as u64,
             })
         })?;
 
@@ -704,13 +726,10 @@ pub struct TradeRecord {
     pub id: i64,
     pub channel_id: String,
     pub action: String,
-    pub asset_type: String,
     pub amount_usd: f64,
     pub amount_btc: f64,
     pub btc_price: f64,
     pub fee_usd: f64,
-    pub old_btc_percent: Option<u8>,
-    pub new_btc_percent: Option<u8>,
     pub payment_id: Option<String>,
     pub status: String,
     pub created_at: i64,
@@ -736,6 +755,7 @@ pub struct PaymentRecord {
     pub counterparty: Option<String>,
     pub status: String,
     pub created_at: i64,
+    pub fee_msat: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -807,19 +827,18 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         db.record_trade(
-            "ch1", "buy", "BTC", 25.0, 0.00025, 100000.0, 0.25,
-            Some(50), Some(75), Some("pay123"), "completed"
+            "ch1", "buy", 25.0, 0.00025, 100000.0, 0.25,
+            Some("pay123"), "completed"
         ).unwrap();
 
         db.record_trade(
-            "ch1", "sell", "BTC", 10.0, 0.000099, 101000.0, 0.10,
-            Some(75), Some(65), Some("pay456"), "completed"
+            "ch1", "sell", 10.0, 0.000099, 101000.0, 0.10,
+            Some("pay456"), "completed"
         ).unwrap();
 
         let trades = db.get_recent_trades("ch1", 10).unwrap();
         assert_eq!(trades.len(), 2);
         assert_eq!(trades[0].action, "sell"); // Most recent first
-        assert_eq!(trades[0].asset_type, "BTC");
         assert_eq!(trades[1].action, "buy");
     }
 
