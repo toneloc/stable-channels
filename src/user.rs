@@ -2036,9 +2036,9 @@
                     ))
                     .order(egui::Order::Foreground)
                     .show(ctx, |ui| {
-                        egui::Frame::none()
+                        egui::Frame::NONE
                             .fill(bg_color)
-                            .rounding(12.0)
+                            .corner_radius(12.0)
                             .inner_margin(egui::Margin::symmetric(16, 12))
                             .shadow(egui::epaint::Shadow {
                                 offset: [0, 2],
@@ -2212,7 +2212,7 @@
                                     .corner_radius(21.0);
 
                                 if ui.add(copy_btn).clicked() {
-                                    ui.output_mut(|o| o.copied_text = self.invoice_result.clone());
+                                    ui.ctx().copy_text(self.invoice_result.clone());
                                     self.show_toast("Copied!", "OK");
                                 }
                             }
@@ -2261,7 +2261,7 @@
                                         .corner_radius(21.0);
 
                                     if ui.add(copy_btn).clicked() {
-                                        ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                                        ui.ctx().copy_text(self.on_chain_address.clone());
                                         self.show_toast("Copied!", "OK");
                                     }
                                 } else {
@@ -2433,11 +2433,9 @@
                         .on_hover_cursor(CursorIcon::PointingHand);
                     
                     if resp.clicked() {
-                        ui.output_mut(|o| {
-                            o.open_url = Some(OpenUrl {
-                                url: "https://www.stablechannels.com".to_owned(),
-                                new_tab: true,
-                            });
+                        ui.ctx().open_url(OpenUrl {
+                            url: "https://www.stablechannels.com".to_owned(),
+                            new_tab: true,
                         });
                     }
                 
@@ -2448,7 +2446,7 @@
                         let wallet_id = self.node.node_id().to_string();
                         ui.monospace(&wallet_id[..7.min(wallet_id.len())]);
                         if ui.small_button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = wallet_id);
+                            ui.ctx().copy_text(wallet_id);
                         }
                     });
 
@@ -2614,9 +2612,9 @@
                     if synth_w > 0.5 {
                         let synth_rect = egui::Rect::from_min_size(rect.min, egui::vec2(synth_w, bar_height));
                         let rounding = if btc_w < 0.5 {
-                            egui::Rounding::same(6)
+                            egui::CornerRadius::same(6)
                         } else {
-                            egui::Rounding { nw: 6, sw: 6, ne: 0, se: 0 }
+                            egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }
                         };
                         painter.rect_filled(synth_rect, rounding, synth_color);
                     }
@@ -2626,9 +2624,9 @@
                             egui::vec2(btc_w, bar_height),
                         );
                         let rounding = if synth_w < 0.5 {
-                            egui::Rounding::same(6)
+                            egui::CornerRadius::same(6)
                         } else {
-                            egui::Rounding { nw: 0, sw: 0, ne: 6, se: 6 }
+                            egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }
                         };
                         painter.rect_filled(btc_rect, rounding, btc_color);
                     }
@@ -3199,7 +3197,7 @@
                         ui.label(RichText::new("Wallet ID:").color(Color32::DARK_GRAY));
                         ui.label(RichText::new(&wallet_id[..7.min(wallet_id.len())]).monospace().size(12.0).color(Color32::BLACK));
                         if ui.small_button("Copy").clicked() {
-                            ui.output_mut(|o| o.copied_text = wallet_id.clone());
+                            ui.ctx().copy_text(wallet_id.clone());
                             self.show_toast("Copied!", "OK");
                         }
                     });
@@ -3212,7 +3210,7 @@
                             ui.label(RichText::new("Channel ID:").color(Color32::DARK_GRAY));
                             ui.label(RichText::new(&channel_id[..7.min(channel_id.len())]).monospace().size(12.0).color(Color32::BLACK));
                             if ui.small_button("Copy").clicked() {
-                                ui.output_mut(|o| o.copied_text = channel_id.clone());
+                                ui.ctx().copy_text(channel_id.clone());
                                 self.show_toast("Copied!", "OK");
                             }
                         });
@@ -3909,7 +3907,7 @@
                     ui.add_space(5.0);
                     ui.label(RichText::new(&self.on_chain_address).monospace().size(10.0).color(Color32::DARK_GRAY));
                     if ui.small_button("Copy").clicked() {
-                        ui.output_mut(|o| o.copied_text = self.on_chain_address.clone());
+                        ui.ctx().copy_text(self.on_chain_address.clone());
                         self.show_toast("Copied!", "OK");
                     }
                 }
@@ -3934,7 +3932,7 @@
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if ui.button("Copy Invoice").clicked() {
-                                ui.output_mut(|o| o.copied_text = self.lightning_receive_invoice.clone());
+                                ui.ctx().copy_text(self.lightning_receive_invoice.clone());
                                 self.show_toast("Copied!", "OK");
                             }
                             if ui.button("Done").clicked() {
@@ -3983,7 +3981,7 @@
                     ui.add_space(5.0);
                     ui.horizontal(|ui| {
                         if ui.button("Copy Offer").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.bolt12_offer.clone());
+                            ui.ctx().copy_text(self.bolt12_offer.clone());
                             self.show_toast("Copied!", "OK");
                         }
                         if ui.button("Done").clicked() {

@@ -250,7 +250,7 @@
 
         /// GET /api/channels
         pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
-            let mut app = APP.lock().expect("APP mutex poisoned");
+            let app = APP.lock().expect("APP mutex poisoned");
             let price = app.btc_price;                       // cache once
 
             let out: Vec<ChannelInfo> = app
@@ -303,7 +303,7 @@
 
         /// POST /api/close_channel
         async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
-            let mut app = APP.lock().unwrap();
+            let app = APP.lock().unwrap();
             for chan in app.node.list_channels() {
                 if hex::encode(chan.channel_id.0) == id {
                     let res = app.node.close_channel(&chan.user_channel_id, chan.counterparty_node_id);

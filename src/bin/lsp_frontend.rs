@@ -312,7 +312,7 @@ impl Dashboard {
                                 ui.horizontal(|ui| {
                                     ui.label(note_text.clone());
                                     if ui.button("📋").clicked() {
-                                        ui.output_mut(|o| o.copied_text = note_text);
+                                        ui.ctx().copy_text(note_text);
                                     }
                                 });
 
@@ -320,7 +320,7 @@ impl Dashboard {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(short(&ch.id, 8)).monospace());
                                     if ui.small_button("⧉").on_hover_text("Copy full ID").clicked() {
-                                        ui.output_mut(|o| o.copied_text = ch.id.clone());
+                                        ui.ctx().copy_text(ch.id.clone());
                                     }
                                 });
     
@@ -328,7 +328,7 @@ impl Dashboard {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(short(&ch.remote_pubkey, 8)).monospace());
                                     if ui.small_button("⧉").on_hover_text("Copy full peer key").clicked() {
-                                        ui.output_mut(|o| o.copied_text = ch.remote_pubkey.clone());
+                                        ui.ctx().copy_text(ch.remote_pubkey.clone());
                                     }
                                 });
     
@@ -460,7 +460,7 @@ impl Dashboard {
             if !self.onchain_address.is_empty() {
                 ui.label(&self.onchain_address);
                 if ui.button("Copy").clicked() {
-                    ui.output_mut(|o| o.copied_text = self.onchain_address.clone());
+                    ui.ctx().copy_text(self.onchain_address.clone());
                 }
             }
         });
