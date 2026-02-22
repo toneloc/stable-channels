@@ -88,6 +88,12 @@ pub const STABILITY_PAYMENT_COOLDOWN_SECS: u64 = 120;
 /// Minimum USD amount to display in UI
 pub const MIN_DISPLAY_USD: f64 = 2.0;
 
+/// Auto-sweep: minimum on-chain sats to trigger splice_in
+pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
+
+/// Auto-sweep: sats reserved for the splice transaction fee
+pub const AUTO_SWEEP_FEE_RESERVE_SATS: u64 = 5_000;
+
 // ============================================================================
 // CHANNEL CONSTANTS
 // ============================================================================

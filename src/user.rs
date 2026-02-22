@@ -49,7 +49,6 @@
     pub enum TransferTab {
         Send,
         Receive,
-        Convert,
     }
 
     #[derive(Clone, Debug)]
@@ -178,13 +177,14 @@
         pub on_chain_amount: String,
         pub onchain_send_address: String,
         pub onchain_send_amount: String,
-        pub splice_in_amount: String,
-        pub splice_out_amount: String,
-        pub splice_out_address: String,
         pending_splice: Option<PendingSplice>,
+        auto_sweep_in_progress: Arc<std::sync::atomic::AtomicBool>,
+        /// On-chain sats at the time auto-sweep was initiated; used to detect confirmation.
+        auto_sweep_onchain_at_start: Arc<std::sync::atomic::AtomicU64>,
         pub show_onchain_receive: bool,
         pub show_onchain_send: bool,
-        pub show_advanced: bool, 
+        pub show_advanced: bool,
+        settings_show_sats: bool,
         balance_last_update: std::time::Instant,
         confirm_close_popup: bool,
         pub stable_message: String,
@@ -389,10 +389,8 @@
 
             // Show onboarding only if no channels AND no funds at all (pending or on-chain)
             let balances = node.list_balances();
-            let has_any_funds = !balances.pending_balances_from_channel_closures.is_empty()
-                || balances.lightning_balances.iter().any(|b| {
-                    !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
-                })
+            let has_any_funds = balances.total_lightning_balance_sats > 0
+                || !balances.pending_balances_from_channel_closures.is_empty()
                 || balances.total_onchain_balance_sats > 0;
             let show_onboarding = node.list_channels().is_empty() && !has_any_funds;
 
@@ -419,10 +417,9 @@
                 on_chain_amount: "0".to_string(),
                 onchain_send_address: String::new(),
                 onchain_send_amount: String::new(),
-                splice_in_amount: String::new(),
-                splice_out_amount: String::new(),
-                splice_out_address: String::new(),
                 pending_splice: None,
+                auto_sweep_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                auto_sweep_onchain_at_start: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 show_onchain_receive: false,
                 show_onchain_send: false,
                 lightning_balance_btc: 0.0,
@@ -438,6 +435,7 @@
                 log_last_read: std::time::Instant::now(),
                 audit_log_path,
                 show_advanced: false,
+                settings_show_sats: true,
                 balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
                 confirm_close_popup: false,
                 stable_message: String::new(),
@@ -455,7 +453,7 @@
                 modal_opened_at: std::time::Instant::now() - Duration::from_secs(10),
                 transfer_tab: TransferTab::Send,
                 send_input: String::new(),
-                send_all: true,
+                send_all: false,
                 send_amount: String::new(),
                 send_error: String::new(),
                 bolt12_offer: String::new(),
@@ -526,6 +524,8 @@
             let node_arc = Arc::clone(&self.node);
             let sc_arc = Arc::clone(&self.stable_channel);
             let db = self.db.clone();
+            let sweep_flag = Arc::clone(&self.auto_sweep_in_progress);
+            let sweep_onchain_start = Arc::clone(&self.auto_sweep_onchain_at_start);
 
             std::thread::spawn(move || {
                 fn current_unix_time() -> i64 {
@@ -589,6 +589,57 @@
                         // ahead of the ChannelManager, causing a force close.
                         if payment_sent {
                             std::thread::sleep(Duration::from_secs(2));
+                        }
+
+                        // Auto-sweep: if on-chain balance exists and channel is ready,
+                        // splice it into the channel automatically.
+                        // The sweep_flag stays true until the on-chain balance drops
+                        // (confirming the splice tx landed), preventing duplicate sweeps.
+                        if sweep_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            // Check if the on-chain balance dropped since we started the sweep
+                            let prev = sweep_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
+                            let current = node_arc.list_balances().total_onchain_balance_sats;
+                            if prev > 0 && current < prev {
+                                sweep_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                sweep_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
+                                audit_event("AUTO_SWEEP_CONFIRMED", json!({
+                                    "prev_onchain": prev,
+                                    "new_onchain": current,
+                                }));
+                            }
+                        }
+
+                        if !sweep_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            if let Some(ch) = node_arc.list_channels().into_iter().find(|c| c.is_channel_ready) {
+                                let balances = node_arc.list_balances();
+                                if balances.total_onchain_balance_sats > AUTO_SWEEP_MIN_SATS {
+                                    let sweep_amount = balances.spendable_onchain_balance_sats
+                                        .saturating_sub(AUTO_SWEEP_FEE_RESERVE_SATS);
+                                    if sweep_amount > 0 {
+                                        audit_event("AUTO_SWEEP_ATTEMPT", json!({
+                                            "onchain_sats": balances.total_onchain_balance_sats,
+                                            "sweep_amount": sweep_amount,
+                                        }));
+                                        match node_arc.splice_in(&ch.user_channel_id, ch.counterparty_node_id, sweep_amount) {
+                                            Ok(()) => {
+                                                sweep_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                sweep_onchain_start.store(
+                                                    balances.total_onchain_balance_sats,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                audit_event("AUTO_SWEEP_INITIATED", json!({
+                                                    "amount_sats": sweep_amount,
+                                                }));
+                                            }
+                                            Err(e) => {
+                                                audit_event("AUTO_SWEEP_FAILED", json!({
+                                                    "error": format!("{e}"),
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -961,7 +1012,7 @@
                 }
             }
 
-            // Try on-chain address
+            // Try on-chain address — route through splice_out when a channel exists
             if lower.starts_with("bc1") || lower.starts_with("tb1")
                 || lower.starts_with("1") || lower.starts_with("3")
                 || lower.starts_with("bcrt1")
@@ -969,37 +1020,73 @@
                 match ldk_node::bitcoin::Address::from_str(&input) {
                     Ok(addr) => match addr.require_network(self.network) {
                         Ok(valid_addr) => {
-                            let result = if self.send_all {
-                                self.node.onchain_payment().send_all_to_address(&valid_addr, false, None)
-                            } else {
-                                match self.send_amount.trim().parse::<u64>() {
-                                    Ok(amount_sats) if amount_sats > 0 => {
-                                        self.node.onchain_payment().send_to_address(&valid_addr, amount_sats, None)
-                                    }
+                            // Check if we have a ready channel for splice_out
+                            let ready_channel = self.node.list_channels().into_iter()
+                                .find(|c| c.is_channel_ready);
+
+                            if let Some(ch) = ready_channel {
+                                // Splice-first: withdraw from channel via splice_out
+                                let amount_sats = match self.send_amount.trim().parse::<u64>() {
+                                    Ok(v) if v > 0 => v,
                                     _ => {
                                         self.send_error = "Enter a valid amount in sats".to_string();
                                         return false;
                                     }
+                                };
+
+                                match self.node.splice_out(&ch.user_channel_id, ch.counterparty_node_id, &valid_addr, amount_sats) {
+                                    Ok(()) => {
+                                        self.pending_splice = Some(PendingSplice {
+                                            direction: "out".to_string(),
+                                            amount_sats,
+                                            address: Some(input.clone()),
+                                        });
+                                        self.show_toast("Withdrawal started", "-");
+                                        self.status_message = format!("Splice-out: {} sats", amount_sats);
+                                        self.send_input.clear();
+                                        self.send_amount.clear();
+                                        self.send_error.clear();
+                                        self.update_balances();
+                                        return true;
+                                    }
+                                    Err(e) => {
+                                        self.send_error = format!("Splice-out failed: {}", e);
+                                        return false;
+                                    }
                                 }
-                            };
-                            match result {
-                                Ok(txid) => {
-                                    self.show_toast("Sent!", "OK");
-                                    self.status_message = format!("On-chain TX: {}", txid);
-                                    self.send_input.clear();
-                                    self.send_amount.clear();
-                                    self.send_error.clear();
-                                    // Trigger a wallet sync so balance updates immediately
-                                    let node_clone = Arc::clone(&self.node);
-                                    std::thread::spawn(move || {
-                                        let _ = node_clone.sync_wallets();
-                                    });
-                                    self.update_balances();
-                                    return true;
-                                }
-                                Err(e) => {
-                                    self.send_error = format!("Send failed: {}", e);
-                                    return false;
+                            } else {
+                                // No channel — fallback to regular on-chain send
+                                let result = if self.send_all {
+                                    self.node.onchain_payment().send_all_to_address(&valid_addr, false, None)
+                                } else {
+                                    match self.send_amount.trim().parse::<u64>() {
+                                        Ok(amount_sats) if amount_sats > 0 => {
+                                            self.node.onchain_payment().send_to_address(&valid_addr, amount_sats, None)
+                                        }
+                                        _ => {
+                                            self.send_error = "Enter a valid amount in sats".to_string();
+                                            return false;
+                                        }
+                                    }
+                                };
+                                match result {
+                                    Ok(txid) => {
+                                        self.show_toast("Sent!", "OK");
+                                        self.status_message = format!("On-chain TX: {}", txid);
+                                        self.send_input.clear();
+                                        self.send_amount.clear();
+                                        self.send_error.clear();
+                                        let node_clone = Arc::clone(&self.node);
+                                        std::thread::spawn(move || {
+                                            let _ = node_clone.sync_wallets();
+                                        });
+                                        self.update_balances();
+                                        return true;
+                                    }
+                                    Err(e) => {
+                                        self.send_error = format!("Send failed: {}", e);
+                                        return false;
+                                    }
                                 }
                             }
                         }
@@ -1415,7 +1502,7 @@
                         // stringify auxiliary fields without relying on `Serialize` impls
                         let temp_id_str = hex::encode(former_temporary_channel_id.0);
 
-                        let funding_str = funding_txo.txid.as_raw_hash().to_string();
+                        let funding_str = funding_txo.txid.to_string();
 
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
@@ -1647,6 +1734,10 @@
                     }
 
                     Event::SplicePending { channel_id, new_funding_txo, .. } => {
+                        // NOTE: Do NOT clear auto_sweep_in_progress here!
+                        // The on-chain balance doesn't update until the splice tx confirms.
+                        // Clearing the flag here allows the auto-sweep to fire again on
+                        // the same unspent UTXO, creating duplicate splice_in calls.
                         audit_event("SPLICE_PENDING", json!({
                             "channel_id": format!("{channel_id}"),
                             "funding_txo": format!("{new_funding_txo}")
@@ -1674,6 +1765,8 @@
                     }
 
                     Event::SpliceFailed { channel_id, user_channel_id, .. } => {
+                        self.auto_sweep_in_progress.store(false, std::sync::atomic::Ordering::Relaxed);
+                        self.auto_sweep_onchain_at_start.store(0, std::sync::atomic::Ordering::Relaxed);
                         audit_event("SPLICE_FAILED", json!({
                             "channel_id": format!("{channel_id}"),
                             "user_channel_id": format!("{:?}", user_channel_id)
@@ -1756,17 +1849,6 @@
                 .collect::<Vec<_>>()
                 .join(",");
             format!("${}.{:02}", formatted, decimal_part.abs())
-        }
-
-        /// Format satoshis with comma separators (e.g., 1000000 -> "1,000,000")
-        fn format_sats(sats: u64) -> String {
-            sats.to_string()
-                .as_bytes()
-                .rchunks(3)
-                .rev()
-                .map(|chunk| std::str::from_utf8(chunk).unwrap())
-                .collect::<Vec<_>>()
-                .join(",")
         }
 
         /// Seed historical price data into the database if not already present
@@ -2217,8 +2299,14 @@
                                 }
                             }
                             FundTab::Onchain => {
+                                let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+                                let label = if has_channel {
+                                    "Send bitcoin here — it will be deposited automatically"
+                                } else {
+                                    "Send bitcoin to this on-chain address"
+                                };
                                 ui.label(
-                                    egui::RichText::new("Send bitcoin to this on-chain address")
+                                    egui::RichText::new(label)
                                         .size(12.0)
                                         .color(egui::Color32::DARK_GRAY),
                                 );
@@ -2560,16 +2648,16 @@
                 // Claimable lightning balances are NOT added to total because they overlap
                 // with pending_sweep or onchain once the sweep tx is broadcast/confirmed.
                 let stabilized_usd = if has_active_channel { expected_usd } else { 0.0 };
-                // Use total_lightning_balance_sats (from get_claimable_balances) for Total Balance
-                // because outbound_capacity_msat excludes commit tx fees and fee-spike buffer,
-                // creating a persistent gap vs expected_usd. total_lightning_balance_sats
-                // includes those overhead sats (what you'd actually receive on close).
-                let lightning_usd = balances.total_lightning_balance_sats as f64 / 100_000_000.0 * btc_price;
-                let total_usd = if has_active_channel {
-                    lightning_usd + (spendable_onchain_btc * btc_price)
-                } else {
-                    (pending_sweep_btc + spendable_onchain_btc) * btc_price
-                };
+                // Total balance = lightning (active channels + claimable from closed channels)
+                //               + pending sweep (broadcast but not yet confirmed)
+                //               + on-chain (confirmed)
+                // During close transitions there may be brief overlap between lightning
+                // and pending_sweep, but this is better than showing $0 for in-transit funds.
+                let total_sats = balances.total_lightning_balance_sats
+                    + pending_sweep_sats
+                    + total_onchain_sats;
+                let total_btc = total_sats as f64 / 100_000_000.0;
+                let total_usd = total_btc * btc_price;
 
                 // Header: "Total Balance"
                 ui.label(RichText::new("Total Balance").size(24.0).color(Color32::BLACK).strong());
@@ -2577,8 +2665,7 @@
 
                 // Large total balance (USD)
                 ui.label(RichText::new(Self::format_price(total_usd)).size(42.0).color(Color32::BLACK).strong());
-                let total_lightning_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-                ui.label(RichText::new(format!("{:.8} BTC", total_lightning_btc)).size(14.0).color(Color32::DARK_GRAY));
+                ui.label(RichText::new(format!("{:.8} BTC", total_btc)).size(14.0).color(Color32::DARK_GRAY));
 
                 ui.add_space(12.0);
 
@@ -2678,9 +2765,20 @@
 
                 // Bitcoin (onchain) - confirmed spendable, only show if > 0
                 if spendable_onchain_btc > 0.000000001 {
+                    let has_ready_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+                    let sweeping = self.auto_sweep_in_progress.load(std::sync::atomic::Ordering::Relaxed);
+                    let onchain_sats = self.node.list_balances().total_onchain_balance_sats;
+                    let above_threshold = onchain_sats > AUTO_SWEEP_MIN_SATS;
+                    let onchain_label = if sweeping {
+                        "Bitcoin (depositing...)"
+                    } else if has_ready_channel && above_threshold {
+                        "Bitcoin (depositing soon)"
+                    } else {
+                        "Bitcoin (onchain)"
+                    };
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Bitcoin (onchain)").size(14.0).color(Color32::DARK_GRAY));
+                        ui.label(RichText::new(onchain_label).size(14.0).color(Color32::DARK_GRAY));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(format!("{:.8} BTC", spendable_onchain_btc)).size(14.0).color(Color32::BLACK).strong());
                         });
@@ -3139,10 +3237,15 @@
                 ui.heading(RichText::new("Settings").color(Color32::BLACK));
                 ui.add_space(20.0);
 
-                // Channel Balance Distribution (Overcollateralization indicator)
+                // Channel Balance Distribution
                 if let Some(ch) = self.node.list_channels().first() {
+                    let btc_price = {
+                        let sc = self.stable_channel.lock().unwrap();
+                        sc.latest_price
+                    };
+
                     ui.group(|ui| {
-                        ui.label(RichText::new("Wallet Balance").size(16.0).strong().color(Color32::BLACK));
+                        ui.label(RichText::new("Wallet Details").size(16.0).strong().color(Color32::BLACK));
                         ui.add_space(10.0);
 
                         let total_sats = ch.channel_value_sats;
@@ -3172,16 +3275,49 @@
 
                         ui.add_space(8.0);
 
-                        // Labels below the bar
+                        // Labels below the bar — click to toggle sats/USD
+                        let mut toggled = false;
+                        let (our_label, lsp_label) = if self.settings_show_sats {
+                            let our_btc = our_sats as f64 / 100_000_000.0;
+                            let lsp_btc = lsp_sats as f64 / 100_000_000.0;
+                            (
+                                format!("Yours: {:.8} BTC", our_btc),
+                                format!("LSP: {:.8} BTC", lsp_btc),
+                            )
+                        } else if btc_price > 0.0 {
+                            let our_usd = our_sats as f64 / 100_000_000.0 * btc_price;
+                            let lsp_usd = lsp_sats as f64 / 100_000_000.0 * btc_price;
+                            (
+                                format!("Yours: ${:.2}", our_usd),
+                                format!("LSP: ${:.2}", lsp_usd),
+                            )
+                        } else {
+                            let our_btc = our_sats as f64 / 100_000_000.0;
+                            let lsp_btc = lsp_sats as f64 / 100_000_000.0;
+                            (
+                                format!("Yours: {:.8} BTC", our_btc),
+                                format!("LSP: {:.8} BTC", lsp_btc),
+                            )
+                        };
+
                         ui.horizontal(|ui| {
-                            ui.colored_label(our_color, format!("Your sats: {}", Self::format_sats(our_sats)));
+                            let our_resp = ui.add(egui::Label::new(
+                                RichText::new(&our_label).color(our_color)
+                            ).sense(egui::Sense::click()));
+                            if our_resp.clicked() { toggled = true; }
+
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.colored_label(lsp_color, format!("LSP sats: {}", Self::format_sats(lsp_sats)));
+                                let lsp_resp = ui.add(egui::Label::new(
+                                    RichText::new(&lsp_label).color(lsp_color)
+                                ).sense(egui::Sense::click()));
+                                if lsp_resp.clicked() { toggled = true; }
                             });
                         });
+                        if toggled { self.settings_show_sats = !self.settings_show_sats; }
 
                         ui.add_space(5.0);
-                        ui.label(RichText::new("LSP sats provide overcollateralization for your stable balance.").size(11.0).color(Color32::GRAY));
+                        let unit_hint = if self.settings_show_sats { "Tap to show USD" } else { "Tap to show BTC" };
+                        ui.label(RichText::new(unit_hint).size(10.0).color(Color32::GRAY));
                     });
 
                     ui.add_space(20.0);
@@ -3214,15 +3350,42 @@
                                 self.show_toast("Copied!", "OK");
                             }
                         });
+
+                        if let Some(funding_txo) = &ch.funding_txo {
+                            // Txid::to_string() already displays in reversed byte order (block explorer format)
+                            let txid_display = funding_txo.txid.to_string();
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Funding Tx:").color(Color32::DARK_GRAY));
+                                ui.label(RichText::new(&txid_display[..7.min(txid_display.len())]).monospace().size(12.0).color(Color32::BLACK));
+                                if ui.small_button("Copy").clicked() {
+                                    ui.ctx().copy_text(txid_display.clone());
+                                    self.show_toast("Copied!", "OK");
+                                }
+                                let mempool_base = match self.network {
+                                    Network::Signet => "https://mempool.space/signet",
+                                    Network::Testnet => "https://mempool.space/testnet",
+                                    _ => "https://mempool.space",
+                                };
+                                let url = format!("{}/tx/{}", mempool_base, txid_display);
+                                let link_btn = egui::Button::new(RichText::new("View").size(11.0).color(Color32::from_rgb(59, 130, 246)))
+                                    .frame(false);
+                                if ui.add(link_btn).clicked() {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                                }
+                            });
+                        }
                     }
                 });
 
                 ui.add_space(20.0);
 
-                // Wallet Settings
+                // Close Wallet
                 ui.group(|ui| {
-                    ui.label(RichText::new("Settings").size(16.0).strong().color(Color32::BLACK));
-                    ui.add_space(10.0);
+                    ui.label(RichText::new("Close Wallet").size(16.0).strong().color(Color32::from_rgb(225, 29, 72)));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("After you close your wallet, all funds will be sent to an on-chain Bitcoin address you control. Your trade and payment history will be preserved.").size(12.0).color(Color32::from_rgb(100, 116, 139)));
+                    ui.add_space(8.0);
 
                     let close_btn = egui::Button::new(RichText::new("Close Wallet").color(Color32::from_rgb(225, 29, 72)))
                         .fill(Color32::from_rgb(255, 241, 242));
@@ -3230,7 +3393,7 @@
                         self.confirm_close_popup = true;
                     }
                     ui.add_space(5.0);
-                    ui.label(RichText::new("Confirm on the following screen").size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new("Confirm on the following screen.").size(11.0).color(Color32::GRAY));
                 });
 
                 ui.add_space(20.0);
@@ -3285,6 +3448,97 @@
 
                 ui.add_space(20.0);
 
+                // Pending Balances (from channel closures)
+                let balances = self.node.list_balances();
+                if !balances.pending_balances_from_channel_closures.is_empty() {
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Pending from Channel Closures").strong().color(Color32::from_rgb(217, 119, 6)));
+                        ui.add_space(8.0);
+
+                        let mut total_pending: u64 = 0;
+                        for pending in &balances.pending_balances_from_channel_closures {
+                            let (status, amount) = match pending {
+                                ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } => {
+                                    ("Pending broadcast", *amount_satoshis)
+                                },
+                                ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, latest_spending_txid, .. } => {
+                                    let status = format!("Awaiting confirmation ({}...)", &latest_spending_txid.to_string()[..8]);
+                                    (status.leak() as &str, *amount_satoshis)
+                                },
+                                ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                    let status = format!("Confirming (height {})", confirmation_height);
+                                    (status.leak() as &str, *amount_satoshis)
+                                },
+                            };
+                            total_pending += amount;
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("{} sats", amount)).size(12.0).color(Color32::BLACK).strong());
+                                ui.label(RichText::new(format!("- {}", status)).size(11.0).color(Color32::DARK_GRAY));
+                            });
+                        }
+
+                        if balances.pending_balances_from_channel_closures.len() > 1 {
+                            ui.add_space(5.0);
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Total pending:").size(12.0).color(Color32::DARK_GRAY));
+                                ui.label(RichText::new(format!("{} sats", total_pending)).size(12.0).color(Color32::BLACK).strong());
+                            });
+                        }
+                    });
+
+                    ui.add_space(20.0);
+                }
+
+                // Claimable lightning balances
+                let has_claimable = balances.lightning_balances.iter().any(|b| {
+                    !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
+                });
+                if has_claimable {
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Claimable Balances").strong().color(Color32::from_rgb(59, 130, 246)));
+                        ui.add_space(8.0);
+
+                        for balance in &balances.lightning_balances {
+                            match balance {
+                                ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(format!("- claimable at block {}", confirmation_height)).size(11.0).color(Color32::DARK_GRAY));
+                                    });
+                                },
+                                ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(format!("- claimable at height {}", timeout_height)).size(11.0).color(Color32::DARK_GRAY));
+                                    });
+                                },
+                                ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(format!("- HTLC claimable at {}", claimable_height)).size(11.0).color(Color32::DARK_GRAY));
+                                    });
+                                },
+                                ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(format!("- needs preimage, expires {}", expiry_height)).size(11.0).color(Color32::DARK_GRAY));
+                                    });
+                                },
+                                ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(Color32::from_rgb(225, 29, 72)));
+                                    });
+                                },
+                                _ => {}
+                            }
+                        }
+                    });
+
+                    ui.add_space(20.0);
+                }
+
                 // Debug
                 ui.group(|ui| {
                     ui.label(RichText::new("Debug").size(16.0).strong().color(Color32::BLACK));
@@ -3306,12 +3560,7 @@
                 ui.label(RichText::new("Trade History").size(16.0).strong().color(Color32::BLACK));
                 ui.add_space(10.0);
 
-                let channel_id_str = {
-                    let sc = self.stable_channel.lock().unwrap();
-                    sc.channel_id.to_string()
-                };
-
-                match self.db.get_recent_trades(&channel_id_str, 100) {
+                match self.db.get_recent_trades(100) {
                     Ok(trades) if trades.is_empty() => {
                         ui.label(RichText::new("No trades yet").color(Color32::GRAY));
                     }
@@ -3687,7 +3936,6 @@
                         let tabs = [
                             (TransferTab::Send, "Send"),
                             (TransferTab::Receive, "Receive"),
-                            (TransferTab::Convert, "Convert"),
                         ];
                         for (tab, label) in &tabs {
                             let is_selected = self.transfer_tab == *tab;
@@ -3711,7 +3959,6 @@
                     match self.transfer_tab {
                         TransferTab::Send => self.show_send_tab(ui),
                         TransferTab::Receive => self.show_receive_tab(ui, ctx),
-                        TransferTab::Convert => self.show_convert_tab(ui),
                     }
 
                     ui.add_space(15.0);
@@ -3785,18 +4032,31 @@
             let is_bolt12 = input_lower.starts_with("lno1");
 
             if is_onchain {
-                ui.checkbox(&mut self.send_all, RichText::new("Send all").size(13.0));
-
-                if !self.send_all {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
-                        let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
-                            .hint_text("e.g. 50000")
-                            .desired_width(140.0);
-                        ui.add(amount_edit);
-                    });
-                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                    let prev_amount = self.send_amount.clone();
+                    let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
+                        .hint_text("e.g. 50000")
+                        .desired_width(120.0);
+                    ui.add(amount_edit);
+                    // Clear send_all if user manually edits the amount
+                    if self.send_amount != prev_amount {
+                        self.send_all = false;
+                    }
+                    let max_btn = egui::Button::new(RichText::new("Max").size(12.0).color(Color32::from_rgb(79, 70, 229)))
+                        .fill(Color32::from_rgb(238, 242, 255))
+                        .corner_radius(6.0);
+                    if ui.add(max_btn).clicked() {
+                        let max_sats = if let Some(ch) = self.node.list_channels().iter().find(|c| c.is_channel_ready) {
+                            ch.outbound_capacity_msat / 1000
+                        } else {
+                            self.node.list_balances().spendable_onchain_balance_sats
+                        };
+                        self.send_amount = max_sats.to_string();
+                        self.send_all = true;
+                    }
+                });
                 ui.add_space(8.0);
             }
 
@@ -4010,196 +4270,6 @@
             });
         }
 
-        fn show_convert_tab(&mut self, ui: &mut egui::Ui) {
-            // Fetch fee rate if not cached
-            if self.cached_fee_rate.is_none() {
-                self.fetch_fee_rate();
-            }
-
-            // Splice In (Deposit)
-            ui.group(|ui| {
-                ui.label(RichText::new("Deposit to Channel").strong().color(Color32::BLACK));
-                ui.add_space(6.0);
-
-                let balances = self.node.list_balances();
-                let total_onchain = balances.total_onchain_balance_sats;
-                let spendable_onchain = balances.spendable_onchain_balance_sats;
-
-                // Estimate fee: splice tx ~350 vB (2-in-2-out with witness),
-                // plus 20% margin for LDK's internal overhead
-                let estimated_fee: u64 = match self.cached_fee_rate {
-                    Some(rate) => ((rate * 350) * 6 / 5).max(1_000),
-                    None => 10_000, // conservative fallback
-                };
-                let anchor_reserve = balances.total_anchor_channels_reserve_sats;
-                let max_deposit = spendable_onchain.saturating_sub(estimated_fee);
-
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("On-chain balance:").size(12.0).color(Color32::DARK_GRAY));
-                    ui.label(RichText::new(format!("{} sats", spendable_onchain)).size(12.0).color(Color32::BLACK).strong());
-                    if anchor_reserve > 0 {
-                        ui.label(RichText::new(format!("({} reserved)", anchor_reserve)).size(10.0).color(Color32::GRAY));
-                    }
-                });
-
-                if max_deposit > 0 {
-                    let fee_label = match self.cached_fee_rate {
-                        Some(rate) => format!("~{} sats fee ({} sat/vB)", estimated_fee, rate),
-                        None => format!("~{} sats fee (estimate)", estimated_fee),
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Max deposit:").size(11.0).color(Color32::DARK_GRAY));
-                        ui.label(RichText::new(format!("{} sats", max_deposit)).size(11.0).color(Color32::from_rgb(16, 185, 129)).strong());
-                    });
-                    ui.label(RichText::new(fee_label).size(10.0).color(Color32::GRAY));
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new("Move on-chain bitcoin into your Lightning channel.")
-                            .size(11.0).italics().color(Color32::from_rgb(100, 116, 139))
-                    );
-                    ui.add_space(6.0);
-                    if ui.button(format!("Deposit Max ({} sats)", max_deposit)).clicked() {
-                        self.splice_in_amount = max_deposit.to_string();
-                        self.do_splice_in();
-                    }
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-                } else if total_onchain > 0 {
-                    ui.label(
-                        RichText::new(format!("Balance too low to cover tx fee (~{} sats)", estimated_fee))
-                            .size(11.0).color(Color32::from_rgb(244, 63, 94))
-                    );
-                    ui.add_space(8.0);
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Custom amount (sats):").size(12.0).color(Color32::DARK_GRAY));
-                    let splice_in_edit = egui::TextEdit::singleline(&mut self.splice_in_amount)
-                        .hint_text("0")
-                        .desired_width(100.0);
-                    ui.add(splice_in_edit);
-                    if ui.button("Deposit").clicked() {
-                        self.do_splice_in();
-                    }
-                });
-            });
-
-            ui.add_space(10.0);
-
-            // Splice Out (Withdraw)
-            ui.group(|ui| {
-                ui.label(RichText::new("Withdraw from Channel").strong().color(Color32::BLACK));
-                ui.add_space(6.0);
-
-                ui.label(RichText::new("To address:").size(12.0).color(Color32::DARK_GRAY));
-                let addr_edit = egui::TextEdit::singleline(&mut self.splice_out_address)
-                    .hint_text("bc1q...")
-                    .desired_width(260.0);
-                ui.add(addr_edit);
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
-                    let splice_out_edit = egui::TextEdit::singleline(&mut self.splice_out_amount)
-                        .hint_text("0")
-                        .desired_width(100.0);
-                    ui.add(splice_out_edit);
-                    if ui.button("Withdraw").clicked() {
-                        self.do_splice_out();
-                    }
-                });
-            });
-
-            // Pending balances from channel closures
-            let balances = self.node.list_balances();
-            if !balances.pending_balances_from_channel_closures.is_empty() {
-                ui.add_space(10.0);
-                ui.group(|ui| {
-                    ui.label(RichText::new("Pending from Channel Closures").strong().color(Color32::from_rgb(217, 119, 6)));
-                    ui.add_space(8.0);
-
-                    let mut total_pending: u64 = 0;
-                    for pending in &balances.pending_balances_from_channel_closures {
-                        let (status, amount) = match pending {
-                            ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } => {
-                                ("Pending broadcast", *amount_satoshis)
-                            },
-                            ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, latest_spending_txid, .. } => {
-                                let status = format!("Awaiting confirmation ({}...)", &latest_spending_txid.to_string()[..8]);
-                                (status.leak() as &str, *amount_satoshis)
-                            },
-                            ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { amount_satoshis, confirmation_height, .. } => {
-                                let status = format!("Confirming (height {})", confirmation_height);
-                                (status.leak() as &str, *amount_satoshis)
-                            },
-                        };
-                        total_pending += amount;
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{} sats", amount)).size(12.0).color(Color32::BLACK).strong());
-                            ui.label(RichText::new(format!("- {}", status)).size(11.0).color(Color32::DARK_GRAY));
-                        });
-                    }
-
-                    if balances.pending_balances_from_channel_closures.len() > 1 {
-                        ui.add_space(5.0);
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Total pending:").size(12.0).color(Color32::DARK_GRAY));
-                            ui.label(RichText::new(format!("{} sats", total_pending)).size(12.0).color(Color32::BLACK).strong());
-                        });
-                    }
-                });
-            }
-
-            // Claimable lightning balances
-            let has_claimable = balances.lightning_balances.iter().any(|b| {
-                !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
-            });
-            if has_claimable {
-                ui.add_space(10.0);
-                ui.group(|ui| {
-                    ui.label(RichText::new("Claimable Balances").strong().color(Color32::from_rgb(59, 130, 246)));
-                    ui.add_space(8.0);
-
-                    for balance in &balances.lightning_balances {
-                        match balance {
-                            ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                    ui.label(RichText::new(format!("- claimable at block {}", confirmation_height)).size(11.0).color(Color32::DARK_GRAY));
-                                });
-                            },
-                            ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                    ui.label(RichText::new(format!("- claimable at height {}", timeout_height)).size(11.0).color(Color32::DARK_GRAY));
-                                });
-                            },
-                            ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                    ui.label(RichText::new(format!("- HTLC claimable at {}", claimable_height)).size(11.0).color(Color32::DARK_GRAY));
-                                });
-                            },
-                            ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                    ui.label(RichText::new(format!("- needs preimage, expires {}", expiry_height)).size(11.0).color(Color32::DARK_GRAY));
-                                });
-                            },
-                            ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                    ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(Color32::from_rgb(225, 29, 72)));
-                                });
-                            },
-                            _ => {}
-                        }
-                    }
-                });
-            }
-        }
 
         fn show_buy_modal_ui(&mut self, ctx: &egui::Context) {
             egui::Window::new("Buy BTC")
@@ -4748,31 +4818,43 @@
                 self.fetch_fee_rate();
             }
 
-            egui::Window::new("Confirm Close")
+            egui::Window::new("Close Wallet")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE))
+                .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE).corner_radius(16.0))
                 .show(ctx, |ui| {
-                    ui.label(RichText::new("Are you sure you want to close your wallet?").color(Color32::BLACK));
+                    ui.label(RichText::new("Are you sure you want to close your wallet?").size(13.0).color(Color32::BLACK));
                     ui.add_space(5.0);
-                    ui.label(RichText::new("Your bitcoin will be sent to an on-chain address you control.").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("All funds will be sent to an on-chain address you control. Your trade and payment history will be preserved.").size(12.0).color(Color32::DARK_GRAY));
                     ui.add_space(10.0);
+
+                    // Show balance that will be received
+                    let total_sats = self.node.list_balances().total_lightning_balance_sats;
+                    if total_sats > 0 {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Balance:").size(12.0).color(Color32::DARK_GRAY));
+                            ui.label(RichText::new(format!("{} sats", total_sats)).size(12.0).color(Color32::BLACK).strong());
+                        });
+                        ui.add_space(5.0);
+                    }
 
                     // Show fee rate
                     let fee_text = match self.cached_fee_rate {
-                        Some(rate) => format!("Current fee rate: {} sat/vB", rate),
+                        Some(rate) => format!("Fee rate: {} sat/vB", rate),
                         None => "Fetching fee rate...".to_string(),
                     };
                     ui.label(RichText::new(fee_text).size(12.0).color(Color32::from_rgb(100, 116, 139)));
 
                     ui.add_space(15.0);
                     ui.horizontal(|ui| {
-                        let yes_btn = egui::Button::new(RichText::new("Yes, close").color(Color32::WHITE))
-                            .fill(Color32::from_rgb(225, 29, 72));
+                        let yes_btn = egui::Button::new(RichText::new("Close Wallet").color(Color32::WHITE))
+                            .fill(Color32::from_rgb(225, 29, 72))
+                            .corner_radius(8.0);
                         if ui.add(yes_btn).clicked() {
                             clicked_yes = true;
                         }
+                        ui.add_space(8.0);
                         if ui.button("Cancel").clicked() {
                             clicked_cancel = true;
                         }
@@ -4897,123 +4979,6 @@
             self.trade_error.clear();
         }
 
-        fn do_splice_in(&mut self) {
-            let amount_sats = match self.splice_in_amount.parse::<u64>() {
-                Ok(0) => {
-                    self.show_toast("Enter an amount", "!");
-                    return;
-                }
-                Ok(v) => v,
-                Err(_) => {
-                    self.show_toast("Enter a valid amount", "!");
-                    return;
-                }
-            };
-
-            let target_channel_id = {
-                let sc = self.stable_channel.lock().unwrap();
-                sc.channel_id
-            };
-
-            let channel_info = self.node.list_channels()
-                .into_iter()
-                .find(|ch| ch.channel_id == target_channel_id);
-
-            let ch = match channel_info {
-                Some(ch) => ch,
-                None => {
-                    self.show_toast("No channel found", "!");
-                    return;
-                }
-            };
-
-            match self.node.splice_in(&ch.user_channel_id, ch.counterparty_node_id, amount_sats) {
-                Ok(()) => {
-                    self.pending_splice = Some(PendingSplice {
-                        direction: "in".to_string(),
-                        amount_sats,
-                        address: None,
-                    });
-                    self.status_message = format!("Splice-in initiated: {} sats", amount_sats);
-                    self.show_toast("Deposit started", "+");
-                    self.splice_in_amount.clear();
-                    self.update_balances();
-                }
-                Err(e) => {
-                    self.status_message = format!("Splice-in failed: {}", e);
-                    self.show_toast(&format!("Deposit failed: {}", e), "!");
-                }
-            }
-        }
-
-        fn do_splice_out(&mut self) {
-            let amount_sats = match self.splice_out_amount.parse::<u64>() {
-                Ok(0) => {
-                    self.show_toast("Enter an amount", "!");
-                    return;
-                }
-                Ok(v) => v,
-                Err(_) => {
-                    self.show_toast("Enter a valid amount", "!");
-                    return;
-                }
-            };
-
-            if self.splice_out_address.trim().is_empty() {
-                self.show_toast("Enter an address", "!");
-                return;
-            }
-
-            let valid_addr = match ldk_node::bitcoin::Address::from_str(self.splice_out_address.trim()) {
-                Ok(addr) => match addr.require_network(self.network) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        self.show_toast("Wrong network", "!");
-                        return;
-                    }
-                },
-                Err(_) => {
-                    self.show_toast("Invalid address", "!");
-                    return;
-                }
-            };
-
-            let target_channel_id = {
-                let sc = self.stable_channel.lock().unwrap();
-                sc.channel_id
-            };
-
-            let ch = match self.node.list_channels()
-                .into_iter()
-                .find(|ch| ch.channel_id == target_channel_id)
-            {
-                Some(ch) => ch,
-                None => {
-                    self.show_toast("No channel found", "!");
-                    return;
-                }
-            };
-
-            let out_address = self.splice_out_address.clone();
-            match self.node.splice_out(&ch.user_channel_id, ch.counterparty_node_id, &valid_addr, amount_sats) {
-                Ok(()) => {
-                    self.pending_splice = Some(PendingSplice {
-                        direction: "out".to_string(),
-                        amount_sats,
-                        address: Some(out_address),
-                    });
-                    self.status_message = format!("Splice-out initiated: {} sats", amount_sats);
-                    self.show_toast("Withdrawal started", "-");
-                    self.splice_out_address.clear();
-                    self.splice_out_amount.clear();
-                    self.update_balances();
-                }
-                Err(e) => {
-                    self.status_message = format!("Splice-out failed: {}", e);
-                    self.show_toast(&format!("Withdrawal failed: {}", e), "!");
-                }
-            }
-        }
 
 
         fn show_log_window_if_open(&mut self, ctx: &egui::Context) {
@@ -5169,10 +5134,8 @@
 
             // Show onboarding only if no channels AND no funds at all (pending or on-chain)
             let balances = self.node.list_balances();
-            let has_any_funds = !balances.pending_balances_from_channel_closures.is_empty()
-                || balances.lightning_balances.iter().any(|b| {
-                    !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
-                })
+            let has_any_funds = balances.total_lightning_balance_sats > 0
+                || !balances.pending_balances_from_channel_closures.is_empty()
                 || balances.total_onchain_balance_sats > 0;
             self.show_onboarding = self.node.list_channels().is_empty()
                 && !self.waiting_for_payment
@@ -5198,10 +5161,23 @@
             // Handle trigger_fund_wallet flag from "Fund Your Wallet" button
             if self.trigger_fund_wallet {
                 self.trigger_fund_wallet = false;
-                println!("[DEBUG] Fund wallet triggered, calling get_jit_invoice");
-                self.status_message = "Getting JIT channel invoice...".to_string();
-                self.get_jit_invoice(ctx);
-                println!("[DEBUG] get_jit_invoice returned, waiting_for_payment={}", self.waiting_for_payment);
+                let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+                if has_channel {
+                    // Channel exists — show on-chain deposit address (auto-sweep handles the rest)
+                    self.fund_tab = FundTab::Onchain;
+                    if self.on_chain_address.is_empty() {
+                        self.get_address();
+                    }
+                    if self.onchain_qr_texture.is_none() && !self.on_chain_address.is_empty() {
+                        self.onchain_qr_texture = Self::generate_qr_texture(&self.on_chain_address, ctx, "onchain_qr");
+                    }
+                    self.waiting_for_payment = true;
+                } else {
+                    // No channel — JIT invoice to open one
+                    println!("[DEBUG] Fund wallet triggered, calling get_jit_invoice");
+                    self.status_message = "Getting JIT channel invoice...".to_string();
+                    self.get_jit_invoice(ctx);
+                }
             }
 
             // Show the appropriate base screen

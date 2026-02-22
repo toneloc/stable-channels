@@ -317,19 +317,18 @@ impl Database {
         Ok(())
     }
 
-    /// Get recent trades for a channel
-    pub fn get_recent_trades(&self, channel_id: &str, limit: usize) -> SqliteResult<Vec<TradeRecord>> {
+    /// Get recent trades across all channels
+    pub fn get_recent_trades(&self, limit: usize) -> SqliteResult<Vec<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
                     payment_id, status, created_at
              FROM trades
-             WHERE channel_id = ?1
              ORDER BY id DESC
-             LIMIT ?2"
+             LIMIT ?1"
         )?;
 
-        let rows = stmt.query_map(params![channel_id, limit as i64], |row| {
+        let rows = stmt.query_map(params![limit as i64], |row| {
             Ok(TradeRecord {
                 id: row.get(0)?,
                 channel_id: row.get(1)?,
@@ -836,7 +835,7 @@ mod tests {
             Some("pay456"), "completed"
         ).unwrap();
 
-        let trades = db.get_recent_trades("ch1", 10).unwrap();
+        let trades = db.get_recent_trades(10).unwrap();
         assert_eq!(trades.len(), 2);
         assert_eq!(trades[0].action, "sell"); // Most recent first
         assert_eq!(trades[1].action, "buy");
