@@ -177,7 +177,7 @@
         pub on_chain_amount: String,
         pub onchain_send_address: String,
         pub onchain_send_amount: String,
-        pending_splice: Option<PendingSplice>,
+        pending_splice: Arc<std::sync::Mutex<Option<PendingSplice>>>,
         auto_sweep_in_progress: Arc<std::sync::atomic::AtomicBool>,
         /// On-chain sats at the time auto-sweep was initiated; used to detect confirmation.
         auto_sweep_onchain_at_start: Arc<std::sync::atomic::AtomicU64>,
@@ -363,6 +363,7 @@
 
             let sc_init = StableChannel {
                 channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]),
+                user_channel_id: 0,
                 counterparty: lsp_pubkey,
                 is_stable_receiver: true,
                 expected_usd: USD::from_f64(0.0),
@@ -417,7 +418,7 @@
                 on_chain_amount: "0".to_string(),
                 onchain_send_address: String::new(),
                 onchain_send_amount: String::new(),
-                pending_splice: None,
+                pending_splice: Arc::new(std::sync::Mutex::new(None)),
                 auto_sweep_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 auto_sweep_onchain_at_start: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 show_onchain_receive: false,
@@ -501,6 +502,7 @@
                         Some(payment_info.btc_price),
                         Some(&payment_info.counterparty),
                         "pending",
+                        None, None,
                     );
                     // Persist updated backing_sats
                     app.save_channel_settings();
@@ -526,6 +528,7 @@
             let db = self.db.clone();
             let sweep_flag = Arc::clone(&self.auto_sweep_in_progress);
             let sweep_onchain_start = Arc::clone(&self.auto_sweep_onchain_at_start);
+            let pending_splice_arc = Arc::clone(&self.pending_splice);
 
             std::thread::spawn(move || {
                 fn current_unix_time() -> i64 {
@@ -536,6 +539,8 @@
                         .try_into()
                         .unwrap_or(0)
                 }
+
+                let mut prev_onchain_sats: u64 = node_arc.list_balances().total_onchain_balance_sats;
 
                 loop {
                     // Fetch price (network call) OUTSIDE of lock
@@ -563,14 +568,17 @@
                                         Some(payment_info.btc_price),
                                         Some(&payment_info.counterparty),
                                         "pending",
+                                        None, None,
                                     );
                                     payment_sent = true;
 
                                     // Persist updated backing_sats to DB
                                     let ch_id = sc.channel_id.to_string();
+                                    let uch_id = format!("{}", sc.user_channel_id);
                                     if sc.expected_usd.0 > 0.0 {
                                         let _ = db.save_channel(
                                             &ch_id,
+                                            &uch_id,
                                             sc.expected_usd.0,
                                             sc.backing_sats,
                                             sc.note.as_deref(),
@@ -589,6 +597,33 @@
                         // ahead of the ChannelManager, causing a force close.
                         if payment_sent {
                             std::thread::sleep(Duration::from_secs(2));
+                        }
+
+                        // Detect new on-chain deposits
+                        {
+                            let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
+                            let is_sweeping = sweep_flag.load(std::sync::atomic::Ordering::Relaxed);
+                            if current_onchain > prev_onchain_sats && !is_sweeping {
+                                let deposit_sats = current_onchain - prev_onchain_sats;
+                                let amount_usd = if price > 0.0 {
+                                    Some(deposit_sats as f64 / 100_000_000.0 * price)
+                                } else {
+                                    None
+                                };
+                                let _ = db.record_payment(
+                                    None, "onchain", "received",
+                                    deposit_sats * 1000,
+                                    amount_usd,
+                                    if price > 0.0 { Some(price) } else { None },
+                                    None, "completed", None, None,
+                                );
+                                audit_event("ONCHAIN_DEPOSIT_DETECTED", json!({
+                                    "amount_sats": deposit_sats,
+                                    "prev_onchain": prev_onchain_sats,
+                                    "new_onchain": current_onchain,
+                                }));
+                            }
+                            prev_onchain_sats = current_onchain;
                         }
 
                         // Auto-sweep: if on-chain balance exists and channel is ready,
@@ -612,14 +647,37 @@
                         if !sweep_flag.load(std::sync::atomic::Ordering::Relaxed) {
                             if let Some(ch) = node_arc.list_channels().into_iter().find(|c| c.is_channel_ready) {
                                 let balances = node_arc.list_balances();
+                                println!("[sweep] total_onchain={} spendable={} threshold={}",
+                                    balances.total_onchain_balance_sats,
+                                    balances.spendable_onchain_balance_sats,
+                                    AUTO_SWEEP_MIN_SATS);
                                 if balances.total_onchain_balance_sats > AUTO_SWEEP_MIN_SATS {
+                                    // Fetch prevailing fee rate (sat/vB) for 6-block target
+                                    let fee_rate_sat_vb: u64 = ureq::Agent::new()
+                                        .get(&format!("{}/fee-estimates", DEFAULT_CHAIN_URL))
+                                        .call().ok()
+                                        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+                                        .and_then(|j| j.get("6").and_then(|v| v.as_f64()))
+                                        .map(|f| f.ceil() as u64)
+                                        .unwrap_or(2); // conservative fallback
+
+                                    // Splice tx ~170 vbytes; reserve exactly enough for fees
+                                    let fee_reserve = fee_rate_sat_vb * 170;
                                     let sweep_amount = balances.spendable_onchain_balance_sats
-                                        .saturating_sub(AUTO_SWEEP_FEE_RESERVE_SATS);
+                                        .saturating_sub(fee_reserve);
+
+                                    println!("[sweep] fee_rate={} sat/vB, reserve={}, sweep_amount={}",
+                                        fee_rate_sat_vb, fee_reserve, sweep_amount);
+
                                     if sweep_amount > 0 {
                                         audit_event("AUTO_SWEEP_ATTEMPT", json!({
                                             "onchain_sats": balances.total_onchain_balance_sats,
+                                            "spendable_sats": balances.spendable_onchain_balance_sats,
+                                            "fee_rate_sat_vb": fee_rate_sat_vb,
+                                            "fee_reserve": fee_reserve,
                                             "sweep_amount": sweep_amount,
                                         }));
+
                                         match node_arc.splice_in(&ch.user_channel_id, ch.counterparty_node_id, sweep_amount) {
                                             Ok(()) => {
                                                 sweep_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -627,11 +685,23 @@
                                                     balances.total_onchain_balance_sats,
                                                     std::sync::atomic::Ordering::Relaxed,
                                                 );
+                                                *pending_splice_arc.lock().unwrap() = Some(PendingSplice {
+                                                    direction: "in".to_string(),
+                                                    amount_sats: sweep_amount,
+                                                    address: None,
+                                                });
+                                                // Record pending deposit in payment history immediately
+                                                let _ = db.record_payment(
+                                                    None, "splice_in", "received",
+                                                    sweep_amount * 1000, None, None, None,
+                                                    "pending", None, None,
+                                                );
                                                 audit_event("AUTO_SWEEP_INITIATED", json!({
                                                     "amount_sats": sweep_amount,
                                                 }));
                                             }
                                             Err(e) => {
+                                                println!("[sweep] splice_in FAILED: {}", e);
                                                 audit_event("AUTO_SWEEP_FAILED", json!({
                                                     "error": format!("{e}"),
                                                 }));
@@ -776,11 +846,12 @@
 
         /// Generate a Lightning invoice with QR code for the transfer modal
         fn generate_lightning_receive_invoice(&mut self, ctx: &egui::Context) {
-            let amount_sats = self.lightning_receive_amount.parse::<u64>().unwrap_or(0);
-            if amount_sats == 0 {
-                self.status_message = "Enter an amount".to_string();
+            let btc_val = self.lightning_receive_amount.parse::<f64>().unwrap_or(0.0);
+            if btc_val <= 0.0 {
+                self.status_message = "Enter an amount in BTC".to_string();
                 return;
             }
+            let amount_sats = (btc_val * 100_000_000.0) as u64;
 
             let msats = amount_sats * 1000;
             match self.node.bolt11_payment().receive(
@@ -904,12 +975,13 @@
                         }
                         let result = if invoice.amount_milli_satoshis().is_none() {
                             // Variable-amount invoice — use amount from input
-                            match self.send_amount.trim().parse::<u64>() {
-                                Ok(sats) if sats > 0 => {
-                                    self.node.bolt11_payment().send_using_amount(&invoice, sats * 1000, None)
+                            match self.send_amount.trim().parse::<f64>() {
+                                Ok(btc) if btc > 0.0 => {
+                                    let msat = (btc * 100_000_000_000.0) as u64;
+                                    self.node.bolt11_payment().send_using_amount(&invoice, msat, None)
                                 }
                                 _ => {
-                                    self.send_error = "Enter an amount in sats".to_string();
+                                    self.send_error = "Enter an amount in BTC".to_string();
                                     return false;
                                 }
                             }
@@ -936,6 +1008,7 @@
                                 if let Ok(db_id) = self.db.record_payment(
                                     Some(&payment_id_str), "lightning", "sent",
                                     amount_msat, amount_usd, btc_price_opt, None, "pending",
+                                    None, None,
                                 ) {
                                     self.pending_payments.insert(payment_id, PendingPayment { payment_db_id: db_id });
                                 }
@@ -968,10 +1041,10 @@
                 }
                 match Offer::from_str(&input) {
                     Ok(offer) => {
-                        let amount_msat = match self.send_amount.trim().parse::<u64>() {
-                            Ok(sats) if sats > 0 => sats * 1000,
+                        let amount_msat = match self.send_amount.trim().parse::<f64>() {
+                            Ok(btc) if btc > 0.0 => (btc * 100_000_000_000.0) as u64,
                             _ => {
-                                self.send_error = "Enter an amount in sats".to_string();
+                                self.send_error = "Enter an amount in BTC".to_string();
                                 return false;
                             }
                         };
@@ -989,6 +1062,7 @@
                                 if let Ok(db_id) = self.db.record_payment(
                                     Some(&payment_id_str), "lightning", "sent",
                                     amount_msat, amount_usd, btc_price_opt, None, "pending",
+                                    None, None,
                                 ) {
                                     self.pending_payments.insert(payment_id, PendingPayment { payment_db_id: db_id });
                                 }
@@ -1026,23 +1100,23 @@
 
                             if let Some(ch) = ready_channel {
                                 // Splice-first: withdraw from channel via splice_out
-                                let amount_sats = match self.send_amount.trim().parse::<u64>() {
-                                    Ok(v) if v > 0 => v,
+                                let amount_sats = match self.send_amount.trim().parse::<f64>() {
+                                    Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
                                     _ => {
-                                        self.send_error = "Enter a valid amount in sats".to_string();
+                                        self.send_error = "Enter a valid amount in BTC".to_string();
                                         return false;
                                     }
                                 };
 
                                 match self.node.splice_out(&ch.user_channel_id, ch.counterparty_node_id, &valid_addr, amount_sats) {
                                     Ok(()) => {
-                                        self.pending_splice = Some(PendingSplice {
+                                        *self.pending_splice.lock().unwrap() = Some(PendingSplice {
                                             direction: "out".to_string(),
                                             amount_sats,
                                             address: Some(input.clone()),
                                         });
                                         self.show_toast("Withdrawal started", "-");
-                                        self.status_message = format!("Splice-out: {} sats", amount_sats);
+                                        self.status_message = format!("Splice-out: {:.8} BTC", amount_sats as f64 / 100_000_000.0);
                                         self.send_input.clear();
                                         self.send_amount.clear();
                                         self.send_error.clear();
@@ -1071,6 +1145,23 @@
                                 };
                                 match result {
                                     Ok(txid) => {
+                                        // Record on-chain send in payment history
+                                        let amount_msat = self.send_amount.trim().parse::<u64>()
+                                            .map(|sats| sats * 1000).unwrap_or(0);
+                                        let (amount_usd, btc_price_opt) = {
+                                            let sc = self.stable_channel.lock().unwrap();
+                                            let price = sc.latest_price;
+                                            let usd = if price > 0.0 && amount_msat > 0 {
+                                                Some(amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * price)
+                                            } else { None };
+                                            (usd, if price > 0.0 { Some(price) } else { None })
+                                        };
+                                        let txid_str = txid.to_string();
+                                        let _ = self.db.record_payment(
+                                            Some(&txid_str), "onchain", "sent",
+                                            amount_msat, amount_usd, btc_price_opt, None,
+                                            "completed", None, None,
+                                        );
                                         self.show_toast("Sent!", "OK");
                                         self.status_message = format!("On-chain TX: {}", txid);
                                         self.send_input.clear();
@@ -1227,16 +1318,16 @@
         /// The fee is sent as the keysend payment amount.
         /// Returns the PaymentId on success so the caller can track it.
         fn send_trade(&mut self, new_expected_usd: f64, fee_usd: f64, trade_action: &str) -> Option<PaymentId> {
-            // Grab channel_id, counterparty, price from StableChannel
-            let (channel_id_str, counterparty, price, old_expected_usd) = {
+            // Grab channel identifiers, counterparty, price from StableChannel
+            let (user_channel_id_str, counterparty, price, old_expected_usd) = {
                 let sc = self.stable_channel.lock().unwrap();
-                (sc.channel_id.to_string(), sc.counterparty, sc.latest_price, sc.expected_usd.0)
+                (format!("{}", sc.user_channel_id), sc.counterparty, sc.latest_price, sc.expected_usd.0)
             };
 
-            // Build payload that the LSP will parse
+            // Build payload that the LSP will parse (use user_channel_id — stable across splices)
             let payload = json!({
                 "type": TRADE_MESSAGE_TYPE,
-                "channel_id": channel_id_str,
+                "user_channel_id": user_channel_id_str,
                 "expected_usd": new_expected_usd,
             });
 
@@ -1286,7 +1377,7 @@
                     );
                     audit_event("TRADE_MESSAGE_SENT", json!({
                         "payment_id": payment_id_str,
-                        "channel_id": channel_id_str,
+                        "user_channel_id": user_channel_id_str,
                         "action": trade_action,
                         "old_expected_usd": old_expected_usd,
                         "new_expected_usd": new_expected_usd,
@@ -1300,7 +1391,7 @@
                 Err(e) => {
                     self.status_message = format!("Failed to send trade order: {}", e);
                     audit_event("TRADE_MESSAGE_FAILED", json!({
-                        "channel_id": channel_id_str,
+                        "user_channel_id": user_channel_id_str,
                         "action": trade_action,
                         "new_expected_usd": new_expected_usd,
                         "error": format!("{e}"),
@@ -1315,15 +1406,17 @@
             let sc = self.stable_channel.lock().unwrap();
 
             // Only save if we have a valid channel
-            if sc.channel_id == ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]) {
+            if sc.user_channel_id == 0 {
                 return;
             }
 
             let channel_id_str = sc.channel_id.to_string();
+            let user_channel_id_str = format!("{}", sc.user_channel_id);
             let note_ref = sc.note.as_deref();
 
             if let Err(e) = self.db.save_channel(
                 &channel_id_str,
+                &user_channel_id_str,
                 sc.expected_usd.0,
                 sc.backing_sats,
                 note_ref,
@@ -1334,13 +1427,13 @@
 
         /// Load user's stable channel from database
         fn load_channel_settings(&mut self) {
-            let channel_id_str = {
+            let user_channel_id_str = {
                 let sc = self.stable_channel.lock().unwrap();
-                sc.channel_id.to_string()
+                format!("{}", sc.user_channel_id)
             };
 
-            // Try to load from database first
-            if let Ok(Some(record)) = self.db.load_channel(&channel_id_str) {
+            // Try to load from database by user_channel_id (stable across splices)
+            if let Ok(Some(record)) = self.db.load_channel(&user_channel_id_str) {
                 let mut sc = self.stable_channel.lock().unwrap();
                 sc.expected_usd = USD::from_f64(record.expected_usd);
                 sc.backing_sats = record.backing_sats;
@@ -1405,8 +1498,10 @@
                 sc.backing_sats = backing_sats;
 
                 // Save to database
+                let uch_id = format!("{}", sc.user_channel_id);
                 let _ = self.db.save_channel(
                     &channel_id_str,
+                    &uch_id,
                     expected_usd,
                     backing_sats,
                     note.as_deref(),
@@ -1418,13 +1513,13 @@
 
         /// Record a trade in the database. Returns the DB row id (0 on error).
         fn record_trade(&self, action: &str, amount_usd: f64, amount_btc: f64, fee_usd: f64, payment_id: Option<&str>, status: &str) -> i64 {
-            let channel_id_str = {
+            let user_channel_id_str = {
                 let sc = self.stable_channel.lock().unwrap();
-                sc.channel_id.to_string()
+                format!("{}", sc.user_channel_id)
             };
 
             match self.db.record_trade(
-                &channel_id_str,
+                &user_channel_id_str,
                 action,
                 amount_usd,
                 amount_btc,
@@ -1469,7 +1564,7 @@
         fn process_events(&mut self) {
             while let Some(event) = self.node.next_event() {
                 match event {
-                    Event::ChannelReady { channel_id, .. } => {
+                    Event::ChannelReady { channel_id, user_channel_id, .. } => {
                         let txid_str = self.node
                             .list_channels()
                             .iter()
@@ -1484,8 +1579,14 @@
                         }
                         self.update_balances(); // Update UI immediately
 
+                        // Mark any pending splice payment with this txid as confirmed
+                        if txid_str != "unknown" {
+                            let _ = self.db.update_payment_confirmations(&txid_str, 1, "completed");
+                        }
+
                         audit_event("CHANNEL_READY", json!({
-                            "channel_id": channel_id.to_string()
+                            "channel_id": channel_id.to_string(),
+                            "user_channel_id": format!("{}", user_channel_id.0)
                         }));
                         self.status_message = format!("Channel {channel_id} is now ready\nTXID: {txid_str}");
                         self.show_onboarding = false;
@@ -1506,15 +1607,16 @@
 
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
+                            sc.user_channel_id = user_channel_id.0;
                             update_balances(&self.node, &mut sc);
                         }
                         self.update_balances(); // Update UI immediately
-                    
+
                         audit_event(
                             "CHANNEL_PENDING",
                             json!({
                                 "channel_id":            channel_id.to_string(),
-                                "user_channel_id":       format!("{:?}", user_channel_id),
+                                "user_channel_id":       format!("{}", user_channel_id.0),
                                 "temp_channel_id":       temp_id_str,
                                 "counterparty_node_id":  counterparty_node_id.to_string(),
                                 "funding_txo":           funding_str,
@@ -1561,6 +1663,7 @@
                                 btc_price,
                                 None,
                                 "completed",
+                                None, None,
                             );
 
                             self.status_message = format!("Received payment of {} msats", amount_msat);
@@ -1658,6 +1761,7 @@
                                         Some(&payment_hash_str), "lightning", "sent", 0,
                                         None, if price > 0.0 { Some(price) } else { None },
                                         None, "completed",
+                                        None, None,
                                     );
                                 }
                             }
@@ -1704,9 +1808,10 @@
                         }
                     }
         
-                    Event::ChannelClosed { channel_id, reason, .. } => {
+                    Event::ChannelClosed { channel_id, user_channel_id, reason, .. } => {
                         audit_event("CHANNEL_CLOSED", json!({
                             "channel_id": format!("{channel_id}"),
+                            "user_channel_id": format!("{}", user_channel_id.0),
                             "reason": format!("{:?}", reason)
                         }));
                         self.status_message = format!("Channel {channel_id} has been closed");
@@ -1715,14 +1820,15 @@
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
                             // Always clear if this is our channel OR if no channels remain
-                            if sc.channel_id == channel_id || self.node.list_channels().is_empty() {
-                                let _ = self.db.delete_channel(&sc.channel_id.to_string());
+                            if sc.user_channel_id == user_channel_id.0 || self.node.list_channels().is_empty() {
+                                let _ = self.db.delete_channel(&format!("{}", sc.user_channel_id));
                                 sc.expected_usd = USD::from_f64(0.0);
                                 sc.backing_sats = 0;
                                 sc.native_channel_btc = Bitcoin::from_sats(0);
                                 sc.stable_receiver_btc = Bitcoin::from_sats(0);
                                 sc.stable_receiver_usd = USD::from_f64(0.0);
                                 sc.channel_id = ldk_node::lightning::ln::types::ChannelId::from_bytes([0; 32]);
+                                sc.user_channel_id = 0;
                             }
                         }
 
@@ -1733,30 +1839,45 @@
                         self.waiting_for_payment = false;
                     }
 
-                    Event::SplicePending { channel_id, new_funding_txo, .. } => {
+                    Event::SplicePending { channel_id, user_channel_id, new_funding_txo, .. } => {
                         // NOTE: Do NOT clear auto_sweep_in_progress here!
                         // The on-chain balance doesn't update until the splice tx confirms.
                         // Clearing the flag here allows the auto-sweep to fire again on
                         // the same unspent UTXO, creating duplicate splice_in calls.
                         audit_event("SPLICE_PENDING", json!({
                             "channel_id": format!("{channel_id}"),
+                            "user_channel_id": format!("{}", user_channel_id.0),
                             "funding_txo": format!("{new_funding_txo}")
                         }));
 
-                        // Record the on-chain transaction if we have pending splice info
-                        if let Some(splice) = self.pending_splice.take() {
-                            let btc_price = {
-                                let sc = self.stable_channel.lock().unwrap();
-                                if sc.latest_price > 0.0 { Some(sc.latest_price) } else { None }
-                            };
-                            let _ = self.db.record_onchain_tx(
-                                &new_funding_txo.txid.to_string(),
-                                &splice.direction,
-                                splice.amount_sats,
-                                splice.address.as_deref(),
-                                btc_price,
-                                "pending",
-                            );
+                        // Record/update splice payment
+                        if let Some(splice) = self.pending_splice.lock().unwrap().take() {
+                            let txid_str = new_funding_txo.txid.to_string();
+                            if splice.direction == "in" {
+                                // Auto-sweep splice_in was already recorded in background thread
+                                // — just update it with the txid now that we know it
+                                let _ = self.db.set_pending_splice_txid(&txid_str);
+                            } else {
+                                let btc_price = {
+                                    let sc = self.stable_channel.lock().unwrap();
+                                    if sc.latest_price > 0.0 { Some(sc.latest_price) } else { None }
+                                };
+                                let amount_msat = splice.amount_sats * 1000;
+                                let amount_usd = btc_price.map(|p| splice.amount_sats as f64 / 100_000_000.0 * p);
+                                let txid_str = new_funding_txo.txid.to_string();
+                                let _ = self.db.record_payment(
+                                    Some(&txid_str),
+                                    "splice_out",
+                                    "sent",
+                                    amount_msat,
+                                    amount_usd,
+                                    btc_price,
+                                    None,
+                                    "pending",
+                                    Some(&txid_str),
+                                    splice.address.as_deref(),
+                                );
+                            }
                         }
 
                         self.status_message = format!("Splice pending - tx: {}", new_funding_txo.txid);
@@ -1771,7 +1892,7 @@
                             "channel_id": format!("{channel_id}"),
                             "user_channel_id": format!("{:?}", user_channel_id)
                         }));
-                        self.pending_splice = None;  // Clear pending splice on failure
+                        *self.pending_splice.lock().unwrap() = None;  // Clear pending splice on failure
                         self.status_message = "Splice failed".to_string();
                         self.show_toast("Splice failed", "!");
                     }
@@ -2538,6 +2659,49 @@
                         }
                     });
 
+                    // Show payment history if any records exist
+                    if let Ok(payments) = self.db.get_recent_payments(10) {
+                        if !payments.is_empty() {
+                            ui.add_space(20.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Recent Activity").size(14.0).strong().color(Color32::BLACK));
+                            ui.add_space(6.0);
+                            for payment in payments.iter().take(5) {
+                                ui.horizontal(|ui| {
+                                    let (dir_label, dir_color) = if payment.direction == "received" {
+                                        ("In", Color32::from_rgb(16, 185, 129))
+                                    } else {
+                                        ("Out", Color32::from_rgb(217, 119, 6))
+                                    };
+                                    ui.label(RichText::new(dir_label).size(11.0).color(dir_color));
+                                    let type_label = match payment.payment_type.as_str() {
+                                        "splice_in" => "Deposit",
+                                        "splice_out" => "Withdraw",
+                                        "onchain" => "On-chain",
+                                        "lightning" => "Lightning",
+                                        "stability" => "USD",
+                                        _ => "Payment",
+                                    };
+                                    ui.label(RichText::new(type_label).size(11.0).color(Color32::DARK_GRAY));
+                                    if let Some(usd) = payment.amount_usd {
+                                        ui.label(RichText::new(format!("${:.2}", usd)).size(11.0).color(Color32::BLACK));
+                                    } else {
+                                        let btc = payment.amount_msat as f64 / 100_000_000_000.0;
+                                        ui.label(RichText::new(format!("{:.6} BTC", btc)).size(11.0).color(Color32::BLACK));
+                                    }
+                                    let (status_label, status_color) = match payment.status.as_str() {
+                                        "completed" => ("Confirmed", Color32::from_rgb(16, 185, 129)),
+                                        "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
+                                        "failed" => ("Failed", Color32::from_rgb(225, 29, 72)),
+                                        _ => (&*payment.status, Color32::DARK_GRAY),
+                                    };
+                                    ui.label(RichText::new(status_label).size(11.0).color(status_color));
+                                });
+                            }
+                        }
+                    }
+
                 });
             });
         }
@@ -2770,15 +2934,32 @@
                     let onchain_sats = self.node.list_balances().total_onchain_balance_sats;
                     let above_threshold = onchain_sats > AUTO_SWEEP_MIN_SATS;
                     let onchain_label = if sweeping {
-                        "Bitcoin (depositing...)"
+                        "Processing deposit..."
                     } else if has_ready_channel && above_threshold {
-                        "Bitcoin (depositing soon)"
+                        "Deposit queued"
+                    } else if has_ready_channel && onchain_sats > 0 && !above_threshold {
+                        "Below $10 minimum"
                     } else {
                         "Bitcoin (onchain)"
                     };
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(onchain_label).size(14.0).color(Color32::DARK_GRAY));
+                        let label_resp = ui.label(RichText::new(onchain_label).size(14.0).color(Color32::DARK_GRAY));
+                        if sweeping {
+                            label_resp.on_hover_text("Your deposit is being added to your channel");
+                            if ui.small_button("?").on_hover_text("View deposit details").clicked() {
+                                if let Ok(payments) = self.db.get_recent_payments(10) {
+                                    if let Some(p) = payments.into_iter().find(|p| p.payment_type == "splice_in" && p.status == "pending") {
+                                        self.selected_payment = Some(p);
+                                        self.modal_opened_at = std::time::Instant::now();
+                                    }
+                                }
+                            }
+                        } else if has_ready_channel && above_threshold {
+                            label_resp.on_hover_text("Will be deposited into your channel shortly");
+                        } else if has_ready_channel && onchain_sats > 0 && !above_threshold {
+                            label_resp.on_hover_text("Minimum ~$10 needed to auto-deposit");
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(RichText::new(format!("{:.8} BTC", spendable_onchain_btc)).size(14.0).color(Color32::BLACK).strong());
                         });
@@ -3341,12 +3522,12 @@
                     ui.add_space(10.0);
 
                     if let Some(ch) = self.node.list_channels().first() {
-                        let channel_id = ch.channel_id.to_string();
+                        let user_ch_id = format!("{}", ch.user_channel_id.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Channel ID:").color(Color32::DARK_GRAY));
-                            ui.label(RichText::new(&channel_id[..7.min(channel_id.len())]).monospace().size(12.0).color(Color32::BLACK));
+                            ui.label(RichText::new(&user_ch_id[..7.min(user_ch_id.len())]).monospace().size(12.0).color(Color32::BLACK));
                             if ui.small_button("Copy").clicked() {
-                                ui.ctx().copy_text(channel_id.clone());
+                                ui.ctx().copy_text(user_ch_id.clone());
                                 self.show_toast("Copied!", "OK");
                             }
                         });
@@ -3658,7 +3839,7 @@
                         ui.horizontal(|ui| {
                             ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::hover()); // match "i" button width
                             ui.add_sized([24.0, 18.0], egui::Label::new(RichText::new("Dir").size(11.0).color(Color32::DARK_GRAY).strong()));
-                            ui.add_sized([48.0, 18.0], egui::Label::new(RichText::new("Type").size(11.0).color(Color32::DARK_GRAY).strong()));
+                            ui.add_sized([56.0, 18.0], egui::Label::new(RichText::new("Type").size(11.0).color(Color32::DARK_GRAY).strong()));
                             let amt_resp = ui.add_sized([72.0, 18.0], egui::Label::new(RichText::new(amt_header).size(11.0).color(Color32::from_rgb(79, 70, 229)).strong()).sense(Sense::click()));
                             if amt_resp.clicked() { toggled = true; }
                             ui.add_sized([58.0, 18.0], egui::Label::new(RichText::new("Status").size(11.0).color(Color32::DARK_GRAY).strong()));
@@ -3693,9 +3874,15 @@
                                         };
                                         ui.add_sized([24.0, 18.0], egui::Label::new(RichText::new(label).color(color)));
 
-                                        let type_label = if payment.payment_type == "stability" { "Stability" } else { "Manual" };
-                                        let type_color = if payment.payment_type == "stability" { Color32::from_rgb(96, 165, 250) } else { Color32::DARK_GRAY };
-                                        ui.add_sized([48.0, 18.0], egui::Label::new(RichText::new(type_label).size(11.0).color(type_color)));
+                                        let (type_label, type_color) = match payment.payment_type.as_str() {
+                                            "stability" => ("USD", Color32::from_rgb(96, 165, 250)),
+                                            "splice_in" => ("Deposit", Color32::from_rgb(16, 185, 129)),
+                                            "splice_out" => ("Withdraw", Color32::from_rgb(217, 119, 6)),
+                                            "onchain" => ("On-chain", Color32::from_rgb(16, 185, 129)),
+                                            "lightning" => ("Lightning", Color32::from_rgb(234, 179, 8)),
+                                            _ => ("Manual", Color32::DARK_GRAY),
+                                        };
+                                        ui.add_sized([56.0, 18.0], egui::Label::new(RichText::new(type_label).size(11.0).color(type_color)));
 
                                         let amt_str = if show_btc {
                                             format!("{:.6}", payment.amount_msat as f64 / 100_000_000_000.0)
@@ -3729,39 +3916,8 @@
                     }
                 }
 
-                ui.add_space(20.0);
 
-                // On-chain Transactions
-                ui.group(|ui| {
-                    ui.label(RichText::new("On-chain Transactions").size(16.0).strong().color(Color32::BLACK));
-                    ui.add_space(10.0);
 
-                    match self.db.get_recent_onchain_txs(10) {
-                        Ok(txs) if txs.is_empty() => {
-                            ui.label(RichText::new("No on-chain transactions yet").color(Color32::GRAY));
-                        }
-                        Ok(txs) => {
-                            for tx in txs.iter().take(5) {
-                                ui.horizontal(|ui| {
-                                    let (color, label) = if tx.direction == "in" {
-                                        (Color32::from_rgb(16, 185, 129), "Deposit")
-                                    } else {
-                                        (Color32::from_rgb(217, 119, 6), "Withdraw")
-                                    };
-                                    ui.label(RichText::new(label).color(color));
-                                    ui.label(RichText::new(format!("{} sats", tx.amount_sats)).color(Color32::BLACK));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(RichText::new(Self::format_timestamp(tx.created_at)).size(11.0).color(Color32::GRAY));
-                                    });
-                                });
-                                ui.add_space(4.0);
-                            }
-                        }
-                        Err(_) => {
-                            ui.label(RichText::new("Error loading transactions").color(Color32::from_rgb(225, 29, 72)));
-                        }
-                    }
-                });
             });
         }
 
@@ -3860,8 +4016,11 @@
                     row(ui, "Direction", dir);
 
                     let type_label = match payment.payment_type.as_str() {
-                        "stability" => "Stability",
+                        "stability" => "USD",
                         "lightning" => "Lightning",
+                        "splice_in" => "Deposit",
+                        "splice_out" => "Withdraw",
+                        "onchain" => "On-chain",
                         _ => "Manual",
                     };
                     row(ui, "Type", type_label);
@@ -3909,6 +4068,17 @@
                         ui.add_space(4.0);
                         ui.label(RichText::new("Counterparty").size(11.0).color(Color32::GRAY));
                         ui.label(RichText::new(cp).size(10.0).color(Color32::DARK_GRAY).monospace());
+                    }
+
+                    if let Some(ref txid) = payment.txid {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Transaction ID").size(11.0).color(Color32::GRAY));
+                        ui.label(RichText::new(txid).size(10.0).color(Color32::DARK_GRAY).monospace());
+                    }
+                    if let Some(ref addr) = payment.address {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Address").size(11.0).color(Color32::GRAY));
+                        ui.label(RichText::new(addr).size(10.0).color(Color32::DARK_GRAY).monospace());
                     }
 
                     ui.add_space(10.0);
@@ -4034,10 +4204,10 @@
             if is_onchain {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("Amount (BTC):").size(12.0).color(Color32::DARK_GRAY));
                     let prev_amount = self.send_amount.clone();
                     let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
-                        .hint_text("e.g. 50000")
+                        .hint_text("e.g. 0.0005")
                         .desired_width(120.0);
                     ui.add(amount_edit);
                     // Clear send_all if user manually edits the amount
@@ -4053,10 +4223,19 @@
                         } else {
                             self.node.list_balances().spendable_onchain_balance_sats
                         };
-                        self.send_amount = max_sats.to_string();
+                        self.send_amount = format!("{:.8}", max_sats as f64 / 100_000_000.0);
                         self.send_all = true;
                     }
                 });
+                // Show USD equivalent
+                if let Ok(btc) = self.send_amount.trim().parse::<f64>() {
+                    if btc > 0.0 {
+                        let price = self.stable_channel.lock().unwrap().latest_price;
+                        if price > 0.0 {
+                            ui.label(RichText::new(format!("~ ${:.2} USD", btc * price)).size(11.0).color(Color32::DARK_GRAY));
+                        }
+                    }
+                }
                 ui.add_space(8.0);
             }
 
@@ -4079,12 +4258,21 @@
             if needs_ln_amount {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Amount (sats):").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("Amount (BTC):").size(12.0).color(Color32::DARK_GRAY));
                     let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
-                        .hint_text("e.g. 5000")
+                        .hint_text("e.g. 0.0005")
                         .desired_width(140.0);
                     ui.add(amount_edit);
                 });
+                // Show USD equivalent
+                if let Ok(btc) = self.send_amount.trim().parse::<f64>() {
+                    if btc > 0.0 {
+                        let price = self.stable_channel.lock().unwrap().latest_price;
+                        if price > 0.0 {
+                            ui.label(RichText::new(format!("~ ${:.2} USD", btc * price)).size(11.0).color(Color32::DARK_GRAY));
+                        }
+                    }
+                }
                 ui.add_space(8.0);
             }
 
@@ -4100,7 +4288,8 @@
                     match self.cached_fee_rate {
                         Some(rate) => {
                             let estimated_fee = rate * vbytes;
-                            format!("Estimated fee: ~{} sats ({} sat/vB)", estimated_fee, rate)
+                            let fee_btc = estimated_fee as f64 / 100_000_000.0;
+                            format!("Estimated fee: ~{:.8} BTC ({} sat/vB)", fee_btc, rate)
                         }
                         None => "Estimating fee...".to_string(),
                     }
@@ -4114,9 +4303,15 @@
                     match Bolt11Invoice::from_str(invoice_str) {
                         Ok(invoice) => {
                             if let Some(amount_msat) = invoice.amount_milli_satoshis() {
-                                let amount_sats = amount_msat / 1000;
-                                let fee_estimate = (amount_sats / 100).max(1); // ~1% estimate
-                                format!("Amount: {} sats + ~{} sats routing fee", amount_sats, fee_estimate)
+                                let amount_btc = amount_msat as f64 / 1000.0 / 100_000_000.0;
+                                let fee_btc = amount_btc / 100.0;
+                                let price = self.stable_channel.lock().unwrap().latest_price;
+                                let usd_str = if price > 0.0 {
+                                    format!(" (${:.2})", amount_btc * price)
+                                } else {
+                                    String::new()
+                                };
+                                format!("Amount: {:.8} BTC{} + ~{:.8} BTC routing fee", amount_btc, usd_str, fee_btc.max(0.00000001))
                             } else {
                                 "Variable amount invoice (no fee estimate)".to_string()
                             }
@@ -4205,16 +4400,23 @@
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Amount (sats):").color(Color32::DARK_GRAY));
+                        ui.label(RichText::new("Amount (BTC):").color(Color32::DARK_GRAY));
                         let amount_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount)
-                            .hint_text("10000")
+                            .hint_text("e.g. 0.0001")
                             .desired_width(100.0);
                         ui.add(amount_edit);
                     });
+                    // Show USD equivalent
+                    if let Ok(btc_val) = self.lightning_receive_amount.trim().parse::<f64>() {
+                        if btc_val > 0.0 && self.btc_price > 0.0 {
+                            let usd_val = btc_val * self.btc_price;
+                            ui.label(RichText::new(format!("≈ ${:.2} USD", usd_val)).size(12.0).color(Color32::DARK_GRAY));
+                        }
+                    }
                     ui.add_space(8.0);
                     if ui.button("Generate Invoice").clicked() {
                         let amount = self.lightning_receive_amount.trim();
-                        if amount.is_empty() || amount == "0" || amount.parse::<u64>().unwrap_or(0) == 0 {
+                        if amount.is_empty() || amount == "0" || amount.parse::<f64>().unwrap_or(0.0) <= 0.0 {
                             self.lightning_receive_error = "Please enter an amount.".to_string();
                         } else {
                             self.lightning_receive_error.clear();

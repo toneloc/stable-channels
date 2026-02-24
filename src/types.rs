@@ -168,6 +168,9 @@ impl std::fmt::Display for USD {
 pub struct StableChannel {
     #[serde(with = "channel_id_serde")]
     pub channel_id: ChannelId,
+    /// Stable identifier that persists across splices (LDK's UserChannelId.0)
+    #[serde(default)]
+    pub user_channel_id: u128,
     pub is_stable_receiver: bool,
     #[serde(with = "pubkey_serde")]
     pub counterparty: PublicKey,
@@ -283,6 +286,7 @@ impl Default for StableChannel {
     fn default() -> Self {
         Self {
             channel_id: ChannelId::from_bytes([0; 32]),
+            user_channel_id: 0,
             is_stable_receiver: true,
             counterparty: PublicKey::from_slice(&[2; 33]).unwrap_or_else(|_| {
                 // This is a fallback that should never be reached,
