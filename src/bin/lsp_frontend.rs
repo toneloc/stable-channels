@@ -21,6 +21,8 @@ struct Balance {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ChannelInfo {
     id: String,
+    #[serde(default)]
+    user_channel_id: String,
     remote_pubkey: String,
     capacity_sats: u64,
     local_balance_sats: u64,
@@ -293,7 +295,7 @@ impl Dashboard {
                         .show(ui, |ui| {
                             // ── headers ───────────────────────────────────────────
                             for h in [
-                                "Notes","ID", "Peer", "Capacity",
+                                "Notes","ID", "User Ch ID", "Peer", "Capacity",
                                 "LSP Sats", "LSP $",      // local sats / local USD
                                 "User Sats", "User $",    // remote sats / remote USD
                                 "Stable $",               // target stable balance
@@ -323,7 +325,15 @@ impl Dashboard {
                                         ui.ctx().copy_text(ch.id.clone());
                                     }
                                 });
-    
+
+                                // User Channel ID (copy)
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(short(&ch.user_channel_id, 8)).monospace());
+                                    if ui.small_button("⧉").on_hover_text("Copy user channel ID").clicked() {
+                                        ui.ctx().copy_text(ch.user_channel_id.clone());
+                                    }
+                                });
+
                                 // Peer (copy)
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(short(&ch.remote_pubkey, 8)).monospace());

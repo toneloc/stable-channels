@@ -1343,14 +1343,15 @@
         /// Returns the PaymentId on success so the caller can track it.
         fn send_trade(&mut self, new_expected_usd: f64, fee_usd: f64, trade_action: &str) -> Option<PaymentId> {
             // Grab channel identifiers, counterparty, price from StableChannel
-            let (user_channel_id_str, counterparty, price, old_expected_usd) = {
+            let (channel_id_str, user_channel_id_str, counterparty, price, old_expected_usd) = {
                 let sc = self.stable_channel.lock().unwrap();
-                (format!("{}", sc.user_channel_id), sc.counterparty, sc.latest_price, sc.expected_usd.0)
+                (sc.channel_id.to_string(), format!("{}", sc.user_channel_id), sc.counterparty, sc.latest_price, sc.expected_usd.0)
             };
 
-            // Build payload that the LSP will parse (use user_channel_id — stable across splices)
+            // Build payload with channel_id (shared between both nodes) for LSP lookup
             let payload = json!({
                 "type": TRADE_MESSAGE_TYPE,
+                "channel_id": channel_id_str,
                 "user_channel_id": user_channel_id_str,
                 "expected_usd": new_expected_usd,
             });
@@ -1996,6 +1997,18 @@
                 .collect::<Vec<_>>()
                 .join(",");
             format!("${}.{:02}", formatted, decimal_part.abs())
+        }
+
+        fn format_chart_price(price: f64) -> String {
+            let price_int = price.round() as i64;
+            let formatted = price_int.to_string()
+                .as_bytes()
+                .rchunks(3)
+                .rev()
+                .map(|chunk| std::str::from_utf8(chunk).unwrap())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("${}", formatted)
         }
 
         /// Seed historical price data into the database if not already present
@@ -2886,13 +2899,12 @@
                     }
 
                     // Text labels embedded inside the bar segments
-                    // Bounce animation: font size pops up then settles back
+                    // Dark text on colored backgrounds for maximum contrast
                     let anim_scale = 1.0 + self.bar_chart_anim * 0.15; // 1.0 → 1.15 → 1.0
-                    let font_size = 13.0 * anim_scale;
-                    let font = egui::FontId::proportional(font_size);
-                    // Slight opacity fade-in during animation
-                    let alpha = ((1.0 - self.bar_chart_anim * 0.4) * 255.0) as u8;
-                    let label_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
+                    let font_size = 14.0 * anim_scale;
+                    let font = egui::FontId::new(font_size, egui::FontFamily::Proportional);
+                    let alpha = ((1.0 - self.bar_chart_anim * 0.3) * 255.0) as u8;
+                    let label_color = Color32::from_rgba_premultiplied(0, 0, 0, alpha);
 
                     // Default: Stable side = USD, BTC side = BTC
                     // Toggled: Stable side = BTC, BTC side = USD
@@ -3186,6 +3198,9 @@
 
                 let painter = ui.painter();
 
+                // Grey border around the chart
+                painter.rect_stroke(rect, egui::CornerRadius::same(8), egui::Stroke::new(1.0, Color32::from_rgb(200, 200, 200)), egui::StrokeKind::Outside);
+
                 if self.chart_period == ChartPeriod::Day1 {
                     // ── 1D chart: time-based x-axis ──────────────────────────
                     let now_ts = std::time::SystemTime::now()
@@ -3241,14 +3256,14 @@
                         painter.text(
                             egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
                             egui::Align2::LEFT_TOP,
-                            format!("${:.0}", max_price),
+                            Self::format_chart_price(max_price),
                             egui::FontId::proportional(10.0),
                             label_color,
                         );
                         painter.text(
                             egui::pos2(rect.left() + 4.0, chart_bottom - 12.0),
                             egui::Align2::LEFT_TOP,
-                            format!("${:.0}", min_price),
+                            Self::format_chart_price(min_price),
                             egui::FontId::proportional(10.0),
                             label_color,
                         );
@@ -3327,14 +3342,14 @@
                         painter.text(
                             egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
                             egui::Align2::LEFT_TOP,
-                            format!("${:.0}", max_price),
+                            Self::format_chart_price(max_price),
                             egui::FontId::proportional(10.0),
                             label_color,
                         );
                         painter.text(
                             egui::pos2(rect.left() + 4.0, rect.bottom() - 12.0),
                             egui::Align2::LEFT_TOP,
-                            format!("${:.0}", min_price),
+                            Self::format_chart_price(min_price),
                             egui::FontId::proportional(10.0),
                             label_color,
                         );
@@ -4230,10 +4245,12 @@
                         .fill(Color32::from_rgb(238, 242, 255))
                         .corner_radius(6.0);
                     if ui.add(max_btn).clicked() {
+                        let balances = self.node.list_balances();
                         let max_sats = if let Some(ch) = self.node.list_channels().iter().find(|c| c.is_channel_ready) {
-                            ch.outbound_capacity_msat / 1000
+                            // With channel: can splice_out from channel OR send on-chain funds
+                            (ch.outbound_capacity_msat / 1000).max(balances.total_onchain_balance_sats)
                         } else {
-                            self.node.list_balances().spendable_onchain_balance_sats
+                            balances.total_onchain_balance_sats
                         };
                         self.send_amount = format!("{:.8}", max_sats as f64 / 100_000_000.0);
                         self.send_all = true;
@@ -4338,6 +4355,17 @@
                     ui.label(RichText::new(&fee_text).size(11.0).color(Color32::DARK_GRAY));
                     ui.add_space(8.0);
                 }
+            }
+
+            // Warn if funds are pending and not yet spendable
+            let balances_check = self.node.list_balances();
+            let has_pending = !balances_check.pending_balances_from_channel_closures.is_empty();
+            let spendable = balances_check.spendable_onchain_balance_sats;
+            let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+            if has_pending && spendable == 0 && !has_channel {
+                ui.label(RichText::new("Funds are pending on-chain confirmation and can't be sent yet.")
+                    .size(12.0).color(Color32::from_rgb(217, 119, 6)));
+                ui.add_space(8.0);
             }
 
             ui.vertical_centered(|ui| {

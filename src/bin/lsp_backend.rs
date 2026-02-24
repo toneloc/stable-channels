@@ -40,7 +40,10 @@
         struct TradePayload {
             #[serde(rename = "type")]
             kind: String,
-            /// Stable channel identifier (persists across splices)
+            /// Channel ID shared between both nodes (hex-encoded)
+            #[serde(default)]
+            channel_id: Option<String>,
+            /// User's local channel identifier (NOT shared — kept for logging)
             user_channel_id: String,
             expected_usd: f64,
         }
@@ -927,22 +930,27 @@
 
                 let user_ch_id_str = payload.user_channel_id.clone();
 
-                // 4) Find the channel by user_channel_id to verify signature
-                let channel_opt = self
-                    .node
-                    .list_channels()
-                    .into_iter()
-                    .find(|c| format!("{}", c.user_channel_id.0) == user_ch_id_str);
+                // 4) Find the channel — prefer channel_id (shared between both nodes),
+                //    fall back to user_channel_id for backward compat
+                let channels = self.node.list_channels();
+                let channel_opt = if let Some(ref cid) = payload.channel_id {
+                    // channel_id is the same on both sides of the channel
+                    channels.iter().find(|c| c.channel_id.to_string() == *cid)
+                } else {
+                    // Legacy: try user_channel_id (only works if both sides happen to match)
+                    channels.iter().find(|c| format!("{}", c.user_channel_id.0) == user_ch_id_str)
+                };
 
                 let channel = match channel_opt {
-                    Some(ch) => ch,
+                    Some(ch) => ch.clone(),
                     None => {
                         audit_event("TRADE_CHANNEL_NOT_FOUND", json!({
+                            "channel_id": payload.channel_id,
                             "user_channel_id": user_ch_id_str,
                             "expected_usd": new_expected_usd,
                             "payment_hash": format!("{}", payment_hash),
                         }));
-                        self.status_message = format!("Trade: unknown channel user_id={}", user_ch_id_str);
+                        self.status_message = format!("Trade: channel not found (channel_id={:?}, user_id={})", payload.channel_id, user_ch_id_str);
                         return;
                     }
                 };
