@@ -1115,6 +1115,21 @@
                                             amount_sats,
                                             address: Some(input.clone()),
                                         });
+                                        // Record pending withdrawal in payment history immediately
+                                        let amount_msat = amount_sats * 1000;
+                                        let (amount_usd, btc_price_opt) = {
+                                            let sc = self.stable_channel.lock().unwrap();
+                                            let price = sc.latest_price;
+                                            let usd = if price > 0.0 {
+                                                Some(amount_sats as f64 / SATS_IN_BTC as f64 * price)
+                                            } else { None };
+                                            (usd, if price > 0.0 { Some(price) } else { None })
+                                        };
+                                        let _ = self.db.record_payment(
+                                            None, "splice_out", "sent",
+                                            amount_msat, amount_usd, btc_price_opt, None,
+                                            "pending", None, Some(&input),
+                                        );
                                         self.show_toast("Withdrawal started", "-");
                                         self.status_message = format!("Splice-out: {:.8} BTC", amount_sats as f64 / 100_000_000.0);
                                         self.send_input.clear();
@@ -1130,24 +1145,26 @@
                                 }
                             } else {
                                 // No channel — fallback to regular on-chain send
+                                let amount_sats = match self.send_amount.trim().parse::<f64>() {
+                                    Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
+                                    _ if self.send_all => self.node.list_balances().spendable_onchain_balance_sats,
+                                    _ => {
+                                        self.send_error = "Enter a valid amount in BTC".to_string();
+                                        return false;
+                                    }
+                                };
                                 let result = if self.send_all {
                                     self.node.onchain_payment().send_all_to_address(&valid_addr, false, None)
+                                } else if amount_sats > 0 {
+                                    self.node.onchain_payment().send_to_address(&valid_addr, amount_sats, None)
                                 } else {
-                                    match self.send_amount.trim().parse::<u64>() {
-                                        Ok(amount_sats) if amount_sats > 0 => {
-                                            self.node.onchain_payment().send_to_address(&valid_addr, amount_sats, None)
-                                        }
-                                        _ => {
-                                            self.send_error = "Enter a valid amount in sats".to_string();
-                                            return false;
-                                        }
-                                    }
+                                    self.send_error = "Enter a valid amount in BTC".to_string();
+                                    return false;
                                 };
                                 match result {
                                     Ok(txid) => {
                                         // Record on-chain send in payment history
-                                        let amount_msat = self.send_amount.trim().parse::<u64>()
-                                            .map(|sats| sats * 1000).unwrap_or(0);
+                                        let amount_msat = amount_sats * 1000;
                                         let (amount_usd, btc_price_opt) = {
                                             let sc = self.stable_channel.lock().unwrap();
                                             let price = sc.latest_price;
@@ -1239,9 +1256,16 @@
         fn close_active_channel(&mut self) {
             let channels = self.node.list_channels();
             if let Some(ch) = channels.first() {
+                if !ch.is_usable {
+                    self.show_toast("Close failed. Please try again in a few minutes.", "-");
+                    return;
+                }
                 match self.node.close_channel(&ch.user_channel_id, ch.counterparty_node_id) {
                     Ok(_)  => self.status_message = format!("Closing channel {}", ch.channel_id),
-                    Err(e) => self.status_message = format!("Error closing channel: {}", e),
+                    Err(e) => {
+                        self.show_toast("Close failed. Please try again in a few minutes.", "-");
+                        self.status_message = format!("Error closing channel: {}", e);
+                    }
                 }
             } else {
                 self.status_message = "No channel to close".into();
@@ -1644,7 +1668,7 @@
                             }));
 
                             // Record payment in database
-                            let (amount_usd, btc_price) = {
+                            let (amount_usd, btc_price, payment_type) = {
                                 let sc = self.stable_channel.lock().unwrap();
                                 let price = sc.latest_price;
                                 let usd = if price > 0.0 {
@@ -1652,11 +1676,12 @@
                                 } else {
                                     None
                                 };
-                                (usd, if price > 0.0 { Some(price) } else { None })
+                                let ptype = if sc.expected_usd.0 > 0.0 { "stability" } else { "lightning" };
+                                (usd, if price > 0.0 { Some(price) } else { None }, ptype)
                             };
                             let _ = self.db.record_payment(
                                 Some(&payment_hash_str),
-                                "stability",
+                                payment_type,
                                 "received",
                                 amount_msat,
                                 amount_usd,
@@ -1815,6 +1840,7 @@
                             "reason": format!("{:?}", reason)
                         }));
                         self.status_message = format!("Channel {channel_id} has been closed");
+                        self.show_toast("Channel closed", "-");
 
                         // Clear stable state so a new channel starts fresh
                         {
@@ -2659,45 +2685,21 @@
                         }
                     });
 
-                    // Show payment history if any records exist
-                    if let Ok(payments) = self.db.get_recent_payments(10) {
+                    // Show "History" link if there are any payment records
+                    if let Ok(payments) = self.db.get_recent_payments(1) {
                         if !payments.is_empty() {
-                            ui.add_space(20.0);
-                            ui.separator();
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("Recent Activity").size(14.0).strong().color(Color32::BLACK));
-                            ui.add_space(6.0);
-                            for payment in payments.iter().take(5) {
-                                ui.horizontal(|ui| {
-                                    let (dir_label, dir_color) = if payment.direction == "received" {
-                                        ("In", Color32::from_rgb(16, 185, 129))
-                                    } else {
-                                        ("Out", Color32::from_rgb(217, 119, 6))
-                                    };
-                                    ui.label(RichText::new(dir_label).size(11.0).color(dir_color));
-                                    let type_label = match payment.payment_type.as_str() {
-                                        "splice_in" => "Deposit",
-                                        "splice_out" => "Withdraw",
-                                        "onchain" => "On-chain",
-                                        "lightning" => "Lightning",
-                                        "stability" => "USD",
-                                        _ => "Payment",
-                                    };
-                                    ui.label(RichText::new(type_label).size(11.0).color(Color32::DARK_GRAY));
-                                    if let Some(usd) = payment.amount_usd {
-                                        ui.label(RichText::new(format!("${:.2}", usd)).size(11.0).color(Color32::BLACK));
-                                    } else {
-                                        let btc = payment.amount_msat as f64 / 100_000_000_000.0;
-                                        ui.label(RichText::new(format!("{:.6} BTC", btc)).size(11.0).color(Color32::BLACK));
-                                    }
-                                    let (status_label, status_color) = match payment.status.as_str() {
-                                        "completed" => ("Confirmed", Color32::from_rgb(16, 185, 129)),
-                                        "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                                        "failed" => ("Failed", Color32::from_rgb(225, 29, 72)),
-                                        _ => (&*payment.status, Color32::DARK_GRAY),
-                                    };
-                                    ui.label(RichText::new(status_label).size(11.0).color(status_color));
-                                });
+                            ui.add_space(12.0);
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    RichText::new("View history")
+                                        .underline()
+                                        .size(13.0)
+                                        .color(Color32::from_rgb(59, 130, 246)),
+                                ).sense(Sense::click()),
+                            ).on_hover_cursor(CursorIcon::PointingHand);
+                            if resp.clicked() {
+                                self.current_tab = Tab::History;
+                                self.show_onboarding = false;
                             }
                         }
                     }
@@ -2812,14 +2814,15 @@
                 // Claimable lightning balances are NOT added to total because they overlap
                 // with pending_sweep or onchain once the sweep tx is broadcast/confirmed.
                 let stabilized_usd = if has_active_channel { expected_usd } else { 0.0 };
-                // Total balance = lightning (active channels + claimable from closed channels)
-                //               + pending sweep (broadcast but not yet confirmed)
-                //               + on-chain (confirmed)
-                // During close transitions there may be brief overlap between lightning
-                // and pending_sweep, but this is better than showing $0 for in-transit funds.
-                let total_sats = balances.total_lightning_balance_sats
-                    + pending_sweep_sats
-                    + total_onchain_sats;
+                // Total balance calculation:
+                // With active channel: lightning + onchain (no overlap)
+                // Without active channel: pending_sweep + onchain only
+                //   (lightning_balances overlaps with pending_sweep/onchain after close)
+                let total_sats = if has_active_channel {
+                    balances.total_lightning_balance_sats + total_onchain_sats
+                } else {
+                    pending_sweep_sats + total_onchain_sats
+                };
                 let total_btc = total_sats as f64 / 100_000_000.0;
                 let total_usd = total_btc * btc_price;
 
@@ -2998,6 +3001,15 @@
                     || !balances_for_check.lightning_balances.is_empty();
                 if !has_channel && (has_pending_funds || has_onchain_balance || has_any_pending) {
                     ui.add_space(15.0);
+
+                    if has_pending_funds || has_any_pending {
+                        ui.label(
+                            RichText::new("Please wait while your funds are confirmed on-chain.")
+                                .size(14.0)
+                                .color(Color32::from_rgb(217, 119, 6))
+                        );
+                        ui.add_space(10.0);
+                    }
 
                     // Compact pending funds summary
                     // Only count truly pending sweeps (not yet broadcast, or awaiting first confirmation)
@@ -5335,13 +5347,16 @@
             }
 
             // Show onboarding only if no channels AND no funds at all (pending or on-chain)
-            let balances = self.node.list_balances();
-            let has_any_funds = balances.total_lightning_balance_sats > 0
-                || !balances.pending_balances_from_channel_closures.is_empty()
-                || balances.total_onchain_balance_sats > 0;
-            self.show_onboarding = self.node.list_channels().is_empty()
-                && !self.waiting_for_payment
-                && !has_any_funds;
+            // Don't override if user navigated to History tab
+            if self.current_tab == Tab::Home {
+                let balances = self.node.list_balances();
+                let has_any_funds = balances.total_lightning_balance_sats > 0
+                    || !balances.pending_balances_from_channel_closures.is_empty()
+                    || balances.total_onchain_balance_sats > 0;
+                self.show_onboarding = self.node.list_channels().is_empty()
+                    && !self.waiting_for_payment
+                    && !has_any_funds;
+            }
 
             self.start_background_if_needed();
 
