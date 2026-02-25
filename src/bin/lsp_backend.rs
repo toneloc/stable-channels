@@ -647,6 +647,8 @@
                                     }
 
                                     let new_expected_usd = sc.expected_usd.0;
+                                    let sync_counterparty = sc.counterparty;
+                                    // sc no longer used after this point
                                     audit_event("CHANNEL_READY_SPLICE", json!({
                                         "channel_id": channel_id.to_string(),
                                         "old_channel_id": old_channel_id,
@@ -655,6 +657,9 @@
                                         "expected_usd": new_expected_usd,
                                     }));
                                     self.save_stable_channels();
+                                    if usd_deducted.is_some() {
+                                        self.send_sync_message(user_channel_id.0, new_expected_usd, sync_counterparty);
+                                    }
                                     self.status_message = format!(
                                         "Channel {} ready after splice (${:.2} stabilized)",
                                         channel_id, new_expected_usd
@@ -773,6 +778,7 @@
                                             // Splice-out: channel got smaller
                                             let splice_out_sats = old_value - new_value;
 
+                                            let mut sync_info: Option<(u128, f64, PublicKey)> = None;
                                             if let Some(sc) = self.stable_channels.iter_mut()
                                                 .find(|sc| sc.user_channel_id == user_channel_id.0)
                                             {
@@ -786,7 +792,11 @@
                                                         "new_expected_usd": sc.expected_usd.0,
                                                         "btc_price": price,
                                                     }));
+                                                    sync_info = Some((sc.user_channel_id, sc.expected_usd.0, sc.counterparty));
                                                 }
+                                            }
+                                            if let Some((ucid, eusd, cp)) = sync_info {
+                                                self.send_sync_message(ucid, eusd, cp);
                                             }
                                             self.save_stable_channels();
                                         }
@@ -955,23 +965,29 @@
 
                     if let Some(usd_deducted) = stable::reconcile_forwarded(sc, user_total_sats, total_sats, self.btc_price) {
                         let overflow_sats = total_sats.saturating_sub(native_sats);
+                        let new_expected_usd = sc.expected_usd.0;
+                        let sc_user_channel_id = sc.user_channel_id;
+                        let sc_counterparty = sc.counterparty;
+                        // sc no longer used after this point
+
                         println!(
                             "[forwarded] channel {} spent {} sats ({} native, {} from stable), expected_usd: ${:.2} -> ${:.2}",
-                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, sc.expected_usd.0
+                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, new_expected_usd
                         );
 
                         audit_event("STABLE_SPEND_DEDUCTED", json!({
-                            "user_channel_id": format!("{}", sc.user_channel_id),
+                            "user_channel_id": format!("{}", sc_user_channel_id),
                             "total_sats_spent": total_sats,
                             "native_sats_spent": native_sats,
                             "stable_sats_spent": overflow_sats,
                             "usd_deducted": usd_deducted,
                             "old_expected_usd": old_expected,
-                            "new_expected_usd": sc.expected_usd.0,
+                            "new_expected_usd": new_expected_usd,
                             "btc_price": self.btc_price,
                         }));
 
                         self.save_stable_channels();
+                        self.send_sync_message(sc_user_channel_id, new_expected_usd, sc_counterparty);
                     } else {
                         println!(
                             "[forwarded] channel {} spent {} sats from native BTC ({} native available), stable ${:.2} unchanged",
@@ -989,6 +1005,51 @@
                 }
 
                 self.update_balances();
+            }
+
+            /// Send authoritative expected_usd to the user after a stable deduction.
+            /// Ensures both sides agree on the stable position value.
+            fn send_sync_message(&self, user_channel_id: u128, expected_usd: f64, counterparty: PublicKey) {
+                let payload = json!({
+                    "type": SYNC_MESSAGE_TYPE,
+                    "user_channel_id": format!("{}", user_channel_id),
+                    "expected_usd": expected_usd,
+                });
+                let payload_str = payload.to_string();
+                let signature = self.node.sign_message(payload_str.as_bytes());
+
+                let signed_msg = json!({
+                    "payload": payload_str,
+                    "signature": signature,
+                });
+                let signed_str = signed_msg.to_string();
+
+                let custom_tlv = CustomTlvRecord {
+                    type_num: STABLE_CHANNEL_TLV_TYPE,
+                    value: signed_str.as_bytes().to_vec(),
+                };
+
+                match self.node.spontaneous_payment().send_with_custom_tlvs(
+                    1, // 1 msat
+                    counterparty,
+                    None,
+                    vec![custom_tlv],
+                ) {
+                    Ok(payment_id) => {
+                        audit_event("SYNC_MESSAGE_SENT", json!({
+                            "user_channel_id": format!("{}", user_channel_id),
+                            "expected_usd": expected_usd,
+                            "payment_id": format!("{}", payment_id),
+                        }));
+                    }
+                    Err(e) => {
+                        audit_event("SYNC_MESSAGE_FAILED", json!({
+                            "user_channel_id": format!("{}", user_channel_id),
+                            "expected_usd": expected_usd,
+                            "error": format!("{e}"),
+                        }));
+                    }
+                }
             }
 
             /// Handle trade message from client - updates the stabilized USD amount

@@ -1150,22 +1150,6 @@
                                             "pending", None, Some(&input),
                                         );
 
-                                        // Deduct stable balance immediately if splice exceeds native BTC,
-                                        // then notify the LSP via trade message so both sides agree.
-                                        {
-                                            let mut sc = self.stable_channel.lock().unwrap();
-                                            let price = sc.latest_price;
-                                            if let Some(usd_deducted) = stable::deduct_outgoing(&mut sc, amount_sats, price) {
-                                                audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
-                                                    "amount_sats": amount_sats,
-                                                    "usd_deducted": usd_deducted,
-                                                    "new_expected_usd": sc.expected_usd.0,
-                                                    "btc_price": price,
-                                                }));
-                                            }
-                                        }
-                                        self.save_channel_settings();
-
                                         self.show_toast("Withdrawal started", "-");
                                         self.status_message = format!("Splice-out: {:.8} BTC", amount_sats as f64 / 100_000_000.0);
                                         self.send_input.clear();
@@ -1711,11 +1695,82 @@
                         self.status_message = format!("Channel {channel_id} is now ready\nTXID: {funding_str}");
                     }
                     
-                    Event::PaymentReceived { amount_msat, payment_hash, .. } => {
+                    Event::PaymentReceived { amount_msat, payment_hash, custom_records, .. } => {
                         let payment_hash_str = format!("{payment_hash}");
 
-                        // Skip if we've already processed this payment (LDK replays events on startup)
-                        if self.db.payment_exists(&payment_hash_str).unwrap_or(false) {
+                        // Check for SYNC_V1 message from LSP (expected_usd synchronization)
+                        let handled_sync = 'sync: {
+                            for tlv in &custom_records {
+                                if tlv.type_num != STABLE_CHANNEL_TLV_TYPE {
+                                    continue;
+                                }
+                                let raw = match String::from_utf8(tlv.value.clone()) {
+                                    Ok(s) => s,
+                                    Err(_) => continue,
+                                };
+                                let envelope: serde_json::Value = match serde_json::from_str(&raw) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                let payload_str = match envelope.get("payload").and_then(|v| v.as_str()) {
+                                    Some(s) => s,
+                                    None => continue,
+                                };
+                                let signature = match envelope.get("signature").and_then(|v| v.as_str()) {
+                                    Some(s) => s,
+                                    None => continue,
+                                };
+                                let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                if payload.get("type").and_then(|v| v.as_str()) != Some(SYNC_MESSAGE_TYPE) {
+                                    continue;
+                                }
+                                // Verify signature against LSP (counterparty)
+                                let counterparty = {
+                                    let sc = self.stable_channel.lock().unwrap();
+                                    sc.counterparty
+                                };
+                                let sig_ok = self.node.verify_signature(
+                                    payload_str.as_bytes(),
+                                    signature,
+                                    &counterparty,
+                                );
+                                if !sig_ok {
+                                    audit_event("SYNC_V1_SIGNATURE_INVALID", json!({
+                                        "payment_hash": &payment_hash_str,
+                                    }));
+                                    continue;
+                                }
+                                if let Some(expected_usd) = payload.get("expected_usd").and_then(|v| v.as_f64()) {
+                                    let mut sc = self.stable_channel.lock().unwrap();
+                                    let price = sc.latest_price;
+                                    let old_expected = sc.expected_usd.0;
+                                    stable::apply_trade(&mut sc, expected_usd, price);
+                                    drop(sc);
+                                    self.save_channel_settings();
+
+                                    audit_event("SYNC_V1_APPLIED", json!({
+                                        "old_expected_usd": old_expected,
+                                        "new_expected_usd": expected_usd,
+                                        "btc_price": price,
+                                        "payment_hash": &payment_hash_str,
+                                    }));
+                                    break 'sync true;
+                                }
+                            }
+                            false
+                        };
+
+                        if handled_sync {
+                            // Sync message: update balances but don't record as a normal payment
+                            {
+                                let mut sc = self.stable_channel.lock().unwrap();
+                                update_balances(&self.node, &mut sc);
+                            }
+                            self.update_balances();
+                        } else if self.db.payment_exists(&payment_hash_str).unwrap_or(false) {
                             // Already recorded, just update balances silently
                             {
                                 let mut sc = self.stable_channel.lock().unwrap();
@@ -1968,6 +2023,52 @@
                             }
                         }
 
+                        // Deduct stable balance if splice-out exceeded native BTC.
+                        // Uses the same capacity-delta approach as the LSP (via bitcoind)
+                        // so both sides compute identical expected_usd.
+                        let txid_str = new_funding_txo.txid.to_string();
+                        let vout = new_funding_txo.vout;
+
+                        let old_channel_value_sats = self.node.list_channels()
+                            .iter()
+                            .find(|c| c.user_channel_id.0 == user_channel_id.0)
+                            .map(|c| c.channel_value_sats);
+
+                        if let Some(old_value) = old_channel_value_sats {
+                            match Self::lookup_funding_output_sats_esplora(&txid_str, vout) {
+                                Some(new_value) => {
+                                    audit_event("SPLICE_PENDING_LOOKUP", json!({
+                                        "old_channel_sats": old_value,
+                                        "new_channel_sats": new_value,
+                                        "delta_sats": (new_value as i64) - (old_value as i64),
+                                    }));
+
+                                    if new_value < old_value {
+                                        let splice_out_sats = old_value - new_value;
+                                        let mut sc = self.stable_channel.lock().unwrap();
+                                        let price = sc.latest_price;
+                                        if let Some(usd_deducted) = stable::deduct_outgoing(&mut sc, splice_out_sats, price) {
+                                            audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
+                                                "splice_out_sats": splice_out_sats,
+                                                "usd_deducted": usd_deducted,
+                                                "new_expected_usd": sc.expected_usd.0,
+                                                "btc_price": price,
+                                            }));
+                                        }
+                                        drop(sc);
+                                        self.save_channel_settings();
+                                    }
+                                }
+                                None => {
+                                    println!("[SplicePending] Could not look up funding output {}:{}", txid_str, vout);
+                                    audit_event("SPLICE_PENDING_LOOKUP_FAILED", json!({
+                                        "txid": txid_str,
+                                        "vout": vout,
+                                    }));
+                                }
+                            }
+                        }
+
                         self.status_message = format!("Splice pending - tx: {}", new_funding_txo.txid);
                         self.show_toast("Splice pending", "~");
                         self.update_balances();
@@ -1994,6 +2095,28 @@
         
                 let _ = self.node.event_handled();
             }
+        }
+
+        /// Look up the value (in sats) of a specific transaction output via esplora.
+        ///
+        /// Queries `{esplora_url}/tx/{txid}` and extracts the output value at the given vout.
+        /// Works for both confirmed and mempool transactions.
+        ///
+        /// Returns None if the lookup fails (tx not found, network error, etc.)
+        fn lookup_funding_output_sats_esplora(txid: &str, vout: u32) -> Option<u64> {
+            let url = format!("{}/tx/{}", DEFAULT_CHAIN_URL, txid);
+
+            let response = ureq::Agent::new()
+                .get(&url)
+                .call()
+                .ok()?;
+
+            let json: serde_json::Value = response.into_json().ok()?;
+            let vouts = json["vout"].as_array()?;
+            let output = vouts.get(vout as usize)?;
+            let value_sats = output["value"].as_u64()?;
+
+            Some(value_sats)
         }
 
         fn format_currency(v: f64) -> String {

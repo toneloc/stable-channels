@@ -11,6 +11,9 @@ pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 /// Trade message type identifier
 pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
+/// Sync message type identifier (LSP → user expected_usd sync after stable deductions)
+pub const SYNC_MESSAGE_TYPE: &str = "SYNC_V1";
+
 // ============================================================================
 // DEFAULT CONFIGURATION VALUES
 // ============================================================================
