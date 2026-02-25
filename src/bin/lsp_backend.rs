@@ -587,21 +587,44 @@
                             {
                                 let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64 * self.btc_price;
 
-                                // Create channel entry with $0 stabilized (user opts in via trade message)
-                                self.selected_channel_id = channel_id.to_string();
-                                self.stable_channel_amount = "0".to_string();
-                                self.edit_stable_channel(None);
+                                // Check if a stable channel already exists for this user_channel_id (splice case)
+                                let existing = self.stable_channels.iter_mut()
+                                    .find(|sc| sc.user_channel_id == user_channel_id.0);
 
-                                audit_event("CHANNEL_READY", json!({
-                                    "channel_id": channel_id.to_string(),
-                                    "user_channel_id": format!("{}", user_channel_id.0),
-                                    "funded_usd": funded_usd,
-                                    "stabilized_usd": 0.0
-                                }));
-                                self.status_message = format!(
-                                    "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
-                                    channel_id, funded_usd
-                                );
+                                if let Some(sc) = existing {
+                                    // Splice: update channel_id but preserve expected_usd and other state
+                                    let old_channel_id = sc.channel_id.to_string();
+                                    sc.channel_id = channel_id;
+                                    let preserved_usd = sc.expected_usd.0;
+                                    audit_event("CHANNEL_READY_SPLICE", json!({
+                                        "channel_id": channel_id.to_string(),
+                                        "old_channel_id": old_channel_id,
+                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                        "funded_usd": funded_usd,
+                                        "preserved_expected_usd": preserved_usd,
+                                    }));
+                                    self.save_stable_channels();
+                                    self.status_message = format!(
+                                        "Channel {} ready after splice (${:.2} stabilized)",
+                                        channel_id, preserved_usd
+                                    );
+                                } else {
+                                    // New channel: create entry with $0 stabilized (user opts in via trade)
+                                    self.selected_channel_id = channel_id.to_string();
+                                    self.stable_channel_amount = "0".to_string();
+                                    self.edit_stable_channel(None);
+
+                                    audit_event("CHANNEL_READY", json!({
+                                        "channel_id": channel_id.to_string(),
+                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                        "funded_usd": funded_usd,
+                                        "stabilized_usd": 0.0
+                                    }));
+                                    self.status_message = format!(
+                                        "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
+                                        channel_id, funded_usd
+                                    );
+                                }
                             }
                             self.update_balances();
                         }

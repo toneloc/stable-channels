@@ -17,6 +17,7 @@
     use std::fs::File;
     use std::path::Path;
     use ldk_node::lightning::ln::channelmanager::PaymentId;
+    use ldk_node::payment::{PaymentKind, PaymentDirection};
     use image::{GrayImage, Luma};
     use qrcode::{QrCode, Color};
     use egui::{Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
@@ -618,12 +619,22 @@
                                 } else {
                                     None
                                 };
+                                // Try to find the txid from LDK's payment list
+                                let deposit_txid: Option<String> = node_arc.list_payments().iter().rev()
+                                    .find_map(|p| {
+                                        if p.direction == PaymentDirection::Inbound {
+                                            if let PaymentKind::Onchain { ref txid, .. } = p.kind {
+                                                return Some(txid.to_string());
+                                            }
+                                        }
+                                        None
+                                    });
                                 let _ = db.record_payment(
                                     None, "onchain", "received",
                                     deposit_sats * 1000,
                                     amount_usd,
                                     if price > 0.0 { Some(price) } else { None },
-                                    None, "completed", None, None,
+                                    None, "completed", deposit_txid.as_deref(), None,
                                 );
                                 audit_event("ONCHAIN_DEPOSIT_DETECTED", json!({
                                     "amount_sats": deposit_sats,
@@ -1185,7 +1196,7 @@
                                         let _ = self.db.record_payment(
                                             Some(&txid_str), "onchain", "sent",
                                             amount_msat, amount_usd, btc_price_opt, None,
-                                            "completed", None, None,
+                                            "completed", Some(&txid_str), None,
                                         );
                                         self.show_toast("Sent!", "OK");
                                         self.status_message = format!("On-chain TX: {}", txid);
@@ -1608,8 +1619,18 @@
 
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
+                            // Update channel_id in case this is a splice (channel_id changes, user_channel_id doesn't)
+                            if sc.user_channel_id == user_channel_id.0 && sc.channel_id != channel_id {
+                                audit_event("CHANNEL_ID_UPDATED_SPLICE", json!({
+                                    "old_channel_id": sc.channel_id.to_string(),
+                                    "new_channel_id": channel_id.to_string(),
+                                    "user_channel_id": format!("{}", user_channel_id.0),
+                                }));
+                                sc.channel_id = channel_id;
+                            }
                             update_balances(&self.node, &mut sc);
                         }
+                        self.save_channel_settings();
                         self.update_balances(); // Update UI immediately
 
                         // Mark any pending splice payment with this txid as confirmed
@@ -4601,20 +4622,28 @@
                         }
                     });
                 } else {
-                    ui.label(
-                        RichText::new("Reusable, no amount required from sender")
-                            .size(11.0).italics().color(Color32::from_rgb(100, 116, 139))
-                    );
-                    ui.add_space(6.0);
-                    if ui.button("Generate Offer").clicked() {
-                        match self.node.bolt12_payment().receive_variable_amount("Stable Channels", None) {
-                            Ok(offer) => {
-                                self.bolt12_offer = offer.to_string();
-                                self.show_toast("Offer ready!", "OK");
-                            }
-                            Err(e) => {
-                                self.show_toast("Offer failed", "!");
-                                self.status_message = format!("Bolt12 error: {}", e);
+                    let has_ready_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+                    if !has_ready_channel {
+                        ui.label(
+                            RichText::new("Channel not ready — offer creation requires an active channel")
+                                .size(11.0).color(Color32::from_rgb(217, 119, 6))
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Reusable, no amount required from sender")
+                                .size(11.0).italics().color(Color32::from_rgb(100, 116, 139))
+                        );
+                        ui.add_space(6.0);
+                        if ui.button("Generate Offer").clicked() {
+                            match self.node.bolt12_payment().receive_variable_amount("Stable Channels", None) {
+                                Ok(offer) => {
+                                    self.bolt12_offer = offer.to_string();
+                                    self.show_toast("Offer ready!", "OK");
+                                }
+                                Err(e) => {
+                                    self.show_toast("Offer failed", "!");
+                                    self.status_message = format!("Bolt12 error: {}", e);
+                                }
                             }
                         }
                     }
