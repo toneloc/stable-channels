@@ -16,6 +16,7 @@
         use std::fs;
         use hex;
         use once_cell::sync::Lazy;
+        use ureq;
 
         use stable_channels::audit::{audit_event, set_audit_log_path};
         use stable_channels::price_feeds::get_cached_price;
@@ -394,6 +395,37 @@
         // Hardcoded data directory
         const LSP_DATA_DIR: &str = "data-2/lsp";
 
+        /// Look up the value (in sats) of a specific transaction output via bitcoind RPC.
+        ///
+        /// Uses `getrawtransaction` with verbose=true to get the decoded transaction,
+        /// then extracts the output value at the given vout index.
+        ///
+        /// Returns None if the lookup fails (tx not found, RPC error, etc.)
+        fn lookup_funding_output_sats(txid: &str, vout: u32) -> Option<u64> {
+            let rpc_url = "http://127.0.0.1:8332";
+
+            let body = json!({
+                "jsonrpc": "1.0",
+                "id": "sc_splice",
+                "method": "getrawtransaction",
+                "params": [txid, true]
+            });
+
+            let response = ureq::post(rpc_url)
+                .set("Authorization", "Basic Og==")  // base64(":")  — empty user:password
+                .set("Content-Type", "application/json")
+                .send_json(&body)
+                .ok()?;
+
+            let json: serde_json::Value = response.into_json().ok()?;
+            let vouts = json["result"]["vout"].as_array()?;
+            let output = vouts.get(vout as usize)?;
+            let value_btc = output["value"].as_f64()?;
+            let value_sats = (value_btc * 100_000_000.0).round() as u64;
+
+            Some(value_sats)
+        }
+
         impl ServerApp {
             pub fn new_with_mode(mode: &str) -> Self {
                 let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
@@ -595,18 +627,37 @@
                                     // Splice: update channel_id but preserve expected_usd and other state
                                     let old_channel_id = sc.channel_id.to_string();
                                     sc.channel_id = channel_id;
-                                    let preserved_usd = sc.expected_usd.0;
+                                    let old_expected_usd = sc.expected_usd.0;
+
+                                    // Update balances from LDK so stable_receiver_btc reflects post-splice state
+                                    stable::update_balances(&self.node, sc);
+
+                                    // If splice-out exceeded native BTC, reconcile the stable portion
+                                    let price = sc.latest_price;
+                                    let usd_deducted = stable::reconcile_outgoing(sc, price);
+                                    if let Some(deducted) = usd_deducted {
+                                        audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
+                                            "channel_id": channel_id.to_string(),
+                                            "user_channel_id": format!("{}", user_channel_id.0),
+                                            "usd_deducted": deducted,
+                                            "old_expected_usd": old_expected_usd,
+                                            "new_expected_usd": sc.expected_usd.0,
+                                            "btc_price": price,
+                                        }));
+                                    }
+
+                                    let new_expected_usd = sc.expected_usd.0;
                                     audit_event("CHANNEL_READY_SPLICE", json!({
                                         "channel_id": channel_id.to_string(),
                                         "old_channel_id": old_channel_id,
                                         "user_channel_id": format!("{}", user_channel_id.0),
                                         "funded_usd": funded_usd,
-                                        "preserved_expected_usd": preserved_usd,
+                                        "expected_usd": new_expected_usd,
                                     }));
                                     self.save_stable_channels();
                                     self.status_message = format!(
                                         "Channel {} ready after splice (${:.2} stabilized)",
-                                        channel_id, preserved_usd
+                                        channel_id, new_expected_usd
                                     );
                                 } else {
                                     // New channel: create entry with $0 stabilized (user opts in via trade)
@@ -691,6 +742,65 @@
                             let _ = self.db.delete_channel(&format!("{}", user_ch_id));
                             self.status_message = format!("Channel {} has been closed", channel_id);
                             self.update_balances();
+                        }
+                        Event::SplicePending { channel_id, user_channel_id, new_funding_txo, .. } => {
+                            let txid_str = new_funding_txo.txid.to_string();
+                            let vout = new_funding_txo.vout;
+
+                            audit_event("SPLICE_PENDING", json!({
+                                "channel_id": channel_id.to_string(),
+                                "user_channel_id": format!("{}", user_channel_id.0),
+                                "funding_txo": format!("{}:{}", txid_str, vout),
+                            }));
+
+                            // Get old channel value (list_channels still shows pre-splice value)
+                            let old_channel_value_sats = self.node.list_channels()
+                                .iter()
+                                .find(|c| c.user_channel_id.0 == user_channel_id.0)
+                                .map(|c| c.channel_value_sats);
+
+                            // Look up new funding output value from bitcoind
+                            if let Some(old_value) = old_channel_value_sats {
+                                match lookup_funding_output_sats(&txid_str, vout) {
+                                    Some(new_value) => {
+                                        audit_event("SPLICE_PENDING_LOOKUP", json!({
+                                            "old_channel_sats": old_value,
+                                            "new_channel_sats": new_value,
+                                            "delta_sats": (new_value as i64) - (old_value as i64),
+                                        }));
+
+                                        if new_value < old_value {
+                                            // Splice-out: channel got smaller
+                                            let splice_out_sats = old_value - new_value;
+
+                                            if let Some(sc) = self.stable_channels.iter_mut()
+                                                .find(|sc| sc.user_channel_id == user_channel_id.0)
+                                            {
+                                                let price = sc.latest_price;
+                                                if let Some(usd_deducted) = stable::deduct_outgoing(sc, splice_out_sats, price) {
+                                                    audit_event("SPLICE_PENDING_STABLE_DEDUCTED", json!({
+                                                        "channel_id": channel_id.to_string(),
+                                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                                        "splice_out_sats": splice_out_sats,
+                                                        "usd_deducted": usd_deducted,
+                                                        "new_expected_usd": sc.expected_usd.0,
+                                                        "btc_price": price,
+                                                    }));
+                                                }
+                                            }
+                                            self.save_stable_channels();
+                                        }
+                                    }
+                                    None => {
+                                        // Tx not yet in mempool or RPC error — trade message + ChannelReady will handle it
+                                        println!("[SplicePending] Could not look up funding output {}:{}", txid_str, vout);
+                                        audit_event("SPLICE_PENDING_LOOKUP_FAILED", json!({
+                                            "txid": txid_str,
+                                            "vout": vout,
+                                        }));
+                                    }
+                                }
+                            }
                         }
                         _ => {
                             audit_event("EVENT_IGNORED", json!({"event_type": format!("{:?}", event)}));

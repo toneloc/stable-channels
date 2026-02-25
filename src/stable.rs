@@ -79,6 +79,35 @@ pub fn reconcile_forwarded(
     Some(usd_to_deduct)
 }
 
+/// Pre-deduct stable balance for a known outgoing amount (e.g. splice-out).
+///
+/// Unlike `reconcile_outgoing` which infers the overflow from post-payment balances,
+/// this takes the explicit `amount_sats` being withdrawn and compares it against
+/// `native_channel_btc` to compute overflow immediately — before on-chain confirmation.
+///
+/// Returns `Some(usd_deducted)` if stable was reduced, `None` if fully covered by native.
+pub fn deduct_outgoing(sc: &mut StableChannel, amount_sats: u64, price: f64) -> Option<f64> {
+    if sc.expected_usd.0 <= 0.01 || price <= 0.0 {
+        return None;
+    }
+
+    let native_sats = sc.native_channel_btc.sats;
+    if amount_sats <= native_sats {
+        return None; // Fully covered by native BTC
+    }
+
+    let overflow_sats = amount_sats - native_sats;
+    let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
+    let new_expected = (sc.expected_usd.0 - usd_to_deduct).max(0.0);
+
+    sc.expected_usd = USD::from_f64(new_expected);
+    let btc_amount = new_expected / price;
+    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    recompute_native(sc);
+
+    Some(usd_to_deduct)
+}
+
 /// Recompute native_channel_btc from receiver sats and backing_sats.
 /// Call this after any mutation to backing_sats to keep native in sync.
 pub fn recompute_native(sc: &mut StableChannel) {

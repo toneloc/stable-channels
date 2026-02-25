@@ -864,11 +864,12 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // backing_sats = 100_000 (backing $100 at some price)
-        db.save_channel("test_channel_123", 100.0, 100_000, Some("test note"))
+        db.save_channel("test_channel_123", "uch_123", 100.0, 100_000, Some("test note"))
             .unwrap();
 
-        let loaded = db.load_channel("test_channel_123").unwrap().unwrap();
+        let loaded = db.load_channel("uch_123").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "test_channel_123");
+        assert_eq!(loaded.user_channel_id, "uch_123");
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
@@ -878,10 +879,12 @@ mod tests {
     fn test_channel_upsert() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("ch1", 50.0, 50_000, None).unwrap();
-        db.save_channel("ch1", 100.0, 100_000, Some("updated")).unwrap();
+        db.save_channel("ch1", "uch1", 50.0, 50_000, None).unwrap();
+        // Same user_channel_id, new channel_id (simulates splice)
+        db.save_channel("ch2", "uch1", 100.0, 100_000, Some("updated")).unwrap();
 
-        let loaded = db.load_channel("ch1").unwrap().unwrap();
+        let loaded = db.load_channel("uch1").unwrap().unwrap();
+        assert_eq!(loaded.channel_id, "ch2"); // channel_id updated
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
     }

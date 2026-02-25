@@ -1149,6 +1149,23 @@
                                             amount_msat, amount_usd, btc_price_opt, None,
                                             "pending", None, Some(&input),
                                         );
+
+                                        // Deduct stable balance immediately if splice exceeds native BTC,
+                                        // then notify the LSP via trade message so both sides agree.
+                                        {
+                                            let mut sc = self.stable_channel.lock().unwrap();
+                                            let price = sc.latest_price;
+                                            if let Some(usd_deducted) = stable::deduct_outgoing(&mut sc, amount_sats, price) {
+                                                audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
+                                                    "amount_sats": amount_sats,
+                                                    "usd_deducted": usd_deducted,
+                                                    "new_expected_usd": sc.expected_usd.0,
+                                                    "btc_price": price,
+                                                }));
+                                            }
+                                        }
+                                        self.save_channel_settings();
+
                                         self.show_toast("Withdrawal started", "-");
                                         self.status_message = format!("Splice-out: {:.8} BTC", amount_sats as f64 / 100_000_000.0);
                                         self.send_input.clear();
@@ -1619,8 +1636,9 @@
 
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
+                            let is_splice = sc.user_channel_id == user_channel_id.0 && sc.channel_id != channel_id;
                             // Update channel_id in case this is a splice (channel_id changes, user_channel_id doesn't)
-                            if sc.user_channel_id == user_channel_id.0 && sc.channel_id != channel_id {
+                            if is_splice {
                                 audit_event("CHANNEL_ID_UPDATED_SPLICE", json!({
                                     "old_channel_id": sc.channel_id.to_string(),
                                     "new_channel_id": channel_id.to_string(),
@@ -1629,6 +1647,19 @@
                                 sc.channel_id = channel_id;
                             }
                             update_balances(&self.node, &mut sc);
+
+                            // After splice confirms, reconcile: if splice-out exceeded
+                            // native BTC, the overflow eats into the stable position.
+                            if is_splice {
+                                let price = sc.latest_price;
+                                if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
+                                    audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
+                                        "usd_deducted": usd_deducted,
+                                        "new_expected_usd": sc.expected_usd.0,
+                                        "btc_price": price,
+                                    }));
+                                }
+                            }
                         }
                         self.save_channel_settings();
                         self.update_balances(); // Update UI immediately
@@ -1900,6 +1931,7 @@
                         // The on-chain balance doesn't update until the splice tx confirms.
                         // Clearing the flag here allows the auto-sweep to fire again on
                         // the same unspent UTXO, creating duplicate splice_in calls.
+
                         audit_event("SPLICE_PENDING", json!({
                             "channel_id": format!("{channel_id}"),
                             "user_channel_id": format!("{}", user_channel_id.0),
