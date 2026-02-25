@@ -224,12 +224,16 @@
         send_input: String,
         send_all: bool,
         send_amount: String,
+        send_amount_usd: String,
+        send_amount_editing: bool, // true = user is editing BTC field, false = USD field
         send_error: String,
         bolt12_offer: String,
 
         // Lightning receive state
         show_lightning_receive: bool,
         lightning_receive_amount: String,
+        lightning_receive_amount_usd: String,
+        lightning_receive_editing_btc: bool,
         lightning_receive_invoice: String,
         lightning_receive_qr: Option<egui::TextureHandle>,
         lightning_receive_error: String,
@@ -456,10 +460,14 @@
                 send_input: String::new(),
                 send_all: false,
                 send_amount: String::new(),
+                send_amount_usd: String::new(),
+                send_amount_editing: true,
                 send_error: String::new(),
                 bolt12_offer: String::new(),
                 show_lightning_receive: false,
                 lightning_receive_amount: String::new(),
+                lightning_receive_amount_usd: String::new(),
+                lightning_receive_editing_btc: true,
                 lightning_receive_invoice: String::new(),
                 lightning_receive_qr: None,
                 lightning_receive_error: String::new(),
@@ -3192,7 +3200,7 @@
                 ui.add_space(30.0);
 
                 // Chart with real data
-                let chart_height = 180.0;
+                let chart_height = 200.0;
                 let chart_width = ui.available_width();
                 let (rect, _response) = ui.allocate_exact_size(egui::vec2(chart_width, chart_height), Sense::hover());
 
@@ -3200,6 +3208,9 @@
 
                 // Grey border around the chart
                 painter.rect_stroke(rect, egui::CornerRadius::same(8), egui::Stroke::new(1.0, Color32::from_rgb(200, 200, 200)), egui::StrokeKind::Outside);
+
+                // Inner drawing area with padding
+                let inner = rect.shrink2(egui::vec2(12.0, 14.0));
 
                 if self.chart_period == ChartPeriod::Day1 {
                     // ── 1D chart: time-based x-axis ──────────────────────────
@@ -3227,13 +3238,13 @@
                             Color32::from_rgb(239, 68, 68)
                         };
 
-                        let chart_top = rect.top() + 10.0;
-                        let chart_bottom = rect.bottom() - 20.0; // room for time labels
+                        let chart_top = inner.top();
+                        let chart_bottom = inner.bottom() - 14.0; // room for time labels
                         let chart_h = chart_bottom - chart_top;
 
                         let to_pos = |ts: f64, price: f64| -> egui::Pos2 {
                             let x_frac = ((ts - t_start as f64) / window_secs as f64).clamp(0.0, 1.0) as f32;
-                            let x = rect.left() + x_frac * rect.width();
+                            let x = inner.left() + x_frac * inner.width();
                             let y_frac = if price_range > 0.0 {
                                 ((price - min_price) / price_range) as f32
                             } else {
@@ -3254,14 +3265,14 @@
                         // Price labels
                         let label_color = Color32::GRAY;
                         painter.text(
-                            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+                            egui::pos2(inner.left(), chart_top),
                             egui::Align2::LEFT_TOP,
                             Self::format_chart_price(max_price),
                             egui::FontId::proportional(10.0),
                             label_color,
                         );
                         painter.text(
-                            egui::pos2(rect.left() + 4.0, chart_bottom - 12.0),
+                            egui::pos2(inner.left(), chart_bottom + 1.0),
                             egui::Align2::LEFT_TOP,
                             Self::format_chart_price(min_price),
                             egui::FontId::proportional(10.0),
@@ -3272,7 +3283,7 @@
                         for h_offset in &[0, 6, 12, 18, 24] {
                             let label_ts = t_start + (*h_offset as i64) * 3600;
                             let x_frac = (*h_offset as f32) / 24.0;
-                            let x = rect.left() + x_frac * rect.width();
+                            let x = inner.left() + x_frac * inner.width();
 
                             // Format as local hour
                             let dt = chrono::DateTime::from_timestamp(label_ts, 0);
@@ -3291,7 +3302,7 @@
                                 egui::Align2::CENTER_TOP
                             };
                             painter.text(
-                                egui::pos2(x, rect.bottom() - 12.0),
+                                egui::pos2(x, inner.bottom() - 2.0),
                                 align,
                                 label,
                                 egui::FontId::proportional(9.0),
@@ -3300,7 +3311,7 @@
                         }
                     } else {
                         painter.text(
-                            rect.center(),
+                            inner.center(),
                             egui::Align2::CENTER_CENTER,
                             "Collecting price data...",
                             egui::FontId::proportional(14.0),
@@ -3324,13 +3335,13 @@
                         };
 
                         let points: Vec<egui::Pos2> = prices.iter().enumerate().map(|(i, price)| {
-                            let x = rect.left() + (i as f32 / (prices.len() - 1).max(1) as f32) * rect.width();
+                            let x = inner.left() + (i as f32 / (prices.len() - 1).max(1) as f32) * inner.width();
                             let normalized = if price_range > 0.0 {
                                 (price - min_price) / price_range
                             } else {
                                 0.5
                             };
-                            let y = rect.bottom() - (normalized as f32 * (chart_height - 20.0)) - 10.0;
+                            let y = inner.bottom() - normalized as f32 * inner.height();
                             egui::Pos2::new(x, y)
                         }).collect();
 
@@ -3340,14 +3351,14 @@
 
                         let label_color = Color32::GRAY;
                         painter.text(
-                            egui::pos2(rect.left() + 4.0, rect.top() + 2.0),
+                            egui::pos2(inner.left(), inner.top()),
                             egui::Align2::LEFT_TOP,
                             Self::format_chart_price(max_price),
                             egui::FontId::proportional(10.0),
                             label_color,
                         );
                         painter.text(
-                            egui::pos2(rect.left() + 4.0, rect.bottom() - 12.0),
+                            egui::pos2(inner.left(), inner.bottom() - 12.0),
                             egui::Align2::LEFT_TOP,
                             Self::format_chart_price(min_price),
                             egui::FontId::proportional(10.0),
@@ -3355,7 +3366,7 @@
                         );
                     } else {
                         painter.text(
-                            rect.center(),
+                            inner.center(),
                             egui::Align2::CENTER_CENTER,
                             "No price data available",
                             egui::FontId::proportional(14.0),
@@ -3902,7 +3913,7 @@
                                         ui.add_sized([24.0, 18.0], egui::Label::new(RichText::new(label).color(color)));
 
                                         let (type_label, type_color) = match payment.payment_type.as_str() {
-                                            "stability" => ("USD", Color32::from_rgb(96, 165, 250)),
+                                            "stability" => ("Settlement", Color32::from_rgb(96, 165, 250)),
                                             "splice_in" => ("Deposit", Color32::from_rgb(16, 185, 129)),
                                             "splice_out" => ("Withdraw", Color32::from_rgb(217, 119, 6)),
                                             "onchain" => ("On-chain", Color32::from_rgb(16, 185, 129)),
@@ -3930,6 +3941,27 @@
                                             ui.label(RichText::new(Self::format_short_timestamp(payment.created_at)).size(11.0).color(Color32::GRAY));
                                         });
                                     });
+                                    if payment.payment_type == "onchain" {
+                                        if let Some(ref txid) = payment.txid {
+                                            let short = if txid.len() > 16 {
+                                                format!("{}...{}", &txid[..8], &txid[txid.len()-8..])
+                                            } else {
+                                                txid.clone()
+                                            };
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                let resp = ui.add(egui::Label::new(
+                                                    RichText::new(format!("txid: {}", short)).size(10.0).color(Color32::GRAY).monospace()
+                                                ).sense(Sense::click()));
+                                                if resp.clicked() {
+                                                    ui.ctx().copy_text(txid.clone());
+                                                }
+                                                if resp.hovered() {
+                                                    resp.on_hover_text("Click to copy full txid");
+                                                }
+                                            });
+                                        }
+                                    }
                                     ui.add_space(6.0);
                                 }
                             });
@@ -4043,7 +4075,7 @@
                     row(ui, "Direction", dir);
 
                     let type_label = match payment.payment_type.as_str() {
-                        "stability" => "USD",
+                        "stability" => "Settlement",
                         "lightning" => "Lightning",
                         "splice_in" => "Deposit",
                         "splice_out" => "Withdraw",
@@ -4229,17 +4261,48 @@
             let is_bolt12 = input_lower.starts_with("lno1");
 
             if is_onchain {
+                let price = self.stable_channel.lock().unwrap().latest_price;
                 ui.add_space(6.0);
+
+                // USD amount field
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (USD):").size(12.0).color(Color32::DARK_GRAY));
+                    let prev_usd = self.send_amount_usd.clone();
+                    let usd_edit = egui::TextEdit::singleline(&mut self.send_amount_usd)
+                        .hint_text("e.g. 10.00")
+                        .desired_width(120.0);
+                    let usd_resp = ui.add(usd_edit);
+                    if usd_resp.has_focus() {
+                        self.send_amount_editing = false;
+                    }
+                    if !self.send_amount_editing && self.send_amount_usd != prev_usd {
+                        self.send_all = false;
+                        if let Ok(usd_val) = self.send_amount_usd.trim().parse::<f64>() {
+                            if price > 0.0 && usd_val >= 0.0 {
+                                self.send_amount = format!("{:.8}", usd_val / price);
+                            }
+                        }
+                    }
+                });
+
+                // BTC amount field
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Amount (BTC):").size(12.0).color(Color32::DARK_GRAY));
                     let prev_amount = self.send_amount.clone();
                     let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
                         .hint_text("e.g. 0.0005")
                         .desired_width(120.0);
-                    ui.add(amount_edit);
-                    // Clear send_all if user manually edits the amount
-                    if self.send_amount != prev_amount {
+                    let btc_resp = ui.add(amount_edit);
+                    if btc_resp.has_focus() {
+                        self.send_amount_editing = true;
+                    }
+                    if self.send_amount_editing && self.send_amount != prev_amount {
                         self.send_all = false;
+                        if let Ok(btc_val) = self.send_amount.trim().parse::<f64>() {
+                            if price > 0.0 && btc_val >= 0.0 {
+                                self.send_amount_usd = format!("{:.2}", btc_val * price);
+                            }
+                        }
                     }
                     let max_btn = egui::Button::new(RichText::new("Max").size(12.0).color(Color32::from_rgb(79, 70, 229)))
                         .fill(Color32::from_rgb(238, 242, 255))
@@ -4247,24 +4310,18 @@
                     if ui.add(max_btn).clicked() {
                         let balances = self.node.list_balances();
                         let max_sats = if let Some(ch) = self.node.list_channels().iter().find(|c| c.is_channel_ready) {
-                            // With channel: can splice_out from channel OR send on-chain funds
                             (ch.outbound_capacity_msat / 1000).max(balances.total_onchain_balance_sats)
                         } else {
                             balances.total_onchain_balance_sats
                         };
-                        self.send_amount = format!("{:.8}", max_sats as f64 / 100_000_000.0);
+                        let max_btc = max_sats as f64 / 100_000_000.0;
+                        self.send_amount = format!("{:.8}", max_btc);
+                        if price > 0.0 {
+                            self.send_amount_usd = format!("{:.2}", max_btc * price);
+                        }
                         self.send_all = true;
                     }
                 });
-                // Show USD equivalent
-                if let Ok(btc) = self.send_amount.trim().parse::<f64>() {
-                    if btc > 0.0 {
-                        let price = self.stable_channel.lock().unwrap().latest_price;
-                        if price > 0.0 {
-                            ui.label(RichText::new(format!("~ ${:.2} USD", btc * price)).size(11.0).color(Color32::DARK_GRAY));
-                        }
-                    }
-                }
                 ui.add_space(8.0);
             }
 
@@ -4285,23 +4342,48 @@
             };
 
             if needs_ln_amount {
+                let price = self.stable_channel.lock().unwrap().latest_price;
                 ui.add_space(4.0);
+
+                // USD amount field
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (USD):").size(12.0).color(Color32::DARK_GRAY));
+                    let prev_usd = self.send_amount_usd.clone();
+                    let usd_edit = egui::TextEdit::singleline(&mut self.send_amount_usd)
+                        .hint_text("e.g. 10.00")
+                        .desired_width(140.0);
+                    let usd_resp = ui.add(usd_edit);
+                    if usd_resp.has_focus() {
+                        self.send_amount_editing = false;
+                    }
+                    if !self.send_amount_editing && self.send_amount_usd != prev_usd {
+                        if let Ok(usd_val) = self.send_amount_usd.trim().parse::<f64>() {
+                            if price > 0.0 && usd_val >= 0.0 {
+                                self.send_amount = format!("{:.8}", usd_val / price);
+                            }
+                        }
+                    }
+                });
+
+                // BTC amount field
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Amount (BTC):").size(12.0).color(Color32::DARK_GRAY));
+                    let prev_btc = self.send_amount.clone();
                     let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
                         .hint_text("e.g. 0.0005")
                         .desired_width(140.0);
-                    ui.add(amount_edit);
-                });
-                // Show USD equivalent
-                if let Ok(btc) = self.send_amount.trim().parse::<f64>() {
-                    if btc > 0.0 {
-                        let price = self.stable_channel.lock().unwrap().latest_price;
-                        if price > 0.0 {
-                            ui.label(RichText::new(format!("~ ${:.2} USD", btc * price)).size(11.0).color(Color32::DARK_GRAY));
+                    let btc_resp = ui.add(amount_edit);
+                    if btc_resp.has_focus() {
+                        self.send_amount_editing = true;
+                    }
+                    if self.send_amount_editing && self.send_amount != prev_btc {
+                        if let Ok(btc_val) = self.send_amount.trim().parse::<f64>() {
+                            if price > 0.0 && btc_val >= 0.0 {
+                                self.send_amount_usd = format!("{:.2}", btc_val * price);
+                            }
                         }
                     }
-                }
+                });
                 ui.add_space(8.0);
             }
 
@@ -4439,20 +4521,48 @@
                         });
                     });
                 } else {
+                    let price = self.btc_price;
+
+                    // USD amount field
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Amount (USD):").color(Color32::DARK_GRAY));
+                        let prev_usd = self.lightning_receive_amount_usd.clone();
+                        let usd_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount_usd)
+                            .hint_text("e.g. 10.00")
+                            .desired_width(100.0);
+                        let usd_resp = ui.add(usd_edit);
+                        if usd_resp.has_focus() {
+                            self.lightning_receive_editing_btc = false;
+                        }
+                        if !self.lightning_receive_editing_btc && self.lightning_receive_amount_usd != prev_usd {
+                            if let Ok(usd_val) = self.lightning_receive_amount_usd.trim().parse::<f64>() {
+                                if price > 0.0 && usd_val >= 0.0 {
+                                    self.lightning_receive_amount = format!("{:.8}", usd_val / price);
+                                }
+                            }
+                        }
+                    });
+
+                    // BTC amount field
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Amount (BTC):").color(Color32::DARK_GRAY));
-                        let amount_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount)
+                        let prev_btc = self.lightning_receive_amount.clone();
+                        let btc_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount)
                             .hint_text("e.g. 0.0001")
                             .desired_width(100.0);
-                        ui.add(amount_edit);
-                    });
-                    // Show USD equivalent
-                    if let Ok(btc_val) = self.lightning_receive_amount.trim().parse::<f64>() {
-                        if btc_val > 0.0 && self.btc_price > 0.0 {
-                            let usd_val = btc_val * self.btc_price;
-                            ui.label(RichText::new(format!("≈ ${:.2} USD", usd_val)).size(12.0).color(Color32::DARK_GRAY));
+                        let btc_resp = ui.add(btc_edit);
+                        if btc_resp.has_focus() {
+                            self.lightning_receive_editing_btc = true;
                         }
-                    }
+                        if self.lightning_receive_editing_btc && self.lightning_receive_amount != prev_btc {
+                            if let Ok(btc_val) = self.lightning_receive_amount.trim().parse::<f64>() {
+                                if price > 0.0 && btc_val >= 0.0 {
+                                    self.lightning_receive_amount_usd = format!("{:.2}", btc_val * price);
+                                }
+                            }
+                        }
+                    });
+
                     ui.add_space(8.0);
                     if ui.button("Generate Invoice").clicked() {
                         let amount = self.lightning_receive_amount.trim();
@@ -5491,11 +5601,25 @@
 
     pub fn run() {
         println!("Starting User Interface...");
+        // Load app icon from embedded PNG
+        let icon_data = {
+            let icon_bytes = include_bytes!("../photos/sc-icon-egui.png");
+            let img = image::load_from_memory(icon_bytes).expect("Failed to load icon");
+            let rgba = img.into_rgba8();
+            let (w, h) = rgba.dimensions();
+            egui::IconData {
+                rgba: rgba.into_raw(),
+                width: w,
+                height: h,
+            }
+        };
+
         let native_options = eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_inner_size([460.0, 700.0])
                 .with_decorations(true)
-                .with_transparent(false),
+                .with_transparent(false)
+                .with_icon(std::sync::Arc::new(icon_data)),
             ..Default::default()
         };
 
