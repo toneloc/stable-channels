@@ -11,6 +11,9 @@ pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 /// Trade message type identifier
 pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
+/// Sync message type identifier (LSP → user expected_usd sync after stable deductions)
+pub const SYNC_MESSAGE_TYPE: &str = "SYNC_V1";
+
 // ============================================================================
 // DEFAULT CONFIGURATION VALUES
 // ============================================================================
@@ -59,7 +62,7 @@ pub const PRICE_FETCH_RETRY_DELAY_MS: u64 = 300;
 pub const PRICE_FETCH_MAX_RETRIES: usize = 3;
 
 /// Background sync intervals (in seconds)
-pub const ONCHAIN_WALLET_SYNC_INTERVAL_SECS: u64 = 160;
+pub const ONCHAIN_WALLET_SYNC_INTERVAL_SECS: u64 = 120;
 pub const LIGHTNING_WALLET_SYNC_INTERVAL_SECS: u64 = 60;
 pub const FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 1200;
 
@@ -87,6 +90,9 @@ pub const STABILITY_PAYMENT_COOLDOWN_SECS: u64 = 120;
 
 /// Minimum USD amount to display in UI
 pub const MIN_DISPLAY_USD: f64 = 2.0;
+
+/// Auto-sweep: minimum on-chain sats to trigger splice_in
+pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
 
 // ============================================================================
 // CHANNEL CONSTANTS

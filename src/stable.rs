@@ -1,7 +1,5 @@
 use crate::types::{Bitcoin, StableChannel, USD};
-use ldk_node::{
-    lightning::ln::types::ChannelId, Node,
-};
+use ldk_node::Node;
 use ureq::Agent;
 use crate::price_feeds::get_cached_price;
 use crate::audit::audit_event;
@@ -81,6 +79,35 @@ pub fn reconcile_forwarded(
     Some(usd_to_deduct)
 }
 
+/// Pre-deduct stable balance for a known outgoing amount (e.g. splice-out).
+///
+/// Unlike `reconcile_outgoing` which infers the overflow from post-payment balances,
+/// this takes the explicit `amount_sats` being withdrawn and compares it against
+/// `native_channel_btc` to compute overflow immediately — before on-chain confirmation.
+///
+/// Returns `Some(usd_deducted)` if stable was reduced, `None` if fully covered by native.
+pub fn deduct_outgoing(sc: &mut StableChannel, amount_sats: u64, price: f64) -> Option<f64> {
+    if sc.expected_usd.0 <= 0.01 || price <= 0.0 {
+        return None;
+    }
+
+    let native_sats = sc.native_channel_btc.sats;
+    if amount_sats <= native_sats {
+        return None; // Fully covered by native BTC
+    }
+
+    let overflow_sats = amount_sats - native_sats;
+    let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
+    let new_expected = (sc.expected_usd.0 - usd_to_deduct).max(0.0);
+
+    sc.expected_usd = USD::from_f64(new_expected);
+    let btc_amount = new_expected / price;
+    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    recompute_native(sc);
+
+    Some(usd_to_deduct)
+}
+
 /// Recompute native_channel_btc from receiver sats and backing_sats.
 /// Call this after any mutation to backing_sats to keep native in sync.
 pub fn recompute_native(sc: &mut StableChannel) {
@@ -131,9 +158,9 @@ pub fn get_current_price(agent: &Agent) -> f64 {
     }
 }
 
-pub fn channel_exists(node: &Node, channel_id: &ChannelId) -> bool {
+pub fn channel_exists(node: &Node, user_channel_id: u128) -> bool {
     let channels = node.list_channels();
-    channels.iter().any(|c| c.channel_id == *channel_id)
+    channels.iter().any(|c| c.user_channel_id.0 == user_channel_id)
 }
 
 // Can run in backgound
@@ -155,17 +182,20 @@ pub fn update_balances<'update_balance_lifetime>(
     sc.onchain_usd = USD::from_bitcoin(sc.onchain_btc, sc.latest_price);
 
     let channels = node.list_channels();
-    let matching_channel = if sc.channel_id == ChannelId::from_bytes([0; 32]) {
+    let matching_channel = if sc.user_channel_id == 0 {
         channels.first()
     } else {
-        channels.iter().find(|c| c.channel_id == sc.channel_id)
+        channels.iter().find(|c| c.user_channel_id.0 == sc.user_channel_id)
     };
-    
+
     if let Some(channel) = matching_channel {
-        if sc.channel_id == ChannelId::from_bytes([0; 32]) {
+        if sc.user_channel_id == 0 {
+            sc.user_channel_id = channel.user_channel_id.0;
             sc.channel_id = channel.channel_id;
-            println!("Set active channel ID to: {}", sc.channel_id);
+            println!("Set active channel: user_channel_id={}, channel_id={}", sc.user_channel_id, sc.channel_id);
         }
+        // Always keep channel_id current (it changes on splice)
+        sc.channel_id = channel.channel_id;
 
         // Skip balance update if channel is not ready yet — during ChannelPending,
         // outbound_capacity_msat is 0, which produces a misleading near-zero balance.
@@ -193,7 +223,7 @@ pub fn update_balances<'update_balance_lifetime>(
         sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 
         audit_event("BALANCE_UPDATE", json!({
-            "channel_id": format!("{}", sc.channel_id),
+            "user_channel_id": format!("{}", sc.user_channel_id),
             "stable_receiver_btc": sc.stable_receiver_btc.to_string(),
             "stable_provider_btc": sc.stable_provider_btc.to_string(),
             "stable_receiver_usd": sc.stable_receiver_usd.to_string(),
@@ -205,7 +235,7 @@ pub fn update_balances<'update_balance_lifetime>(
         return (true, sc);
     }
     
-    println!("No matching channel found for ID: {}", sc.channel_id);
+    println!("No matching channel found for user_channel_id: {}", sc.user_channel_id);
     (true, sc)
 }
 
@@ -245,7 +275,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
 
     if !success {
         audit_event("BALANCE_UPDATE_FAILED", json!({
-            "channel_id": format!("{}", sc.channel_id)
+            "user_channel_id": format!("{}", sc.user_channel_id)
         }));
         return None;
     }
@@ -253,7 +283,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
     // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {
         audit_event("STABILITY_SKIP", json!({
-            "channel_id": format!("{}", sc.channel_id),
+            "user_channel_id": format!("{}", sc.user_channel_id),
             "reason": "expected_usd is too small",
             "expected_usd": sc.expected_usd.0
         }));
@@ -321,7 +351,7 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
         && (now - sc.last_stability_payment) < STABILITY_PAYMENT_COOLDOWN_SECS as i64
     {
         audit_event("STABILITY_COOLDOWN", json!({
-            "channel_id": format!("{}", sc.channel_id),
+            "user_channel_id": format!("{}", sc.user_channel_id),
             "seconds_since_last": now - sc.last_stability_payment,
             "cooldown_secs": STABILITY_PAYMENT_COOLDOWN_SECS,
         }));

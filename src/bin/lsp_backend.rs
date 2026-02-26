@@ -16,6 +16,7 @@
         use std::fs;
         use hex;
         use once_cell::sync::Lazy;
+        use ureq;
 
         use stable_channels::audit::{audit_event, set_audit_log_path};
         use stable_channels::price_feeds::get_cached_price;
@@ -40,7 +41,11 @@
         struct TradePayload {
             #[serde(rename = "type")]
             kind: String,
-            channel_id: String,
+            /// Channel ID shared between both nodes (hex-encoded)
+            #[serde(default)]
+            channel_id: Option<String>,
+            /// User's local channel identifier (NOT shared — kept for logging)
+            user_channel_id: String,
             expected_usd: f64,
         }
 
@@ -56,6 +61,8 @@
         #[derive(Serialize, Deserialize, Clone, Debug)]
         struct StableChannelEntry {
             channel_id: String,
+            #[serde(default)]
+            user_channel_id: Option<String>,
             expected_usd: f64,
             note: Option<String>,
             #[serde(default)]
@@ -106,6 +113,7 @@
         #[derive(Serialize)]
         pub struct ChannelInfo {
             pub id: String,
+            pub user_channel_id: String,
             pub remote_pubkey: String,
             pub capacity_sats: u64,
             pub local_balance_sats: u64,
@@ -261,7 +269,7 @@
                     let is_stable = app
                         .stable_channels
                         .iter()
-                        .find(|sc| sc.channel_id == c.channel_id);
+                        .find(|sc| sc.user_channel_id == c.user_channel_id.0);
 
                     // If the channel is stabilized, pull the data
                     let expected_usd = is_stable.map(|sc| sc.expected_usd.0);
@@ -272,6 +280,7 @@
 
                     ChannelInfo {
                         id: hex::encode(c.channel_id.0),
+                        user_channel_id: format!("{}", c.user_channel_id.0),
                         remote_pubkey: c.counterparty_node_id.to_string(),
                         capacity_sats: c.channel_value_sats,
 
@@ -328,8 +337,12 @@
         
             if let Some(n) = note.as_ref() {
                 let selected_id = app.selected_channel_id.clone();
-                if let Some(sc) = app.stable_channels.iter_mut()
-                    .find(|sc| sc.channel_id.to_string() == selected_id)
+                // Look up channel's user_channel_id, then match stable channel by it
+                let user_ch_id = app.node.list_channels().iter()
+                    .find(|c| c.channel_id.to_string() == selected_id)
+                    .map(|c| c.user_channel_id.0);
+                if let Some(sc) = user_ch_id.and_then(|uid| app.stable_channels.iter_mut()
+                    .find(|sc| sc.user_channel_id == uid))
                 {
                     sc.note = Some(n.clone()); // sc.note is Option<String>
                     app.status_message = "Note updated".to_string();
@@ -381,6 +394,37 @@
 
         // Hardcoded data directory
         const LSP_DATA_DIR: &str = "data-2/lsp";
+
+        /// Look up the value (in sats) of a specific transaction output via bitcoind RPC.
+        ///
+        /// Uses `getrawtransaction` with verbose=true to get the decoded transaction,
+        /// then extracts the output value at the given vout index.
+        ///
+        /// Returns None if the lookup fails (tx not found, RPC error, etc.)
+        fn lookup_funding_output_sats(txid: &str, vout: u32) -> Option<u64> {
+            let rpc_url = "http://127.0.0.1:8332";
+
+            let body = json!({
+                "jsonrpc": "1.0",
+                "id": "sc_splice",
+                "method": "getrawtransaction",
+                "params": [txid, true]
+            });
+
+            let response = ureq::post(rpc_url)
+                .set("Authorization", "Basic Og==")  // base64(":")  — empty user:password
+                .set("Content-Type", "application/json")
+                .send_json(&body)
+                .ok()?;
+
+            let json: serde_json::Value = response.into_json().ok()?;
+            let vouts = json["result"]["vout"].as_array()?;
+            let output = vouts.get(vout as usize)?;
+            let value_btc = output["value"].as_f64()?;
+            let value_sats = (value_btc * 100_000_000.0).round() as u64;
+
+            Some(value_sats)
+        }
 
         impl ServerApp {
             pub fn new_with_mode(mode: &str) -> Self {
@@ -542,7 +586,7 @@
                 let mut channels_updated = false;
                 let mut payment_sent = false;
                 for sc in &mut self.stable_channels {
-                    if !stable::channel_exists(&self.node, &sc.channel_id) {
+                    if !stable::channel_exists(&self.node, sc.user_channel_id) {
                         continue;
                     }
 
@@ -568,27 +612,75 @@
                     println!("[LSP EVENT] {:?}", event);
                     match event {
                         // Create stable channel entry with $0 stabilized - user must opt-in via trade message
-                        Event::ChannelReady { channel_id, .. } => {
+                        Event::ChannelReady { channel_id, user_channel_id, .. } => {
                             if let Some(chan) = self.node.list_channels()
                                 .into_iter()
                                 .find(|c| c.channel_id == channel_id)
                             {
                                 let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64 * self.btc_price;
 
-                                // Create channel entry with $0 stabilized (user opts in via trade message)
-                                self.selected_channel_id = channel_id.to_string();
-                                self.stable_channel_amount = "0".to_string();
-                                self.edit_stable_channel(None);
+                                // Check if a stable channel already exists for this user_channel_id (splice case)
+                                let existing = self.stable_channels.iter_mut()
+                                    .find(|sc| sc.user_channel_id == user_channel_id.0);
 
-                                audit_event("CHANNEL_READY", json!({
-                                    "channel_id": channel_id.to_string(),
-                                    "funded_usd": funded_usd,
-                                    "stabilized_usd": 0.0
-                                }));
-                                self.status_message = format!(
-                                    "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
-                                    channel_id, funded_usd
-                                );
+                                if let Some(sc) = existing {
+                                    // Splice: update channel_id but preserve expected_usd and other state
+                                    let old_channel_id = sc.channel_id.to_string();
+                                    sc.channel_id = channel_id;
+                                    let old_expected_usd = sc.expected_usd.0;
+
+                                    // Update balances from LDK so stable_receiver_btc reflects post-splice state
+                                    stable::update_balances(&self.node, sc);
+
+                                    // If splice-out exceeded native BTC, reconcile the stable portion
+                                    let price = sc.latest_price;
+                                    let usd_deducted = stable::reconcile_outgoing(sc, price);
+                                    if let Some(deducted) = usd_deducted {
+                                        audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
+                                            "channel_id": channel_id.to_string(),
+                                            "user_channel_id": format!("{}", user_channel_id.0),
+                                            "usd_deducted": deducted,
+                                            "old_expected_usd": old_expected_usd,
+                                            "new_expected_usd": sc.expected_usd.0,
+                                            "btc_price": price,
+                                        }));
+                                    }
+
+                                    let new_expected_usd = sc.expected_usd.0;
+                                    let sync_counterparty = sc.counterparty;
+                                    // sc no longer used after this point
+                                    audit_event("CHANNEL_READY_SPLICE", json!({
+                                        "channel_id": channel_id.to_string(),
+                                        "old_channel_id": old_channel_id,
+                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                        "funded_usd": funded_usd,
+                                        "expected_usd": new_expected_usd,
+                                    }));
+                                    self.save_stable_channels();
+                                    if usd_deducted.is_some() {
+                                        self.send_sync_message(user_channel_id.0, new_expected_usd, sync_counterparty);
+                                    }
+                                    self.status_message = format!(
+                                        "Channel {} ready after splice (${:.2} stabilized)",
+                                        channel_id, new_expected_usd
+                                    );
+                                } else {
+                                    // New channel: create entry with $0 stabilized (user opts in via trade)
+                                    self.selected_channel_id = channel_id.to_string();
+                                    self.stable_channel_amount = "0".to_string();
+                                    self.edit_stable_channel(None);
+
+                                    audit_event("CHANNEL_READY", json!({
+                                        "channel_id": channel_id.to_string(),
+                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                        "funded_usd": funded_usd,
+                                        "stabilized_usd": 0.0
+                                    }));
+                                    self.status_message = format!(
+                                        "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
+                                        channel_id, funded_usd
+                                    );
+                                }
                             }
                             self.update_balances();
                         }
@@ -643,10 +735,82 @@
                                 total_fee_earned_msat,
                             );
                         }
-                        Event::ChannelClosed { channel_id, reason, .. } => {
-                            audit_event("CHANNEL_CLOSED", json!({"channel_id": format!("{}", channel_id), "reason": format!("{:?}", reason)}));
+                        Event::ChannelClosed { channel_id, user_channel_id, reason, .. } => {
+                            let user_ch_id = user_channel_id.0;
+                            audit_event("CHANNEL_CLOSED", json!({
+                                "channel_id": format!("{}", channel_id),
+                                "user_channel_id": format!("{}", user_ch_id),
+                                "reason": format!("{:?}", reason)
+                            }));
+                            // Remove stable channel entry and delete from DB
+                            self.stable_channels.retain(|sc| sc.user_channel_id != user_ch_id);
+                            let _ = self.db.delete_channel(&format!("{}", user_ch_id));
                             self.status_message = format!("Channel {} has been closed", channel_id);
                             self.update_balances();
+                        }
+                        Event::SplicePending { channel_id, user_channel_id, new_funding_txo, .. } => {
+                            let txid_str = new_funding_txo.txid.to_string();
+                            let vout = new_funding_txo.vout;
+
+                            audit_event("SPLICE_PENDING", json!({
+                                "channel_id": channel_id.to_string(),
+                                "user_channel_id": format!("{}", user_channel_id.0),
+                                "funding_txo": format!("{}:{}", txid_str, vout),
+                            }));
+
+                            // Get old channel value (list_channels still shows pre-splice value)
+                            let old_channel_value_sats = self.node.list_channels()
+                                .iter()
+                                .find(|c| c.user_channel_id.0 == user_channel_id.0)
+                                .map(|c| c.channel_value_sats);
+
+                            // Look up new funding output value from bitcoind
+                            if let Some(old_value) = old_channel_value_sats {
+                                match lookup_funding_output_sats(&txid_str, vout) {
+                                    Some(new_value) => {
+                                        audit_event("SPLICE_PENDING_LOOKUP", json!({
+                                            "old_channel_sats": old_value,
+                                            "new_channel_sats": new_value,
+                                            "delta_sats": (new_value as i64) - (old_value as i64),
+                                        }));
+
+                                        if new_value < old_value {
+                                            // Splice-out: channel got smaller
+                                            let splice_out_sats = old_value - new_value;
+
+                                            let mut sync_info: Option<(u128, f64, PublicKey)> = None;
+                                            if let Some(sc) = self.stable_channels.iter_mut()
+                                                .find(|sc| sc.user_channel_id == user_channel_id.0)
+                                            {
+                                                let price = sc.latest_price;
+                                                if let Some(usd_deducted) = stable::deduct_outgoing(sc, splice_out_sats, price) {
+                                                    audit_event("SPLICE_PENDING_STABLE_DEDUCTED", json!({
+                                                        "channel_id": channel_id.to_string(),
+                                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                                        "splice_out_sats": splice_out_sats,
+                                                        "usd_deducted": usd_deducted,
+                                                        "new_expected_usd": sc.expected_usd.0,
+                                                        "btc_price": price,
+                                                    }));
+                                                    sync_info = Some((sc.user_channel_id, sc.expected_usd.0, sc.counterparty));
+                                                }
+                                            }
+                                            if let Some((ucid, eusd, cp)) = sync_info {
+                                                self.send_sync_message(ucid, eusd, cp);
+                                            }
+                                            self.save_stable_channels();
+                                        }
+                                    }
+                                    None => {
+                                        // Tx not yet in mempool or RPC error — trade message + ChannelReady will handle it
+                                        println!("[SplicePending] Could not look up funding output {}:{}", txid_str, vout);
+                                        audit_event("SPLICE_PENDING_LOOKUP_FAILED", json!({
+                                            "txid": txid_str,
+                                            "vout": vout,
+                                        }));
+                                    }
+                                }
+                            }
                         }
                         _ => {
                             audit_event("EVENT_IGNORED", json!({"event_type": format!("{:?}", event)}));
@@ -717,7 +881,8 @@
                                 let unspendable = chan.unspendable_punishment_reserve.unwrap_or(0);
                                 let new_lsp_sats = (chan.outbound_capacity_msat / 1000) + unspendable;
                                 if new_lsp_sats > *old_lsp_sats {
-                                    if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.channel_id == *ch_id) {
+                                    let user_ch_id = chan.user_channel_id.0;
+                                    if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.user_channel_id == user_ch_id) {
                                         if current_price > 0.0 {
                                             sc.latest_price = current_price;
                                         }
@@ -769,11 +934,15 @@
                 }));
 
                 // Check if the payment came FROM a stable channel (user sent payment out)
-                println!("[forwarded] looking for prev_channel_id={} in {} stable channels", prev_channel_id, self.stable_channels.len());
+                // Look up user_channel_id from LDK (channel_id changes on splice, user_channel_id doesn't)
+                let prev_user_ch_id = self.node.list_channels().iter()
+                    .find(|c| c.channel_id == prev_channel_id)
+                    .map(|c| c.user_channel_id.0);
+                println!("[forwarded] looking for prev_channel_id={} (user_ch_id={:?}) in {} stable channels", prev_channel_id, prev_user_ch_id, self.stable_channels.len());
                 for sc in &self.stable_channels {
-                    println!("[forwarded]   have channel: {} expected_usd={}", sc.channel_id, sc.expected_usd.0);
+                    println!("[forwarded]   have channel: {} user_channel_id={} expected_usd={}", sc.channel_id, sc.user_channel_id, sc.expected_usd.0);
                 }
-                if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.channel_id == prev_channel_id) {
+                if let Some(sc) = prev_user_ch_id.and_then(|uid| self.stable_channels.iter_mut().find(|sc| sc.user_channel_id == uid)) {
                     println!("[forwarded] matched! expected_usd={} btc_price={}", sc.expected_usd.0, self.btc_price);
                     if sc.expected_usd.0 <= 0.0 || self.btc_price <= 0.0 {
                         println!("[forwarded] skipping: expected_usd={} btc_price={}", sc.expected_usd.0, self.btc_price);
@@ -796,30 +965,36 @@
 
                     if let Some(usd_deducted) = stable::reconcile_forwarded(sc, user_total_sats, total_sats, self.btc_price) {
                         let overflow_sats = total_sats.saturating_sub(native_sats);
+                        let new_expected_usd = sc.expected_usd.0;
+                        let sc_user_channel_id = sc.user_channel_id;
+                        let sc_counterparty = sc.counterparty;
+                        // sc no longer used after this point
+
                         println!(
                             "[forwarded] channel {} spent {} sats ({} native, {} from stable), expected_usd: ${:.2} -> ${:.2}",
-                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, sc.expected_usd.0
+                            prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, new_expected_usd
                         );
 
                         audit_event("STABLE_SPEND_DEDUCTED", json!({
-                            "channel_id": prev_channel_id.to_string(),
+                            "user_channel_id": format!("{}", sc_user_channel_id),
                             "total_sats_spent": total_sats,
                             "native_sats_spent": native_sats,
                             "stable_sats_spent": overflow_sats,
                             "usd_deducted": usd_deducted,
                             "old_expected_usd": old_expected,
-                            "new_expected_usd": sc.expected_usd.0,
+                            "new_expected_usd": new_expected_usd,
                             "btc_price": self.btc_price,
                         }));
 
                         self.save_stable_channels();
+                        self.send_sync_message(sc_user_channel_id, new_expected_usd, sc_counterparty);
                     } else {
                         println!(
                             "[forwarded] channel {} spent {} sats from native BTC ({} native available), stable ${:.2} unchanged",
                             prev_channel_id, total_sats, native_sats, sc.expected_usd.0
                         );
                         audit_event("FORWARDED_FROM_NATIVE", json!({
-                            "channel_id": prev_channel_id.to_string(),
+                            "user_channel_id": format!("{}", sc.user_channel_id),
                             "sats_spent": total_sats,
                             "native_sats": native_sats,
                             "expected_usd": sc.expected_usd.0,
@@ -830,6 +1005,51 @@
                 }
 
                 self.update_balances();
+            }
+
+            /// Send authoritative expected_usd to the user after a stable deduction.
+            /// Ensures both sides agree on the stable position value.
+            fn send_sync_message(&self, user_channel_id: u128, expected_usd: f64, counterparty: PublicKey) {
+                let payload = json!({
+                    "type": SYNC_MESSAGE_TYPE,
+                    "user_channel_id": format!("{}", user_channel_id),
+                    "expected_usd": expected_usd,
+                });
+                let payload_str = payload.to_string();
+                let signature = self.node.sign_message(payload_str.as_bytes());
+
+                let signed_msg = json!({
+                    "payload": payload_str,
+                    "signature": signature,
+                });
+                let signed_str = signed_msg.to_string();
+
+                let custom_tlv = CustomTlvRecord {
+                    type_num: STABLE_CHANNEL_TLV_TYPE,
+                    value: signed_str.as_bytes().to_vec(),
+                };
+
+                match self.node.spontaneous_payment().send_with_custom_tlvs(
+                    1, // 1 msat
+                    counterparty,
+                    None,
+                    vec![custom_tlv],
+                ) {
+                    Ok(payment_id) => {
+                        audit_event("SYNC_MESSAGE_SENT", json!({
+                            "user_channel_id": format!("{}", user_channel_id),
+                            "expected_usd": expected_usd,
+                            "payment_id": format!("{}", payment_id),
+                        }));
+                    }
+                    Err(e) => {
+                        audit_event("SYNC_MESSAGE_FAILED", json!({
+                            "user_channel_id": format!("{}", user_channel_id),
+                            "expected_usd": expected_usd,
+                            "error": format!("{e}"),
+                        }));
+                    }
+                }
             }
 
             /// Handle trade message from client - updates the stabilized USD amount
@@ -875,7 +1095,7 @@
 
                 audit_event("TRADE_PARSED_PAYLOAD_OK", json!({
                     "payment_hash": format!("{}", payment_hash),
-                    "channel_id": &payload.channel_id,
+                    "user_channel_id": &payload.user_channel_id,
                     "type": &payload.kind,
                     "expected_usd": payload.expected_usd,
                 }));
@@ -902,27 +1122,34 @@
                     return;
                 }
 
-                let chan_id_str = payload.channel_id.clone();
+                let user_ch_id_str = payload.user_channel_id.clone();
 
-                // 4) Find the channel to verify signature
-                let channel_opt = self
-                    .node
-                    .list_channels()
-                    .into_iter()
-                    .find(|c| c.channel_id.to_string() == chan_id_str);
+                // 4) Find the channel — prefer channel_id (shared between both nodes),
+                //    fall back to user_channel_id for backward compat
+                let channels = self.node.list_channels();
+                let channel_opt = if let Some(ref cid) = payload.channel_id {
+                    // channel_id is the same on both sides of the channel
+                    channels.iter().find(|c| c.channel_id.to_string() == *cid)
+                } else {
+                    // Legacy: try user_channel_id (only works if both sides happen to match)
+                    channels.iter().find(|c| format!("{}", c.user_channel_id.0) == user_ch_id_str)
+                };
 
                 let channel = match channel_opt {
-                    Some(ch) => ch,
+                    Some(ch) => ch.clone(),
                     None => {
                         audit_event("TRADE_CHANNEL_NOT_FOUND", json!({
-                            "channel_id": chan_id_str,
+                            "channel_id": payload.channel_id,
+                            "user_channel_id": user_ch_id_str,
                             "expected_usd": new_expected_usd,
                             "payment_hash": format!("{}", payment_hash),
                         }));
-                        self.status_message = format!("Trade: unknown channel {}", chan_id_str);
+                        self.status_message = format!("Trade: channel not found (channel_id={:?}, user_id={})", payload.channel_id, user_ch_id_str);
                         return;
                     }
                 };
+
+                let chan_id_str = channel.channel_id.to_string();
 
                 // 5) Verify signature using counterparty's pubkey
                 let pkey = channel.counterparty_node_id;
@@ -933,6 +1160,7 @@
                 if !sig_ok {
                     audit_event("TRADE_SIGNATURE_INVALID", json!({
                         "channel_id": chan_id_str,
+                        "user_channel_id": user_ch_id_str,
                         "expected_usd": new_expected_usd,
                         "payment_hash": format!("{}", payment_hash),
                     }));
@@ -946,6 +1174,7 @@
 
                 audit_event("TRADE_SIGNATURE_VALID", json!({
                     "channel_id": chan_id_str,
+                    "user_channel_id": user_ch_id_str,
                     "expected_usd": new_expected_usd,
                     "payment_hash": format!("{}", payment_hash),
                 }));
@@ -954,13 +1183,13 @@
                 let old_expected_usd = if let Some(sc) = self
                     .stable_channels
                     .iter_mut()
-                    .find(|sc| sc.channel_id == channel.channel_id)
+                    .find(|sc| sc.user_channel_id == channel.user_channel_id.0)
                 {
                     // Refresh balances to get current receiver USD
                     let (ok, _) = stable::update_balances(&self.node, sc);
                     if !ok {
                         audit_event("TRADE_BALANCE_UPDATE_FAILED", json!({
-                            "channel_id": chan_id_str,
+                            "user_channel_id": user_ch_id_str,
                             "payment_hash": format!("{}", payment_hash),
                         }));
                         self.status_message = "Trade: failed to update balances".to_string();
@@ -971,7 +1200,7 @@
                     let receiver_usd = sc.stable_receiver_usd.0;
                     if new_expected_usd > receiver_usd {
                         audit_event("TRADE_EXCEEDS_BALANCE", json!({
-                            "channel_id": chan_id_str,
+                            "user_channel_id": user_ch_id_str,
                             "expected_usd": new_expected_usd,
                             "receiver_usd": receiver_usd,
                             "payment_hash": format!("{}", payment_hash),
@@ -984,24 +1213,25 @@
                     }
 
                     let old = sc.expected_usd.0;
-                    println!("[trade] updating expected_usd: {} -> {} for channel {}", old, new_expected_usd, sc.channel_id);
+                    println!("[trade] updating expected_usd: {} -> {} for user_channel_id={}", old, new_expected_usd, sc.user_channel_id);
 
                     stable::apply_trade(sc, new_expected_usd, sc.latest_price);
 
                     old
                 } else {
-                    println!("[trade] ERROR: channel {} not found in stable_channels list ({} entries)", chan_id_str, self.stable_channels.len());
+                    println!("[trade] ERROR: user_channel_id {} not found in stable_channels list ({} entries)", user_ch_id_str, self.stable_channels.len());
                     for sc in &self.stable_channels {
-                        println!("[trade]   have: {}", sc.channel_id);
+                        println!("[trade]   have: channel_id={} user_channel_id={}", sc.channel_id, sc.user_channel_id);
                     }
                     audit_event("TRADE_STABLE_ENTRY_NOT_FOUND", json!({
                         "channel_id": chan_id_str,
+                        "user_channel_id": user_ch_id_str,
                         "expected_usd": new_expected_usd,
                         "payment_hash": format!("{}", payment_hash),
                     }));
                     self.status_message = format!(
-                        "Trade: channel {} not in stable channels list",
-                        chan_id_str
+                        "Trade: user_channel_id {} not in stable channels list",
+                        user_ch_id_str
                     );
                     return;
                 };
@@ -1009,7 +1239,7 @@
                 self.save_stable_channels();
 
                 audit_event("TRADE_APPLIED", json!({
-                    "channel_id": chan_id_str,
+                    "user_channel_id": user_ch_id_str,
                     "old_expected_usd": old_expected_usd,
                     "new_expected_usd": new_expected_usd,
                     "payment_hash": format!("{}", payment_hash),
@@ -1142,7 +1372,7 @@
                 info.push_str("[Channel Information Table]\n");
             
                 for (i, channel) in channels.iter().enumerate() {
-                    let is_stable = self.stable_channels.iter().any(|sc| sc.channel_id == channel.channel_id);
+                    let is_stable = self.stable_channels.iter().any(|sc| sc.user_channel_id == channel.user_channel_id.0);
             
                     let id_str = hex::encode(channel.channel_id.0);
                     let peer_str = channel.counterparty_node_id.to_string();
@@ -1287,7 +1517,7 @@
             
                         let mut note = note.clone();
                         if note.is_none() {
-                            if let Some(existing) = self.stable_channels.iter().find(|sc| sc.channel_id == channel.channel_id) {
+                            if let Some(existing) = self.stable_channels.iter().find(|sc| sc.user_channel_id == channel.user_channel_id.0) {
                                 note = existing.note.clone();
                             }
                         }
@@ -1302,6 +1532,7 @@
 
                         let stable_channel = StableChannel {
                             channel_id: channel.channel_id,
+                            user_channel_id: channel.user_channel_id.0,
                             counterparty: channel.counterparty_node_id,
                             is_stable_receiver: false,
                             expected_usd,
@@ -1327,7 +1558,7 @@
 
                         let mut found = false;
                         for sc in &mut self.stable_channels {
-                            if sc.channel_id == channel.channel_id {
+                            if sc.user_channel_id == channel.user_channel_id.0 {
                                 *sc = stable_channel.clone();
                                 found = true;
                                 break;
@@ -1344,7 +1575,7 @@
                             "Channel {} edited as stable with target ${}",
                             channel_id_str, amount
                         );
-                        audit_event("STABLE_EDITED", json!({"channel_id": channel_id_str, "target_usd": amount}));
+                        audit_event("STABLE_EDITED", json!({"user_channel_id": format!("{}", channel.user_channel_id.0), "target_usd": amount}));
                         self.selected_channel_id.clear();
                         self.stable_channel_amount = "0".to_string();
                         return;
@@ -1358,9 +1589,11 @@
             pub fn save_stable_channels(&mut self) {
                 for sc in &self.stable_channels {
                     let ch_id = sc.channel_id.to_string();
-                    println!("[save_stable] saving channel={} expected_usd={} backing_sats={}", ch_id, sc.expected_usd.0, sc.backing_sats);
+                    let uch_id = format!("{}", sc.user_channel_id);
+                    println!("[save_stable] saving channel={} user_channel_id={} expected_usd={} backing_sats={}", ch_id, uch_id, sc.expected_usd.0, sc.backing_sats);
                     if let Err(e) = self.db.save_channel(
                         &ch_id,
+                        &uch_id,
                         sc.expected_usd.0,
                         sc.backing_sats,
                         sc.note.as_deref(),
@@ -1378,8 +1611,10 @@
                     if let Ok(contents) = fs::read_to_string(&json_path) {
                         if let Ok(entries) = serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
                             for entry in &entries {
+                                let uch_id = entry.user_channel_id.as_deref().unwrap_or(&entry.channel_id);
                                 let _ = self.db.save_channel(
                                     &entry.channel_id,
+                                    uch_id,
                                     entry.expected_usd,
                                     entry.backing_sats,
                                     entry.note.as_deref(),
@@ -1403,16 +1638,22 @@
                 let ldk_channels = self.node.list_channels();
                 println!("[load_stable] DB has {} entries, LDK has {} channels", entries.len(), ldk_channels.len());
                 for ch in &ldk_channels {
-                    println!("[load_stable]   LDK channel: {}", ch.channel_id);
+                    println!("[load_stable]   LDK channel: {} (user_channel_id={})", ch.channel_id, ch.user_channel_id.0);
                 }
 
                 self.stable_channels.clear();
 
                 for entry in entries {
-                    println!("[load_stable] DB entry: channel_id={}, expected_usd={}", entry.channel_id, entry.expected_usd);
+                    println!("[load_stable] DB entry: channel_id={}, user_channel_id={}, expected_usd={}", entry.channel_id, entry.user_channel_id, entry.expected_usd);
                     let mut matched = false;
                     for channel in &ldk_channels {
-                        if channel.channel_id.to_string() == entry.channel_id {
+                        // Match by user_channel_id (stable across splices), fall back to channel_id for legacy entries
+                        let matches = if !entry.user_channel_id.is_empty() {
+                            format!("{}", channel.user_channel_id.0) == entry.user_channel_id
+                        } else {
+                            channel.channel_id.to_string() == entry.channel_id
+                        };
+                        if matches {
                             matched = true;
                             let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
                             let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
@@ -1425,6 +1666,7 @@
 
                             let stable_channel = StableChannel {
                                 channel_id: channel.channel_id,
+                                user_channel_id: channel.user_channel_id.0,
                                 counterparty: channel.counterparty_node_id,
                                 is_stable_receiver: false,
                                 expected_usd: USD::from_f64(entry.expected_usd),
@@ -1453,7 +1695,7 @@
                         }
                     }
                     if !matched {
-                        println!("[load_stable] WARNING: no LDK channel matched DB entry {}", entry.channel_id);
+                        println!("[load_stable] WARNING: no LDK channel matched DB entry channel_id={} user_channel_id={}", entry.channel_id, entry.user_channel_id);
                     }
                 }
 

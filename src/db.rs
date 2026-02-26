@@ -96,6 +96,12 @@ impl Database {
             [],
         ); // Ignore error if column already exists
 
+        // Migration: Add user_channel_id column (stable across splices, unlike channel_id)
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN user_channel_id TEXT",
+            [],
+        ); // Ignore error if column already exists
+
         // Price history table - stores historical prices for charts
         conn.execute(
             "CREATE TABLE IF NOT EXISTS price_history (
@@ -142,6 +148,20 @@ impl Database {
             "ALTER TABLE payments ADD COLUMN fee_msat INTEGER NOT NULL DEFAULT 0",
             [],
         ); // Ignore error if column already exists
+
+        // Migration: Add on-chain fields to payments table
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN txid TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN address TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN confirmations INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
 
         // Create index for faster payment queries
         conn.execute(
@@ -206,45 +226,59 @@ impl Database {
     pub fn save_channel(
         &self,
         channel_id: &str,
+        user_channel_id: &str,
         expected_usd: f64,
         backing_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO channels (channel_id, expected_usd, stable_sats, note)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(channel_id) DO UPDATE SET
-                expected_usd = ?2,
-                stable_sats = ?3,
-                note = ?4,
-                updated_at = strftime('%s', 'now')",
-            params![channel_id, expected_usd, backing_sats as i64, note],
+        // Try to update by user_channel_id first (handles channel_id changes from splices)
+        let updated = conn.execute(
+            "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                 note = ?4, user_channel_id = ?5,
+                                 updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?5",
+            params![channel_id, expected_usd, backing_sats as i64, note, user_channel_id],
         )?;
+        if updated == 0 {
+            // No existing row — insert new
+            conn.execute(
+                "INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, note)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(channel_id) DO UPDATE SET
+                    user_channel_id = ?2,
+                    expected_usd = ?3,
+                    stable_sats = ?4,
+                    note = ?5,
+                    updated_at = strftime('%s', 'now')",
+                params![channel_id, user_channel_id, expected_usd, backing_sats as i64, note],
+            )?;
+        }
         Ok(())
     }
 
     /// Delete channel settings (e.g. after channel close)
-    pub fn delete_channel(&self, channel_id: &str) -> SqliteResult<()> {
+    pub fn delete_channel(&self, user_channel_id: &str) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM channels WHERE channel_id = ?1", params![channel_id])?;
+        conn.execute("DELETE FROM channels WHERE user_channel_id = ?1", params![user_channel_id])?;
         Ok(())
     }
 
-    /// Load channel settings
-    pub fn load_channel(&self, channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
+    /// Load channel settings by user_channel_id (stable across splices)
+    pub fn load_channel(&self, user_channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, expected_usd, note, stable_sats
-             FROM channels WHERE channel_id = ?1"
+            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id
+             FROM channels WHERE user_channel_id = ?1"
         )?;
 
-        let mut rows = stmt.query(params![channel_id])?;
+        let mut rows = stmt.query(params![user_channel_id])?;
 
         if let Some(row) = rows.next()? {
             let backing_sats: i64 = row.get(3).unwrap_or(0);
             Ok(Some(ChannelRecord {
                 channel_id: row.get(0)?,
+                user_channel_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
                 backing_sats: backing_sats as u64,
@@ -258,13 +292,14 @@ impl Database {
     pub fn load_all_channels(&self) -> SqliteResult<Vec<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, expected_usd, note, stable_sats FROM channels"
+            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id FROM channels"
         )?;
 
         let rows = stmt.query_map([], |row| {
             let backing_sats: i64 = row.get(3).unwrap_or(0);
             Ok(ChannelRecord {
                 channel_id: row.get(0)?,
+                user_channel_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
                 backing_sats: backing_sats as u64,
@@ -317,19 +352,18 @@ impl Database {
         Ok(())
     }
 
-    /// Get recent trades for a channel
-    pub fn get_recent_trades(&self, channel_id: &str, limit: usize) -> SqliteResult<Vec<TradeRecord>> {
+    /// Get recent trades across all channels
+    pub fn get_recent_trades(&self, limit: usize) -> SqliteResult<Vec<TradeRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
                     payment_id, status, created_at
              FROM trades
-             WHERE channel_id = ?1
              ORDER BY id DESC
-             LIMIT ?2"
+             LIMIT ?1"
         )?;
 
-        let rows = stmt.query_map(params![channel_id, limit as i64], |row| {
+        let rows = stmt.query_map(params![limit as i64], |row| {
             Ok(TradeRecord {
                 id: row.get(0)?,
                 channel_id: row.get(1)?,
@@ -559,7 +593,7 @@ impl Database {
     }
 
     /// Record a payment
-    /// payment_type should be "stability" or "manual"
+    /// payment_type: "stability", "lightning", "splice_in", "splice_out", or "manual"
     pub fn record_payment(
         &self,
         payment_id: Option<&str>,
@@ -570,12 +604,14 @@ impl Database {
         btc_price: Option<f64>,
         counterparty: Option<&str>,
         status: &str,
+        txid: Option<&str>,
+        address: Option<&str>,
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![payment_id, payment_type, direction, amount_msat as i64, amount_usd, btc_price, counterparty, status],
+            "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![payment_id, payment_type, direction, amount_msat as i64, amount_usd, btc_price, counterparty, status, txid, address],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -614,11 +650,32 @@ impl Database {
         Ok(rows)
     }
 
+    /// Set txid on the most recent pending splice_in payment (recorded before txid was known)
+    pub fn set_pending_splice_txid(&self, txid: &str) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE payments SET txid = ?1, payment_id = ?1
+             WHERE id = (SELECT id FROM payments WHERE payment_type = 'splice_in' AND status = 'pending' AND txid IS NULL ORDER BY id DESC LIMIT 1)",
+            params![txid],
+        )?;
+        Ok(rows)
+    }
+
+    /// Update confirmations and status for a payment by txid
+    pub fn update_payment_confirmations(&self, txid: &str, confirmations: u32, status: &str) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE payments SET confirmations = ?1, status = ?2 WHERE txid = ?3",
+            params![confirmations as i32, status, txid],
+        )?;
+        Ok(rows)
+    }
+
     /// Get recent payments
     pub fn get_recent_payments(&self, limit: usize) -> SqliteResult<Vec<PaymentRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat
+            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
              FROM payments
              ORDER BY id DESC
              LIMIT ?1"
@@ -637,6 +694,9 @@ impl Database {
                 status: row.get(8)?,
                 created_at: row.get(9)?,
                 fee_msat: row.get::<_, i64>(10).unwrap_or(0) as u64,
+                txid: row.get(11)?,
+                address: row.get(12)?,
+                confirmations: row.get::<_, i32>(13).unwrap_or(0) as u32,
             })
         })?;
 
@@ -716,6 +776,7 @@ impl Database {
 #[derive(Debug, Clone)]
 pub struct ChannelRecord {
     pub channel_id: String,
+    pub user_channel_id: String,
     pub expected_usd: f64,
     pub note: Option<String>,
     pub backing_sats: u64,
@@ -756,6 +817,9 @@ pub struct PaymentRecord {
     pub status: String,
     pub created_at: i64,
     pub fee_msat: u64,
+    pub txid: Option<String>,
+    pub address: Option<String>,
+    pub confirmations: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -800,11 +864,12 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // backing_sats = 100_000 (backing $100 at some price)
-        db.save_channel("test_channel_123", 100.0, 100_000, Some("test note"))
+        db.save_channel("test_channel_123", "uch_123", 100.0, 100_000, Some("test note"))
             .unwrap();
 
-        let loaded = db.load_channel("test_channel_123").unwrap().unwrap();
+        let loaded = db.load_channel("uch_123").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "test_channel_123");
+        assert_eq!(loaded.user_channel_id, "uch_123");
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
@@ -814,10 +879,12 @@ mod tests {
     fn test_channel_upsert() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("ch1", 50.0, 50_000, None).unwrap();
-        db.save_channel("ch1", 100.0, 100_000, Some("updated")).unwrap();
+        db.save_channel("ch1", "uch1", 50.0, 50_000, None).unwrap();
+        // Same user_channel_id, new channel_id (simulates splice)
+        db.save_channel("ch2", "uch1", 100.0, 100_000, Some("updated")).unwrap();
 
-        let loaded = db.load_channel("ch1").unwrap().unwrap();
+        let loaded = db.load_channel("uch1").unwrap().unwrap();
+        assert_eq!(loaded.channel_id, "ch2"); // channel_id updated
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
     }
@@ -836,7 +903,7 @@ mod tests {
             Some("pay456"), "completed"
         ).unwrap();
 
-        let trades = db.get_recent_trades("ch1", 10).unwrap();
+        let trades = db.get_recent_trades(10).unwrap();
         assert_eq!(trades.len(), 2);
         assert_eq!(trades[0].action, "sell"); // Most recent first
         assert_eq!(trades[1].action, "buy");
