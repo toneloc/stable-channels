@@ -1,0 +1,33 @@
+{
+  "originHash" : "e361f7d2296187aeb60e118ea09e178ee68bf4f796cc75de6a6b844098c93353",
+  "pins" : [
+    {
+      "identity" : "codescanner",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/twostraws/CodeScanner.git",
+      "state" : {
+        "revision" : "5e886430238944c7200fc9e10dbf2d9550dba865",
+        "version" : "2.5.2"
+      }
+    },
+    {
+      "identity" : "keychainaccess",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kishikawakatsumi/KeychainAccess.git",
+      "state" : {
+        "revision" : "84e546727d66f1adc5439debad16270d0fdd04e7",
+        "version" : "4.2.2"
+      }
+    },
+    {
+      "identity" : "ldk-node",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/lightningdevkit/ldk-node.git",
+      "state" : {
+        "revision" : "68ab7f417e595f3997dd598ebe070dd5d1b5facf",
+        "version" : "0.7.0"
+      }
+    }
+  ],
+  "version" : 3
+}
