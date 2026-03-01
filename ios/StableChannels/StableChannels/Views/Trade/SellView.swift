@@ -128,14 +128,14 @@ struct SellView: View {
 
     private var doneScreen: some View {
         VStack(spacing: 20) {
-            Image(systemName: "clock.arrow.circlepath")
+            Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 64))
-                .foregroundStyle(.orange)
+                .foregroundStyle(.green)
 
-            Text("Trade Pending")
+            Text("Trade Complete")
                 .font(.title2.bold())
 
-            Text(String(format: "Selling %.8f BTC for $%.2f\nWaiting for payment confirmation...", btcAmount, amountUSD))
+            Text(String(format: "Sold %.8f BTC for %@", btcAmount, (amountUSD * 0.99).usdFormatted))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
@@ -160,12 +160,13 @@ struct SellView: View {
         let sc = appState.stableChannel
         let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: appState.btcPrice).amount
         let feeUSD = amountUSD * 0.01  // 1% fee
+        let price = appState.btcPrice
         do {
             guard let result = try appState.tradeService?.executeSell(
                 sc: sc,
                 amountUSD: amountUSD,
                 feeUSD: feeUSD,
-                price: appState.btcPrice,
+                price: price,
                 maxUSD: totalUSD
             ) else {
                 errorMessage = "Trade failed — check amount and try again"
@@ -173,22 +174,30 @@ struct SellView: View {
                 return
             }
 
-            // Record trade as pending in DB
+            // Apply trade immediately (optimistic — matches desktop behavior)
+            StabilityService.applyTrade(
+                &appState.stableChannel,
+                newExpectedUSD: result.newExpectedUSD,
+                price: price
+            )
+            appState.saveChannelToDB()
+
+            // Record trade in DB
             let tradeDbId = try appState.databaseService?.recordTrade(
                 channelId: sc.channelId,
                 action: "sell",
                 amountUSD: amountUSD,
                 amountBTC: result.btcAmount,
-                btcPrice: appState.btcPrice,
+                btcPrice: price,
                 feeUSD: feeUSD,
                 paymentId: result.paymentId,
                 status: "pending"
             ) ?? 0
 
-            // Store pending trade — will be applied on PaymentSuccessful
+            // Track for DB status update on PaymentSuccessful/PaymentFailed
             appState.pendingTradePayments[result.paymentId] = PendingTradePayment(
                 newExpectedUSD: result.newExpectedUSD,
-                price: appState.btcPrice,
+                price: price,
                 tradeDbId: tradeDbId,
                 action: "sell"
             )

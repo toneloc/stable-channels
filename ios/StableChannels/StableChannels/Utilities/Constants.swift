@@ -95,9 +95,20 @@ enum Constants {
         static let testnet = "https://rapidsync.lightningdevkit.org/testnet/snapshot/"
     }
 
+    // MARK: - Push Notifications
+
+    static let appGroupIdentifier = "group.com.stablechannels.app"
+
     // MARK: - Data Directory
 
     static var userDataDir: URL {
+        if let shared = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupIdentifier
+        ) {
+            return shared.appendingPathComponent("StableChannels")
+                .appendingPathComponent(defaultUserAlias)
+        }
+        // Fallback to Application Support if App Group is unavailable
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("StableChannels").appendingPathComponent(defaultUserAlias)
     }

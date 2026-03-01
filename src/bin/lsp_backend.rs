@@ -25,6 +25,19 @@
         use stable_channels::constants::*;
         use stable_channels::db::Database;
 
+        // APNs push notification support
+        use a2::{
+            Client as ApnsClient, ClientConfig as ApnsClientConfig,
+            DefaultNotificationBuilder, NotificationBuilder,
+            NotificationOptions, Priority,
+        };
+
+        // APNs configuration — set these for your Apple Developer account
+        const APNS_KEY_ID: &str = "YOUR_KEY_ID";
+        const APNS_TEAM_ID: &str = "VJF3VBKXV9";
+        const APNS_TOPIC: &str = "com.stablechannels.app";
+        const APNS_KEY_FILE: &str = "AuthKey.p8";
+
         // ============================================================================
         // TRADE MESSAGE TYPES
         // ============================================================================
@@ -166,13 +179,47 @@
             address: String,
         }
 
+        #[derive(Deserialize)]
+        struct RegisterPushReq {
+            device_token: String,
+            platform: String,  // "ios" or "android"
+        }
+
+        /// Lazily initialized APNs client (loaded from .p8 key file)
+        static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
+            let key_path = format!("{}/{}", LSP_DATA_DIR, APNS_KEY_FILE);
+            match std::fs::read(&key_path) {
+                Ok(key_data) => {
+                    match ApnsClient::token(
+                        &mut std::io::Cursor::new(key_data),
+                        APNS_KEY_ID,
+                        APNS_TEAM_ID,
+                        ApnsClientConfig::default(),
+                    ) {
+                        Ok(client) => {
+                            println!("[APNs] Client initialized from {}", key_path);
+                            Mutex::new(Some(client))
+                        }
+                        Err(e) => {
+                            println!("[APNs] Failed to create client: {} — pushes will be logged only", e);
+                            Mutex::new(None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("[APNs] Key file not found at {}: {} — pushes will be logged only", key_path, e);
+                    Mutex::new(None)
+                }
+            }
+        });
+
 
         #[tokio::main]
         async fn main() -> Result<()> {
             // ── periodic upkeep task ───────────────────────────────────────────────
             tokio::spawn(async {
                 loop {
-                    let payment_sent = {
+                    let (payment_sent, needs_push) = {
                         let mut app = APP.lock().unwrap();
 
                         app.poll_events();
@@ -185,13 +232,34 @@
                         }
 
                         if app.last_stability_check.elapsed() >= Duration::from_secs(STABILITY_CHECK_INTERVAL_SECS) {
+                            // Check if peer is offline and needs a push notification
+                            let needs_push = app.needs_push_for_stability();
+
                             let sent = app.check_and_update_stable_channels();
                             app.last_stability_check = Instant::now();
-                            sent
+                            (sent, needs_push)
                         } else {
-                            false
+                            (false, false)
                         }
                     }; // MutexGuard dropped here
+
+                    // If a stability payment is needed but the peer is offline,
+                    // send a push notification and wait for them to come online
+                    if needs_push {
+                        send_push_to_all("Stability Payment", "A stability payment is pending — open app to receive");
+
+                        // Wait 15 seconds for the user's node to wake up via NSE
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+
+                        // Retry the stability check now that (hopefully) the peer reconnected
+                        let retry_sent = {
+                            let mut app = APP.lock().unwrap();
+                            app.check_and_update_stable_channels()
+                        };
+                        if retry_sent {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
 
                     // After a stability payment, wait for LDK's background processor
                     // to persist the ChannelManager before continuing.
@@ -213,7 +281,8 @@
                 .route("/api/edit_stable_channel", post(edit_stable_channel_handler))
                 .route("/api/onchain_send", post(onchain_send_handler))
                 .route("/api/onchain_address", get(get_onchain_address))
-                .route("/api/connect", post(connect_handler));
+                .route("/api/connect", post(connect_handler))
+                .route("/api/register-push", post(register_push_handler));
 
 
             let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
@@ -390,6 +459,151 @@
             Json(format!("Connection attempt to {}", req.node_id))
         }
 
+        // POST /api/register-push
+        async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String> {
+            save_push_token(&req.device_token, &req.platform);
+
+            println!("[Push] Registered {} device: {}...",
+                req.platform,
+                &req.device_token[..req.device_token.len().min(16)]
+            );
+
+            Json("ok".to_string())
+        }
+
+        // ── Push token persistence (SQLite) ──────────────────────────────────────
+
+        fn push_tokens_db_path() -> String {
+            format!("{}/push_tokens.db", LSP_DATA_DIR)
+        }
+
+        fn init_push_tokens_table(data_dir: &str) {
+            let db_path = format!("{}/push_tokens.db", data_dir);
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS push_tokens (
+                        device_token TEXT PRIMARY KEY,
+                        platform TEXT NOT NULL,
+                        registered_at INTEGER NOT NULL
+                    )",
+                    [],
+                ).ok();
+            }
+        }
+
+        fn save_push_token(device_token: &str, platform: &str) {
+            let db_path = push_tokens_db_path();
+            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                conn.execute(
+                    "INSERT OR REPLACE INTO push_tokens (device_token, platform, registered_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![device_token, platform, now],
+                ).ok();
+            }
+        }
+
+        fn load_push_tokens() -> Vec<(String, String)> {
+            let db_path = push_tokens_db_path();
+            let conn = match rusqlite::Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+            let mut stmt = match conn.prepare("SELECT device_token, platform FROM push_tokens") {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            });
+            match rows {
+                Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+
+        // ── APNs sending ─────────────────────────────────────────────────────────
+
+        /// Send a push notification to all registered iOS devices.
+        /// Uses the `a2` crate for real APNs delivery when a .p8 key is configured.
+        fn send_push_to_all(title: &str, body: &str) {
+            let tokens = load_push_tokens();
+            if tokens.is_empty() {
+                println!("[Push] No registered devices");
+                return;
+            }
+
+            let rt = match tokio::runtime::Handle::try_current() {
+                Ok(h) => h,
+                Err(_) => {
+                    println!("[Push] No tokio runtime available");
+                    return;
+                }
+            };
+
+            let title = title.to_string();
+            let body = body.to_string();
+
+            rt.spawn(async move {
+                // Clone the client out of the mutex so we don't hold the guard across await
+                let client = {
+                    let guard = APNS_CLIENT.lock().unwrap();
+                    guard.clone()
+                };
+                let client = match client.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        for (token, platform) in &tokens {
+                            if platform == "ios" {
+                                println!("[Push] (no client) Would send to {}...: {} - {}",
+                                    &token[..token.len().min(16)], title, body);
+                            }
+                        }
+                        return;
+                    }
+                };
+
+                for (token, platform) in &tokens {
+                    if platform != "ios" { continue; }
+
+                    let payload = DefaultNotificationBuilder::new()
+                        .set_title(&title)
+                        .set_body(&body)
+                        .set_mutable_content()
+                        .set_sound("default")
+                        .build(
+                            token,
+                            NotificationOptions {
+                                apns_topic: Some(APNS_TOPIC),
+                                apns_priority: Some(Priority::High),
+                                ..Default::default()
+                            },
+                        );
+
+                    match client.send(payload).await {
+                        Ok(response) => {
+                            println!("[Push] APNs sent to {}...: {:?}",
+                                &token[..token.len().min(16)], response);
+                            audit_event("APNS_SENT", json!({
+                                "token_prefix": &token[..token.len().min(16)],
+                                "title": title,
+                            }));
+                        }
+                        Err(e) => {
+                            println!("[Push] APNs error for {}...: {}",
+                                &token[..token.len().min(16)], e);
+                            audit_event("APNS_ERROR", json!({
+                                "token_prefix": &token[..token.len().min(16)],
+                                "error": e.to_string(),
+                            }));
+                        }
+                    }
+                }
+            });
+        }
+
 
 
         // Hardcoded data directory
@@ -510,6 +724,9 @@
                 let db = Database::open(std::path::Path::new(LSP_DATA_DIR))
                     .expect("Failed to open LSP database");
 
+                // Create push_tokens table for persistent APNs device token storage
+                init_push_tokens_table(LSP_DATA_DIR);
+
                 let mut app = Self {
                     node,
                     btc_price,
@@ -575,6 +792,47 @@
                 self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
                 self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
                 self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+            }
+
+            /// Check if a peer is connected by looking for a usable channel with them.
+            fn is_peer_connected(&self, user_channel_id: u128) -> bool {
+                self.node.list_channels().iter().any(|c|
+                    c.user_channel_id.0 == user_channel_id && c.is_usable
+                )
+            }
+
+            /// Returns true if any stability payment needs to be sent but the peer is offline.
+            /// The caller should send a push notification and retry after a delay.
+            pub fn needs_push_for_stability(&self) -> bool {
+                let current_price = get_cached_price();
+                if current_price <= 0.0 { return false; }
+
+                for sc in &self.stable_channels {
+                    if !stable::channel_exists(&self.node, sc.user_channel_id) {
+                        continue;
+                    }
+                    if sc.expected_usd.0 < 0.01 { continue; }
+
+                    // Quick drift check — does this channel need a stability payment?
+                    let stable_usd_value = if sc.backing_sats > 0 {
+                        (sc.backing_sats as f64 / 100_000_000.0) * current_price
+                    } else {
+                        sc.stable_receiver_usd.0
+                    };
+                    let target_usd = sc.expected_usd.0;
+                    let percent_from_par = if target_usd > 0.0 {
+                        (((stable_usd_value - target_usd) / target_usd) * 100.0).abs()
+                    } else {
+                        0.0
+                    };
+
+                    if percent_from_par >= STABILITY_THRESHOLD_PERCENT
+                        && !self.is_peer_connected(sc.user_channel_id)
+                    {
+                        return true;
+                    }
+                }
+                false
             }
 
             pub fn check_and_update_stable_channels(&mut self) -> bool {

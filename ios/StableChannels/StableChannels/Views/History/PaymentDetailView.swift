@@ -12,10 +12,10 @@ struct PaymentDetailView: View {
                     row("Type", paymentTypeLabel)
                     row("Amount", "\(payment.amountSats) sats")
                     if let usd = payment.amountUSD {
-                        row("USD Value", String(format: "$%.2f", usd))
+                        row("USD Value", usd.usdFormatted)
                     }
                     if let price = payment.btcPrice {
-                        row("BTC Price", String(format: "$%.2f", price))
+                        row("BTC Price", price.usdFormatted)
                     }
                     if payment.feeMsat > 0 {
                         row("Fee", "\(payment.feeMsat) msat")
@@ -62,9 +62,11 @@ struct PaymentDetailView: View {
     private var paymentTypeLabel: String {
         switch payment.paymentType {
         case "stability": return "Stability Payment"
-        case "lightning": return "Lightning"
+        case "lightning": return "Settlement"
         case "splice_in": return "Splice In"
         case "splice_out": return "Splice Out"
+        case "onchain": return "On-chain"
+        case "bolt12": return "Bolt12"
         default: return payment.paymentType
         }
     }

@@ -235,6 +235,15 @@ class DatabaseService {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Int64 {
+        // Dedup: skip if a payment with this payment_id already exists
+        if let pid = paymentId, !pid.isEmpty {
+            let existing = try query(
+                "SELECT id FROM payments WHERE payment_id = ?",
+                params: [.text(pid)]
+            )
+            if !existing.isEmpty { return existing[0][0] as? Int64 ?? 0 }
+        }
+
         let sql = """
             INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

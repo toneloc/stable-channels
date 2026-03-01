@@ -34,6 +34,7 @@ targets:
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: StableChannels/StableChannels.entitlements
       configs:
         Debug:
           CODE_SIGN_IDENTITY: "Apple Development"
@@ -44,6 +45,7 @@ targets:
         product: LDKNode
       - package: KeychainAccess
       - package: CodeScanner
+      - target: NotificationService
     info:
       path: StableChannels/Info.plist
       properties:
@@ -62,7 +64,33 @@ targets:
         UIBackgroundModes:
           - fetch
           - processing
+          - remote-notification
         NSCameraUsageDescription: "Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses."
+
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.NotificationService
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: NotificationService/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: VJF3VBKXV9
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: NotificationService/NotificationService.entitlements
+      configs:
+        Debug:
+          CODE_SIGN_IDENTITY: "Apple Development"
+        Release:
+          CODE_SIGN_IDENTITY: "Apple Distribution"
+    dependencies:
+      - package: ldk-node
+        product: LDKNode
 
   StableChannelsTests:
     type: bundle.unit-test

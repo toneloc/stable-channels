@@ -9,17 +9,17 @@ struct TradeDetailView: View {
             List {
                 Section("Trade Details") {
                     row("Action", trade.action == "buy" ? "Buy BTC" : "Sell BTC")
-                    row("Amount (USD)", String(format: "$%.2f", trade.amountUSD))
+                    row("Amount (USD)", trade.amountUSD.usdFormatted)
                     row("Amount (BTC)", String(format: "%.8f", trade.amountBTC))
-                    row("BTC Price", String(format: "$%.2f", trade.btcPrice))
-                    row("Fee", String(format: "$%.2f", trade.feeUSD))
+                    row("BTC Price", trade.btcPrice.usdFormatted)
+                    row("Fee", trade.feeUSD.usdFormatted)
                     row("Status", trade.status.capitalized)
                 }
 
                 Section("Metadata") {
                     row("Date", trade.date.formatted())
                     if let paymentId = trade.paymentId {
-                        row("Payment ID", paymentId)
+                        row("Trade ID", paymentId)
                     }
                 }
             }

@@ -7,11 +7,22 @@ struct ReceiveView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var amountSats = ""
     @State private var invoice: String?
+    @State private var invoiceAmountSats: UInt64?
     @State private var errorMessage: String?
     @State private var isCopied = false
 
     private var hasChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
+    }
+
+    private var enteredSats: UInt64 {
+        UInt64(amountSats) ?? 0
+    }
+
+    private var enteredUSD: Double? {
+        let price = appState.btcPrice
+        guard price > 0, enteredSats > 0 else { return nil }
+        return Double(enteredSats) / Double(Constants.satsInBTC) * price
     }
 
     var body: some View {
@@ -53,6 +64,12 @@ struct ReceiveView: View {
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
 
+            if let usd = enteredUSD {
+                Text("≈ \(usd.usdFormatted)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
             if !hasChannel {
                 Text("First payment — a channel will be opened automatically via LSP")
                     .font(.caption)
@@ -82,6 +99,25 @@ struct ReceiveView: View {
 
     private func invoiceDisplay(_ invoiceStr: String) -> some View {
         VStack(spacing: 16) {
+            // Amount summary
+            if let sats = invoiceAmountSats, sats > 0 {
+                VStack(spacing: 2) {
+                    Text(sats.satsFormatted)
+                        .font(.title2.bold())
+                    let price = appState.btcPrice
+                    if price > 0 {
+                        let usd = Double(sats) / Double(Constants.satsInBTC) * price
+                        Text(usd.usdFormatted)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Text("Any amount")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+
             // QR Code
             if let qrImage = generateQRCode(from: invoiceStr) {
                 Image(uiImage: qrImage)
@@ -130,6 +166,7 @@ struct ReceiveView: View {
                     description: "Stable Channels payment"
                 )
             }
+            invoiceAmountSats = sats
             invoice = inv.description
         } catch {
             errorMessage = error.localizedDescription
@@ -142,6 +179,7 @@ struct ReceiveView: View {
             let inv = try appState.nodeService.receiveVariablePayment(
                 description: "Stable Channels payment"
             )
+            invoiceAmountSats = nil
             invoice = inv.description
         } catch {
             errorMessage = error.localizedDescription

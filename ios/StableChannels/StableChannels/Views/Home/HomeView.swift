@@ -6,6 +6,7 @@ struct HomeView: View {
     @State private var showReceiveSheet = false
     @State private var showBuySheet = false
     @State private var showSellSheet = false
+    @State private var flashScale: CGFloat = 1.0
 
     var body: some View {
         NavigationStack {
@@ -30,6 +31,7 @@ struct HomeView: View {
                         statusSection
                     }
                 }
+                .animation(.easeInOut(duration: 0.3), value: appState.statusMessage)
                 .padding()
             }
             .navigationTitle("Stable Channels")
@@ -42,6 +44,18 @@ struct HomeView: View {
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
         .sheet(isPresented: $showBuySheet) { BuyView() }
         .sheet(isPresented: $showSellSheet) { SellView() }
+        .onChange(of: appState.paymentFlash) {
+            if appState.paymentFlash {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    flashScale = 1.08
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation(.easeInOut(duration: 0.4)) {
+                        flashScale = 1.0
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Balance Section
@@ -50,13 +64,16 @@ struct HomeView: View {
         VStack(spacing: 8) {
             Text(appState.totalBalanceUSD.usdFormatted)
                 .font(.system(size: 48, weight: .bold, design: .rounded))
+                .foregroundStyle(appState.paymentFlash ? .green : .primary)
                 .contentTransition(.numericText())
                 .animation(.default, value: appState.totalBalanceUSD)
+                .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
 
             Text(appState.totalBalanceSats.satsFormatted)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
+        .scaleEffect(flashScale)
         .padding(.top, 16)
     }
 

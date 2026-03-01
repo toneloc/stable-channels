@@ -1,10 +1,12 @@
 import SwiftUI
+import UserNotifications
 
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var showCloseChannelAlert = false
     @State private var showNodeId = false
     @State private var copiedField: String?
+    @State private var notificationsEnabled = true
 
     var body: some View {
         NavigationStack {
@@ -145,6 +147,36 @@ struct SettingsView: View {
                     }
                 }
 
+                // Push Notifications
+                Section("Push Notifications") {
+                    HStack {
+                        Text("Notifications")
+                        Spacer()
+                        if notificationsEnabled {
+                            Text("Enabled")
+                                .foregroundStyle(.green)
+                        } else {
+                            Text("Disabled")
+                                .foregroundStyle(.red)
+                        }
+                    }
+
+                    if !notificationsEnabled {
+                        Button("Enable in Settings") {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        Text("Notifications are required to receive stability payments while the app is closed.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let token = UserDefaults.standard.string(forKey: "apns_device_token") {
+                        copyableRow("Device Token", token)
+                    }
+                }
+
                 // About
                 Section("About") {
                     HStack {
@@ -162,6 +194,13 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .onAppear {
+                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                    DispatchQueue.main.async {
+                        notificationsEnabled = settings.authorizationStatus == .authorized
+                    }
+                }
+            }
             .alert("Close Channel?", isPresented: $showCloseChannelAlert) {
                 Button("Cancel", role: .cancel) { }
                 Button("Close", role: .destructive) {

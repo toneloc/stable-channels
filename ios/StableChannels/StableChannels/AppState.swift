@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import LDKNode
+import SQLite3
 
 @Observable
 class AppState {
@@ -28,6 +29,7 @@ class AppState {
     var stableChannel: StableChannel = .default
     var btcPrice: Double { priceService.currentPrice }
     var statusMessage: String = ""
+    var paymentFlash: Bool = false
 
     // Balance (derived)
     var totalBalanceSats: UInt64 = 0
@@ -61,6 +63,12 @@ class AppState {
     // MARK: - Startup
 
     func start() async {
+        // Migrate data from old Application Support dir to shared App Group container
+        migrateDataDirIfNeeded()
+
+        // Wait for NSE to finish if it was recently active
+        await waitForNSE()
+
         // Initialize database
         do {
             databaseService = try DatabaseService(dataDir: Constants.userDataDir)
@@ -84,6 +92,9 @@ class AppState {
         // Subscribe to LDK events
         subscribeToEvents()
 
+        // Subscribe to push notifications (background wake)
+        subscribeToPushNotifications()
+
         // Check for existing seed / mnemonic
         let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
         if FileManager.default.fileExists(atPath: seedPath.path) {
@@ -98,14 +109,64 @@ class AppState {
                 await MainActor.run {
                     phase = .wallet
                     refreshBalances()
-                    prevOnchainSats = onchainBalanceSats
+                    // Use totalOnchainBalanceSats to match detectOnchainDeposit
+                    prevOnchainSats = nodeService.balances()?.totalOnchainBalanceSats ?? 0
                 }
                 startStabilityTimer()
+                // Check if NSE flagged a pending payment while app was killed
+                await processPendingPushPayment()
             } catch {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
         } else {
             await MainActor.run { phase = .onboarding }
+        }
+    }
+
+    // MARK: - Data Migration
+
+    /// Migrate LDK data from old Application Support directory to shared App Group container.
+    /// This is needed so the Notification Service Extension can access the node data.
+    private func migrateDataDirIfNeeded() {
+        let oldDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("StableChannels").appendingPathComponent("user")
+        let newDir = Constants.userDataDir
+        let fm = FileManager.default
+
+        // Only migrate if old seed exists and new seed does not
+        guard fm.fileExists(atPath: oldDir.appendingPathComponent("keys_seed").path),
+              !fm.fileExists(atPath: newDir.appendingPathComponent("keys_seed").path) else { return }
+
+        try? fm.createDirectory(at: newDir, withIntermediateDirectories: true)
+        if let contents = try? fm.contentsOfDirectory(atPath: oldDir.path) {
+            for file in contents {
+                try? fm.copyItem(
+                    at: oldDir.appendingPathComponent(file),
+                    to: newDir.appendingPathComponent(file)
+                )
+            }
+        }
+
+        AuditService.log("DATA_MIGRATED", data: [
+            "from": oldDir.path,
+            "to": newDir.path,
+        ])
+    }
+
+    // MARK: - NSE Coordination
+
+    /// Wait for the Notification Service Extension to finish if it's currently processing.
+    /// Prevents two processes from running LDK on the same data directory simultaneously.
+    private func waitForNSE() async {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        var waited = 0
+        while shared?.bool(forKey: "nse_processing") == true {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+            waited += 1
+            if waited >= 10 { break }  // timeout after 10 seconds
+        }
+        if waited > 0 {
+            AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
         }
     }
 
@@ -116,8 +177,160 @@ class AppState {
             NotificationCenter.default.removeObserver(observer)
             eventObserver = nil
         }
+        if let observer = pushObserver {
+            NotificationCenter.default.removeObserver(observer)
+            pushObserver = nil
+        }
         priceService.stopAutoRefresh()
         nodeService.stop()
+    }
+
+    /// Stop the node and extract gossip data so the NSE can open the lightweight DB.
+    func stopNodeForBackground() {
+        print("[App] Stopping node for background")
+        stabilityTimer?.cancel()
+        stabilityTimer = nil
+        nodeService.stop()
+        extractGossipFromDB()
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+    }
+
+    /// Restore gossip data and restart the node when returning to foreground.
+    func restartNodeFromForeground() async {
+        guard case .wallet = phase else { return }
+        print("[App] Restarting node from foreground")
+        await waitForNSE()
+        restoreGossipToDB()
+        do {
+            try await nodeService.start(
+                network: .bitcoin,
+                esploraURL: Constants.defaultChainURL,
+                mnemonic: ""
+            )
+            refreshBalances()
+            startStabilityTimer()
+            await processPendingPushPayment()
+        } catch {
+            print("[App] Node restart failed: \(error)")
+        }
+    }
+
+    // MARK: - Gossip Data Management
+
+    /// Extract network_graph blob from SQLite to a file, then delete it from the DB.
+    /// This shrinks the DB from ~8.7MB to ~30KB so the NSE can load it.
+    private func extractGossipFromDB() {
+        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
+        let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin").path
+
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+
+        // Read the network_graph blob
+        var stmt: OpaquePointer?
+        let query = "SELECT value FROM ldk_node_data WHERE key = 'network_graph'"
+        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let blobSize = sqlite3_column_bytes(stmt, 0)
+            if blobSize > 0, let blobPtr = sqlite3_column_blob(stmt, 0) {
+                let data = Data(bytes: blobPtr, count: Int(blobSize))
+                do {
+                    try data.write(to: URL(fileURLWithPath: gossipPath))
+                    print("[App] Saved network_graph (\(blobSize) bytes) to file")
+
+                    // Delete from DB and compact
+                    sqlite3_finalize(stmt)
+                    stmt = nil
+                    sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
+                    sqlite3_exec(db, "VACUUM", nil, nil, nil)
+                    print("[App] Stripped network_graph from DB")
+                } catch {
+                    print("[App] Failed to save network_graph: \(error)")
+                }
+            }
+        }
+    }
+
+    /// Restore network_graph blob from file back into SQLite.
+    private func restoreGossipToDB() {
+        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
+        let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin")
+
+        guard FileManager.default.fileExists(atPath: gossipPath.path) else { return }
+
+        guard let data = try? Data(contentsOf: gossipPath) else { return }
+
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+
+        let upsert = "INSERT OR REPLACE INTO ldk_node_data (primary_namespace, secondary_namespace, key, value) VALUES ('', '', 'network_graph', ?)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, upsert, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+
+        data.withUnsafeBytes { ptr in
+            sqlite3_bind_blob(stmt, 1, ptr.baseAddress, Int32(data.count), nil)
+        }
+        sqlite3_step(stmt)
+
+        // Clean up the file
+        try? FileManager.default.removeItem(at: gossipPath)
+        print("[App] Restored network_graph (\(data.count) bytes) to DB")
+    }
+
+    // MARK: - Pending Push Payment (app was killed)
+
+    /// Check if the NSE flagged a pending payment while the app was killed.
+    /// Reconnect to LSP so the pending stability payment can land.
+    private func processPendingPushPayment() async {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        guard shared?.bool(forKey: "pending_push_payment") == true else { return }
+
+        shared?.set(false, forKey: "pending_push_payment")
+        print("[Push] Processing pending push payment from NSE flag")
+
+        // Reconnect to LSP so pending payment can be received
+        try? nodeService.node?.connect(
+            nodeId: Constants.defaultLSPPubkey,
+            address: Constants.defaultLSPAddress,
+            persist: true
+        )
+        refreshBalances()
+        updateStableBalances()
+    }
+
+    // MARK: - Push Notification Handling
+
+    private var pushObserver: NSObjectProtocol?
+
+    private func subscribeToPushNotifications() {
+        if let observer = pushObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        pushObserver = NotificationCenter.default.addObserver(
+            forName: .pushPaymentNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.nodeService.isRunning else { return }
+            // Re-connect to LSP to ensure we can receive the pending payment
+            try? self.nodeService.node?.connect(
+                nodeId: Constants.defaultLSPPubkey,
+                address: Constants.defaultLSPAddress,
+                persist: true
+            )
+            self.refreshBalances()
+            self.updateStableBalances()
+
+            AuditService.log("PUSH_WAKE", data: [
+                "node_running": "\(self.nodeService.isRunning)",
+            ])
+        }
     }
 
     // MARK: - Event Handling
@@ -256,6 +469,7 @@ class AppState {
         customRecords: [CustomTlvRecord]
     ) {
         let paymentHashStr = "\(paymentHash)"
+        let paymentIdStr = paymentId.map { "\($0)" } ?? paymentHashStr
 
         // Check for SYNC_V1 message from LSP
         if handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
@@ -267,16 +481,17 @@ class AppState {
         // Normal payment received
         AuditService.log("PAYMENT_RECEIVED", data: [
             "amount_msat": "\(amountMsat)",
+            "payment_id": paymentIdStr,
             "payment_hash": paymentHashStr,
         ])
 
-        // Record in DB
+        // Record in DB (dedup by paymentIdStr)
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
         let paymentType = stableChannel.expectedUSD.amount > 0 ? "stability" : "lightning"
 
         _ = try? databaseService?.recordPayment(
-            paymentId: paymentHashStr,
+            paymentId: paymentIdStr,
             paymentType: paymentType,
             direction: "received",
             amountMsat: amountMsat,
@@ -297,6 +512,12 @@ class AppState {
             statusMessage = "Received \(sats) sats ($\(String(format: "%.2f", usd)))"
         } else {
             statusMessage = "Received \(sats) sats"
+        }
+
+        // Trigger payment received animation
+        paymentFlash = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.paymentFlash = false
         }
     }
 
@@ -340,10 +561,9 @@ class AppState {
     ) {
         let paymentHashStr = "\(paymentHash)"
 
-        // Check if this is a pending trade payment
+        // Check if this is a pending trade payment — trade was already applied optimistically,
+        // just update DB status
         if let pid = paymentId, let trade = pendingTradePayments.removeValue(forKey: "\(pid)") {
-            // Trade payment confirmed — now apply the trade
-            StabilityService.applyTrade(&stableChannel, newExpectedUSD: trade.newExpectedUSD, price: trade.price)
             try? databaseService?.updateTradeStatus(trade.tradeDbId, status: "completed")
 
             AuditService.log("TRADE_CONFIRMED", data: [
@@ -355,7 +575,6 @@ class AppState {
 
             refreshBalances()
             updateStableBalances()
-            saveChannelToDB()
 
             let verb = trade.action == "buy" ? "Buy" : "Sell"
             statusMessage = "\(verb) confirmed"
@@ -480,6 +699,10 @@ class AppState {
                 guard !Task.isCancelled else { break }
 
                 await MainActor.run { [weak self] in
+                    // Heartbeat so NSE knows main app is active
+                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+
                     self?.recordCurrentPrice()
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
@@ -547,14 +770,25 @@ class AppState {
     // MARK: - On-Chain Deposit Detection
 
     private func detectOnchainDeposit() {
-        let currentOnchain = nodeService.spendableOnchainSats()
-        if currentOnchain > prevOnchainSats && prevOnchainSats > 0 && !isSweeping {
+        // Use totalOnchainBalanceSats consistently (not spendable, which excludes unconfirmed)
+        guard let balances = nodeService.balances() else { return }
+        let currentOnchain = balances.totalOnchainBalanceSats
+
+        if currentOnchain > prevOnchainSats && !isSweeping {
             let depositSats = currentOnchain - prevOnchainSats
-            let price = stableChannel.latestPrice
+            // Ignore tiny fluctuations from fee estimation changes
+            guard depositSats >= 1000 else {
+                prevOnchainSats = currentOnchain
+                return
+            }
+
+            let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
 
+            // Use timestamp-based ID so dedup works
+            let depositId = "onchain_\(Int64(Date().timeIntervalSince1970))_\(depositSats)"
             _ = try? databaseService?.recordPayment(
-                paymentId: nil,
+                paymentId: depositId,
                 paymentType: "onchain",
                 direction: "received",
                 amountMsat: depositSats * 1000,
@@ -686,7 +920,7 @@ class AppState {
 
     // MARK: - Persistence
 
-    private func saveChannelToDB() {
+    func saveChannelToDB() {
         guard !stableChannel.userChannelId.isEmpty else { return }
         do {
             try databaseService?.saveChannel(
