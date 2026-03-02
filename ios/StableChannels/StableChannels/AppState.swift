@@ -319,7 +319,7 @@ class AppState {
               !nodeService.nodeId.isEmpty else { return }
 
         let nodeId = nodeService.nodeId
-        guard let url = URL(string: "http://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9737", with: ":3000"))/api/register-push") else { return }
+        guard let url = URL(string: "http://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9737", with: ":8080"))/api/register-push") else { return }
 
         Task {
             var request = URLRequest(url: url)

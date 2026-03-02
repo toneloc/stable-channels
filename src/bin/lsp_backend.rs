@@ -205,7 +205,7 @@ static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
                 &mut std::io::Cursor::new(key_data),
                 APNS_KEY_ID,
                 APNS_TEAM_ID,
-                ApnsClientConfig::default(),
+                ApnsClientConfig::new(a2::Endpoint::Sandbox),
             ) {
                 Ok(client) => {
                     println!("[APNs] Client initialized from {}", key_path);
