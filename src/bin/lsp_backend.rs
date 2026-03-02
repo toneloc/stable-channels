@@ -1,1650 +1,1970 @@
-        use axum::extract::Path as AxumPath;
-        use ldk_node::{
-            bitcoin::{Network, Address, secp256k1::PublicKey},
-            lightning_invoice::{Bolt11Invoice, Description, Bolt11InvoiceDescription},
-            lightning::ln::msgs::SocketAddress,
-            lightning::ln::types::ChannelId,
-            config::ChannelConfig,
-            lightning_types::payment::PaymentHash,
-            Builder, Node, Event, liquidity::LSPS2ServiceConfig, CustomTlvRecord,
-        };
-        use std::{sync::Mutex, time::{Duration, Instant}};
-        use std::str::FromStr;
-        use std::sync::Arc;
-        use serde::{Serialize, Deserialize};
-        use serde_json::json;
-        use std::fs;
-        use hex;
-        use once_cell::sync::Lazy;
-        use ureq;
+use axum::extract::Path as AxumPath;
+use ldk_node::{
+    bitcoin::{secp256k1::PublicKey, Address, Network},
+    config::ChannelConfig,
+    lightning::ln::msgs::SocketAddress,
+    lightning::ln::types::ChannelId,
+    lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description},
+    lightning_types::payment::PaymentHash,
+    liquidity::LSPS2ServiceConfig,
+    Builder, CustomTlvRecord, Event, Node,
+};
+use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::fs;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
-        use stable_channels::audit::{audit_event, set_audit_log_path};
-        use stable_channels::price_feeds::get_cached_price;
-        use stable_channels::stable;
-        use stable_channels::types::{USD, Bitcoin, StableChannel};
-        use stable_channels::constants::*;
-        use stable_channels::db::Database;
+use stable_channels::audit::{audit_event, set_audit_log_path};
+use stable_channels::constants::*;
+use stable_channels::db::Database;
+use stable_channels::price_feeds::get_cached_price;
+use stable_channels::stable;
+use stable_channels::types::{Bitcoin, StableChannel, USD};
 
-        // APNs push notification support
-        use a2::{
-            Client as ApnsClient, ClientConfig as ApnsClientConfig,
-            DefaultNotificationBuilder, NotificationBuilder,
-            NotificationOptions, Priority,
-        };
+// APNs push notification support
+use a2::{
+    Client as ApnsClient, ClientConfig as ApnsClientConfig, DefaultNotificationBuilder,
+    NotificationBuilder, NotificationOptions, Priority,
+};
 
-        // APNs configuration — set these for your Apple Developer account
-        const APNS_KEY_ID: &str = "YOUR_KEY_ID";
-        const APNS_TEAM_ID: &str = "VJF3VBKXV9";
-        const APNS_TOPIC: &str = "com.stablechannels.app";
-        const APNS_KEY_FILE: &str = "AuthKey.p8";
+// APNs configuration — set these for your Apple Developer account
+const APNS_KEY_ID: &str = "Y58XTJ3N4C";
+const APNS_TEAM_ID: &str = "VJF3VBKXV9";
+const APNS_TOPIC: &str = "com.stablechannels.app";
+const APNS_KEY_FILE: &str = "AuthKey.p8";
 
-        // ============================================================================
-        // TRADE MESSAGE TYPES
-        // ============================================================================
+// ============================================================================
+// TRADE MESSAGE TYPES
+// ============================================================================
 
-        /// Outer envelope for signed trade messages
-        #[derive(Deserialize, Debug)]
-        struct TradeSignedMessage {
-            payload: String,
-            signature: String,
-        }
+/// Outer envelope for signed trade messages
+#[derive(Deserialize, Debug)]
+struct TradeSignedMessage {
+    payload: String,
+    signature: String,
+}
 
-        /// Inner payload for trade messages
-        #[derive(Deserialize, Debug)]
-        struct TradePayload {
-            #[serde(rename = "type")]
-            kind: String,
-            /// Channel ID shared between both nodes (hex-encoded)
-            #[serde(default)]
-            channel_id: Option<String>,
-            /// User's local channel identifier (NOT shared — kept for logging)
-            user_channel_id: String,
-            expected_usd: f64,
-        }
+/// Inner payload for trade messages
+#[derive(Deserialize, Debug)]
+struct TradePayload {
+    #[serde(rename = "type")]
+    kind: String,
+    /// Channel ID shared between both nodes (hex-encoded)
+    #[serde(default)]
+    channel_id: Option<String>,
+    /// User's local channel identifier (NOT shared — kept for logging)
+    user_channel_id: String,
+    expected_usd: f64,
+}
 
-        // HTTP
-        use axum::{routing::{get, post}, Json, Router};
-        use anyhow::Result;
+// HTTP
+use anyhow::Result;
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
 
-        static APP: Lazy<Mutex<ServerApp>> = Lazy::new(|| {
-            Mutex::new(ServerApp::new_with_mode("lsp"))
-        });
+static APP: Lazy<Mutex<ServerApp>> = Lazy::new(|| Mutex::new(ServerApp::new_with_mode("lsp")));
 
-        /// Entry stored in stablechannels.json for persistence
-        #[derive(Serialize, Deserialize, Clone, Debug)]
-        struct StableChannelEntry {
-            channel_id: String,
-            #[serde(default)]
-            user_channel_id: Option<String>,
-            expected_usd: f64,
-            note: Option<String>,
-            #[serde(default)]
-            backing_sats: u64,
-        }
-        pub struct ServerApp {
-            // core + balances …
-            node: Arc<Node>,
-            btc_price: f64,
-            status_message: String,
-            last_update: Instant,
-            last_stability_check: Instant,
+/// Entry stored in stablechannels.json for persistence
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct StableChannelEntry {
+    channel_id: String,
+    #[serde(default)]
+    user_channel_id: Option<String>,
+    expected_usd: f64,
+    note: Option<String>,
+    #[serde(default)]
+    backing_sats: u64,
+}
+pub struct ServerApp {
+    // core + balances …
+    node: Arc<Node>,
+    btc_price: f64,
+    status_message: String,
+    last_update: Instant,
+    last_stability_check: Instant,
 
-            lightning_balance_btc: f64,
-            onchain_balance_btc:    f64,
-            total_balance_btc:      f64,
-            lightning_balance_usd:  f64,
-            onchain_balance_usd:    f64,
-            total_balance_usd:      f64,
+    lightning_balance_btc: f64,
+    onchain_balance_btc: f64,
+    total_balance_btc: f64,
+    lightning_balance_usd: f64,
+    onchain_balance_usd: f64,
+    total_balance_usd: f64,
 
-            // invoice / on-chain helpers
-            invoice_amount:   String,
-            invoice_result:   String,
-            invoice_to_pay:   String,
-            on_chain_address: String,
-            on_chain_amount:  String,
+    // invoice / on-chain helpers
+    invoice_amount: String,
+    invoice_result: String,
+    invoice_to_pay: String,
+    on_chain_address: String,
+    on_chain_amount: String,
 
-            // channel-management helpers that methods still use
-            open_channel_node_id: String,
-            open_channel_address: String,
-            open_channel_amount:  String,
+    // channel-management helpers that methods still use
+    open_channel_node_id: String,
+    open_channel_address: String,
+    open_channel_amount: String,
 
-            connect_node_id:     String,
-            connect_node_address:String,
+    connect_node_id: String,
+    connect_node_address: String,
 
-            channel_id_to_close: String,
+    channel_id_to_close: String,
 
-            selected_channel_id:   String,
-            stable_channel_amount: String,
+    selected_channel_id: String,
+    stable_channel_amount: String,
 
-            // stable-channel bookkeeping
-            stable_channels: Vec<StableChannel>,
-            db: Database,
-        }
+    // stable-channel bookkeeping
+    stable_channels: Vec<StableChannel>,
+    db: Database,
+}
 
+// API responses
+#[derive(Serialize)]
+pub struct ChannelInfo {
+    pub id: String,
+    pub user_channel_id: String,
+    pub remote_pubkey: String,
+    pub capacity_sats: u64,
+    pub local_balance_sats: u64,
+    pub local_balance_usd: f64,
+    pub remote_balance_sats: u64,
+    pub remote_balance_usd: f64,
+    pub status: String,
+    pub is_channel_ready: bool,
+    pub is_usable: bool,
+    pub is_stable: bool,
+    pub expected_usd: Option<f64>,
+    pub note: Option<String>,
+}
 
-        // API responses
-        #[derive(Serialize)]
-        pub struct ChannelInfo {
-            pub id: String,
-            pub user_channel_id: String,
-            pub remote_pubkey: String,
-            pub capacity_sats: u64,
-            pub local_balance_sats: u64,
-            pub local_balance_usd:  f64,
-            pub remote_balance_sats: u64,
-            pub remote_balance_usd:  f64,
-            pub status: String,
-            pub is_channel_ready: bool,  
-            pub is_usable: bool,         
-            pub is_stable: bool,   
-            pub expected_usd: Option<f64>,
-            pub note: Option<String>,
-        }
+#[derive(Serialize)]
+struct Balance {
+    total_sats: u64,
+    total_usd: f64,
+    lightning_sats: u64,
+    lightning_usd: f64,
+    onchain_sats: u64,
+    onchain_usd: f64,
+}
 
-        #[derive(Serialize)]
-        struct Balance {
-            total_sats: u64,
-            total_usd:  f64,
-            lightning_sats: u64,
-            lightning_usd:  f64,
-            onchain_sats:   u64,
-            onchain_usd:    f64,
-        }
+#[derive(Deserialize)]
+struct PayReq {
+    invoice: String,
+}
 
-        #[derive(Deserialize)]
-        struct PayReq { invoice: String }
+#[derive(Deserialize)]
+struct EditStableChannelReq {
+    channel_id: String,
+    target_usd: Option<String>,
+    note: Option<String>,
+}
 
-        #[derive(Deserialize)]
-        struct EditStableChannelReq {
-            channel_id: String,
-            target_usd: Option<String>,
-            note: Option<String>,
-        }
+#[derive(Serialize)]
+struct EditStableChannelRes {
+    ok: bool,
+    status: String,
+}
 
-        #[derive(Serialize)]
-        struct EditStableChannelRes {
-            ok: bool,
-            status: String,
-        }
+#[derive(Deserialize)]
+struct OnchainSendReq {
+    address: String,
+    amount: String, // sats, still as string for reuse
+}
 
-        #[derive(Deserialize)]
-        struct OnchainSendReq {
-            address: String,
-            amount:  String,   // sats, still as string for reuse
-        }
+#[derive(Deserialize)]
+struct ConnectReq {
+    node_id: String,
+    address: String,
+}
 
-        #[derive(Deserialize)]
-        struct ConnectReq {
-            node_id: String,
-            address: String,
-        }
+#[derive(Deserialize)]
+struct RegisterPushReq {
+    device_token: String,
+    platform: String, // "ios" or "android"
+    #[serde(default)]
+    node_id: String, // Lightning node pubkey hex
+}
 
-        #[derive(Deserialize)]
-        struct RegisterPushReq {
-            device_token: String,
-            platform: String,  // "ios" or "android"
-        }
+/// A stability payment that needs a push notification to wake the peer.
+pub struct StabilityPushTarget {
+    node_id: String,   // Lightning pubkey hex
+    direction: String, // "lsp_to_user" or "user_to_lsp"
+}
 
-        /// Lazily initialized APNs client (loaded from .p8 key file)
-        static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
-            let key_path = format!("{}/{}", LSP_DATA_DIR, APNS_KEY_FILE);
-            match std::fs::read(&key_path) {
-                Ok(key_data) => {
-                    match ApnsClient::token(
-                        &mut std::io::Cursor::new(key_data),
-                        APNS_KEY_ID,
-                        APNS_TEAM_ID,
-                        ApnsClientConfig::default(),
-                    ) {
-                        Ok(client) => {
-                            println!("[APNs] Client initialized from {}", key_path);
-                            Mutex::new(Some(client))
-                        }
-                        Err(e) => {
-                            println!("[APNs] Failed to create client: {} — pushes will be logged only", e);
-                            Mutex::new(None)
-                        }
-                    }
+/// Lazily initialized APNs client (loaded from .p8 key file)
+static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
+    let key_path = format!("{}/{}", LSP_DATA_DIR, APNS_KEY_FILE);
+    match std::fs::read(&key_path) {
+        Ok(key_data) => {
+            match ApnsClient::token(
+                &mut std::io::Cursor::new(key_data),
+                APNS_KEY_ID,
+                APNS_TEAM_ID,
+                ApnsClientConfig::default(),
+            ) {
+                Ok(client) => {
+                    println!("[APNs] Client initialized from {}", key_path);
+                    Mutex::new(Some(client))
                 }
                 Err(e) => {
-                    println!("[APNs] Key file not found at {}: {} — pushes will be logged only", key_path, e);
+                    println!(
+                        "[APNs] Failed to create client: {} — pushes will be logged only",
+                        e
+                    );
                     Mutex::new(None)
                 }
             }
-        });
-
-
-        #[tokio::main]
-        async fn main() -> Result<()> {
-            // ── periodic upkeep task ───────────────────────────────────────────────
-            tokio::spawn(async {
-                loop {
-                    let (payment_sent, needs_push) = {
-                        let mut app = APP.lock().unwrap();
-
-                        app.poll_events();
-
-                        if app.last_update.elapsed() >= Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS) {
-                            let p = get_cached_price();
-                            if p > 0.0 { app.btc_price = p; }
-                            app.update_balances();
-                            app.last_update = Instant::now();
-                        }
-
-                        if app.last_stability_check.elapsed() >= Duration::from_secs(STABILITY_CHECK_INTERVAL_SECS) {
-                            // Check if peer is offline and needs a push notification
-                            let needs_push = app.needs_push_for_stability();
-
-                            let sent = app.check_and_update_stable_channels();
-                            app.last_stability_check = Instant::now();
-                            (sent, needs_push)
-                        } else {
-                            (false, false)
-                        }
-                    }; // MutexGuard dropped here
-
-                    // If a stability payment is needed but the peer is offline,
-                    // send a push notification and wait for them to come online
-                    if needs_push {
-                        send_push_to_all("Stability Payment", "A stability payment is pending — open app to receive");
-
-                        // Wait 15 seconds for the user's node to wake up via NSE
-                        tokio::time::sleep(Duration::from_secs(15)).await;
-
-                        // Retry the stability check now that (hopefully) the peer reconnected
-                        let retry_sent = {
-                            let mut app = APP.lock().unwrap();
-                            app.check_and_update_stable_channels()
-                        };
-                        if retry_sent {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        }
-                    }
-
-                    // After a stability payment, wait for LDK's background processor
-                    // to persist the ChannelManager before continuing.
-                    if payment_sent {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            });
-
-            // ── HTTP router & server ───────────────────────────────────────────────
-            let app = Router::new()
-                .route("/api/balance", get(get_balance))
-                .route("/api/pay",     post(pay_handler))
-                .route("/api/channels", get(get_channels))
-                .route("/api/price", get(get_price))
-                .route("/api/close_channel/{id}", post(post_close_channel))
-                .route("/api/edit_stable_channel", post(edit_stable_channel_handler))
-                .route("/api/onchain_send", post(onchain_send_handler))
-                .route("/api/onchain_address", get(get_onchain_address))
-                .route("/api/connect", post(connect_handler))
-                .route("/api/register-push", post(register_push_handler));
-
-
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
-            println!("Backend running at http://0.0.0.0:8080");
-            axum::serve(listener, app).await?;
-            Ok(())
         }
+        Err(e) => {
+            println!(
+                "[APNs] Key file not found at {}: {} — pushes will be logged only",
+                key_path, e
+            );
+            Mutex::new(None)
+        }
+    }
+});
 
-        /* ---- handlers ---------------------------------------------------- */
-
-        // GET /api/balance
-        async fn get_balance() -> Json<Balance> {
-            let (total_usd, lightning_usd, onchain_usd, lightning_sats, onchain_sats) = {
+#[tokio::main]
+async fn main() -> Result<()> {
+    // ── periodic upkeep task ───────────────────────────────────────────────
+    tokio::spawn(async {
+        loop {
+            let (payment_sent, needs_push) = {
                 let mut app = APP.lock().unwrap();
 
-                // Refresh cached price + app.{lightning, onchain, total}_* fields
-                app.update_balances();
+                app.poll_events();
 
-                // Pull sat balances from LDK directly to avoid any float rounding
-                let b = app.node.list_balances();
-                let lightning_sats = b.total_lightning_balance_sats;
-                let onchain_sats   = b.total_onchain_balance_sats;
-
-                (
-                    app.total_balance_usd,
-                    app.lightning_balance_usd,
-                    app.onchain_balance_usd,
-                    lightning_sats,
-                    onchain_sats,
-                )
-            };
-
-            Json(Balance {
-                total_sats: lightning_sats + onchain_sats,
-                total_usd,
-                lightning_sats,
-                lightning_usd,
-                onchain_sats,
-                onchain_usd,
-            })
-        }
-
-        /// GET /api/channels
-        pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
-            let app = APP.lock().expect("APP mutex poisoned");
-            let price = app.btc_price;                       // cache once
-
-            let out: Vec<ChannelInfo> = app
-                .node
-                .list_channels()
-                .into_iter()
-                .map(|c| {
-                    let is_stable = app
-                        .stable_channels
-                        .iter()
-                        .find(|sc| sc.user_channel_id == c.user_channel_id.0);
-
-                    // If the channel is stabilized, pull the data
-                    let expected_usd = is_stable.map(|sc| sc.expected_usd.0);
-                    let note = is_stable.and_then(|sc| sc.note.clone());
-
-                    let local_sat   = c.outbound_capacity_msat / 1_000;
-                    let remote_sat  = c.inbound_capacity_msat / 1_000;
-
-                    ChannelInfo {
-                        id: hex::encode(c.channel_id.0),
-                        user_channel_id: format!("{}", c.user_channel_id.0),
-                        remote_pubkey: c.counterparty_node_id.to_string(),
-                        capacity_sats: c.channel_value_sats,
-
-                        local_balance_sats:  local_sat,
-                        local_balance_usd:   local_sat as f64 / 100_000_000.0 * price,
-
-                        remote_balance_sats: remote_sat,
-                        remote_balance_usd:  remote_sat as f64 / 100_000_000.0 * price,
-
-                        expected_usd,        // Some(x) or None
-                        status: if c.is_channel_ready { "open".into() } else { "pending".into() },
-                        is_channel_ready: c.is_channel_ready,
-                        is_usable:       c.is_usable,
-                        is_stable:       is_stable.is_some(),
-                        note,
+                if app.last_update.elapsed() >= Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS) {
+                    let p = get_cached_price();
+                    if p > 0.0 {
+                        app.btc_price = p;
                     }
-                })
-                .collect();
-
-            Json(out)
-        }
-
-
-        /// GET /api/price
-        async fn get_price() -> Json<f64> {
-                let price = get_cached_price();
-                Json(price)
-        }
-
-        /// POST /api/close_channel
-        async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
-            let app = APP.lock().unwrap();
-            for chan in app.node.list_channels() {
-                if hex::encode(chan.channel_id.0) == id {
-                    let res = app.node.close_channel(&chan.user_channel_id, chan.counterparty_node_id);
-                    return match res {
-                        Ok(_) => format!("Closing channel {}", id),
-                        Err(e) => format!("Error closing channel {}: {}", id, e),
-                    };
+                    app.update_balances();
+                    app.last_update = Instant::now();
                 }
-            }
-            format!("Channel {} not found", id)
-        }
 
-        async fn edit_stable_channel_handler(Json(req): Json<EditStableChannelReq>) -> Json<EditStableChannelRes> {
-            let mut app = APP.lock().unwrap();
-            app.selected_channel_id = req.channel_id;
-        
-            if let Some(t) = req.target_usd {
-                app.stable_channel_amount = t;
-            }
-        
-            let note = req.note;
-        
-            if let Some(n) = note.as_ref() {
-                let selected_id = app.selected_channel_id.clone();
-                // Look up channel's user_channel_id, then match stable channel by it
-                let user_ch_id = app.node.list_channels().iter()
-                    .find(|c| c.channel_id.to_string() == selected_id)
-                    .map(|c| c.user_channel_id.0);
-                if let Some(sc) = user_ch_id.and_then(|uid| app.stable_channels.iter_mut()
-                    .find(|sc| sc.user_channel_id == uid))
+                if app.last_stability_check.elapsed()
+                    >= Duration::from_secs(STABILITY_CHECK_INTERVAL_SECS)
                 {
-                    sc.note = Some(n.clone()); // sc.note is Option<String>
-                    app.status_message = "Note updated".to_string();
+                    // Check which peers are offline and need push notifications
+                    let push_targets = app.get_stability_push_targets();
+
+                    let sent = app.check_and_update_stable_channels();
+                    app.last_stability_check = Instant::now();
+                    (sent, push_targets)
+                } else {
+                    (false, Vec::new())
+                }
+            }; // MutexGuard dropped here
+
+            // Send targeted push notifications to offline peers
+            if !needs_push.is_empty() {
+                for target in &needs_push {
+                    notify(&target.node_id, &target.direction);
+                }
+
+                // Wait 15 seconds for the user's node(s) to wake up via NSE
+                tokio::time::sleep(Duration::from_secs(15)).await;
+
+                // Retry the stability check now that (hopefully) peers reconnected
+                let retry_sent = {
+                    let mut app = APP.lock().unwrap();
+                    app.check_and_update_stable_channels()
+                };
+                if retry_sent {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
-        
-            app.edit_stable_channel(note);
-        
-            Json(EditStableChannelRes {
-                ok: app.status_message.starts_with("Channel") || app.status_message.contains("stable"),
-                status: app.status_message.clone(),
-            })
-        }
-        
-        async fn pay_handler(Json(req): Json<PayReq>) -> Json<String> {
-            let mut app = APP.lock().unwrap();
-            app.invoice_to_pay = req.invoice;
-            let _ok = app.pay_invoice();
-            Json(app.status_message.clone())
-        }
 
-        async fn onchain_send_handler(Json(req): Json<OnchainSendReq>) -> Json<String> {
-            let mut app = APP.lock().unwrap();
-            app.on_chain_address = req.address;
-            app.on_chain_amount  = req.amount;
-            app.send_onchain();                    // updates status_message
-            Json(app.status_message.clone())
-        }
-
-        async fn get_onchain_address() -> Json<String> {
-            let mut app = APP.lock().unwrap();
-            if app.get_address() {
-                Json(app.on_chain_address.clone())
-            } else {
-                Json(app.status_message.clone())
+            // After a stability payment, wait for LDK's background processor
+            // to persist the ChannelManager before continuing.
+            if payment_sent {
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    });
 
-        async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
-            let mut app = APP.lock().unwrap();
-            app.connect_node_id      = req.node_id.clone();
-            app.connect_node_address = req.address.clone();
+    // ── HTTP router & server ───────────────────────────────────────────────
+    let app = Router::new()
+        .route("/api/balance", get(get_balance))
+        .route("/api/pay", post(pay_handler))
+        .route("/api/channels", get(get_channels))
+        .route("/api/price", get(get_price))
+        .route("/api/close_channel/{id}", post(post_close_channel))
+        .route(
+            "/api/edit_stable_channel",
+            post(edit_stable_channel_handler),
+        )
+        .route("/api/onchain_send", post(onchain_send_handler))
+        .route("/api/onchain_address", get(get_onchain_address))
+        .route("/api/connect", post(connect_handler))
+        .route("/api/register-push", post(register_push_handler));
 
-            let _ok = app.connect_to_node();
-            Json(format!("Connection attempt to {}", req.node_id))
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    println!("Backend running at http://0.0.0.0:8080");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/* ---- handlers ---------------------------------------------------- */
+
+// GET /api/balance
+async fn get_balance() -> Json<Balance> {
+    let (total_usd, lightning_usd, onchain_usd, lightning_sats, onchain_sats) = {
+        let mut app = APP.lock().unwrap();
+
+        // Refresh cached price + app.{lightning, onchain, total}_* fields
+        app.update_balances();
+
+        // Pull sat balances from LDK directly to avoid any float rounding
+        let b = app.node.list_balances();
+        let lightning_sats = b.total_lightning_balance_sats;
+        let onchain_sats = b.total_onchain_balance_sats;
+
+        (
+            app.total_balance_usd,
+            app.lightning_balance_usd,
+            app.onchain_balance_usd,
+            lightning_sats,
+            onchain_sats,
+        )
+    };
+
+    Json(Balance {
+        total_sats: lightning_sats + onchain_sats,
+        total_usd,
+        lightning_sats,
+        lightning_usd,
+        onchain_sats,
+        onchain_usd,
+    })
+}
+
+/// GET /api/channels
+pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
+    let app = APP.lock().expect("APP mutex poisoned");
+    let price = app.btc_price; // cache once
+
+    let out: Vec<ChannelInfo> = app
+        .node
+        .list_channels()
+        .into_iter()
+        .map(|c| {
+            let is_stable = app
+                .stable_channels
+                .iter()
+                .find(|sc| sc.user_channel_id == c.user_channel_id.0);
+
+            // If the channel is stabilized, pull the data
+            let expected_usd = is_stable.map(|sc| sc.expected_usd.0);
+            let note = is_stable.and_then(|sc| sc.note.clone());
+
+            let local_sat = c.outbound_capacity_msat / 1_000;
+            let remote_sat = c.inbound_capacity_msat / 1_000;
+
+            ChannelInfo {
+                id: hex::encode(c.channel_id.0),
+                user_channel_id: format!("{}", c.user_channel_id.0),
+                remote_pubkey: c.counterparty_node_id.to_string(),
+                capacity_sats: c.channel_value_sats,
+
+                local_balance_sats: local_sat,
+                local_balance_usd: local_sat as f64 / 100_000_000.0 * price,
+
+                remote_balance_sats: remote_sat,
+                remote_balance_usd: remote_sat as f64 / 100_000_000.0 * price,
+
+                expected_usd, // Some(x) or None
+                status: if c.is_channel_ready {
+                    "open".into()
+                } else {
+                    "pending".into()
+                },
+                is_channel_ready: c.is_channel_ready,
+                is_usable: c.is_usable,
+                is_stable: is_stable.is_some(),
+                note,
+            }
+        })
+        .collect();
+
+    Json(out)
+}
+
+/// GET /api/price
+async fn get_price() -> Json<f64> {
+    let price = get_cached_price();
+    Json(price)
+}
+
+/// POST /api/close_channel
+async fn post_close_channel(AxumPath(id): AxumPath<String>) -> String {
+    let app = APP.lock().unwrap();
+    for chan in app.node.list_channels() {
+        if hex::encode(chan.channel_id.0) == id {
+            let res = app
+                .node
+                .close_channel(&chan.user_channel_id, chan.counterparty_node_id);
+            return match res {
+                Ok(_) => format!("Closing channel {}", id),
+                Err(e) => format!("Error closing channel {}: {}", id, e),
+            };
         }
+    }
+    format!("Channel {} not found", id)
+}
 
-        // POST /api/register-push
-        async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String> {
-            save_push_token(&req.device_token, &req.platform);
+async fn edit_stable_channel_handler(
+    Json(req): Json<EditStableChannelReq>,
+) -> Json<EditStableChannelRes> {
+    let mut app = APP.lock().unwrap();
+    app.selected_channel_id = req.channel_id;
 
-            println!("[Push] Registered {} device: {}...",
-                req.platform,
-                &req.device_token[..req.device_token.len().min(16)]
-            );
+    if let Some(t) = req.target_usd {
+        app.stable_channel_amount = t;
+    }
 
-            Json("ok".to_string())
+    let note = req.note;
+
+    if let Some(n) = note.as_ref() {
+        let selected_id = app.selected_channel_id.clone();
+        // Look up channel's user_channel_id, then match stable channel by it
+        let user_ch_id = app
+            .node
+            .list_channels()
+            .iter()
+            .find(|c| c.channel_id.to_string() == selected_id)
+            .map(|c| c.user_channel_id.0);
+        if let Some(sc) = user_ch_id.and_then(|uid| {
+            app.stable_channels
+                .iter_mut()
+                .find(|sc| sc.user_channel_id == uid)
+        }) {
+            sc.note = Some(n.clone()); // sc.note is Option<String>
+            app.status_message = "Note updated".to_string();
         }
+    }
 
-        // ── Push token persistence (SQLite) ──────────────────────────────────────
+    app.edit_stable_channel(note);
 
-        fn push_tokens_db_path() -> String {
-            format!("{}/push_tokens.db", LSP_DATA_DIR)
+    Json(EditStableChannelRes {
+        ok: app.status_message.starts_with("Channel") || app.status_message.contains("stable"),
+        status: app.status_message.clone(),
+    })
+}
+
+async fn pay_handler(Json(req): Json<PayReq>) -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    app.invoice_to_pay = req.invoice;
+    let _ok = app.pay_invoice();
+    Json(app.status_message.clone())
+}
+
+async fn onchain_send_handler(Json(req): Json<OnchainSendReq>) -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    app.on_chain_address = req.address;
+    app.on_chain_amount = req.amount;
+    app.send_onchain(); // updates status_message
+    Json(app.status_message.clone())
+}
+
+async fn get_onchain_address() -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    if app.get_address() {
+        Json(app.on_chain_address.clone())
+    } else {
+        Json(app.status_message.clone())
+    }
+}
+
+async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
+    let mut app = APP.lock().unwrap();
+    app.connect_node_id = req.node_id.clone();
+    app.connect_node_address = req.address.clone();
+
+    let _ok = app.connect_to_node();
+    Json(format!("Connection attempt to {}", req.node_id))
+}
+
+// POST /api/register-push
+async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String> {
+    save_push_token(&req.device_token, &req.platform, &req.node_id);
+
+    println!(
+        "[Push] Registered {} device: {}... node_id: {}",
+        req.platform,
+        &req.device_token[..req.device_token.len().min(16)],
+        if req.node_id.is_empty() {
+            "(none)"
+        } else {
+            &req.node_id[..req.node_id.len().min(16)]
         }
+    );
 
-        fn init_push_tokens_table(data_dir: &str) {
-            let db_path = format!("{}/push_tokens.db", data_dir);
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS push_tokens (
+    Json("ok".to_string())
+}
+
+// ── Push token persistence (SQLite) ──────────────────────────────────────
+
+fn push_tokens_db_path() -> String {
+    format!("{}/push_tokens.db", LSP_DATA_DIR)
+}
+
+fn init_push_tokens_table(data_dir: &str) {
+    let db_path = format!("{}/push_tokens.db", data_dir);
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS push_tokens (
                         device_token TEXT PRIMARY KEY,
                         platform TEXT NOT NULL,
-                        registered_at INTEGER NOT NULL
+                        registered_at INTEGER NOT NULL,
+                        node_id TEXT NOT NULL DEFAULT ''
                     )",
-                    [],
+            [],
+        )
+        .ok();
+        // Migration: add node_id column if missing (existing installs)
+        conn.execute(
+            "ALTER TABLE push_tokens ADD COLUMN node_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .ok(); // Silently fails if column already exists
+    }
+}
+
+fn save_push_token(device_token: &str, platform: &str, node_id: &str) {
+    let db_path = push_tokens_db_path();
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+                    "INSERT OR REPLACE INTO push_tokens (device_token, platform, registered_at, node_id) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![device_token, platform, now, node_id],
                 ).ok();
+    }
+}
+
+/// Look up the push token for a specific Lightning node_id.
+/// Returns (device_token, platform) if found.
+fn load_push_token_for_node(node_id: &str) -> Option<(String, String)> {
+    let db_path = push_tokens_db_path();
+    let conn = rusqlite::Connection::open(&db_path).ok()?;
+    let mut stmt = conn
+        .prepare("SELECT device_token, platform FROM push_tokens WHERE node_id = ?1 LIMIT 1")
+        .ok()?;
+    stmt.query_row(rusqlite::params![node_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })
+    .ok()
+}
+
+// ── APNs sending ─────────────────────────────────────────────────────────
+
+/// Send a targeted push notification to a specific Lightning node's device.
+/// The push includes the stability direction so the NSE knows what to do.
+/// Uses the `a2` crate for real APNs delivery when a .p8 key is configured.
+fn notify(node_id: &str, direction: &str) {
+    let token_info = load_push_token_for_node(node_id);
+    let (device_token, platform) = match token_info {
+        Some(t) => t,
+        None => {
+            println!(
+                "[Push] No push token registered for node {}...",
+                &node_id[..node_id.len().min(16)]
+            );
+            return;
+        }
+    };
+
+    if platform != "ios" {
+        // TODO: FCM for Android
+        println!(
+            "[Push] Android push not yet implemented for node {}...",
+            &node_id[..node_id.len().min(16)]
+        );
+        return;
+    }
+
+    let rt = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            println!("[Push] No tokio runtime available");
+            return;
+        }
+    };
+
+    let device_token = device_token.clone();
+    let direction = direction.to_string();
+    let node_id = node_id.to_string();
+
+    rt.spawn(async move {
+        let client = {
+            let guard = APNS_CLIENT.lock().unwrap();
+            guard.clone()
+        };
+        let client = match client.as_ref() {
+            Some(c) => c,
+            None => {
+                println!(
+                    "[Push] (no client) Would send to {}... direction={}",
+                    &device_token[..device_token.len().min(16)],
+                    direction
+                );
+                return;
             }
+        };
+
+        let mut payload = DefaultNotificationBuilder::new()
+            .set_title("Stability")
+            .set_body("Processing stability payment...")
+            .set_mutable_content()
+            .set_sound("default")
+            .build(
+                &device_token,
+                NotificationOptions {
+                    apns_topic: Some(APNS_TOPIC),
+                    apns_priority: Some(Priority::High),
+                    ..Default::default()
+                },
+            );
+
+        // Add custom "stability" key with direction
+        let stability_data = json!({ "direction": direction });
+        if let Err(e) = payload.add_custom_data("stability", &stability_data) {
+            println!("[Push] Failed to add custom data: {}", e);
         }
 
-        fn save_push_token(device_token: &str, platform: &str) {
-            let db_path = push_tokens_db_path();
-            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                conn.execute(
-                    "INSERT OR REPLACE INTO push_tokens (device_token, platform, registered_at) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![device_token, platform, now],
-                ).ok();
+        match client.send(payload).await {
+            Ok(response) => {
+                println!(
+                    "[Push] APNs sent to {}... direction={}: {:?}",
+                    &device_token[..device_token.len().min(16)],
+                    direction,
+                    response
+                );
+                audit_event(
+                    "APNS_SENT",
+                    json!({
+                        "token_prefix": &device_token[..device_token.len().min(16)],
+                        "node_id_prefix": &node_id[..node_id.len().min(16)],
+                        "direction": direction,
+                    }),
+                );
+            }
+            Err(e) => {
+                println!(
+                    "[Push] APNs error for {}...: {}",
+                    &device_token[..device_token.len().min(16)],
+                    e
+                );
+                audit_event(
+                    "APNS_ERROR",
+                    json!({
+                        "token_prefix": &device_token[..device_token.len().min(16)],
+                        "node_id_prefix": &node_id[..node_id.len().min(16)],
+                        "direction": direction,
+                        "error": e.to_string(),
+                    }),
+                );
             }
         }
+    });
+}
 
-        fn load_push_tokens() -> Vec<(String, String)> {
-            let db_path = push_tokens_db_path();
-            let conn = match rusqlite::Connection::open(&db_path) {
-                Ok(c) => c,
-                Err(_) => return Vec::new(),
+// Hardcoded data directory
+const LSP_DATA_DIR: &str = "data-2/lsp";
+
+/// Look up the value (in sats) of a specific transaction output via bitcoind RPC.
+///
+/// Uses `getrawtransaction` with verbose=true to get the decoded transaction,
+/// then extracts the output value at the given vout index.
+///
+/// Returns None if the lookup fails (tx not found, RPC error, etc.)
+fn lookup_funding_output_sats(txid: &str, vout: u32) -> Option<u64> {
+    let rpc_url = "http://127.0.0.1:8332";
+
+    let body = json!({
+        "jsonrpc": "1.0",
+        "id": "sc_splice",
+        "method": "getrawtransaction",
+        "params": [txid, true]
+    });
+
+    let response = ureq::post(rpc_url)
+        .set("Authorization", "Basic Og==") // base64(":")  — empty user:password
+        .set("Content-Type", "application/json")
+        .send_json(&body)
+        .ok()?;
+
+    let json: serde_json::Value = response.into_json().ok()?;
+    let vouts = json["result"]["vout"].as_array()?;
+    let output = vouts.get(vout as usize)?;
+    let value_btc = output["value"].as_f64()?;
+    let value_sats = (value_btc * 100_000_000.0).round() as u64;
+
+    Some(value_sats)
+}
+
+impl ServerApp {
+    pub fn new_with_mode(mode: &str) -> Self {
+        let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
+            // "lsp" => (get_lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
+            "lsp" => (LSP_DATA_DIR, DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
+            _ => panic!("Invalid mode"),
+        };
+
+        let mut builder = Builder::new();
+
+        let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
+            "signet" => Network::Signet,
+            "testnet" => Network::Testnet,
+            "bitcoin" => Network::Bitcoin,
+            _ => {
+                println!("Warning: Unknown network in config, defaulting to Bitcoin");
+                Network::Bitcoin
+            }
+        };
+
+        println!("[Init] Setting network to: {:?}", network);
+        builder.set_network(network);
+
+        // println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
+        // builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
+
+        println!("[Init] Setting Bitcoin RPC connection");
+        builder.set_chain_source_bitcoind_rpc("127.0.0.1".into(), 8332, "".into(), "".into());
+
+        println!("[Init] Setting storage directory: {}", data_dir);
+        builder.set_storage_dir_path(data_dir.to_string());
+
+        let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
+        set_audit_log_path(&audit_log_path);
+
+        let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
+        println!("[Init] Setting listening address: {}", listen_addr);
+        builder.set_listening_addresses(vec![listen_addr]).unwrap();
+        println!("[Init] Setting node alias: {}", node_alias);
+        let _ = builder.set_node_alias(node_alias.to_string()).ok();
+
+        if node_alias == DEFAULT_LSP_ALIAS {
+            println!("[Init] Configuring LSP parameters...");
+            let service_config = LSPS2ServiceConfig {
+                require_token: None,
+                advertise_service: true,
+                channel_opening_fee_ppm: CHANNEL_OPENING_FEE_PPM,
+                channel_over_provisioning_ppm: CHANNEL_OVER_PROVISIONING_PPM,
+                min_channel_opening_fee_msat: MIN_CHANNEL_OPENING_FEE_MSAT,
+                min_channel_lifetime: MIN_CHANNEL_LIFETIME,
+                max_client_to_self_delay: DEFAULT_MAX_CLIENT_TO_SELF_DELAY,
+                min_payment_size_msat: MIN_PAYMENT_SIZE_MSAT,
+                max_payment_size_msat: MAX_PAYMENT_SIZE_MSAT,
+                client_trusts_lsp: true,
             };
-            let mut stmt = match conn.prepare("SELECT device_token, platform FROM push_tokens") {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
+            builder.set_liquidity_provider_lsps2(service_config);
+        }
+
+        let node = Arc::new(match builder.build() {
+            Ok(n) => {
+                println!("[Init] Node built successfully");
+                n
+            }
+            Err(e) => panic!("[Init] Failed to build node: {:?}", e),
+        });
+
+        node.start().expect("Failed to start node");
+
+        println!("[Init] Node ID: {}", node.node_id());
+
+        if let Some(addrs) = node.listening_addresses() {
+            println!("[Init] Listening on: {:?}", addrs);
+        }
+
+        let btc_price = get_cached_price();
+        println!("[Init] Initial BTC price: {}", btc_price);
+
+        let db = Database::open(std::path::Path::new(LSP_DATA_DIR))
+            .expect("Failed to open LSP database");
+
+        // Create push_tokens table for persistent APNs device token storage
+        init_push_tokens_table(LSP_DATA_DIR);
+
+        let mut app = Self {
+            node,
+            btc_price,
+            status_message: String::new(),
+            last_update: Instant::now(),
+            last_stability_check: Instant::now(),
+
+            lightning_balance_btc: 0.0,
+            onchain_balance_btc: 0.0,
+            total_balance_btc: 0.0,
+            lightning_balance_usd: 0.0,
+            onchain_balance_usd: 0.0,
+            total_balance_usd: 0.0,
+
+            invoice_amount: String::new(),
+            invoice_result: String::new(),
+            invoice_to_pay: String::new(),
+            on_chain_address: String::new(),
+            on_chain_amount: String::new(),
+
+            open_channel_node_id: String::new(),
+            open_channel_address: String::new(),
+            open_channel_amount: String::new(),
+
+            connect_node_id: String::new(),
+            connect_node_address: String::new(),
+
+            channel_id_to_close: String::new(),
+
+            selected_channel_id: String::new(),
+            stable_channel_amount: "0".to_string(),
+
+            stable_channels: Vec::new(),
+            db,
+        };
+
+        app.update_balances();
+        app.update_channel_info();
+
+        if node_alias == DEFAULT_LSP_ALIAS {
+            app.load_stable_channels();
+        }
+
+        app
+    }
+
+    pub fn new() -> Self {
+        Self::new_with_mode("lsp")
+    }
+}
+
+impl ServerApp {
+    pub fn update_balances(&mut self) {
+        let current_price = get_cached_price();
+        if current_price > 0.0 {
+            self.btc_price = current_price;
+        }
+
+        let balances = self.node.list_balances();
+        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
+        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
+        self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+        self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
+        self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+    }
+
+    /// Check if a peer is connected by looking for a usable channel with them.
+    fn is_peer_connected(&self, user_channel_id: u128) -> bool {
+        self.node
+            .list_channels()
+            .iter()
+            .any(|c| c.user_channel_id.0 == user_channel_id && c.is_usable)
+    }
+
+    /// Returns a list of offline peers that need stability payments, with direction.
+    /// The caller should send a push notification to each and retry after a delay.
+    pub fn get_stability_push_targets(&self) -> Vec<StabilityPushTarget> {
+        let current_price = get_cached_price();
+        if current_price <= 0.0 {
+            return Vec::new();
+        }
+
+        let mut targets = Vec::new();
+        for sc in &self.stable_channels {
+            if !stable::channel_exists(&self.node, sc.user_channel_id) {
+                continue;
+            }
+            if sc.expected_usd.0 < 0.01 {
+                continue;
+            }
+
+            // Quick drift check — does this channel need a stability payment?
+            let stable_usd_value = if sc.backing_sats > 0 {
+                (sc.backing_sats as f64 / 100_000_000.0) * current_price
+            } else {
+                sc.stable_receiver_usd.0
             };
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            });
-            match rows {
-                Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
-                Err(_) => Vec::new(),
+            let target_usd = sc.expected_usd.0;
+            let percent_from_par = if target_usd > 0.0 {
+                (((stable_usd_value - target_usd) / target_usd) * 100.0).abs()
+            } else {
+                0.0
+            };
+
+            let is_receiver_below_expected = stable_usd_value < target_usd;
+
+            if percent_from_par >= STABILITY_THRESHOLD_PERCENT
+                && !self.is_peer_connected(sc.user_channel_id)
+            {
+                // Determine direction from LSP perspective:
+                // LSP is_stable_receiver=false, so:
+                //   - Price dropped → user below expected → LSP pays user → lsp_to_user
+                //   - Price rose → user above expected → user pays LSP → user_to_lsp
+                let direction = if is_receiver_below_expected {
+                    "lsp_to_user"
+                } else {
+                    "user_to_lsp"
+                };
+
+                targets.push(StabilityPushTarget {
+                    node_id: sc.counterparty.to_string(),
+                    direction: direction.to_string(),
+                });
+            }
+        }
+        targets
+    }
+
+    pub fn check_and_update_stable_channels(&mut self) -> bool {
+        let current_price = get_cached_price();
+        if current_price > 0.0 {
+            self.btc_price = current_price;
+        }
+
+        let mut channels_updated = false;
+        let mut payment_sent = false;
+        for sc in &mut self.stable_channels {
+            if !stable::channel_exists(&self.node, sc.user_channel_id) {
+                continue;
+            }
+
+            sc.latest_price = current_price;
+            if stable::check_stability(&self.node, sc, current_price).is_some() {
+                payment_sent = true;
+            }
+
+            if sc.payment_made {
+                channels_updated = true;
             }
         }
 
-        // ── APNs sending ─────────────────────────────────────────────────────────
+        if channels_updated {
+            self.save_stable_channels();
+        }
 
-        /// Send a push notification to all registered iOS devices.
-        /// Uses the `a2` crate for real APNs delivery when a .p8 key is configured.
-        fn send_push_to_all(title: &str, body: &str) {
-            let tokens = load_push_tokens();
-            if tokens.is_empty() {
-                println!("[Push] No registered devices");
+        payment_sent
+    }
+
+    pub fn poll_events(&mut self) {
+        while let Some(event) = self.node.next_event() {
+            println!("[LSP EVENT] {:?}", event);
+            match event {
+                // Create stable channel entry with $0 stabilized - user must opt-in via trade message
+                Event::ChannelReady {
+                    channel_id,
+                    user_channel_id,
+                    ..
+                } => {
+                    if let Some(chan) = self
+                        .node
+                        .list_channels()
+                        .into_iter()
+                        .find(|c| c.channel_id == channel_id)
+                    {
+                        let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64
+                            * self.btc_price;
+
+                        // Check if a stable channel already exists for this user_channel_id (splice case)
+                        let existing = self
+                            .stable_channels
+                            .iter_mut()
+                            .find(|sc| sc.user_channel_id == user_channel_id.0);
+
+                        if let Some(sc) = existing {
+                            // Splice: update channel_id but preserve expected_usd and other state
+                            let old_channel_id = sc.channel_id.to_string();
+                            sc.channel_id = channel_id;
+                            let old_expected_usd = sc.expected_usd.0;
+
+                            // Update balances from LDK so stable_receiver_btc reflects post-splice state
+                            stable::update_balances(&self.node, sc);
+
+                            // If splice-out exceeded native BTC, reconcile the stable portion
+                            let price = sc.latest_price;
+                            let usd_deducted = stable::reconcile_outgoing(sc, price);
+                            if let Some(deducted) = usd_deducted {
+                                audit_event(
+                                    "SPLICE_OUT_STABLE_DEDUCTED",
+                                    json!({
+                                        "channel_id": channel_id.to_string(),
+                                        "user_channel_id": format!("{}", user_channel_id.0),
+                                        "usd_deducted": deducted,
+                                        "old_expected_usd": old_expected_usd,
+                                        "new_expected_usd": sc.expected_usd.0,
+                                        "btc_price": price,
+                                    }),
+                                );
+                            }
+
+                            let new_expected_usd = sc.expected_usd.0;
+                            let sync_counterparty = sc.counterparty;
+                            // sc no longer used after this point
+                            audit_event(
+                                "CHANNEL_READY_SPLICE",
+                                json!({
+                                    "channel_id": channel_id.to_string(),
+                                    "old_channel_id": old_channel_id,
+                                    "user_channel_id": format!("{}", user_channel_id.0),
+                                    "funded_usd": funded_usd,
+                                    "expected_usd": new_expected_usd,
+                                }),
+                            );
+                            self.save_stable_channels();
+                            if usd_deducted.is_some() {
+                                self.send_sync_message(
+                                    user_channel_id.0,
+                                    new_expected_usd,
+                                    sync_counterparty,
+                                );
+                            }
+                            self.status_message = format!(
+                                "Channel {} ready after splice (${:.2} stabilized)",
+                                channel_id, new_expected_usd
+                            );
+                        } else {
+                            // New channel: create entry with $0 stabilized (user opts in via trade)
+                            self.selected_channel_id = channel_id.to_string();
+                            self.stable_channel_amount = "0".to_string();
+                            self.edit_stable_channel(None);
+
+                            audit_event(
+                                "CHANNEL_READY",
+                                json!({
+                                    "channel_id": channel_id.to_string(),
+                                    "user_channel_id": format!("{}", user_channel_id.0),
+                                    "funded_usd": funded_usd,
+                                    "stabilized_usd": 0.0
+                                }),
+                            );
+                            self.status_message = format!(
+                                "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
+                                channel_id, funded_usd
+                            );
+                        }
+                    }
+                    self.update_balances();
+                }
+                Event::ChannelPending {
+                    channel_id,
+                    user_channel_id,
+                    former_temporary_channel_id,
+                    counterparty_node_id,
+                    funding_txo,
+                } => {
+                    let temp_id_str = hex::encode(former_temporary_channel_id.0);
+
+                    let funding_str = funding_txo.txid.as_raw_hash().to_string();
+
+                    audit_event(
+                        "CHANNEL_PENDING",
+                        json!({
+                            "channel_id":            channel_id.to_string(),
+                            "user_channel_id":       format!("{:?}", user_channel_id),
+                            "temp_channel_id":       temp_id_str,
+                            "counterparty_node_id":  counterparty_node_id.to_string(),
+                            "funding_txo":           funding_str,
+                        }),
+                    );
+
+                    self.status_message = format!("Channel {} is pending confirmation", channel_id);
+                }
+                Event::PaymentSuccessful { payment_hash, .. } => {
+                    audit_event(
+                        "PAYMENT_SUCCESSFUL",
+                        json!({"payment_hash": format!("{}", payment_hash)}),
+                    );
+                    self.status_message = format!("Sent payment {}", payment_hash);
+                    self.update_balances();
+                }
+                // Event::PaymentReceived { amount_msat, payment_hash, .. } => {
+                //     audit_event("PAYMENT_RECEIVED", json!({"amount_msat": amount_msat, "payment_hash": format!("{}", payment_hash)}));
+                //     self.status_message = format!("Received payment of {} msats", amount_msat);
+                //     self.update_balances();
+                // }
+                Event::PaymentReceived {
+                    amount_msat,
+                    payment_hash,
+                    custom_records,
+                    payment_id: _,
+                } => self.handle_payment_received(amount_msat, payment_hash, custom_records),
+                Event::PaymentForwarded {
+                    prev_channel_id,
+                    next_channel_id,
+                    outbound_amount_forwarded_msat,
+                    total_fee_earned_msat,
+                    ..
+                } => {
+                    self.handle_payment_forwarded(
+                        prev_channel_id,
+                        next_channel_id,
+                        outbound_amount_forwarded_msat,
+                        total_fee_earned_msat,
+                    );
+                }
+                Event::ChannelClosed {
+                    channel_id,
+                    user_channel_id,
+                    reason,
+                    ..
+                } => {
+                    let user_ch_id = user_channel_id.0;
+                    audit_event(
+                        "CHANNEL_CLOSED",
+                        json!({
+                            "channel_id": format!("{}", channel_id),
+                            "user_channel_id": format!("{}", user_ch_id),
+                            "reason": format!("{:?}", reason)
+                        }),
+                    );
+                    // Remove stable channel entry and delete from DB
+                    self.stable_channels
+                        .retain(|sc| sc.user_channel_id != user_ch_id);
+                    let _ = self.db.delete_channel(&format!("{}", user_ch_id));
+                    self.status_message = format!("Channel {} has been closed", channel_id);
+                    self.update_balances();
+                }
+                Event::SplicePending {
+                    channel_id,
+                    user_channel_id,
+                    new_funding_txo,
+                    ..
+                } => {
+                    let txid_str = new_funding_txo.txid.to_string();
+                    let vout = new_funding_txo.vout;
+
+                    audit_event(
+                        "SPLICE_PENDING",
+                        json!({
+                            "channel_id": channel_id.to_string(),
+                            "user_channel_id": format!("{}", user_channel_id.0),
+                            "funding_txo": format!("{}:{}", txid_str, vout),
+                        }),
+                    );
+
+                    // Get old channel value (list_channels still shows pre-splice value)
+                    let old_channel_value_sats = self
+                        .node
+                        .list_channels()
+                        .iter()
+                        .find(|c| c.user_channel_id.0 == user_channel_id.0)
+                        .map(|c| c.channel_value_sats);
+
+                    // Look up new funding output value from bitcoind
+                    if let Some(old_value) = old_channel_value_sats {
+                        match lookup_funding_output_sats(&txid_str, vout) {
+                            Some(new_value) => {
+                                audit_event(
+                                    "SPLICE_PENDING_LOOKUP",
+                                    json!({
+                                        "old_channel_sats": old_value,
+                                        "new_channel_sats": new_value,
+                                        "delta_sats": (new_value as i64) - (old_value as i64),
+                                    }),
+                                );
+
+                                if new_value < old_value {
+                                    // Splice-out: channel got smaller
+                                    let splice_out_sats = old_value - new_value;
+
+                                    let mut sync_info: Option<(u128, f64, PublicKey)> = None;
+                                    if let Some(sc) = self
+                                        .stable_channels
+                                        .iter_mut()
+                                        .find(|sc| sc.user_channel_id == user_channel_id.0)
+                                    {
+                                        let price = sc.latest_price;
+                                        if let Some(usd_deducted) =
+                                            stable::deduct_outgoing(sc, splice_out_sats, price)
+                                        {
+                                            audit_event(
+                                                "SPLICE_PENDING_STABLE_DEDUCTED",
+                                                json!({
+                                                    "channel_id": channel_id.to_string(),
+                                                    "user_channel_id": format!("{}", user_channel_id.0),
+                                                    "splice_out_sats": splice_out_sats,
+                                                    "usd_deducted": usd_deducted,
+                                                    "new_expected_usd": sc.expected_usd.0,
+                                                    "btc_price": price,
+                                                }),
+                                            );
+                                            sync_info = Some((
+                                                sc.user_channel_id,
+                                                sc.expected_usd.0,
+                                                sc.counterparty,
+                                            ));
+                                        }
+                                    }
+                                    if let Some((ucid, eusd, cp)) = sync_info {
+                                        self.send_sync_message(ucid, eusd, cp);
+                                    }
+                                    self.save_stable_channels();
+                                }
+                            }
+                            None => {
+                                // Tx not yet in mempool or RPC error — trade message + ChannelReady will handle it
+                                println!(
+                                    "[SplicePending] Could not look up funding output {}:{}",
+                                    txid_str, vout
+                                );
+                                audit_event(
+                                    "SPLICE_PENDING_LOOKUP_FAILED",
+                                    json!({
+                                        "txid": txid_str,
+                                        "vout": vout,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    audit_event(
+                        "EVENT_IGNORED",
+                        json!({"event_type": format!("{:?}", event)}),
+                    );
+                }
+            }
+            let _ = self.node.event_handled();
+        }
+    }
+
+    fn handle_payment_received(
+        &mut self,
+        amount_msat: u64,
+        payment_hash: PaymentHash,
+        custom_records: Vec<CustomTlvRecord>,
+    ) {
+        let mut decoded_payload: Option<String> = None;
+
+        for tlv in custom_records {
+            if tlv.type_num == STABLE_CHANNEL_TLV_TYPE {
+                if let Ok(s) = String::from_utf8(tlv.value) {
+                    decoded_payload = Some(s);
+                }
+            }
+        }
+
+        self.status_message = match &decoded_payload {
+            Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
+            None => format!("Received {} msats (no TLV)", amount_msat),
+        };
+
+        // Check for trade TLV on any payment
+        match &decoded_payload {
+            Some(raw) => {
+                audit_event(
+                    "MESSAGE_RECEIVED",
+                    json!({
+                        "payment_hash": format!("{}", payment_hash),
+                        "amount_msat": amount_msat,
+                        "raw": raw,
+                    }),
+                );
+
+                // Try to parse as trade message
+                self.handle_trade_message(raw, &payment_hash);
+            }
+            None => {
+                audit_event(
+                    "PAYMENT_RECEIVED",
+                    json!({
+                        "amount_msat": amount_msat,
+                        "payment_hash": format!("{}", payment_hash),
+                    }),
+                );
+
+                // Non-TLV payment is likely a stability payment from the user.
+                // Identify which channel received it by comparing balances,
+                // then reconcile only that channel.
+                let current_price = get_cached_price();
+
+                // Snapshot LSP-side balances before refresh
+                let balances_before: Vec<(ldk_node::lightning::ln::types::ChannelId, u64)> = self
+                    .node
+                    .list_channels()
+                    .iter()
+                    .map(|c| {
+                        let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
+                        (
+                            c.channel_id,
+                            (c.outbound_capacity_msat / 1000) + unspendable,
+                        )
+                    })
+                    .collect();
+
+                // Refresh channel state
+                self.update_balances();
+
+                // Find which channel's LSP balance increased (received sats from user)
+                let mut reconciled = false;
+                for (ch_id, old_lsp_sats) in &balances_before {
+                    if let Some(chan) = self
+                        .node
+                        .list_channels()
+                        .iter()
+                        .find(|c| c.channel_id == *ch_id)
+                    {
+                        let unspendable = chan.unspendable_punishment_reserve.unwrap_or(0);
+                        let new_lsp_sats = (chan.outbound_capacity_msat / 1000) + unspendable;
+                        if new_lsp_sats > *old_lsp_sats {
+                            let user_ch_id = chan.user_channel_id.0;
+                            if let Some(sc) = self
+                                .stable_channels
+                                .iter_mut()
+                                .find(|sc| sc.user_channel_id == user_ch_id)
+                            {
+                                if current_price > 0.0 {
+                                    sc.latest_price = current_price;
+                                }
+                                stable::reconcile_incoming(sc);
+                                reconciled = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback: if we couldn't identify the channel, reconcile
+                // the only stable channel if there's exactly one
+                if !reconciled && self.stable_channels.len() == 1 {
+                    let sc = &mut self.stable_channels[0];
+                    if current_price > 0.0 {
+                        sc.latest_price = current_price;
+                    }
+                    stable::reconcile_incoming(sc);
+                }
+
+                self.save_stable_channels();
+            }
+        }
+
+        self.update_balances();
+    }
+
+    /// Handle a forwarded payment — if it came from a stable channel,
+    /// deduct from native BTC first, then overflow into the stabilized portion.
+    fn handle_payment_forwarded(
+        &mut self,
+        prev_channel_id: ChannelId,
+        next_channel_id: ChannelId,
+        outbound_amount_forwarded_msat: Option<u64>,
+        total_fee_earned_msat: Option<u64>,
+    ) {
+        let forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
+        let fee_msat = total_fee_earned_msat.unwrap_or(0);
+        let total_msat = forwarded_msat + fee_msat;
+        let total_sats = total_msat / 1000;
+
+        audit_event(
+            "PAYMENT_FORWARDED",
+            json!({
+                "prev_channel_id": prev_channel_id.to_string(),
+                "next_channel_id": next_channel_id.to_string(),
+                "forwarded_msat": forwarded_msat,
+                "fee_msat": fee_msat,
+                "total_sats": total_sats,
+            }),
+        );
+
+        // Check if the payment came FROM a stable channel (user sent payment out)
+        // Look up user_channel_id from LDK (channel_id changes on splice, user_channel_id doesn't)
+        let prev_user_ch_id = self
+            .node
+            .list_channels()
+            .iter()
+            .find(|c| c.channel_id == prev_channel_id)
+            .map(|c| c.user_channel_id.0);
+        println!(
+            "[forwarded] looking for prev_channel_id={} (user_ch_id={:?}) in {} stable channels",
+            prev_channel_id,
+            prev_user_ch_id,
+            self.stable_channels.len()
+        );
+        for sc in &self.stable_channels {
+            println!(
+                "[forwarded]   have channel: {} user_channel_id={} expected_usd={}",
+                sc.channel_id, sc.user_channel_id, sc.expected_usd.0
+            );
+        }
+        if let Some(sc) = prev_user_ch_id.and_then(|uid| {
+            self.stable_channels
+                .iter_mut()
+                .find(|sc| sc.user_channel_id == uid)
+        }) {
+            println!(
+                "[forwarded] matched! expected_usd={} btc_price={}",
+                sc.expected_usd.0, self.btc_price
+            );
+            if sc.expected_usd.0 <= 0.0 || self.btc_price <= 0.0 {
+                println!(
+                    "[forwarded] skipping: expected_usd={} btc_price={}",
+                    sc.expected_usd.0, self.btc_price
+                );
                 return;
             }
 
-            let rt = match tokio::runtime::Handle::try_current() {
-                Ok(h) => h,
-                Err(_) => {
-                    println!("[Push] No tokio runtime available");
-                    return;
-                }
-            };
-
-            let title = title.to_string();
-            let body = body.to_string();
-
-            rt.spawn(async move {
-                // Clone the client out of the mutex so we don't hold the guard across await
-                let client = {
-                    let guard = APNS_CLIENT.lock().unwrap();
-                    guard.clone()
-                };
-                let client = match client.as_ref() {
-                    Some(c) => c,
-                    None => {
-                        for (token, platform) in &tokens {
-                            if platform == "ios" {
-                                println!("[Push] (no client) Would send to {}...: {} - {}",
-                                    &token[..token.len().min(16)], title, body);
-                            }
-                        }
-                        return;
-                    }
-                };
-
-                for (token, platform) in &tokens {
-                    if platform != "ios" { continue; }
-
-                    let payload = DefaultNotificationBuilder::new()
-                        .set_title(&title)
-                        .set_body(&body)
-                        .set_mutable_content()
-                        .set_sound("default")
-                        .build(
-                            token,
-                            NotificationOptions {
-                                apns_topic: Some(APNS_TOPIC),
-                                apns_priority: Some(Priority::High),
-                                ..Default::default()
-                            },
-                        );
-
-                    match client.send(payload).await {
-                        Ok(response) => {
-                            println!("[Push] APNs sent to {}...: {:?}",
-                                &token[..token.len().min(16)], response);
-                            audit_event("APNS_SENT", json!({
-                                "token_prefix": &token[..token.len().min(16)],
-                                "title": title,
-                            }));
-                        }
-                        Err(e) => {
-                            println!("[Push] APNs error for {}...: {}",
-                                &token[..token.len().min(16)], e);
-                            audit_event("APNS_ERROR", json!({
-                                "token_prefix": &token[..token.len().min(16)],
-                                "error": e.to_string(),
-                            }));
-                        }
-                    }
-                }
-            });
-        }
-
-
-
-        // Hardcoded data directory
-        const LSP_DATA_DIR: &str = "data-2/lsp";
-
-        /// Look up the value (in sats) of a specific transaction output via bitcoind RPC.
-        ///
-        /// Uses `getrawtransaction` with verbose=true to get the decoded transaction,
-        /// then extracts the output value at the given vout index.
-        ///
-        /// Returns None if the lookup fails (tx not found, RPC error, etc.)
-        fn lookup_funding_output_sats(txid: &str, vout: u32) -> Option<u64> {
-            let rpc_url = "http://127.0.0.1:8332";
-
-            let body = json!({
-                "jsonrpc": "1.0",
-                "id": "sc_splice",
-                "method": "getrawtransaction",
-                "params": [txid, true]
-            });
-
-            let response = ureq::post(rpc_url)
-                .set("Authorization", "Basic Og==")  // base64(":")  — empty user:password
-                .set("Content-Type", "application/json")
-                .send_json(&body)
-                .ok()?;
-
-            let json: serde_json::Value = response.into_json().ok()?;
-            let vouts = json["result"]["vout"].as_array()?;
-            let output = vouts.get(vout as usize)?;
-            let value_btc = output["value"].as_f64()?;
-            let value_sats = (value_btc * 100_000_000.0).round() as u64;
-
-            Some(value_sats)
-        }
-
-        impl ServerApp {
-            pub fn new_with_mode(mode: &str) -> Self {
-                let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
-                    // "lsp" => (get_lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
-                    "lsp" => (LSP_DATA_DIR, DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
-                    _ => panic!("Invalid mode"),
-                };
-
-                let mut builder = Builder::new();
-
-                let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
-                    "signet" => Network::Signet,
-                    "testnet" => Network::Testnet,
-                    "bitcoin" => Network::Bitcoin,
-                    _ => {
-                        println!("Warning: Unknown network in config, defaulting to Bitcoin");
-                        Network::Bitcoin
-                    }
-                };
-
-                println!("[Init] Setting network to: {:?}", network);
-                builder.set_network(network);
-
-                // println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
-                // builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
-
-                println!("[Init] Setting Bitcoin RPC connection");
-                builder.set_chain_source_bitcoind_rpc(
-                    "127.0.0.1".into(), 8332,
-                    "".into(),
-                    "".into(),
-                );
-
-                println!("[Init] Setting storage directory: {}", data_dir);
-                builder.set_storage_dir_path(data_dir.to_string());
-
-                let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
-                set_audit_log_path(&audit_log_path);
-
-                let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
-                println!("[Init] Setting listening address: {}", listen_addr);
-                builder.set_listening_addresses(vec![listen_addr]).unwrap();
-                println!("[Init] Setting node alias: {}", node_alias);
-                let _ = builder.set_node_alias(node_alias.to_string()).ok();
-
-                if node_alias == DEFAULT_LSP_ALIAS {
-                    println!("[Init] Configuring LSP parameters...");
-                    let service_config = LSPS2ServiceConfig {
-                        require_token: None,
-                        advertise_service: true,
-                        channel_opening_fee_ppm: CHANNEL_OPENING_FEE_PPM,
-                        channel_over_provisioning_ppm: CHANNEL_OVER_PROVISIONING_PPM,
-                        min_channel_opening_fee_msat: MIN_CHANNEL_OPENING_FEE_MSAT,
-                        min_channel_lifetime: MIN_CHANNEL_LIFETIME,
-                        max_client_to_self_delay: DEFAULT_MAX_CLIENT_TO_SELF_DELAY,
-                        min_payment_size_msat: MIN_PAYMENT_SIZE_MSAT,
-                        max_payment_size_msat: MAX_PAYMENT_SIZE_MSAT,
-                        client_trusts_lsp: true,
-                    };
-                    builder.set_liquidity_provider_lsps2(service_config);
-                }
-
-                let node = Arc::new(match builder.build() {
-                    Ok(n) => {
-                        println!("[Init] Node built successfully");
-                        n
-                    }
-                    Err(e) => panic!("[Init] Failed to build node: {:?}", e),
-                });
-                
-                node.start().expect("Failed to start node");
-
-                println!("[Init] Node ID: {}", node.node_id());
-                
-                if let Some(addrs) = node.listening_addresses() {
-                    println!("[Init] Listening on: {:?}", addrs);
-                }
-
-                let btc_price = get_cached_price();
-                println!("[Init] Initial BTC price: {}", btc_price);
-
-                let db = Database::open(std::path::Path::new(LSP_DATA_DIR))
-                    .expect("Failed to open LSP database");
-
-                // Create push_tokens table for persistent APNs device token storage
-                init_push_tokens_table(LSP_DATA_DIR);
-
-                let mut app = Self {
-                    node,
-                    btc_price,
-                    status_message: String::new(),
-                    last_update: Instant::now(),
-                    last_stability_check: Instant::now(),
-
-                    lightning_balance_btc: 0.0,
-                    onchain_balance_btc:   0.0,
-                    total_balance_btc:     0.0,
-                    lightning_balance_usd: 0.0,
-                    onchain_balance_usd:   0.0,
-                    total_balance_usd:     0.0,
-
-                    invoice_amount: String::new(),
-                    invoice_result: String::new(),
-                    invoice_to_pay: String::new(),
-                    on_chain_address: String::new(),
-                    on_chain_amount: String::new(),
-
-                    open_channel_node_id: String::new(),
-                    open_channel_address: String::new(),
-                    open_channel_amount:  String::new(),
-
-                    connect_node_id:     String::new(),
-                    connect_node_address:String::new(),
-
-                    channel_id_to_close: String::new(),
-
-                    selected_channel_id:   String::new(),
-                    stable_channel_amount: "0".to_string(),
-
-                    stable_channels: Vec::new(),
-                    db,
-                };
-
-                app.update_balances();
-                app.update_channel_info();
-
-                if node_alias == DEFAULT_LSP_ALIAS {
-                    app.load_stable_channels();
-                }
-
-                app
-            }
-
-            pub fn new() -> Self {
-                Self::new_with_mode("lsp")
-            }
-        }
-
-        impl ServerApp {
-            pub fn update_balances(&mut self) {
-                let current_price = get_cached_price();
-                if current_price > 0.0 {
-                    self.btc_price = current_price;
-                }
-
-                let balances = self.node.list_balances();
-                self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-                self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
-                self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
-                self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
-                self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
-                self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
-            }
-
-            /// Check if a peer is connected by looking for a usable channel with them.
-            fn is_peer_connected(&self, user_channel_id: u128) -> bool {
-                self.node.list_channels().iter().any(|c|
-                    c.user_channel_id.0 == user_channel_id && c.is_usable
-                )
-            }
-
-            /// Returns true if any stability payment needs to be sent but the peer is offline.
-            /// The caller should send a push notification and retry after a delay.
-            pub fn needs_push_for_stability(&self) -> bool {
-                let current_price = get_cached_price();
-                if current_price <= 0.0 { return false; }
-
-                for sc in &self.stable_channels {
-                    if !stable::channel_exists(&self.node, sc.user_channel_id) {
-                        continue;
-                    }
-                    if sc.expected_usd.0 < 0.01 { continue; }
-
-                    // Quick drift check — does this channel need a stability payment?
-                    let stable_usd_value = if sc.backing_sats > 0 {
-                        (sc.backing_sats as f64 / 100_000_000.0) * current_price
-                    } else {
-                        sc.stable_receiver_usd.0
-                    };
-                    let target_usd = sc.expected_usd.0;
-                    let percent_from_par = if target_usd > 0.0 {
-                        (((stable_usd_value - target_usd) / target_usd) * 100.0).abs()
-                    } else {
-                        0.0
-                    };
-
-                    if percent_from_par >= STABILITY_THRESHOLD_PERCENT
-                        && !self.is_peer_connected(sc.user_channel_id)
-                    {
-                        return true;
-                    }
-                }
-                false
-            }
-
-            pub fn check_and_update_stable_channels(&mut self) -> bool {
-                let current_price = get_cached_price();
-                if current_price > 0.0 {
-                    self.btc_price = current_price;
-                }
-
-                let mut channels_updated = false;
-                let mut payment_sent = false;
-                for sc in &mut self.stable_channels {
-                    if !stable::channel_exists(&self.node, sc.user_channel_id) {
-                        continue;
-                    }
-
-                    sc.latest_price = current_price;
-                    if stable::check_stability(&self.node, sc, current_price).is_some() {
-                        payment_sent = true;
-                    }
-
-                    if sc.payment_made {
-                        channels_updated = true;
-                    }
-                }
-
-                if channels_updated {
-                    self.save_stable_channels();
-                }
-
-                payment_sent
-            }
-
-            pub fn poll_events(&mut self) {
-                while let Some(event) = self.node.next_event() {
-                    println!("[LSP EVENT] {:?}", event);
-                    match event {
-                        // Create stable channel entry with $0 stabilized - user must opt-in via trade message
-                        Event::ChannelReady { channel_id, user_channel_id, .. } => {
-                            if let Some(chan) = self.node.list_channels()
-                                .into_iter()
-                                .find(|c| c.channel_id == channel_id)
-                            {
-                                let funded_usd = chan.channel_value_sats as f64 / 2.0 / SATS_IN_BTC as f64 * self.btc_price;
-
-                                // Check if a stable channel already exists for this user_channel_id (splice case)
-                                let existing = self.stable_channels.iter_mut()
-                                    .find(|sc| sc.user_channel_id == user_channel_id.0);
-
-                                if let Some(sc) = existing {
-                                    // Splice: update channel_id but preserve expected_usd and other state
-                                    let old_channel_id = sc.channel_id.to_string();
-                                    sc.channel_id = channel_id;
-                                    let old_expected_usd = sc.expected_usd.0;
-
-                                    // Update balances from LDK so stable_receiver_btc reflects post-splice state
-                                    stable::update_balances(&self.node, sc);
-
-                                    // If splice-out exceeded native BTC, reconcile the stable portion
-                                    let price = sc.latest_price;
-                                    let usd_deducted = stable::reconcile_outgoing(sc, price);
-                                    if let Some(deducted) = usd_deducted {
-                                        audit_event("SPLICE_OUT_STABLE_DEDUCTED", json!({
-                                            "channel_id": channel_id.to_string(),
-                                            "user_channel_id": format!("{}", user_channel_id.0),
-                                            "usd_deducted": deducted,
-                                            "old_expected_usd": old_expected_usd,
-                                            "new_expected_usd": sc.expected_usd.0,
-                                            "btc_price": price,
-                                        }));
-                                    }
-
-                                    let new_expected_usd = sc.expected_usd.0;
-                                    let sync_counterparty = sc.counterparty;
-                                    // sc no longer used after this point
-                                    audit_event("CHANNEL_READY_SPLICE", json!({
-                                        "channel_id": channel_id.to_string(),
-                                        "old_channel_id": old_channel_id,
-                                        "user_channel_id": format!("{}", user_channel_id.0),
-                                        "funded_usd": funded_usd,
-                                        "expected_usd": new_expected_usd,
-                                    }));
-                                    self.save_stable_channels();
-                                    if usd_deducted.is_some() {
-                                        self.send_sync_message(user_channel_id.0, new_expected_usd, sync_counterparty);
-                                    }
-                                    self.status_message = format!(
-                                        "Channel {} ready after splice (${:.2} stabilized)",
-                                        channel_id, new_expected_usd
-                                    );
-                                } else {
-                                    // New channel: create entry with $0 stabilized (user opts in via trade)
-                                    self.selected_channel_id = channel_id.to_string();
-                                    self.stable_channel_amount = "0".to_string();
-                                    self.edit_stable_channel(None);
-
-                                    audit_event("CHANNEL_READY", json!({
-                                        "channel_id": channel_id.to_string(),
-                                        "user_channel_id": format!("{}", user_channel_id.0),
-                                        "funded_usd": funded_usd,
-                                        "stabilized_usd": 0.0
-                                    }));
-                                    self.status_message = format!(
-                                        "Channel {} ready (funded ${:.2}, awaiting stabilization opt-in)",
-                                        channel_id, funded_usd
-                                    );
-                                }
-                            }
-                            self.update_balances();
-                        }
-                        Event::ChannelPending {
-                            channel_id,
-                            user_channel_id,
-                            former_temporary_channel_id,
-                            counterparty_node_id,
-                            funding_txo,
-                            } => {
-                            let temp_id_str = hex::encode(former_temporary_channel_id.0);
-                        
-                            let funding_str = funding_txo.txid.as_raw_hash().to_string();
-                        
-                            audit_event(
-                                "CHANNEL_PENDING",
-                                json!({
-                                    "channel_id":            channel_id.to_string(),
-                                    "user_channel_id":       format!("{:?}", user_channel_id),
-                                    "temp_channel_id":       temp_id_str,
-                                    "counterparty_node_id":  counterparty_node_id.to_string(),
-                                    "funding_txo":           funding_str,
-                                }),
-                            );
-                        
-                            self.status_message = format!("Channel {} is pending confirmation", channel_id);
-                        }
-                        Event::PaymentSuccessful { payment_hash, .. } => {
-                            audit_event("PAYMENT_SUCCESSFUL", json!({"payment_hash": format!("{}", payment_hash)}));
-                            self.status_message = format!("Sent payment {}", payment_hash);
-                            self.update_balances();
-                        }
-                        // Event::PaymentReceived { amount_msat, payment_hash, .. } => {
-                        //     audit_event("PAYMENT_RECEIVED", json!({"amount_msat": amount_msat, "payment_hash": format!("{}", payment_hash)}));
-                        //     self.status_message = format!("Received payment of {} msats", amount_msat);
-                        //     self.update_balances();
-                        // }
-                        Event::PaymentReceived { amount_msat, payment_hash, custom_records, payment_id: _ } => {
-                            self.handle_payment_received(amount_msat, payment_hash, custom_records)
-                        }
-                        Event::PaymentForwarded {
-                            prev_channel_id,
-                            next_channel_id,
-                            outbound_amount_forwarded_msat,
-                            total_fee_earned_msat,
-                            ..
-                        } => {
-                            self.handle_payment_forwarded(
-                                prev_channel_id,
-                                next_channel_id,
-                                outbound_amount_forwarded_msat,
-                                total_fee_earned_msat,
-                            );
-                        }
-                        Event::ChannelClosed { channel_id, user_channel_id, reason, .. } => {
-                            let user_ch_id = user_channel_id.0;
-                            audit_event("CHANNEL_CLOSED", json!({
-                                "channel_id": format!("{}", channel_id),
-                                "user_channel_id": format!("{}", user_ch_id),
-                                "reason": format!("{:?}", reason)
-                            }));
-                            // Remove stable channel entry and delete from DB
-                            self.stable_channels.retain(|sc| sc.user_channel_id != user_ch_id);
-                            let _ = self.db.delete_channel(&format!("{}", user_ch_id));
-                            self.status_message = format!("Channel {} has been closed", channel_id);
-                            self.update_balances();
-                        }
-                        Event::SplicePending { channel_id, user_channel_id, new_funding_txo, .. } => {
-                            let txid_str = new_funding_txo.txid.to_string();
-                            let vout = new_funding_txo.vout;
-
-                            audit_event("SPLICE_PENDING", json!({
-                                "channel_id": channel_id.to_string(),
-                                "user_channel_id": format!("{}", user_channel_id.0),
-                                "funding_txo": format!("{}:{}", txid_str, vout),
-                            }));
-
-                            // Get old channel value (list_channels still shows pre-splice value)
-                            let old_channel_value_sats = self.node.list_channels()
-                                .iter()
-                                .find(|c| c.user_channel_id.0 == user_channel_id.0)
-                                .map(|c| c.channel_value_sats);
-
-                            // Look up new funding output value from bitcoind
-                            if let Some(old_value) = old_channel_value_sats {
-                                match lookup_funding_output_sats(&txid_str, vout) {
-                                    Some(new_value) => {
-                                        audit_event("SPLICE_PENDING_LOOKUP", json!({
-                                            "old_channel_sats": old_value,
-                                            "new_channel_sats": new_value,
-                                            "delta_sats": (new_value as i64) - (old_value as i64),
-                                        }));
-
-                                        if new_value < old_value {
-                                            // Splice-out: channel got smaller
-                                            let splice_out_sats = old_value - new_value;
-
-                                            let mut sync_info: Option<(u128, f64, PublicKey)> = None;
-                                            if let Some(sc) = self.stable_channels.iter_mut()
-                                                .find(|sc| sc.user_channel_id == user_channel_id.0)
-                                            {
-                                                let price = sc.latest_price;
-                                                if let Some(usd_deducted) = stable::deduct_outgoing(sc, splice_out_sats, price) {
-                                                    audit_event("SPLICE_PENDING_STABLE_DEDUCTED", json!({
-                                                        "channel_id": channel_id.to_string(),
-                                                        "user_channel_id": format!("{}", user_channel_id.0),
-                                                        "splice_out_sats": splice_out_sats,
-                                                        "usd_deducted": usd_deducted,
-                                                        "new_expected_usd": sc.expected_usd.0,
-                                                        "btc_price": price,
-                                                    }));
-                                                    sync_info = Some((sc.user_channel_id, sc.expected_usd.0, sc.counterparty));
-                                                }
-                                            }
-                                            if let Some((ucid, eusd, cp)) = sync_info {
-                                                self.send_sync_message(ucid, eusd, cp);
-                                            }
-                                            self.save_stable_channels();
-                                        }
-                                    }
-                                    None => {
-                                        // Tx not yet in mempool or RPC error — trade message + ChannelReady will handle it
-                                        println!("[SplicePending] Could not look up funding output {}:{}", txid_str, vout);
-                                        audit_event("SPLICE_PENDING_LOOKUP_FAILED", json!({
-                                            "txid": txid_str,
-                                            "vout": vout,
-                                        }));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            audit_event("EVENT_IGNORED", json!({"event_type": format!("{:?}", event)}));
-                        }
-                    }
-                    let _ = self.node.event_handled();
-                }
-            }
-
-            fn handle_payment_received(
-                &mut self,
-                amount_msat: u64,
-                payment_hash: PaymentHash,
-                custom_records: Vec<CustomTlvRecord>,
-            ) {
-                let mut decoded_payload: Option<String> = None;
-
-                for tlv in custom_records {
-                    if tlv.type_num == STABLE_CHANNEL_TLV_TYPE {
-                        if let Ok(s) = String::from_utf8(tlv.value) {
-                            decoded_payload = Some(s);
-                        }
-                    }
-                }
-
-                self.status_message = match &decoded_payload {
-                    Some(msg) => format!("Received {} msats with TLV: {}", amount_msat, msg),
-                    None => format!("Received {} msats (no TLV)", amount_msat),
-                };
-
-                // Check for trade TLV on any payment
-                match &decoded_payload {
-                    Some(raw) => {
-                        audit_event("MESSAGE_RECEIVED", json!({
-                            "payment_hash": format!("{}", payment_hash),
-                            "amount_msat": amount_msat,
-                            "raw": raw,
-                        }));
-
-                        // Try to parse as trade message
-                        self.handle_trade_message(raw, &payment_hash);
-                    }
-                    None => {
-                        audit_event("PAYMENT_RECEIVED", json!({
-                            "amount_msat": amount_msat,
-                            "payment_hash": format!("{}", payment_hash),
-                        }));
-
-                        // Non-TLV payment is likely a stability payment from the user.
-                        // Identify which channel received it by comparing balances,
-                        // then reconcile only that channel.
-                        let current_price = get_cached_price();
-
-                        // Snapshot LSP-side balances before refresh
-                        let balances_before: Vec<(ldk_node::lightning::ln::types::ChannelId, u64)> =
-                            self.node.list_channels().iter().map(|c| {
-                                let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-                                (c.channel_id, (c.outbound_capacity_msat / 1000) + unspendable)
-                            }).collect();
-
-                        // Refresh channel state
-                        self.update_balances();
-
-                        // Find which channel's LSP balance increased (received sats from user)
-                        let mut reconciled = false;
-                        for (ch_id, old_lsp_sats) in &balances_before {
-                            if let Some(chan) = self.node.list_channels().iter().find(|c| c.channel_id == *ch_id) {
-                                let unspendable = chan.unspendable_punishment_reserve.unwrap_or(0);
-                                let new_lsp_sats = (chan.outbound_capacity_msat / 1000) + unspendable;
-                                if new_lsp_sats > *old_lsp_sats {
-                                    let user_ch_id = chan.user_channel_id.0;
-                                    if let Some(sc) = self.stable_channels.iter_mut().find(|sc| sc.user_channel_id == user_ch_id) {
-                                        if current_price > 0.0 {
-                                            sc.latest_price = current_price;
-                                        }
-                                        stable::reconcile_incoming(sc);
-                                        reconciled = true;
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Fallback: if we couldn't identify the channel, reconcile
-                        // the only stable channel if there's exactly one
-                        if !reconciled && self.stable_channels.len() == 1 {
-                            let sc = &mut self.stable_channels[0];
-                            if current_price > 0.0 {
-                                sc.latest_price = current_price;
-                            }
-                            stable::reconcile_incoming(sc);
-                        }
-
-                        self.save_stable_channels();
-                    }
-                }
-
-                self.update_balances();
-            }
-
-            /// Handle a forwarded payment — if it came from a stable channel,
-            /// deduct from native BTC first, then overflow into the stabilized portion.
-            fn handle_payment_forwarded(
-                &mut self,
-                prev_channel_id: ChannelId,
-                next_channel_id: ChannelId,
-                outbound_amount_forwarded_msat: Option<u64>,
-                total_fee_earned_msat: Option<u64>,
-            ) {
-                let forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
-                let fee_msat = total_fee_earned_msat.unwrap_or(0);
-                let total_msat = forwarded_msat + fee_msat;
-                let total_sats = total_msat / 1000;
-
-                audit_event("PAYMENT_FORWARDED", json!({
-                    "prev_channel_id": prev_channel_id.to_string(),
-                    "next_channel_id": next_channel_id.to_string(),
-                    "forwarded_msat": forwarded_msat,
-                    "fee_msat": fee_msat,
-                    "total_sats": total_sats,
-                }));
-
-                // Check if the payment came FROM a stable channel (user sent payment out)
-                // Look up user_channel_id from LDK (channel_id changes on splice, user_channel_id doesn't)
-                let prev_user_ch_id = self.node.list_channels().iter()
-                    .find(|c| c.channel_id == prev_channel_id)
-                    .map(|c| c.user_channel_id.0);
-                println!("[forwarded] looking for prev_channel_id={} (user_ch_id={:?}) in {} stable channels", prev_channel_id, prev_user_ch_id, self.stable_channels.len());
-                for sc in &self.stable_channels {
-                    println!("[forwarded]   have channel: {} user_channel_id={} expected_usd={}", sc.channel_id, sc.user_channel_id, sc.expected_usd.0);
-                }
-                if let Some(sc) = prev_user_ch_id.and_then(|uid| self.stable_channels.iter_mut().find(|sc| sc.user_channel_id == uid)) {
-                    println!("[forwarded] matched! expected_usd={} btc_price={}", sc.expected_usd.0, self.btc_price);
-                    if sc.expected_usd.0 <= 0.0 || self.btc_price <= 0.0 {
-                        println!("[forwarded] skipping: expected_usd={} btc_price={}", sc.expected_usd.0, self.btc_price);
-                        return;
-                    }
-
-                    // Get the user's current channel balance (remote side from LSP perspective)
-                    let user_total_sats = self.node.list_channels()
-                        .iter()
-                        .find(|c| c.channel_id == prev_channel_id)
-                        .map(|c| {
-                            let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-                            let lsp_sats = (c.outbound_capacity_msat / 1000) + unspendable;
-                            c.channel_value_sats.saturating_sub(lsp_sats)
-                        })
-                        .unwrap_or(0);
-
-                    let old_expected = sc.expected_usd.0;
-                    let native_sats = user_total_sats.saturating_sub(sc.backing_sats);
-
-                    if let Some(usd_deducted) = stable::reconcile_forwarded(sc, user_total_sats, total_sats, self.btc_price) {
-                        let overflow_sats = total_sats.saturating_sub(native_sats);
-                        let new_expected_usd = sc.expected_usd.0;
-                        let sc_user_channel_id = sc.user_channel_id;
-                        let sc_counterparty = sc.counterparty;
-                        // sc no longer used after this point
-
-                        println!(
+            // Get the user's current channel balance (remote side from LSP perspective)
+            let user_total_sats = self
+                .node
+                .list_channels()
+                .iter()
+                .find(|c| c.channel_id == prev_channel_id)
+                .map(|c| {
+                    let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
+                    let lsp_sats = (c.outbound_capacity_msat / 1000) + unspendable;
+                    c.channel_value_sats.saturating_sub(lsp_sats)
+                })
+                .unwrap_or(0);
+
+            let old_expected = sc.expected_usd.0;
+            let native_sats = user_total_sats.saturating_sub(sc.backing_sats);
+
+            if let Some(usd_deducted) =
+                stable::reconcile_forwarded(sc, user_total_sats, total_sats, self.btc_price)
+            {
+                let overflow_sats = total_sats.saturating_sub(native_sats);
+                let new_expected_usd = sc.expected_usd.0;
+                let sc_user_channel_id = sc.user_channel_id;
+                let sc_counterparty = sc.counterparty;
+                // sc no longer used after this point
+
+                println!(
                             "[forwarded] channel {} spent {} sats ({} native, {} from stable), expected_usd: ${:.2} -> ${:.2}",
                             prev_channel_id, total_sats, native_sats, overflow_sats, old_expected, new_expected_usd
                         );
 
-                        audit_event("STABLE_SPEND_DEDUCTED", json!({
-                            "user_channel_id": format!("{}", sc_user_channel_id),
-                            "total_sats_spent": total_sats,
-                            "native_sats_spent": native_sats,
-                            "stable_sats_spent": overflow_sats,
-                            "usd_deducted": usd_deducted,
-                            "old_expected_usd": old_expected,
-                            "new_expected_usd": new_expected_usd,
-                            "btc_price": self.btc_price,
-                        }));
+                audit_event(
+                    "STABLE_SPEND_DEDUCTED",
+                    json!({
+                        "user_channel_id": format!("{}", sc_user_channel_id),
+                        "total_sats_spent": total_sats,
+                        "native_sats_spent": native_sats,
+                        "stable_sats_spent": overflow_sats,
+                        "usd_deducted": usd_deducted,
+                        "old_expected_usd": old_expected,
+                        "new_expected_usd": new_expected_usd,
+                        "btc_price": self.btc_price,
+                    }),
+                );
 
-                        self.save_stable_channels();
-                        self.send_sync_message(sc_user_channel_id, new_expected_usd, sc_counterparty);
-                    } else {
-                        println!(
+                self.save_stable_channels();
+                self.send_sync_message(sc_user_channel_id, new_expected_usd, sc_counterparty);
+            } else {
+                println!(
                             "[forwarded] channel {} spent {} sats from native BTC ({} native available), stable ${:.2} unchanged",
                             prev_channel_id, total_sats, native_sats, sc.expected_usd.0
                         );
-                        audit_event("FORWARDED_FROM_NATIVE", json!({
-                            "user_channel_id": format!("{}", sc.user_channel_id),
-                            "sats_spent": total_sats,
-                            "native_sats": native_sats,
-                            "expected_usd": sc.expected_usd.0,
-                        }));
-                    }
-                } else {
-                    println!("[forwarded] no stable channel matched prev_channel_id={}", prev_channel_id);
-                }
-
-                self.update_balances();
+                audit_event(
+                    "FORWARDED_FROM_NATIVE",
+                    json!({
+                        "user_channel_id": format!("{}", sc.user_channel_id),
+                        "sats_spent": total_sats,
+                        "native_sats": native_sats,
+                        "expected_usd": sc.expected_usd.0,
+                    }),
+                );
             }
+        } else {
+            println!(
+                "[forwarded] no stable channel matched prev_channel_id={}",
+                prev_channel_id
+            );
+        }
 
-            /// Send authoritative expected_usd to the user after a stable deduction.
-            /// Ensures both sides agree on the stable position value.
-            fn send_sync_message(&self, user_channel_id: u128, expected_usd: f64, counterparty: PublicKey) {
-                let payload = json!({
-                    "type": SYNC_MESSAGE_TYPE,
-                    "user_channel_id": format!("{}", user_channel_id),
-                    "expected_usd": expected_usd,
-                });
-                let payload_str = payload.to_string();
-                let signature = self.node.sign_message(payload_str.as_bytes());
+        self.update_balances();
+    }
 
-                let signed_msg = json!({
-                    "payload": payload_str,
-                    "signature": signature,
-                });
-                let signed_str = signed_msg.to_string();
+    /// Send authoritative expected_usd to the user after a stable deduction.
+    /// Ensures both sides agree on the stable position value.
+    fn send_sync_message(&self, user_channel_id: u128, expected_usd: f64, counterparty: PublicKey) {
+        let payload = json!({
+            "type": SYNC_MESSAGE_TYPE,
+            "user_channel_id": format!("{}", user_channel_id),
+            "expected_usd": expected_usd,
+        });
+        let payload_str = payload.to_string();
+        let signature = self.node.sign_message(payload_str.as_bytes());
 
-                let custom_tlv = CustomTlvRecord {
-                    type_num: STABLE_CHANNEL_TLV_TYPE,
-                    value: signed_str.as_bytes().to_vec(),
-                };
+        let signed_msg = json!({
+            "payload": payload_str,
+            "signature": signature,
+        });
+        let signed_str = signed_msg.to_string();
 
-                match self.node.spontaneous_payment().send_with_custom_tlvs(
-                    1, // 1 msat
-                    counterparty,
-                    None,
-                    vec![custom_tlv],
-                ) {
-                    Ok(payment_id) => {
-                        audit_event("SYNC_MESSAGE_SENT", json!({
-                            "user_channel_id": format!("{}", user_channel_id),
-                            "expected_usd": expected_usd,
-                            "payment_id": format!("{}", payment_id),
-                        }));
-                    }
-                    Err(e) => {
-                        audit_event("SYNC_MESSAGE_FAILED", json!({
-                            "user_channel_id": format!("{}", user_channel_id),
-                            "expected_usd": expected_usd,
-                            "error": format!("{e}"),
-                        }));
-                    }
-                }
+        let custom_tlv = CustomTlvRecord {
+            type_num: STABLE_CHANNEL_TLV_TYPE,
+            value: signed_str.as_bytes().to_vec(),
+        };
+
+        match self.node.spontaneous_payment().send_with_custom_tlvs(
+            1, // 1 msat
+            counterparty,
+            None,
+            vec![custom_tlv],
+        ) {
+            Ok(payment_id) => {
+                audit_event(
+                    "SYNC_MESSAGE_SENT",
+                    json!({
+                        "user_channel_id": format!("{}", user_channel_id),
+                        "expected_usd": expected_usd,
+                        "payment_id": format!("{}", payment_id),
+                    }),
+                );
             }
+            Err(e) => {
+                audit_event(
+                    "SYNC_MESSAGE_FAILED",
+                    json!({
+                        "user_channel_id": format!("{}", user_channel_id),
+                        "expected_usd": expected_usd,
+                        "error": format!("{e}"),
+                    }),
+                );
+            }
+        }
+    }
 
-            /// Handle trade message from client - updates the stabilized USD amount
-            fn handle_trade_message(
-                &mut self,
-                raw_msg: &str,
-                payment_hash: &PaymentHash,
-            ) {
-                // 1) Parse outer envelope: {"payload":"...", "signature":"..."}
-                let signed: TradeSignedMessage =
-                    match serde_json::from_str::<TradeSignedMessage>(raw_msg) {
-                        Ok(v) => {
-                            audit_event("TRADE_PARSED_SIGNED_OK", json!({
-                                "payment_hash": format!("{}", payment_hash),
-                            }));
-                            v
-                        }
-                        Err(e) => {
-                            audit_event("TRADE_PARSE_SIGNED_FAILED", json!({
-                                "error": format!("{e}"),
-                                "raw": raw_msg,
-                                "payment_hash": format!("{}", payment_hash),
-                            }));
-                            self.status_message = "Trade: malformed signed JSON".to_string();
-                            return;
-                        }
-                    };
+    /// Handle trade message from client - updates the stabilized USD amount
+    fn handle_trade_message(&mut self, raw_msg: &str, payment_hash: &PaymentHash) {
+        // 1) Parse outer envelope: {"payload":"...", "signature":"..."}
+        let signed: TradeSignedMessage = match serde_json::from_str::<TradeSignedMessage>(raw_msg) {
+            Ok(v) => {
+                audit_event(
+                    "TRADE_PARSED_SIGNED_OK",
+                    json!({
+                        "payment_hash": format!("{}", payment_hash),
+                    }),
+                );
+                v
+            }
+            Err(e) => {
+                audit_event(
+                    "TRADE_PARSE_SIGNED_FAILED",
+                    json!({
+                        "error": format!("{e}"),
+                        "raw": raw_msg,
+                        "payment_hash": format!("{}", payment_hash),
+                    }),
+                );
+                self.status_message = "Trade: malformed signed JSON".to_string();
+                return;
+            }
+        };
 
-                // 2) Parse inner payload: type + channel_id + expected_usd
-                let payload: TradePayload =
-                    match serde_json::from_str::<TradePayload>(&signed.payload) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            audit_event("TRADE_PARSE_PAYLOAD_FAILED", json!({
-                                "error": format!("{e}"),
-                                "payload": signed.payload,
-                                "payment_hash": format!("{}", payment_hash),
-                            }));
-                            self.status_message = "Trade: malformed payload".to_string();
-                            return;
-                        }
-                    };
+        // 2) Parse inner payload: type + channel_id + expected_usd
+        let payload: TradePayload = match serde_json::from_str::<TradePayload>(&signed.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                audit_event(
+                    "TRADE_PARSE_PAYLOAD_FAILED",
+                    json!({
+                        "error": format!("{e}"),
+                        "payload": signed.payload,
+                        "payment_hash": format!("{}", payment_hash),
+                    }),
+                );
+                self.status_message = "Trade: malformed payload".to_string();
+                return;
+            }
+        };
 
-                audit_event("TRADE_PARSED_PAYLOAD_OK", json!({
+        audit_event(
+            "TRADE_PARSED_PAYLOAD_OK",
+            json!({
+                "payment_hash": format!("{}", payment_hash),
+                "user_channel_id": &payload.user_channel_id,
+                "type": &payload.kind,
+                "expected_usd": payload.expected_usd,
+            }),
+        );
+
+        // Check message type
+        if payload.kind != TRADE_MESSAGE_TYPE {
+            audit_event(
+                "TRADE_UNHANDLED_TYPE",
+                json!({
+                    "kind": payload.kind,
                     "payment_hash": format!("{}", payment_hash),
-                    "user_channel_id": &payload.user_channel_id,
-                    "type": &payload.kind,
-                    "expected_usd": payload.expected_usd,
-                }));
+                }),
+            );
+            self.status_message = format!("Trade: ignoring type {}", payload.kind);
+            return;
+        }
 
-                // Check message type
-                if payload.kind != TRADE_MESSAGE_TYPE {
-                    audit_event("TRADE_UNHANDLED_TYPE", json!({
-                        "kind": payload.kind,
-                        "payment_hash": format!("{}", payment_hash),
-                    }));
-                    self.status_message = format!("Trade: ignoring type {}", payload.kind);
-                    return;
-                }
+        // 3) Validate expected_usd
+        let new_expected_usd = payload.expected_usd;
+        if new_expected_usd < 0.0 {
+            audit_event(
+                "TRADE_INVALID_AMOUNT",
+                json!({
+                    "expected_usd": new_expected_usd,
+                    "reason": "negative amount",
+                    "payment_hash": format!("{}", payment_hash),
+                }),
+            );
+            self.status_message = "Trade: negative amount not allowed".to_string();
+            return;
+        }
 
-                // 3) Validate expected_usd
-                let new_expected_usd = payload.expected_usd;
-                if new_expected_usd < 0.0 {
-                    audit_event("TRADE_INVALID_AMOUNT", json!({
-                        "expected_usd": new_expected_usd,
-                        "reason": "negative amount",
-                        "payment_hash": format!("{}", payment_hash),
-                    }));
-                    self.status_message = "Trade: negative amount not allowed".to_string();
-                    return;
-                }
+        let user_ch_id_str = payload.user_channel_id.clone();
 
-                let user_ch_id_str = payload.user_channel_id.clone();
+        // 4) Find the channel — prefer channel_id (shared between both nodes),
+        //    fall back to user_channel_id for backward compat
+        let channels = self.node.list_channels();
+        let channel_opt = if let Some(ref cid) = payload.channel_id {
+            // channel_id is the same on both sides of the channel
+            channels.iter().find(|c| c.channel_id.to_string() == *cid)
+        } else {
+            // Legacy: try user_channel_id (only works if both sides happen to match)
+            channels
+                .iter()
+                .find(|c| format!("{}", c.user_channel_id.0) == user_ch_id_str)
+        };
 
-                // 4) Find the channel — prefer channel_id (shared between both nodes),
-                //    fall back to user_channel_id for backward compat
-                let channels = self.node.list_channels();
-                let channel_opt = if let Some(ref cid) = payload.channel_id {
-                    // channel_id is the same on both sides of the channel
-                    channels.iter().find(|c| c.channel_id.to_string() == *cid)
-                } else {
-                    // Legacy: try user_channel_id (only works if both sides happen to match)
-                    channels.iter().find(|c| format!("{}", c.user_channel_id.0) == user_ch_id_str)
-                };
-
-                let channel = match channel_opt {
-                    Some(ch) => ch.clone(),
-                    None => {
-                        audit_event("TRADE_CHANNEL_NOT_FOUND", json!({
-                            "channel_id": payload.channel_id,
-                            "user_channel_id": user_ch_id_str,
-                            "expected_usd": new_expected_usd,
-                            "payment_hash": format!("{}", payment_hash),
-                        }));
-                        self.status_message = format!("Trade: channel not found (channel_id={:?}, user_id={})", payload.channel_id, user_ch_id_str);
-                        return;
-                    }
-                };
-
-                let chan_id_str = channel.channel_id.to_string();
-
-                // 5) Verify signature using counterparty's pubkey
-                let pkey = channel.counterparty_node_id;
-                let sig_ok = self
-                    .node
-                    .verify_signature(signed.payload.as_bytes(), &signed.signature, &pkey);
-
-                if !sig_ok {
-                    audit_event("TRADE_SIGNATURE_INVALID", json!({
-                        "channel_id": chan_id_str,
+        let channel = match channel_opt {
+            Some(ch) => ch.clone(),
+            None => {
+                audit_event(
+                    "TRADE_CHANNEL_NOT_FOUND",
+                    json!({
+                        "channel_id": payload.channel_id,
                         "user_channel_id": user_ch_id_str,
                         "expected_usd": new_expected_usd,
                         "payment_hash": format!("{}", payment_hash),
-                    }));
-                    self.status_message = format!(
-                        "Trade: signature NOT verified for channel {}",
-                        chan_id_str
-                    );
-                    println!("Trade message signature NOT verified for channel {}", chan_id_str);
-                    return;
-                }
+                    }),
+                );
+                self.status_message = format!(
+                    "Trade: channel not found (channel_id={:?}, user_id={})",
+                    payload.channel_id, user_ch_id_str
+                );
+                return;
+            }
+        };
 
-                audit_event("TRADE_SIGNATURE_VALID", json!({
+        let chan_id_str = channel.channel_id.to_string();
+
+        // 5) Verify signature using counterparty's pubkey
+        let pkey = channel.counterparty_node_id;
+        let sig_ok =
+            self.node
+                .verify_signature(signed.payload.as_bytes(), &signed.signature, &pkey);
+
+        if !sig_ok {
+            audit_event(
+                "TRADE_SIGNATURE_INVALID",
+                json!({
                     "channel_id": chan_id_str,
                     "user_channel_id": user_ch_id_str,
                     "expected_usd": new_expected_usd,
                     "payment_hash": format!("{}", payment_hash),
-                }));
+                }),
+            );
+            self.status_message =
+                format!("Trade: signature NOT verified for channel {}", chan_id_str);
+            println!(
+                "Trade message signature NOT verified for channel {}",
+                chan_id_str
+            );
+            return;
+        }
 
-                // 6) Apply new expected_usd to StableChannel
-                let old_expected_usd = if let Some(sc) = self
-                    .stable_channels
-                    .iter_mut()
-                    .find(|sc| sc.user_channel_id == channel.user_channel_id.0)
-                {
-                    // Refresh balances to get current receiver USD
-                    let (ok, _) = stable::update_balances(&self.node, sc);
-                    if !ok {
-                        audit_event("TRADE_BALANCE_UPDATE_FAILED", json!({
-                            "user_channel_id": user_ch_id_str,
-                            "payment_hash": format!("{}", payment_hash),
-                        }));
-                        self.status_message = "Trade: failed to update balances".to_string();
-                        return;
-                    }
+        audit_event(
+            "TRADE_SIGNATURE_VALID",
+            json!({
+                "channel_id": chan_id_str,
+                "user_channel_id": user_ch_id_str,
+                "expected_usd": new_expected_usd,
+                "payment_hash": format!("{}", payment_hash),
+            }),
+        );
 
-                    // Validate: can't stabilize more than the user's channel balance
-                    let receiver_usd = sc.stable_receiver_usd.0;
-                    if new_expected_usd > receiver_usd {
-                        audit_event("TRADE_EXCEEDS_BALANCE", json!({
-                            "user_channel_id": user_ch_id_str,
-                            "expected_usd": new_expected_usd,
-                            "receiver_usd": receiver_usd,
-                            "payment_hash": format!("{}", payment_hash),
-                        }));
-                        self.status_message = format!(
-                            "Trade: expected_usd ${:.2} exceeds receiver balance ${:.2}",
-                            new_expected_usd, receiver_usd
-                        );
-                        return;
-                    }
+        // 6) Apply new expected_usd to StableChannel
+        let old_expected_usd = if let Some(sc) = self
+            .stable_channels
+            .iter_mut()
+            .find(|sc| sc.user_channel_id == channel.user_channel_id.0)
+        {
+            // Refresh balances to get current receiver USD
+            let (ok, _) = stable::update_balances(&self.node, sc);
+            if !ok {
+                audit_event(
+                    "TRADE_BALANCE_UPDATE_FAILED",
+                    json!({
+                        "user_channel_id": user_ch_id_str,
+                        "payment_hash": format!("{}", payment_hash),
+                    }),
+                );
+                self.status_message = "Trade: failed to update balances".to_string();
+                return;
+            }
 
-                    let old = sc.expected_usd.0;
-                    println!("[trade] updating expected_usd: {} -> {} for user_channel_id={}", old, new_expected_usd, sc.user_channel_id);
-
-                    stable::apply_trade(sc, new_expected_usd, sc.latest_price);
-
-                    old
-                } else {
-                    println!("[trade] ERROR: user_channel_id {} not found in stable_channels list ({} entries)", user_ch_id_str, self.stable_channels.len());
-                    for sc in &self.stable_channels {
-                        println!("[trade]   have: channel_id={} user_channel_id={}", sc.channel_id, sc.user_channel_id);
-                    }
-                    audit_event("TRADE_STABLE_ENTRY_NOT_FOUND", json!({
-                        "channel_id": chan_id_str,
+            // Validate: can't stabilize more than the user's channel balance
+            let receiver_usd = sc.stable_receiver_usd.0;
+            if new_expected_usd > receiver_usd {
+                audit_event(
+                    "TRADE_EXCEEDS_BALANCE",
+                    json!({
                         "user_channel_id": user_ch_id_str,
                         "expected_usd": new_expected_usd,
+                        "receiver_usd": receiver_usd,
                         "payment_hash": format!("{}", payment_hash),
-                    }));
-                    self.status_message = format!(
-                        "Trade: user_channel_id {} not in stable channels list",
-                        user_ch_id_str
-                    );
-                    return;
-                };
-
-                self.save_stable_channels();
-
-                audit_event("TRADE_APPLIED", json!({
-                    "user_channel_id": user_ch_id_str,
-                    "old_expected_usd": old_expected_usd,
-                    "new_expected_usd": new_expected_usd,
-                    "payment_hash": format!("{}", payment_hash),
-                }));
-
-                self.status_message = format!(
-                    "Trade applied: ${:.2} -> ${:.2} for channel {}",
-                    old_expected_usd,
-                    new_expected_usd,
-                    &chan_id_str[..8.min(chan_id_str.len())],
+                    }),
                 );
+                self.status_message = format!(
+                    "Trade: expected_usd ${:.2} exceeds receiver balance ${:.2}",
+                    new_expected_usd, receiver_usd
+                );
+                return;
+            }
+
+            let old = sc.expected_usd.0;
+            println!(
+                "[trade] updating expected_usd: {} -> {} for user_channel_id={}",
+                old, new_expected_usd, sc.user_channel_id
+            );
+
+            stable::apply_trade(sc, new_expected_usd, sc.latest_price);
+
+            old
+        } else {
+            println!(
+                "[trade] ERROR: user_channel_id {} not found in stable_channels list ({} entries)",
+                user_ch_id_str,
+                self.stable_channels.len()
+            );
+            for sc in &self.stable_channels {
                 println!(
-                    "Trade applied: ${:.2} -> ${:.2} for channel {}",
-                    old_expected_usd,
-                    new_expected_usd,
-                    chan_id_str
+                    "[trade]   have: channel_id={} user_channel_id={}",
+                    sc.channel_id, sc.user_channel_id
                 );
             }
-            
-            pub fn generate_invoice(&mut self) -> bool {
-                if let Ok(amount) = self.invoice_amount.parse::<u64>() {
-                    let msats = amount * 1000;
-                    match self.node.bolt11_payment().receive(
-                        msats,
-                        &Bolt11InvoiceDescription::Direct(Description::new("Invoice".to_string()).unwrap()),
-                        INVOICE_EXPIRY_SECS,
-                    ) {
-                        Ok(invoice) => {
-                            self.invoice_result = invoice.to_string();
-                            self.status_message = "Invoice generated".to_string();
-                            audit_event("INVOICE_GENERATED", json!({"amount_msats": msats, "invoice": self.invoice_result}));
-                            true
-                        }
-                        Err(e) => {
-                            self.status_message = format!("Error: {}", e);
-                            audit_event("INVOICE_GENERATION_FAILED", json!({"amount_msats": msats, "error": format!("{}", e)}));
-                            false
-                        }
-                    }
-                } else {
-                    self.status_message = "Invalid amount".to_string();
-                    audit_event("INVOICE_INPUT_INVALID", json!({"raw_input": self.invoice_amount}));
+            audit_event(
+                "TRADE_STABLE_ENTRY_NOT_FOUND",
+                json!({
+                    "channel_id": chan_id_str,
+                    "user_channel_id": user_ch_id_str,
+                    "expected_usd": new_expected_usd,
+                    "payment_hash": format!("{}", payment_hash),
+                }),
+            );
+            self.status_message = format!(
+                "Trade: user_channel_id {} not in stable channels list",
+                user_ch_id_str
+            );
+            return;
+        };
+
+        self.save_stable_channels();
+
+        audit_event(
+            "TRADE_APPLIED",
+            json!({
+                "user_channel_id": user_ch_id_str,
+                "old_expected_usd": old_expected_usd,
+                "new_expected_usd": new_expected_usd,
+                "payment_hash": format!("{}", payment_hash),
+            }),
+        );
+
+        self.status_message = format!(
+            "Trade applied: ${:.2} -> ${:.2} for channel {}",
+            old_expected_usd,
+            new_expected_usd,
+            &chan_id_str[..8.min(chan_id_str.len())],
+        );
+        println!(
+            "Trade applied: ${:.2} -> ${:.2} for channel {}",
+            old_expected_usd, new_expected_usd, chan_id_str
+        );
+    }
+
+    pub fn generate_invoice(&mut self) -> bool {
+        if let Ok(amount) = self.invoice_amount.parse::<u64>() {
+            let msats = amount * 1000;
+            match self.node.bolt11_payment().receive(
+                msats,
+                &Bolt11InvoiceDescription::Direct(Description::new("Invoice".to_string()).unwrap()),
+                INVOICE_EXPIRY_SECS,
+            ) {
+                Ok(invoice) => {
+                    self.invoice_result = invoice.to_string();
+                    self.status_message = "Invoice generated".to_string();
+                    audit_event(
+                        "INVOICE_GENERATED",
+                        json!({"amount_msats": msats, "invoice": self.invoice_result}),
+                    );
+                    true
+                }
+                Err(e) => {
+                    self.status_message = format!("Error: {}", e);
+                    audit_event(
+                        "INVOICE_GENERATION_FAILED",
+                        json!({"amount_msats": msats, "error": format!("{}", e)}),
+                    );
                     false
                 }
             }
+        } else {
+            self.status_message = "Invalid amount".to_string();
+            audit_event(
+                "INVOICE_INPUT_INVALID",
+                json!({"raw_input": self.invoice_amount}),
+            );
+            false
+        }
+    }
 
-            pub fn pay_invoice(&mut self) -> bool {
-                match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-                    Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
-                        Ok(payment_id) => {
-                            self.status_message = format!("Payment sent, ID: {}", payment_id);
-                            audit_event("PAYMENT_SENT", json!({"invoice": self.invoice_to_pay, "payment_id": format!("{}", payment_id)}));
-                            self.invoice_to_pay.clear();
-                            self.update_balances();
-                            true
-                        }
-                        Err(e) => {
-                            self.status_message = format!("Payment error: {}", e);
-                            audit_event("PAYMENT_SEND_FAILED", json!({"invoice": self.invoice_to_pay, "error": format!("{}", e)}));
-                            false
-                        }
-                    },
-                    Err(e) => {
-                        self.status_message = format!("Invalid invoice: {}", e);
-                        audit_event("PAYMENT_INVOICE_INVALID", json!({"raw_input": self.invoice_to_pay, "error": format!("{}", e)}));
-                        false
-                    }
+    pub fn pay_invoice(&mut self) -> bool {
+        match Bolt11Invoice::from_str(&self.invoice_to_pay) {
+            Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
+                Ok(payment_id) => {
+                    self.status_message = format!("Payment sent, ID: {}", payment_id);
+                    audit_event(
+                        "PAYMENT_SENT",
+                        json!({"invoice": self.invoice_to_pay, "payment_id": format!("{}", payment_id)}),
+                    );
+                    self.invoice_to_pay.clear();
+                    self.update_balances();
+                    true
                 }
-            }
-
-            pub fn get_address(&mut self) -> bool {
-                match self.node.onchain_payment().new_address() {
-                    Ok(address) => {
-                        self.on_chain_address = address.to_string();
-                        self.status_message = "Address generated".to_string();
-                        audit_event("ONCHAIN_ADDRESS_GENERATED", json!({"address": self.on_chain_address}));
-                        true
-                    }
-                    Err(e) => {
-                        self.status_message = format!("Error: {}", e);
-                        audit_event("ONCHAIN_ADDRESS_FAILED", json!({"error": format!("{}", e)}));
-                        false
-                    }
+                Err(e) => {
+                    self.status_message = format!("Payment error: {}", e);
+                    audit_event(
+                        "PAYMENT_SEND_FAILED",
+                        json!({"invoice": self.invoice_to_pay, "error": format!("{}", e)}),
+                    );
+                    false
                 }
+            },
+            Err(e) => {
+                self.status_message = format!("Invalid invoice: {}", e);
+                audit_event(
+                    "PAYMENT_INVOICE_INVALID",
+                    json!({"raw_input": self.invoice_to_pay, "error": format!("{}", e)}),
+                );
+                false
             }
+        }
+    }
 
-            pub fn send_onchain(&mut self) -> bool {
-                if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
-                    match Address::from_str(&self.on_chain_address) {
-                        Ok(addr) => match addr.require_network(Network::Bitcoin) {
-                            Ok(valid_addr) => match self.node.onchain_payment().send_to_address(&valid_addr, amount, None) {
-                                Ok(txid) => {
-                                    self.status_message = format!("Transaction sent: {}", txid);
-                                    audit_event("ONCHAIN_SEND_SUCCESS", json!({"txid": format!("{}", txid), "amount_sat": amount}));
-                                    self.update_balances();
-                                    true
-                                }
-                                Err(e) => {
-                                    self.status_message = format!("Transaction error: {}", e);
-                                    audit_event("ONCHAIN_SEND_FAILED", json!({"amount_sat": amount, "error": format!("{}", e)}));
-                                    false
-                                }
-                            },
-                            Err(_) => {
-                                self.status_message = "Invalid address for this network".to_string();
-                                audit_event("ONCHAIN_ADDRESS_INVALID_NET", json!({"address": self.on_chain_address}));
+    pub fn get_address(&mut self) -> bool {
+        match self.node.onchain_payment().new_address() {
+            Ok(address) => {
+                self.on_chain_address = address.to_string();
+                self.status_message = "Address generated".to_string();
+                audit_event(
+                    "ONCHAIN_ADDRESS_GENERATED",
+                    json!({"address": self.on_chain_address}),
+                );
+                true
+            }
+            Err(e) => {
+                self.status_message = format!("Error: {}", e);
+                audit_event("ONCHAIN_ADDRESS_FAILED", json!({"error": format!("{}", e)}));
+                false
+            }
+        }
+    }
+
+    pub fn send_onchain(&mut self) -> bool {
+        if let Ok(amount) = self.on_chain_amount.parse::<u64>() {
+            match Address::from_str(&self.on_chain_address) {
+                Ok(addr) => {
+                    match addr.require_network(Network::Bitcoin) {
+                        Ok(valid_addr) => match self.node.onchain_payment().send_to_address(
+                            &valid_addr,
+                            amount,
+                            None,
+                        ) {
+                            Ok(txid) => {
+                                self.status_message = format!("Transaction sent: {}", txid);
+                                audit_event(
+                                    "ONCHAIN_SEND_SUCCESS",
+                                    json!({"txid": format!("{}", txid), "amount_sat": amount}),
+                                );
+                                self.update_balances();
+                                true
+                            }
+                            Err(e) => {
+                                self.status_message = format!("Transaction error: {}", e);
+                                audit_event(
+                                    "ONCHAIN_SEND_FAILED",
+                                    json!({"amount_sat": amount, "error": format!("{}", e)}),
+                                );
                                 false
                             }
                         },
                         Err(_) => {
-                            self.status_message = "Invalid address".to_string();
-                            audit_event("ONCHAIN_ADDRESS_INVALID", json!({"address": self.on_chain_address}));
+                            self.status_message = "Invalid address for this network".to_string();
+                            audit_event(
+                                "ONCHAIN_ADDRESS_INVALID_NET",
+                                json!({"address": self.on_chain_address}),
+                            );
                             false
                         }
                     }
-                } else {
-                    self.status_message = "Invalid amount".to_string();
-                    audit_event("ONCHAIN_AMOUNT_INVALID", json!({"raw_input": self.on_chain_amount}));
+                }
+                Err(_) => {
+                    self.status_message = "Invalid address".to_string();
+                    audit_event(
+                        "ONCHAIN_ADDRESS_INVALID",
+                        json!({"address": self.on_chain_address}),
+                    );
                     false
                 }
             }
+        } else {
+            self.status_message = "Invalid amount".to_string();
+            audit_event(
+                "ONCHAIN_AMOUNT_INVALID",
+                json!({"raw_input": self.on_chain_amount}),
+            );
+            false
+        }
+    }
 
-            pub fn update_channel_info(&mut self) -> String {
-                let channels = self.node.list_channels();
-                if channels.is_empty() {
-                    return "No channels found.".to_string();
-                }
-            
-                let mut info = String::new();
-                info.push_str("[Channel Information Table]\n");
-            
-                for (i, channel) in channels.iter().enumerate() {
-                    let is_stable = self.stable_channels.iter().any(|sc| sc.user_channel_id == channel.user_channel_id.0);
-            
-                    let id_str = hex::encode(channel.channel_id.0);
-                    let peer_str = channel.counterparty_node_id.to_string();
-                    let txid_str = channel.funding_txo
-                        .as_ref()
-                        .map(|o| format!("{}:{}", o.txid, o.vout))
-                        .unwrap_or("-".to_string());
-            
-                    let value = channel.channel_value_sats;
-                    let outbound = channel.outbound_capacity_msat / 1000;
-                    let inbound = channel.inbound_capacity_msat / 1000;
-                    let usable = channel.is_usable;
-            
-                    info.push_str(&format!(
+    pub fn update_channel_info(&mut self) -> String {
+        let channels = self.node.list_channels();
+        if channels.is_empty() {
+            return "No channels found.".to_string();
+        }
+
+        let mut info = String::new();
+        info.push_str("[Channel Information Table]\n");
+
+        for (i, channel) in channels.iter().enumerate() {
+            let is_stable = self
+                .stable_channels
+                .iter()
+                .any(|sc| sc.user_channel_id == channel.user_channel_id.0);
+
+            let id_str = hex::encode(channel.channel_id.0);
+            let peer_str = channel.counterparty_node_id.to_string();
+            let txid_str = channel
+                .funding_txo
+                .as_ref()
+                .map(|o| format!("{}:{}", o.txid, o.vout))
+                .unwrap_or("-".to_string());
+
+            let value = channel.channel_value_sats;
+            let outbound = channel.outbound_capacity_msat / 1000;
+            let inbound = channel.inbound_capacity_msat / 1000;
+            let usable = channel.is_usable;
+
+            info.push_str(&format!(
                         "{} | ID: {} | Peer: {} | TXID: {} | Capacity: {} sats | Ours: {} | Theirs: {} | Usable: {} | Stable: {}\n",
                         i + 1,
                         id_str,
@@ -1656,335 +1976,374 @@
                         usable,
                         is_stable
                     ));
-                }
-            
-                info
-            }
-        
-            pub fn open_channel(&mut self) -> bool {
-                match PublicKey::from_str(&self.open_channel_node_id) {
-                    Ok(node_id) => match SocketAddress::from_str(&self.open_channel_address) {
-                        Ok(net_address) => match self.open_channel_amount.parse::<u64>() {
-                            Ok(sats) => {
-                                let push_msat = (sats / 2) * 1000;
-                                let channel_config: Option<ChannelConfig> = None;
+        }
 
-                                match self.node.open_announced_channel(
-                                    node_id,
-                                    net_address,
-                                    sats,
-                                    Some(push_msat),
-                                    channel_config,
-                                ) {
-                                    Ok(_) => {
-                                        self.status_message = format!("Channel opening initiated with {} for {} sats", node_id, sats);
-                                        true
-                                    }
-                                    Err(e) => {
-                                        self.status_message = format!("Error opening channel: {}", e);
-                                        false
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                self.status_message = "Invalid amount format".to_string();
-                                false
-                            }
-                        },
-                        Err(_) => {
-                            self.status_message = "Invalid network address format".to_string();
-                            false
-                        }
-                    },
-                    Err(_) => {
-                        self.status_message = "Invalid node ID format".to_string();
-                        false
-                    }
-                }
-            }
+        info
+    }
 
-            pub fn close_specific_channel(&mut self) {
-                if self.channel_id_to_close.is_empty() {
-                    self.status_message = "Please enter a channel ID to close".to_string();
-                    return;
-                }
+    pub fn open_channel(&mut self) -> bool {
+        match PublicKey::from_str(&self.open_channel_node_id) {
+            Ok(node_id) => match SocketAddress::from_str(&self.open_channel_address) {
+                Ok(net_address) => match self.open_channel_amount.parse::<u64>() {
+                    Ok(sats) => {
+                        let push_msat = (sats / 2) * 1000;
+                        let channel_config: Option<ChannelConfig> = None;
 
-                let input = self.channel_id_to_close.trim();
-                if input.len() == 64 && input.chars().all(|c| c.is_ascii_hexdigit()) {
-                    if let Ok(bytes) = hex::decode(input) {
-                        for channel in self.node.list_channels() {
-                            if channel.channel_id.0.to_vec() == bytes {
-                                let result = self.node.close_channel(&channel.user_channel_id, channel.counterparty_node_id);
-                                self.status_message = match result {
-                                    Ok(_) => format!("Closing channel: {}", input),
-                                    Err(e) => format!("Error closing channel: {}", e),
-                                };
-                                self.channel_id_to_close.clear();
-                                return;
-                            }
-                        }
-                    }
-                    self.status_message = "Channel ID not found.".to_string();
-                } else {
-                    for channel in self.node.list_channels() {
-                        if channel.channel_id.to_string() == input {
-                            let result = self.node.close_channel(&channel.user_channel_id, channel.counterparty_node_id);
-                            self.status_message = match result {
-                                Ok(_) => format!("Closing channel: {}", input),
-                                Err(e) => format!("Error closing channel: {}", e),
-                            };
-                            self.channel_id_to_close.clear();
-                            return;
-                        }
-                    }
-                    self.status_message = "Channel not found.".to_string();
-                }
-            }
-
-            pub fn edit_stable_channel(&mut self, note: Option<String>) {
-                if self.selected_channel_id.is_empty() {
-                    self.status_message = "Please select a channel ID".to_string();
-                    audit_event("STABLE_EDIT_NO_CHANNEL", json!({}));  
-                    return;
-                }
-            
-                let amount = match self.stable_channel_amount.parse::<f64>() {
-                    Ok(val) => val,
-                    Err(_) => {
-                        self.status_message = "Invalid amount format".to_string();
-                        audit_event("STABLE_EDIT_AMOUNT_INVALID", json!({"raw_input": self.stable_channel_amount}));
-                        return;
-                    }
-                };
-            
-                let channel_id_str = self.selected_channel_id.trim().to_string();
-            
-                for channel in self.node.list_channels() {
-                    if channel.channel_id.to_string() == channel_id_str {
-                        let expected_usd = USD::from_f64(amount);
-                        let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
-            
-                        let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
-                        let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
-                        let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-            
-                        let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
-                        let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
-                        let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
-                        let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
-            
-                        let mut note = note.clone();
-                        if note.is_none() {
-                            if let Some(existing) = self.stable_channels.iter().find(|sc| sc.user_channel_id == channel.user_channel_id.0) {
-                                note = existing.note.clone();
-                            }
-                        }
-
-                        // Calculate backing_sats: BTC amount backing the stable portion
-                        let backing_sats = if self.btc_price > 0.0 {
-                            let btc_amount = amount / self.btc_price;
-                            (btc_amount * 100_000_000.0) as u64
-                        } else {
-                            0
-                        };
-
-                        let stable_channel = StableChannel {
-                            channel_id: channel.channel_id,
-                            user_channel_id: channel.user_channel_id.0,
-                            counterparty: channel.counterparty_node_id,
-                            is_stable_receiver: false,
-                            expected_usd,
-                            expected_btc,
-                            stable_receiver_btc,
-                            stable_receiver_usd,
-                            stable_provider_btc,
-                            stable_provider_usd,
-                            latest_price: self.btc_price,
-                            risk_level: 0,
-                            payment_made: false,
-                            timestamp: 0,
-                            formatted_datetime: "".to_string(),
-                            sc_dir: LSP_DATA_DIR.to_string(),
-                            prices: "".to_string(),
-                            onchain_btc: Bitcoin::from_sats(0),
-                            onchain_usd: USD(0.0),
-                            note,
-                            native_channel_btc: Bitcoin::from_sats(0),
-                            backing_sats,
-                            last_stability_payment: 0,
-                        };
-
-                        let mut found = false;
-                        for sc in &mut self.stable_channels {
-                            if sc.user_channel_id == channel.user_channel_id.0 {
-                                *sc = stable_channel.clone();
-                                found = true;
-                                break;
-                            }
-                        }
-            
-                        if !found {
-                            self.stable_channels.push(stable_channel);
-                        }
-            
-                        self.save_stable_channels();
-            
-                        self.status_message = format!(
-                            "Channel {} edited as stable with target ${}",
-                            channel_id_str, amount
-                        );
-                        audit_event("STABLE_EDITED", json!({"user_channel_id": format!("{}", channel.user_channel_id.0), "target_usd": amount}));
-                        self.selected_channel_id.clear();
-                        self.stable_channel_amount = "0".to_string();
-                        return;
-                    }
-                }
-            
-                audit_event("STABLE_EDIT_CHANNEL_NOT_FOUND", json!({"channel_id": self.selected_channel_id}));
-                self.status_message = format!("No channel found matching: {}", self.selected_channel_id);
-            }            
-
-            pub fn save_stable_channels(&mut self) {
-                for sc in &self.stable_channels {
-                    let ch_id = sc.channel_id.to_string();
-                    let uch_id = format!("{}", sc.user_channel_id);
-                    println!("[save_stable] saving channel={} user_channel_id={} expected_usd={} backing_sats={}", ch_id, uch_id, sc.expected_usd.0, sc.backing_sats);
-                    if let Err(e) = self.db.save_channel(
-                        &ch_id,
-                        &uch_id,
-                        sc.expected_usd.0,
-                        sc.backing_sats,
-                        sc.note.as_deref(),
-                    ) {
-                        eprintln!("[save_stable] ERROR saving channel {} to DB: {}", ch_id, e);
-                    }
-                }
-                println!("[save_stable] Saved {} stable channels to DB", self.stable_channels.len());
-            }
-
-            pub fn load_stable_channels(&mut self) {
-                // Migrate from legacy JSON if it exists
-                let json_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
-                if json_path.exists() {
-                    if let Ok(contents) = fs::read_to_string(&json_path) {
-                        if let Ok(entries) = serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
-                            for entry in &entries {
-                                let uch_id = entry.user_channel_id.as_deref().unwrap_or(&entry.channel_id);
-                                let _ = self.db.save_channel(
-                                    &entry.channel_id,
-                                    uch_id,
-                                    entry.expected_usd,
-                                    entry.backing_sats,
-                                    entry.note.as_deref(),
-                                );
-                            }
-                            println!("Migrated {} channels from JSON to DB", entries.len());
-                            let _ = fs::remove_file(&json_path);
-                        }
-                    }
-                }
-
-                // Load from DB
-                let entries = match self.db.load_all_channels() {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!("Error loading channels from DB: {}", e);
-                        return;
-                    }
-                };
-
-                let ldk_channels = self.node.list_channels();
-                println!("[load_stable] DB has {} entries, LDK has {} channels", entries.len(), ldk_channels.len());
-                for ch in &ldk_channels {
-                    println!("[load_stable]   LDK channel: {} (user_channel_id={})", ch.channel_id, ch.user_channel_id.0);
-                }
-
-                self.stable_channels.clear();
-
-                for entry in entries {
-                    println!("[load_stable] DB entry: channel_id={}, user_channel_id={}, expected_usd={}", entry.channel_id, entry.user_channel_id, entry.expected_usd);
-                    let mut matched = false;
-                    for channel in &ldk_channels {
-                        // Match by user_channel_id (stable across splices), fall back to channel_id for legacy entries
-                        let matches = if !entry.user_channel_id.is_empty() {
-                            format!("{}", channel.user_channel_id.0) == entry.user_channel_id
-                        } else {
-                            channel.channel_id.to_string() == entry.channel_id
-                        };
-                        if matches {
-                            matched = true;
-                            let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
-                            let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
-                            let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-
-                            let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
-                            let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
-                            let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
-                            let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
-
-                            let stable_channel = StableChannel {
-                                channel_id: channel.channel_id,
-                                user_channel_id: channel.user_channel_id.0,
-                                counterparty: channel.counterparty_node_id,
-                                is_stable_receiver: false,
-                                expected_usd: USD::from_f64(entry.expected_usd),
-                                expected_btc: Bitcoin::from_btc(0.0),
-                                stable_receiver_btc,
-                                stable_receiver_usd,
-                                stable_provider_btc,
-                                stable_provider_usd,
-                                latest_price: self.btc_price,
-                                risk_level: 0,
-                                payment_made: false,
-                                timestamp: 0,
-                                formatted_datetime: "".to_string(),
-                                sc_dir: LSP_DATA_DIR.to_string(),
-                                prices: "".to_string(),
-                                onchain_btc: Bitcoin::from_sats(0),
-                                onchain_usd: USD(0.0),
-                                note: entry.note.clone(),
-                                native_channel_btc: Bitcoin::from_sats(0),
-                                backing_sats: entry.backing_sats,
-                                last_stability_payment: 0,
-                            };
-
-                            self.stable_channels.push(stable_channel);
-                            break;
-                        }
-                    }
-                    if !matched {
-                        println!("[load_stable] WARNING: no LDK channel matched DB entry channel_id={} user_channel_id={}", entry.channel_id, entry.user_channel_id);
-                    }
-                }
-
-                println!("Loaded {} stable channels from DB", self.stable_channels.len());
-                self.status_message = format!("Loaded {} stable channels", self.stable_channels.len());
-            }
-            
-            pub fn connect_to_node(&mut self) -> bool {
-                match PublicKey::from_str(&self.connect_node_id) {
-                Ok(node_id) => match SocketAddress::from_str(&self.connect_node_address) {
-                    Ok(address) => {
-                        match self.node.connect(node_id, address, true) {
+                        match self.node.open_announced_channel(
+                            node_id,
+                            net_address,
+                            sats,
+                            Some(push_msat),
+                            channel_config,
+                        ) {
                             Ok(_) => {
-                                self.status_message = format!("Connected to node {}", node_id);
+                                self.status_message = format!(
+                                    "Channel opening initiated with {} for {} sats",
+                                    node_id, sats
+                                );
                                 true
                             }
                             Err(e) => {
-                                self.status_message = format!("Connect error: {}", e);
+                                self.status_message = format!("Error opening channel: {}", e);
                                 false
                             }
                         }
                     }
                     Err(_) => {
-                        self.status_message = "Invalid address format".to_string();
+                        self.status_message = "Invalid amount format".to_string();
                         false
                     }
                 },
                 Err(_) => {
-                    self.status_message = "Invalid node ID format".to_string();
+                    self.status_message = "Invalid network address format".to_string();
                     false
                 }
+            },
+            Err(_) => {
+                self.status_message = "Invalid node ID format".to_string();
+                false
+            }
+        }
+    }
+
+    pub fn close_specific_channel(&mut self) {
+        if self.channel_id_to_close.is_empty() {
+            self.status_message = "Please enter a channel ID to close".to_string();
+            return;
+        }
+
+        let input = self.channel_id_to_close.trim();
+        if input.len() == 64 && input.chars().all(|c| c.is_ascii_hexdigit()) {
+            if let Ok(bytes) = hex::decode(input) {
+                for channel in self.node.list_channels() {
+                    if channel.channel_id.0.to_vec() == bytes {
+                        let result = self
+                            .node
+                            .close_channel(&channel.user_channel_id, channel.counterparty_node_id);
+                        self.status_message = match result {
+                            Ok(_) => format!("Closing channel: {}", input),
+                            Err(e) => format!("Error closing channel: {}", e),
+                        };
+                        self.channel_id_to_close.clear();
+                        return;
+                    }
+                }
+            }
+            self.status_message = "Channel ID not found.".to_string();
+        } else {
+            for channel in self.node.list_channels() {
+                if channel.channel_id.to_string() == input {
+                    let result = self
+                        .node
+                        .close_channel(&channel.user_channel_id, channel.counterparty_node_id);
+                    self.status_message = match result {
+                        Ok(_) => format!("Closing channel: {}", input),
+                        Err(e) => format!("Error closing channel: {}", e),
+                    };
+                    self.channel_id_to_close.clear();
+                    return;
+                }
+            }
+            self.status_message = "Channel not found.".to_string();
+        }
+    }
+
+    pub fn edit_stable_channel(&mut self, note: Option<String>) {
+        if self.selected_channel_id.is_empty() {
+            self.status_message = "Please select a channel ID".to_string();
+            audit_event("STABLE_EDIT_NO_CHANNEL", json!({}));
+            return;
+        }
+
+        let amount = match self.stable_channel_amount.parse::<f64>() {
+            Ok(val) => val,
+            Err(_) => {
+                self.status_message = "Invalid amount format".to_string();
+                audit_event(
+                    "STABLE_EDIT_AMOUNT_INVALID",
+                    json!({"raw_input": self.stable_channel_amount}),
+                );
+                return;
+            }
+        };
+
+        let channel_id_str = self.selected_channel_id.trim().to_string();
+
+        for channel in self.node.list_channels() {
+            if channel.channel_id.to_string() == channel_id_str {
+                let expected_usd = USD::from_f64(amount);
+                let expected_btc = Bitcoin::from_usd(expected_usd, self.btc_price);
+
+                let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+                let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+                let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+
+                let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+                let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+                let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, self.btc_price);
+                let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+
+                let mut note = note.clone();
+                if note.is_none() {
+                    if let Some(existing) = self
+                        .stable_channels
+                        .iter()
+                        .find(|sc| sc.user_channel_id == channel.user_channel_id.0)
+                    {
+                        note = existing.note.clone();
+                    }
+                }
+
+                // Calculate backing_sats: BTC amount backing the stable portion
+                let backing_sats = if self.btc_price > 0.0 {
+                    let btc_amount = amount / self.btc_price;
+                    (btc_amount * 100_000_000.0) as u64
+                } else {
+                    0
+                };
+
+                let stable_channel = StableChannel {
+                    channel_id: channel.channel_id,
+                    user_channel_id: channel.user_channel_id.0,
+                    counterparty: channel.counterparty_node_id,
+                    is_stable_receiver: false,
+                    expected_usd,
+                    expected_btc,
+                    stable_receiver_btc,
+                    stable_receiver_usd,
+                    stable_provider_btc,
+                    stable_provider_usd,
+                    latest_price: self.btc_price,
+                    risk_level: 0,
+                    payment_made: false,
+                    timestamp: 0,
+                    formatted_datetime: "".to_string(),
+                    sc_dir: LSP_DATA_DIR.to_string(),
+                    prices: "".to_string(),
+                    onchain_btc: Bitcoin::from_sats(0),
+                    onchain_usd: USD(0.0),
+                    note,
+                    native_channel_btc: Bitcoin::from_sats(0),
+                    backing_sats,
+                    last_stability_payment: 0,
+                };
+
+                let mut found = false;
+                for sc in &mut self.stable_channels {
+                    if sc.user_channel_id == channel.user_channel_id.0 {
+                        *sc = stable_channel.clone();
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
+                    self.stable_channels.push(stable_channel);
+                }
+
+                self.save_stable_channels();
+
+                self.status_message = format!(
+                    "Channel {} edited as stable with target ${}",
+                    channel_id_str, amount
+                );
+                audit_event(
+                    "STABLE_EDITED",
+                    json!({"user_channel_id": format!("{}", channel.user_channel_id.0), "target_usd": amount}),
+                );
+                self.selected_channel_id.clear();
+                self.stable_channel_amount = "0".to_string();
+                return;
+            }
+        }
+
+        audit_event(
+            "STABLE_EDIT_CHANNEL_NOT_FOUND",
+            json!({"channel_id": self.selected_channel_id}),
+        );
+        self.status_message = format!("No channel found matching: {}", self.selected_channel_id);
+    }
+
+    pub fn save_stable_channels(&mut self) {
+        for sc in &self.stable_channels {
+            let ch_id = sc.channel_id.to_string();
+            let uch_id = format!("{}", sc.user_channel_id);
+            println!("[save_stable] saving channel={} user_channel_id={} expected_usd={} backing_sats={}", ch_id, uch_id, sc.expected_usd.0, sc.backing_sats);
+            if let Err(e) = self.db.save_channel(
+                &ch_id,
+                &uch_id,
+                sc.expected_usd.0,
+                sc.backing_sats,
+                sc.note.as_deref(),
+            ) {
+                eprintln!("[save_stable] ERROR saving channel {} to DB: {}", ch_id, e);
+            }
+        }
+        println!(
+            "[save_stable] Saved {} stable channels to DB",
+            self.stable_channels.len()
+        );
+    }
+
+    pub fn load_stable_channels(&mut self) {
+        // Migrate from legacy JSON if it exists
+        let json_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
+        if json_path.exists() {
+            if let Ok(contents) = fs::read_to_string(&json_path) {
+                if let Ok(entries) = serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
+                    for entry in &entries {
+                        let uch_id = entry
+                            .user_channel_id
+                            .as_deref()
+                            .unwrap_or(&entry.channel_id);
+                        let _ = self.db.save_channel(
+                            &entry.channel_id,
+                            uch_id,
+                            entry.expected_usd,
+                            entry.backing_sats,
+                            entry.note.as_deref(),
+                        );
+                    }
+                    println!("Migrated {} channels from JSON to DB", entries.len());
+                    let _ = fs::remove_file(&json_path);
                 }
             }
         }
+
+        // Load from DB
+        let entries = match self.db.load_all_channels() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error loading channels from DB: {}", e);
+                return;
+            }
+        };
+
+        let ldk_channels = self.node.list_channels();
+        println!(
+            "[load_stable] DB has {} entries, LDK has {} channels",
+            entries.len(),
+            ldk_channels.len()
+        );
+        for ch in &ldk_channels {
+            println!(
+                "[load_stable]   LDK channel: {} (user_channel_id={})",
+                ch.channel_id, ch.user_channel_id.0
+            );
+        }
+
+        self.stable_channels.clear();
+
+        for entry in entries {
+            println!(
+                "[load_stable] DB entry: channel_id={}, user_channel_id={}, expected_usd={}",
+                entry.channel_id, entry.user_channel_id, entry.expected_usd
+            );
+            let mut matched = false;
+            for channel in &ldk_channels {
+                // Match by user_channel_id (stable across splices), fall back to channel_id for legacy entries
+                let matches = if !entry.user_channel_id.is_empty() {
+                    format!("{}", channel.user_channel_id.0) == entry.user_channel_id
+                } else {
+                    channel.channel_id.to_string() == entry.channel_id
+                };
+                if matches {
+                    matched = true;
+                    let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
+                    let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
+                    let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+
+                    let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
+                    let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
+                    let stable_provider_usd =
+                        USD::from_bitcoin(stable_provider_btc, self.btc_price);
+                    let stable_receiver_usd =
+                        USD::from_bitcoin(stable_receiver_btc, self.btc_price);
+
+                    let stable_channel = StableChannel {
+                        channel_id: channel.channel_id,
+                        user_channel_id: channel.user_channel_id.0,
+                        counterparty: channel.counterparty_node_id,
+                        is_stable_receiver: false,
+                        expected_usd: USD::from_f64(entry.expected_usd),
+                        expected_btc: Bitcoin::from_btc(0.0),
+                        stable_receiver_btc,
+                        stable_receiver_usd,
+                        stable_provider_btc,
+                        stable_provider_usd,
+                        latest_price: self.btc_price,
+                        risk_level: 0,
+                        payment_made: false,
+                        timestamp: 0,
+                        formatted_datetime: "".to_string(),
+                        sc_dir: LSP_DATA_DIR.to_string(),
+                        prices: "".to_string(),
+                        onchain_btc: Bitcoin::from_sats(0),
+                        onchain_usd: USD(0.0),
+                        note: entry.note.clone(),
+                        native_channel_btc: Bitcoin::from_sats(0),
+                        backing_sats: entry.backing_sats,
+                        last_stability_payment: 0,
+                    };
+
+                    self.stable_channels.push(stable_channel);
+                    break;
+                }
+            }
+            if !matched {
+                println!("[load_stable] WARNING: no LDK channel matched DB entry channel_id={} user_channel_id={}", entry.channel_id, entry.user_channel_id);
+            }
+        }
+
+        println!(
+            "Loaded {} stable channels from DB",
+            self.stable_channels.len()
+        );
+        self.status_message = format!("Loaded {} stable channels", self.stable_channels.len());
+    }
+
+    pub fn connect_to_node(&mut self) -> bool {
+        match PublicKey::from_str(&self.connect_node_id) {
+            Ok(node_id) => match SocketAddress::from_str(&self.connect_node_address) {
+                Ok(address) => match self.node.connect(node_id, address, true) {
+                    Ok(_) => {
+                        self.status_message = format!("Connected to node {}", node_id);
+                        true
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Connect error: {}", e);
+                        false
+                    }
+                },
+                Err(_) => {
+                    self.status_message = "Invalid address format".to_string();
+                    false
+                }
+            },
+            Err(_) => {
+                self.status_message = "Invalid node ID format".to_string();
+                false
+            }
+        }
+    }
+}

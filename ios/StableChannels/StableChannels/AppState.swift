@@ -30,6 +30,7 @@ class AppState {
     var btcPrice: Double { priceService.currentPrice }
     var statusMessage: String = ""
     var paymentFlash: Bool = false
+    var isSyncing: Bool = false
 
     // Balance (derived)
     var totalBalanceSats: UInt64 = 0
@@ -38,6 +39,11 @@ class AppState {
 
     var totalBalanceUSD: Double {
         guard btcPrice > 0 else { return 0 }
+        // Before node syncs, use cached channel balance if available
+        if totalBalanceSats == 0 && stableChannel.stableReceiverBTC.sats > 0 {
+            return Double(stableChannel.stableReceiverBTC.sats + stableChannel.onchainBTC.sats)
+                / Double(Constants.satsInBTC) * btcPrice
+        }
         return Double(totalBalanceSats) / Double(Constants.satsInBTC) * btcPrice
     }
 
@@ -86,6 +92,11 @@ class AppState {
         // Load saved channel state from DB
         loadChannelFromDB()
 
+        // Seed price from cache so UI can compute native USD immediately
+        if stableChannel.latestPrice > 0 {
+            priceService.currentPrice = stableChannel.latestPrice
+        }
+
         // Start price fetching
         priceService.startAutoRefresh()
 
@@ -98,7 +109,12 @@ class AppState {
         // Check for existing seed / mnemonic
         let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
         if FileManager.default.fileExists(atPath: seedPath.path) {
-            await MainActor.run { phase = .syncing }
+            // Show wallet immediately with cached data from DB
+            let hasCachedData = !stableChannel.userChannelId.isEmpty
+            await MainActor.run {
+                phase = hasCachedData ? .wallet : .syncing
+                if hasCachedData { isSyncing = true }
+            }
 
             do {
                 try await nodeService.start(
@@ -106,13 +122,24 @@ class AppState {
                     esploraURL: Constants.defaultChainURL,
                     mnemonic: ""  // Uses existing seed from data dir
                 )
+                // Store node_id in shared UserDefaults for NSE and push registration
+                let nodeId = nodeService.nodeId
+                if !nodeId.isEmpty {
+                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .set(nodeId, forKey: "node_id")
+                }
+
                 await MainActor.run {
                     phase = .wallet
+                    isSyncing = false
                     refreshBalances()
+                    updateStableBalances()
                     // Use totalOnchainBalanceSats to match detectOnchainDeposit
                     prevOnchainSats = nodeService.balances()?.totalOnchainBalanceSats ?? 0
                 }
                 startStabilityTimer()
+                // Re-register push token with node_id now that node is running
+                reregisterPushTokenIfNeeded()
                 // Check if NSE flagged a pending payment while app was killed
                 await processPendingPushPayment()
             } catch {
@@ -281,6 +308,42 @@ class AppState {
         // Clean up the file
         try? FileManager.default.removeItem(at: gossipPath)
         print("[App] Restored network_graph (\(data.count) bytes) to DB")
+    }
+
+    // MARK: - Push Token Re-registration
+
+    /// Re-register the push token with the LSP now that we have a node_id.
+    /// The initial registration may have happened before the node started.
+    private func reregisterPushTokenIfNeeded() {
+        guard let token = UserDefaults.standard.string(forKey: "apns_device_token"),
+              !nodeService.nodeId.isEmpty else { return }
+
+        let nodeId = nodeService.nodeId
+        guard let url = URL(string: "http://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9737", with: ":3000"))/api/register-push") else { return }
+
+        Task {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let body: [String: String] = [
+                "device_token": token,
+                "platform": "ios",
+                "node_id": nodeId,
+            ]
+
+            guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
+            request.httpBody = httpBody
+
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                if let http = response as? HTTPURLResponse {
+                    print("[Push] Re-registered with node_id: \(http.statusCode)")
+                }
+            } catch {
+                print("[Push] Re-registration failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Pending Push Payment (app was killed)
@@ -488,7 +551,8 @@ class AppState {
         // Record in DB (dedup by paymentIdStr)
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
-        let paymentType = stableChannel.expectedUSD.amount > 0 ? "stability" : "lightning"
+        let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType }
+        let paymentType = isStabilityPayment ? "stability" : "lightning"
 
         _ = try? databaseService?.recordPayment(
             paymentId: paymentIdStr,
@@ -909,6 +973,7 @@ class AppState {
 
     /// Update the StableChannel struct from current LDK channel data + price.
     private func updateStableBalances() {
+        let hadChannelId = !stableChannel.userChannelId.isEmpty
         let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
         StabilityService.updateBalances(
             &stableChannel,
@@ -916,6 +981,10 @@ class AppState {
             onchainBalanceSats: onchainBalanceSats,
             price: price
         )
+        // If userChannelId was just discovered, reload saved state (expectedUSD etc.) from DB
+        if !hadChannelId && !stableChannel.userChannelId.isEmpty {
+            loadChannelFromDB()
+        }
     }
 
     // MARK: - Persistence
@@ -928,7 +997,9 @@ class AppState {
                 userChannelId: stableChannel.userChannelId,
                 expectedUSD: stableChannel.expectedUSD.amount,
                 backingSats: stableChannel.backingSats,
-                note: stableChannel.note
+                note: stableChannel.note,
+                receiverSats: stableChannel.stableReceiverBTC.sats,
+                latestPrice: stableChannel.latestPrice
             )
         } catch {
             AuditService.log("DB_SAVE_CHANNEL_FAILED", data: ["error": error.localizedDescription])
@@ -945,6 +1016,16 @@ class AppState {
                 stableChannel.expectedUSD = USD(amount: record.expectedUSD)
                 stableChannel.backingSats = record.backingSats
                 stableChannel.note = record.note
+
+                // Restore cached balances so UI shows immediately
+                if record.receiverSats > 0 {
+                    stableChannel.stableReceiverBTC = Bitcoin(sats: record.receiverSats)
+                    stableChannel.stableReceiverUSD = USD.fromBitcoin(stableChannel.stableReceiverBTC, price: record.latestPrice)
+                    StabilityService.recomputeNative(&stableChannel)
+                }
+                if record.latestPrice > 0 {
+                    stableChannel.latestPrice = record.latestPrice
+                }
             }
         } catch {
             AuditService.log("DB_LOAD_CHANNEL_FAILED", data: ["error": error.localizedDescription])

@@ -67,6 +67,7 @@ struct HistoryView: View {
                 loadHistory()
             }
             .refreshable {
+                appState.refreshBalances()
                 loadHistory()
             }
             .sheet(item: $selectedTrade) { trade in
@@ -255,8 +256,8 @@ struct PaymentRowView: View {
 
     private var paymentTypeLabel: String {
         switch payment.paymentType {
-        case "stability": return "Stability"
-        case "lightning": return "Settlement"
+        case "stability": return "Settlement"
+        case "lightning": return "Lightning"
         case "splice_in": return "Splice In"
         case "splice_out": return "Splice Out"
         case "onchain": return "On-chain"

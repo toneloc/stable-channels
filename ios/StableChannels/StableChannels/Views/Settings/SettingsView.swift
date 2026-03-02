@@ -194,6 +194,9 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .refreshable {
+                appState.refreshBalances()
+            }
             .onAppear {
                 UNUserNotificationCenter.current().getNotificationSettings { settings in
                     DispatchQueue.main.async {

@@ -1,11 +1,13 @@
+use crate::audit::audit_event;
+use crate::constants::{
+    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
+};
+use crate::price_feeds::get_cached_price;
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
-use ureq::Agent;
-use crate::price_feeds::get_cached_price;
-use crate::audit::audit_event;
-use crate::constants::{STABILITY_THRESHOLD_PERCENT, MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS};
-use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH};
+use ureq::Agent;
 
 // ================================================================
 // Reconciliation functions
@@ -146,21 +148,20 @@ pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
 pub fn get_current_price(agent: &Agent) -> f64 {
     // First try the cached price
     let cached_price = get_cached_price();
-    
+
     // Use the cached price if valid
     if cached_price > 0.0 {
         return cached_price;
     }
-    
-    match crate::price_feeds::get_latest_price(agent) {
-        Ok(price) => price,
-        Err(_) => 0.0 
-    }
+
+    crate::price_feeds::get_latest_price(agent).unwrap_or(0.0)
 }
 
 pub fn channel_exists(node: &Node, user_channel_id: u128) -> bool {
     let channels = node.list_channels();
-    channels.iter().any(|c| c.user_channel_id.0 == user_channel_id)
+    channels
+        .iter()
+        .any(|c| c.user_channel_id.0 == user_channel_id)
 }
 
 // Can run in backgound
@@ -185,14 +186,19 @@ pub fn update_balances<'update_balance_lifetime>(
     let matching_channel = if sc.user_channel_id == 0 {
         channels.first()
     } else {
-        channels.iter().find(|c| c.user_channel_id.0 == sc.user_channel_id)
+        channels
+            .iter()
+            .find(|c| c.user_channel_id.0 == sc.user_channel_id)
     };
 
     if let Some(channel) = matching_channel {
         if sc.user_channel_id == 0 {
             sc.user_channel_id = channel.user_channel_id.0;
             sc.channel_id = channel.channel_id;
-            println!("Set active channel: user_channel_id={}, channel_id={}", sc.user_channel_id, sc.channel_id);
+            println!(
+                "Set active channel: user_channel_id={}, channel_id={}",
+                sc.user_channel_id, sc.channel_id
+            );
         }
         // Always keep channel_id current (it changes on splice)
         sc.channel_id = channel.channel_id;
@@ -204,9 +210,10 @@ pub fn update_balances<'update_balance_lifetime>(
         }
 
         let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
-        let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
+        let our_balance_sats =
+            (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
         let their_balance_sats = channel.channel_value_sats - our_balance_sats;
-        
+
         if sc.is_stable_receiver {
             sc.stable_receiver_btc = Bitcoin::from_sats(our_balance_sats);
             sc.stable_provider_btc = Bitcoin::from_sats(their_balance_sats);
@@ -214,7 +221,7 @@ pub fn update_balances<'update_balance_lifetime>(
             sc.stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
             sc.stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
         }
-        
+
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, sc.latest_price);
         sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, sc.latest_price);
 
@@ -222,20 +229,26 @@ pub fn update_balances<'update_balance_lifetime>(
         let native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
         sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 
-        audit_event("BALANCE_UPDATE", json!({
-            "user_channel_id": format!("{}", sc.user_channel_id),
-            "stable_receiver_btc": sc.stable_receiver_btc.to_string(),
-            "stable_provider_btc": sc.stable_provider_btc.to_string(),
-            "stable_receiver_usd": sc.stable_receiver_usd.to_string(),
-            "stable_provider_usd": sc.stable_provider_usd.to_string(),
-            "native_channel_btc": sc.native_channel_btc.to_string(),
-            "btc_price": sc.latest_price
-        }));
+        audit_event(
+            "BALANCE_UPDATE",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "stable_receiver_btc": sc.stable_receiver_btc.to_string(),
+                "stable_provider_btc": sc.stable_provider_btc.to_string(),
+                "stable_receiver_usd": sc.stable_receiver_usd.to_string(),
+                "stable_provider_usd": sc.stable_provider_usd.to_string(),
+                "native_channel_btc": sc.native_channel_btc.to_string(),
+                "btc_price": sc.latest_price
+            }),
+        );
 
         return (true, sc);
     }
-    
-    println!("No matching channel found for user_channel_id: {}", sc.user_channel_id);
+
+    println!(
+        "No matching channel found for user_channel_id: {}",
+        sc.user_channel_id
+    );
     (true, sc)
 }
 
@@ -255,7 +268,11 @@ pub struct StabilityPaymentInfo {
 /// - The rest of the channel balance floats with BTC price
 ///
 /// Returns Some(StabilityPaymentInfo) if a payment was sent, None otherwise.
-pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Option<StabilityPaymentInfo> {
+pub fn check_stability(
+    node: &Node,
+    sc: &mut StableChannel,
+    price: f64,
+) -> Option<StabilityPaymentInfo> {
     let current_price = if price > 0.0 {
         price
     } else {
@@ -263,9 +280,12 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
         if cached_price > 0.0 {
             cached_price
         } else {
-            audit_event("STABILITY_SKIP", json!({
-                "reason": "no valid price available"
-            }));
+            audit_event(
+                "STABILITY_SKIP",
+                json!({
+                    "reason": "no valid price available"
+                }),
+            );
             return None;
         }
     };
@@ -274,19 +294,25 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
     let (success, _) = update_balances(node, sc);
 
     if !success {
-        audit_event("BALANCE_UPDATE_FAILED", json!({
-            "user_channel_id": format!("{}", sc.user_channel_id)
-        }));
+        audit_event(
+            "BALANCE_UPDATE_FAILED",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id)
+            }),
+        );
         return None;
     }
 
     // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {
-        audit_event("STABILITY_SKIP", json!({
-            "user_channel_id": format!("{}", sc.user_channel_id),
-            "reason": "expected_usd is too small",
-            "expected_usd": sc.expected_usd.0
-        }));
+        audit_event(
+            "STABILITY_SKIP",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "reason": "expected_usd is too small",
+                "expected_usd": sc.expected_usd.0
+            }),
+        );
         return None;
     }
 
@@ -326,17 +352,20 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
         "PAY"
     };
 
-    audit_event("STABILITY_CHECK", json!({
-        "expected_usd": target_usd,
-        "stable_usd_value": stable_usd_value,
-        "backing_sats": sc.backing_sats,
-        "total_receiver_usd": sc.stable_receiver_usd.0,
-        "percent_from_par": percent_from_par,
-        "btc_price": sc.latest_price,
-        "action": action,
-        "is_stable_receiver": sc.is_stable_receiver,
-        "risk_level": sc.risk_level
-    }));
+    audit_event(
+        "STABILITY_CHECK",
+        json!({
+            "expected_usd": target_usd,
+            "stable_usd_value": stable_usd_value,
+            "backing_sats": sc.backing_sats,
+            "total_receiver_usd": sc.stable_receiver_usd.0,
+            "percent_from_par": percent_from_par,
+            "btc_price": sc.latest_price,
+            "action": action,
+            "is_stable_receiver": sc.is_stable_receiver,
+            "risk_level": sc.risk_level
+        }),
+    );
 
     if action != "PAY" {
         return None;
@@ -350,11 +379,14 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
     if sc.last_stability_payment > 0
         && (now - sc.last_stability_payment) < STABILITY_PAYMENT_COOLDOWN_SECS as i64
     {
-        audit_event("STABILITY_COOLDOWN", json!({
-            "user_channel_id": format!("{}", sc.user_channel_id),
-            "seconds_since_last": now - sc.last_stability_payment,
-            "cooldown_secs": STABILITY_PAYMENT_COOLDOWN_SECS,
-        }));
+        audit_event(
+            "STABILITY_COOLDOWN",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "seconds_since_last": now - sc.last_stability_payment,
+                "cooldown_secs": STABILITY_PAYMENT_COOLDOWN_SECS,
+            }),
+        );
         return None;
     }
 
@@ -375,13 +407,16 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
-            audit_event("STABILITY_PAYMENT_SENT", json!({
-                "amount_msats": amt,
-                "payment_id": payment_id_str,
-                "counterparty": counterparty_str,
-                "expected_usd": target_usd,
-                "new_backing_sats": sc.backing_sats
-            }));
+            audit_event(
+                "STABILITY_PAYMENT_SENT",
+                json!({
+                    "amount_msats": amt,
+                    "payment_id": payment_id_str,
+                    "counterparty": counterparty_str,
+                    "expected_usd": target_usd,
+                    "new_backing_sats": sc.backing_sats
+                }),
+            );
             Some(StabilityPaymentInfo {
                 payment_id: payment_id_str,
                 amount_msat: amt,
@@ -390,11 +425,14 @@ pub fn check_stability(node: &Node, sc: &mut StableChannel, price: f64) -> Optio
             })
         }
         Err(e) => {
-            audit_event("STABILITY_PAYMENT_FAILED", json!({
-                "amount_msats": amt,
-                "error": format!("{e}"),
-                "counterparty": sc.counterparty.to_string()
-            }));
+            audit_event(
+                "STABILITY_PAYMENT_FAILED",
+                json!({
+                    "amount_msats": amt,
+                    "error": format!("{e}"),
+                    "counterparty": sc.counterparty.to_string()
+                }),
+            );
             None
         }
     }
@@ -508,7 +546,11 @@ mod tests {
         let deducted = reconcile_outgoing(&mut sc, 100_000.0);
         assert!(deducted.is_some());
         let d = deducted.unwrap();
-        assert!((d - 100.0).abs() < 0.01, "should deduct ~$100, got ${:.2}", d);
+        assert!(
+            (d - 100.0).abs() < 0.01,
+            "should deduct ~$100, got ${:.2}",
+            d
+        );
         assert!((sc.expected_usd.0 - 900.0).abs() < 0.01);
         // backing_sats should match new expected_usd
         let expected_backing = (900.0 / 100_000.0 * 100_000_000.0) as u64;
@@ -772,7 +814,11 @@ mod tests {
         let mut sc = test_sc(1000.0, 100_000.0, 900_000);
         reconcile_outgoing(&mut sc, 100_000.0);
         // expected_usd reduced to ~$900, backing ~900k, native ≈ 0 (±1 sat from f64 truncation)
-        assert!(sc.native_channel_btc.sats <= 1, "native should be ~0, got {}", sc.native_channel_btc.sats);
+        assert!(
+            sc.native_channel_btc.sats <= 1,
+            "native should be ~0, got {}",
+            sc.native_channel_btc.sats
+        );
     }
 
     #[test]

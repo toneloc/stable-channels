@@ -20,7 +20,7 @@ use rand::distr::Alphanumeric;
 use rand::Rng;
 use serde_json::{json, Value};
 
-use stable_channels::types::{StableChannel, USD, Bitcoin};
+use stable_channels::types::{StableChannel, USD};
 
 // ================================================================
 // Event macros (adapted from ldk-node test suite)
@@ -32,27 +32,30 @@ macro_rules! expect_event {
             ref e @ ldk_node::Event::$event_type { .. } => {
                 println!("{} got event {:?}", $node.node_id(), e);
                 $node.event_handled().unwrap();
-            },
+            }
             ref e => {
                 panic!("{} got unexpected event: {:?}", stringify!($node), e);
-            },
+            }
         }
     }};
 }
-pub(crate) use expect_event;
 
 macro_rules! expect_channel_pending_event {
     ($node:expr, $counterparty_node_id:expr) => {{
         match $node.next_event_async().await {
-            ref e @ ldk_node::Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
+            ref e @ ldk_node::Event::ChannelPending {
+                funding_txo,
+                counterparty_node_id,
+                ..
+            } => {
                 println!("{} got event {:?}", $node.node_id(), e);
                 assert_eq!(counterparty_node_id, $counterparty_node_id);
                 $node.event_handled().unwrap();
                 funding_txo
-            },
+            }
             ref e => {
                 panic!("{} got unexpected event: {:?}", stringify!($node), e);
-            },
+            }
         }
     }};
 }
@@ -61,15 +64,19 @@ pub(crate) use expect_channel_pending_event;
 macro_rules! expect_channel_ready_event {
     ($node:expr, $counterparty_node_id:expr) => {{
         match $node.next_event_async().await {
-            ref e @ ldk_node::Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
+            ref e @ ldk_node::Event::ChannelReady {
+                user_channel_id,
+                counterparty_node_id,
+                ..
+            } => {
                 println!("{} got event {:?}", $node.node_id(), e);
                 assert_eq!(counterparty_node_id, Some($counterparty_node_id));
                 $node.event_handled().unwrap();
                 user_channel_id
-            },
+            }
             ref e => {
                 panic!("{} got unexpected event: {:?}", stringify!($node), e);
-            },
+            }
         }
     }};
 }
@@ -78,14 +85,18 @@ pub(crate) use expect_channel_ready_event;
 macro_rules! expect_payment_received_event {
     ($node:expr) => {{
         match $node.next_event_async().await {
-            ref e @ ldk_node::Event::PaymentReceived { payment_id, amount_msat, .. } => {
+            ref e @ ldk_node::Event::PaymentReceived {
+                payment_id,
+                amount_msat,
+                ..
+            } => {
                 println!("{} got event {:?}", $node.node_id(), e);
                 $node.event_handled().unwrap();
                 (payment_id, amount_msat)
-            },
+            }
             ref e => {
                 panic!("{} got unexpected event: {:?}", stringify!($node), e);
-            },
+            }
         }
     }};
 }
@@ -94,14 +105,18 @@ pub(crate) use expect_payment_received_event;
 macro_rules! expect_payment_successful_event {
     ($node:expr) => {{
         match $node.next_event_async().await {
-            ref e @ ldk_node::Event::PaymentSuccessful { payment_id, fee_paid_msat, .. } => {
+            ref e @ ldk_node::Event::PaymentSuccessful {
+                payment_id,
+                fee_paid_msat,
+                ..
+            } => {
                 println!("{} got event {:?}", $node.node_id(), e);
                 $node.event_handled().unwrap();
                 (payment_id, fee_paid_msat)
-            },
+            }
             ref e => {
                 panic!("{} got unexpected event: {:?}", stringify!($node), e);
-            },
+            }
         }
     }};
 }
@@ -188,7 +203,9 @@ pub fn setup_node(electrsd: &ElectrsD, alias_prefix: &str, anchor_channels: bool
 
     let mut builder = Builder::from_config(config);
     let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-    let sync_config = EsploraSyncConfig { background_sync_config: None };
+    let sync_config = EsploraSyncConfig {
+        background_sync_config: None,
+    };
     builder.set_chain_source_esplora(esplora_url, Some(sync_config));
 
     let node = builder.build().unwrap();
@@ -207,7 +224,9 @@ pub fn setup_lsp_node(electrsd: &ElectrsD) -> Node {
 
     let mut builder = Builder::from_config(config);
     let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-    let sync_config = EsploraSyncConfig { background_sync_config: None };
+    let sync_config = EsploraSyncConfig {
+        background_sync_config: None,
+    };
     builder.set_chain_source_esplora(esplora_url, Some(sync_config));
 
     // Configure as LSPS2 service provider
@@ -249,7 +268,9 @@ pub fn setup_user_node(
 
     let mut builder = Builder::from_config(config);
     let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-    let sync_config = EsploraSyncConfig { background_sync_config: None };
+    let sync_config = EsploraSyncConfig {
+        background_sync_config: None,
+    };
     builder.set_chain_source_esplora(esplora_url, Some(sync_config));
 
     // LSPS2 client
@@ -266,12 +287,16 @@ pub fn setup_user_node(
 // ================================================================
 
 pub async fn generate_blocks_and_wait<E: ElectrumApi>(
-    bitcoind: &BitcoindClient, electrs: &E, num: usize,
+    bitcoind: &BitcoindClient,
+    electrs: &E,
+    num: usize,
 ) {
     let _ = bitcoind.create_wallet("sc_regtest");
     let _ = bitcoind.load_wallet("sc_regtest");
     print!("Generating {} blocks...", num);
-    let blockchain_info = bitcoind.get_blockchain_info().expect("failed to get blockchain info");
+    let blockchain_info = bitcoind
+        .get_blockchain_info()
+        .expect("failed to get blockchain info");
     let cur_height = blockchain_info.blocks;
     let address = bitcoind.new_address().expect("failed to get new address");
     let _block_hashes_res = bitcoind.generate_to_address(num, &address);
@@ -284,8 +309,10 @@ pub async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
         Ok(header) => header,
         Err(_) => {
             tokio::time::sleep(Duration::from_secs(3)).await;
-            electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
-        },
+            electrs
+                .block_headers_subscribe()
+                .expect("failed to subscribe to block headers")
+        }
     };
     loop {
         if header.height >= min_height {
@@ -293,7 +320,9 @@ pub async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
         }
         header = exponential_backoff_poll(|| {
             electrs.ping().expect("failed to ping electrs");
-            electrs.block_headers_pop().expect("failed to pop block header")
+            electrs
+                .block_headers_pop()
+                .expect("failed to pop block header")
         })
         .await;
     }
@@ -306,7 +335,10 @@ pub async fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: 
 }
 
 pub async fn premine_and_distribute_funds<E: ElectrumApi>(
-    bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
+    bitcoind: &BitcoindClient,
+    electrs: &E,
+    addrs: Vec<Address>,
+    amount: Amount,
 ) {
     premine_blocks(bitcoind, electrs).await;
 
@@ -352,8 +384,8 @@ where
             Some(data) => break data,
             None if delay.as_millis() < 512 => {
                 delay = delay.mul_f32(2.0);
-            },
-            None => {},
+            }
+            None => {}
         }
         assert!(tries < 20, "Reached max tries.");
         tries += 1;
@@ -366,13 +398,21 @@ where
 // ================================================================
 
 pub async fn open_channel(
-    node_a: &Node, node_b: &Node, funding_amount_sat: u64, push_msat: Option<u64>,
+    node_a: &Node,
+    node_b: &Node,
+    funding_amount_sat: u64,
+    push_msat: Option<u64>,
     electrsd: &ElectrsD,
 ) -> ldk_node::bitcoin::OutPoint {
     node_a
         .open_channel(
             node_b.node_id(),
-            node_b.listening_addresses().unwrap().first().unwrap().clone(),
+            node_b
+                .listening_addresses()
+                .unwrap()
+                .first()
+                .unwrap()
+                .clone(),
             funding_amount_sat,
             push_msat,
             None,
@@ -389,8 +429,12 @@ pub async fn open_channel(
 
 /// Open a channel and wait for it to be fully ready (confirmed)
 pub async fn open_channel_and_confirm(
-    node_a: &Node, node_b: &Node, funding_amount_sat: u64, push_msat: Option<u64>,
-    bitcoind: &BitcoindClient, electrsd: &ElectrsD,
+    node_a: &Node,
+    node_b: &Node,
+    funding_amount_sat: u64,
+    push_msat: Option<u64>,
+    bitcoind: &BitcoindClient,
+    electrsd: &ElectrsD,
 ) {
     let _funding_txo = open_channel(node_a, node_b, funding_amount_sat, push_msat, electrsd).await;
 
@@ -405,7 +449,10 @@ pub async fn open_channel_and_confirm(
 
     println!(
         "[channel] {}↔{} ready ({}sat, push={}msat)",
-        node_a.node_id(), node_b.node_id(), funding_amount_sat, push_msat.unwrap_or(0)
+        node_a.node_id(),
+        node_b.node_id(),
+        funding_amount_sat,
+        push_msat.unwrap_or(0)
     );
 }
 
@@ -423,7 +470,8 @@ pub fn create_stable_channel(
     price: f64,
 ) -> StableChannel {
     let channels = node.list_channels();
-    let ch = channels.iter()
+    let ch = channels
+        .iter()
         .find(|c| c.counterparty_node_id == counterparty)
         .expect("no channel found with counterparty");
 
@@ -452,10 +500,19 @@ pub fn print_channel_balances(label: &str, node: &Node) {
     let channels = node.list_channels();
     let balances = node.list_balances();
     println!("\n=== {} ({}) ===", label, node.node_id());
-    println!("  total_lightning_balance_sats: {}", balances.total_lightning_balance_sats);
-    println!("  spendable_onchain_balance_sats: {}", balances.spendable_onchain_balance_sats);
+    println!(
+        "  total_lightning_balance_sats: {}",
+        balances.total_lightning_balance_sats
+    );
+    println!(
+        "  spendable_onchain_balance_sats: {}",
+        balances.spendable_onchain_balance_sats
+    );
     for ch in &channels {
-        println!("  channel {} (ready={}):", ch.channel_id, ch.is_channel_ready);
+        println!(
+            "  channel {} (ready={}):",
+            ch.channel_id, ch.is_channel_ready
+        );
         println!("    channel_value_sats: {}", ch.channel_value_sats);
         println!("    outbound_capacity_msat: {}", ch.outbound_capacity_msat);
         println!("    inbound_capacity_msat: {}", ch.inbound_capacity_msat);

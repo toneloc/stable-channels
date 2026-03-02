@@ -35,6 +35,8 @@ class DatabaseService {
                 expected_usd REAL NOT NULL DEFAULT 0.0,
                 stable_sats INTEGER NOT NULL DEFAULT 0,
                 note TEXT,
+                receiver_sats INTEGER NOT NULL DEFAULT 0,
+                latest_price REAL NOT NULL DEFAULT 0.0,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
@@ -113,6 +115,16 @@ class DatabaseService {
         for sql in statements {
             try execute(sql)
         }
+
+        // Migrate: add receiver_sats and latest_price if missing
+        let cols = try query("PRAGMA table_info(channels)")
+        let colNames = cols.compactMap { $0[1] as? String }
+        if !colNames.contains("receiver_sats") {
+            try execute("ALTER TABLE channels ADD COLUMN receiver_sats INTEGER NOT NULL DEFAULT 0")
+        }
+        if !colNames.contains("latest_price") {
+            try execute("ALTER TABLE channels ADD COLUMN latest_price REAL NOT NULL DEFAULT 0.0")
+        }
     }
 
     // MARK: - Channel Operations
@@ -122,43 +134,54 @@ class DatabaseService {
         userChannelId: String,
         expectedUSD: Double,
         backingSats: UInt64,
-        note: String?
+        note: String?,
+        receiverSats: UInt64 = 0,
+        latestPrice: Double = 0.0
     ) throws {
         // Try update first
         let updateSQL = """
             UPDATE channels SET channel_id = ?, expected_usd = ?, stable_sats = ?,
-                note = ?, updated_at = strftime('%s', 'now')
+                note = ?, receiver_sats = ?, latest_price = ?, updated_at = strftime('%s', 'now')
             WHERE user_channel_id = ?
         """
         try execute(updateSQL, params: [
             .text(channelId), .real(expectedUSD), .integer(Int64(backingSats)),
-            note.map { .text($0) } ?? .null, .text(userChannelId)
+            note.map { .text($0) } ?? .null, .integer(Int64(receiverSats)), .real(latestPrice),
+            .text(userChannelId)
         ])
 
         if sqlite3_changes(db) == 0 {
             let insertSQL = """
-                INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, note)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, note, receiver_sats, latest_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(channel_id) DO UPDATE SET
                     user_channel_id = excluded.user_channel_id,
                     expected_usd = excluded.expected_usd,
                     stable_sats = excluded.stable_sats,
                     note = excluded.note,
+                    receiver_sats = excluded.receiver_sats,
+                    latest_price = excluded.latest_price,
                     updated_at = strftime('%s', 'now')
             """
             try execute(insertSQL, params: [
                 .text(channelId), .text(userChannelId), .real(expectedUSD),
-                .integer(Int64(backingSats)), note.map { .text($0) } ?? .null
+                .integer(Int64(backingSats)), note.map { .text($0) } ?? .null,
+                .integer(Int64(receiverSats)), .real(latestPrice)
             ])
         }
     }
 
-    func loadChannel(userChannelId: String) throws -> ChannelRecord? {
-        let sql = """
-            SELECT channel_id, expected_usd, note, stable_sats, user_channel_id
-            FROM channels WHERE user_channel_id = ?
-        """
-        let rows = try query(sql, params: [.text(userChannelId)])
+    func loadChannel(userChannelId: String? = nil) throws -> ChannelRecord? {
+        let sql: String
+        let params: [SQLValue]
+        if let id = userChannelId, !id.isEmpty {
+            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price FROM channels WHERE user_channel_id = ?"
+            params = [.text(id)]
+        } else {
+            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price FROM channels LIMIT 1"
+            params = []
+        }
+        let rows = try query(sql, params: params)
         guard let row = rows.first else { return nil }
 
         return ChannelRecord(
@@ -166,7 +189,9 @@ class DatabaseService {
             userChannelId: row[4] as? String ?? "",
             expectedUSD: row[1] as? Double ?? 0.0,
             note: row[2] as? String,
-            backingSats: UInt64(row[3] as? Int64 ?? 0)
+            backingSats: UInt64(row[3] as? Int64 ?? 0),
+            receiverSats: UInt64(row[5] as? Int64 ?? 0),
+            latestPrice: row[6] as? Double ?? 0.0
         )
     }
 

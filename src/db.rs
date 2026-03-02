@@ -5,10 +5,10 @@
 //! - Trade history
 //! - Price history (for charts and analytics)
 
-use rusqlite::{Connection, Result as SqliteResult, params};
+use chrono::{Duration as ChronoDuration, Utc};
+use rusqlite::{params, Connection, Result as SqliteResult};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use chrono::{Utc, Duration as ChronoDuration};
 
 /// Database file name
 pub const DB_FILENAME: &str = "stablechannels.db";
@@ -97,10 +97,7 @@ impl Database {
         ); // Ignore error if column already exists
 
         // Migration: Add user_channel_id column (stable across splices, unlike channel_id)
-        let _ = conn.execute(
-            "ALTER TABLE channels ADD COLUMN user_channel_id TEXT",
-            [],
-        ); // Ignore error if column already exists
+        let _ = conn.execute("ALTER TABLE channels ADD COLUMN user_channel_id TEXT", []); // Ignore error if column already exists
 
         // Price history table - stores historical prices for charts
         conn.execute(
@@ -150,14 +147,8 @@ impl Database {
         ); // Ignore error if column already exists
 
         // Migration: Add on-chain fields to payments table
-        let _ = conn.execute(
-            "ALTER TABLE payments ADD COLUMN txid TEXT",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE payments ADD COLUMN address TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE payments ADD COLUMN txid TEXT", []);
+        let _ = conn.execute("ALTER TABLE payments ADD COLUMN address TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE payments ADD COLUMN confirmations INTEGER NOT NULL DEFAULT 0",
             [],
@@ -238,7 +229,13 @@ impl Database {
                                  note = ?4, user_channel_id = ?5,
                                  updated_at = strftime('%s', 'now')
              WHERE user_channel_id = ?5",
-            params![channel_id, expected_usd, backing_sats as i64, note, user_channel_id],
+            params![
+                channel_id,
+                expected_usd,
+                backing_sats as i64,
+                note,
+                user_channel_id
+            ],
         )?;
         if updated == 0 {
             // No existing row — insert new
@@ -260,7 +257,10 @@ impl Database {
     /// Delete channel settings (e.g. after channel close)
     pub fn delete_channel(&self, user_channel_id: &str) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM channels WHERE user_channel_id = ?1", params![user_channel_id])?;
+        conn.execute(
+            "DELETE FROM channels WHERE user_channel_id = ?1",
+            params![user_channel_id],
+        )?;
         Ok(())
     }
 
@@ -269,7 +269,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id
-             FROM channels WHERE user_channel_id = ?1"
+             FROM channels WHERE user_channel_id = ?1",
         )?;
 
         let mut rows = stmt.query(params![user_channel_id])?;
@@ -292,7 +292,7 @@ impl Database {
     pub fn load_all_channels(&self) -> SqliteResult<Vec<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id FROM channels"
+            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id FROM channels",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -335,8 +335,7 @@ impl Database {
                                  payment_id, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
-                payment_id, status
+                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -360,7 +359,7 @@ impl Database {
                     payment_id, status, created_at
              FROM trades
              ORDER BY id DESC
-             LIMIT ?1"
+             LIMIT ?1",
         )?;
 
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -396,7 +395,12 @@ impl Database {
     }
 
     /// Record a price with a specific timestamp (for backfill)
-    pub fn record_price_at(&self, price: f64, timestamp: i64, source: Option<&str>) -> SqliteResult<()> {
+    pub fn record_price_at(
+        &self,
+        price: f64,
+        timestamp: i64,
+        source: Option<&str>,
+    ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO price_history (price, source, timestamp) VALUES (?1, ?2, ?3)",
@@ -411,13 +415,14 @@ impl Database {
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() as i64 - (hours as i64 * 3600);
+            .as_secs() as i64
+            - (hours as i64 * 3600);
 
         let mut stmt = conn.prepare(
             "SELECT id, price, source, timestamp
              FROM price_history
              WHERE timestamp > ?1
-             ORDER BY timestamp ASC"
+             ORDER BY timestamp ASC",
         )?;
 
         let rows = stmt.query_map(params![cutoff], |row| {
@@ -438,14 +443,15 @@ impl Database {
         let target_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() as i64 - 86400; // 24 hours ago
+            .as_secs() as i64
+            - 86400; // 24 hours ago
 
         // Get the price closest to 24 hours ago
         let mut stmt = conn.prepare(
             "SELECT price FROM price_history
              WHERE timestamp <= ?1
              ORDER BY timestamp DESC
-             LIMIT 1"
+             LIMIT 1",
         )?;
 
         let mut rows = stmt.query(params![target_time])?;
@@ -462,7 +468,8 @@ impl Database {
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() as i64 - (days_to_keep as i64 * 86400);
+            .as_secs() as i64
+            - (days_to_keep as i64 * 86400);
 
         conn.execute(
             "DELETE FROM price_history WHERE timestamp < ?1",
@@ -495,7 +502,10 @@ impl Database {
     }
 
     /// Bulk insert daily prices (for seeding historical data)
-    pub fn bulk_insert_daily_prices(&self, prices: &[(String, f64, f64, f64, f64, Option<f64>)]) -> SqliteResult<usize> {
+    pub fn bulk_insert_daily_prices(
+        &self,
+        prices: &[(String, f64, f64, f64, f64, Option<f64>)],
+    ) -> SqliteResult<usize> {
         let conn = self.conn.lock().unwrap();
         let mut count = 0;
         for (date, open, high, low, close, volume) in prices {
@@ -523,7 +533,7 @@ impl Database {
             "SELECT date, open, high, low, close, volume
              FROM daily_prices
              WHERE date >= ?1
-             ORDER BY date ASC"
+             ORDER BY date ASC",
         )?;
 
         let rows = stmt.query_map(params![cutoff_date], |row| {
@@ -543,9 +553,7 @@ impl Database {
     /// Get the most recent daily price date
     pub fn get_latest_daily_price_date(&self) -> SqliteResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1"
-        )?;
+        let mut stmt = conn.prepare("SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1")?;
 
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
@@ -558,9 +566,7 @@ impl Database {
     /// Get the oldest daily price date
     pub fn get_oldest_daily_price_date(&self) -> SqliteResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1"
-        )?;
+        let mut stmt = conn.prepare("SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1")?;
 
         let mut rows = stmt.query([])?;
         if let Some(row) = rows.next()? {
@@ -585,9 +591,7 @@ impl Database {
     /// Check if a payment with the given payment_id already exists
     pub fn payment_exists(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1"
-        )?;
+        let mut stmt = conn.prepare("SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1")?;
         let exists = stmt.exists(params![payment_id])?;
         Ok(exists)
     }
@@ -617,7 +621,12 @@ impl Database {
     }
 
     /// Update payment status (pending -> completed/failed) and optionally set fee
-    pub fn update_payment_status(&self, payment_db_id: i64, status: &str, fee_msat: Option<u64>) -> SqliteResult<()> {
+    pub fn update_payment_status(
+        &self,
+        payment_db_id: i64,
+        status: &str,
+        fee_msat: Option<u64>,
+    ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         if let Some(fee) = fee_msat {
             conn.execute(
@@ -634,7 +643,12 @@ impl Database {
     }
 
     /// Update payment status by payment_id string and optionally set fee
-    pub fn update_payment_status_by_pid(&self, payment_id: &str, status: &str, fee_msat: Option<u64>) -> SqliteResult<usize> {
+    pub fn update_payment_status_by_pid(
+        &self,
+        payment_id: &str,
+        status: &str,
+        fee_msat: Option<u64>,
+    ) -> SqliteResult<usize> {
         let conn = self.conn.lock().unwrap();
         let rows = if let Some(fee) = fee_msat {
             conn.execute(
@@ -662,7 +676,12 @@ impl Database {
     }
 
     /// Update confirmations and status for a payment by txid
-    pub fn update_payment_confirmations(&self, txid: &str, confirmations: u32, status: &str) -> SqliteResult<usize> {
+    pub fn update_payment_confirmations(
+        &self,
+        txid: &str,
+        confirmations: u32,
+        status: &str,
+    ) -> SqliteResult<usize> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
             "UPDATE payments SET confirmations = ?1, status = ?2 WHERE txid = ?3",
@@ -864,8 +883,14 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         // backing_sats = 100_000 (backing $100 at some price)
-        db.save_channel("test_channel_123", "uch_123", 100.0, 100_000, Some("test note"))
-            .unwrap();
+        db.save_channel(
+            "test_channel_123",
+            "uch_123",
+            100.0,
+            100_000,
+            Some("test note"),
+        )
+        .unwrap();
 
         let loaded = db.load_channel("uch_123").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "test_channel_123");
@@ -881,7 +906,8 @@ mod tests {
 
         db.save_channel("ch1", "uch1", 50.0, 50_000, None).unwrap();
         // Same user_channel_id, new channel_id (simulates splice)
-        db.save_channel("ch2", "uch1", 100.0, 100_000, Some("updated")).unwrap();
+        db.save_channel("ch2", "uch1", 100.0, 100_000, Some("updated"))
+            .unwrap();
 
         let loaded = db.load_channel("uch1").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "ch2"); // channel_id updated
@@ -894,14 +920,28 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
 
         db.record_trade(
-            "ch1", "buy", 25.0, 0.00025, 100000.0, 0.25,
-            Some("pay123"), "completed"
-        ).unwrap();
+            "ch1",
+            "buy",
+            25.0,
+            0.00025,
+            100000.0,
+            0.25,
+            Some("pay123"),
+            "completed",
+        )
+        .unwrap();
 
         db.record_trade(
-            "ch1", "sell", 10.0, 0.000099, 101000.0, 0.10,
-            Some("pay456"), "completed"
-        ).unwrap();
+            "ch1",
+            "sell",
+            10.0,
+            0.000099,
+            101000.0,
+            0.10,
+            Some("pay456"),
+            "completed",
+        )
+        .unwrap();
 
         let trades = db.get_recent_trades(10).unwrap();
         assert_eq!(trades.len(), 2);

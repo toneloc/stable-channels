@@ -30,6 +30,22 @@ extension UInt64 {
         let btc = Double(self) / Double(Constants.satsInBTC)
         return String(format: "%.8f BTC", btc)
     }
+
+    /// Format as BTC with spaced digit groups: "0.00 009 000"
+    var btcSpacedFormatted: String {
+        let btc = Double(self) / Double(Constants.satsInBTC)
+        let raw = String(format: "%.8f", btc)
+        guard let dotIndex = raw.firstIndex(of: ".") else { return raw }
+        let whole = raw[raw.startIndex..<dotIndex]
+        let decimals = raw[raw.index(after: dotIndex)...]
+        // Group decimal digits in threes: "00 009 000"
+        var grouped = ""
+        for (i, ch) in decimals.enumerated() {
+            if i > 0 && i % 3 == 0 { grouped += "\u{2009}" }  // thin space
+            grouped += String(ch)
+        }
+        return "\(whole).\(grouped)"
+    }
 }
 
 extension Double {

@@ -37,13 +37,15 @@ pub const DEFAULT_LSP_PORT: u16 = 9737;
 pub const DEFAULT_CHAIN_URL: &str = "https://blockstream.info/api";
 
 /// Default LSP public key
-pub const DEFAULT_LSP_PUBKEY: &str = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
+pub const DEFAULT_LSP_PUBKEY: &str =
+    "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
 
 /// Default LSP address
 pub const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
 
 /// Default gateway public key
-pub const DEFAULT_GATEWAY_PUBKEY: &str = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed";
+pub const DEFAULT_GATEWAY_PUBKEY: &str =
+    "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed";
 
 /// Default gateway address
 pub const DEFAULT_GATEWAY_ADDRESS: &str = "213.174.156.80:9735";
@@ -174,8 +176,8 @@ pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
 // HELPER FUNCTIONS
 // ============================================================================
 
-use std::path::PathBuf;
 use dirs::data_dir;
+use std::path::PathBuf;
 
 /// Get the user data directory
 pub fn get_user_data_dir() -> PathBuf {
@@ -200,7 +202,10 @@ pub fn audit_log_path_for(mode: &str) -> String {
         "lsp" => get_lsp_data_dir(),
         _ => panic!("Invalid mode for audit log path"),
     };
-    base_dir.join("audit_log.txt").to_string_lossy().into_owned()
+    base_dir
+        .join("audit_log.txt")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]

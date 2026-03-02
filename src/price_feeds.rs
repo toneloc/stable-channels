@@ -1,12 +1,14 @@
-use ureq::Agent;
+use crate::audit::audit_event;
+use crate::constants::{
+    PRICE_CACHE_REFRESH_SECS, PRICE_FETCH_MAX_RETRIES, PRICE_FETCH_RETRY_DELAY_MS,
+};
+use retry::{delay::Fixed, retry};
+use serde_json::json;
 use serde_json::Value;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use retry::{retry, delay::Fixed};
-use crate::audit::audit_event;
-use crate::constants::{PRICE_CACHE_REFRESH_SECS, PRICE_FETCH_RETRY_DELAY_MS, PRICE_FETCH_MAX_RETRIES};
-use serde_json::json;
+use ureq::Agent;
 
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
@@ -23,7 +25,7 @@ pub struct PriceCache {
 }
 
 // Re-export from constants module
-pub use crate::constants::{PriceFeedConfig as PriceFeed, get_default_price_feeds};
+pub use crate::constants::{get_default_price_feeds, PriceFeedConfig as PriceFeed};
 
 /// Get the raw cached price without triggering a network fetch.
 /// Use this for non-blocking startup. Returns 0.0 if no price is cached.
@@ -45,7 +47,8 @@ pub fn set_cached_price(price: f64) {
 pub fn get_cached_price() -> f64 {
     let should_update = {
         let cache = PRICE_CACHE.lock().unwrap();
-        cache.last_update.elapsed() > Duration::from_secs(PRICE_CACHE_REFRESH_SECS) && !cache.updating
+        cache.last_update.elapsed() > Duration::from_secs(PRICE_CACHE_REFRESH_SECS)
+            && !cache.updating
     };
 
     if should_update {
@@ -88,8 +91,9 @@ pub fn fetch_prices(
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD");
 
-        let response = retry(Fixed::from_millis(PRICE_FETCH_RETRY_DELAY_MS).take(PRICE_FETCH_MAX_RETRIES), || {
-            match agent.get(&url).call() {
+        let response = retry(
+            Fixed::from_millis(PRICE_FETCH_RETRY_DELAY_MS).take(PRICE_FETCH_MAX_RETRIES),
+            || match agent.get(&url).call() {
                 Ok(resp) => {
                     if resp.status() >= 200 && resp.status() < 300 {
                         Ok(resp)
@@ -98,10 +102,13 @@ pub fn fetch_prices(
                     }
                 }
                 Err(e) => Err(e.to_string()),
-            }
-        })
+            },
+        )
         .map_err(|e| -> Box<dyn Error> {
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
         })?;
 
         let json: Value = response.into_json()?;
@@ -111,14 +118,17 @@ pub fn fetch_prices(
             if let Some(inner_data) = data.get(key) {
                 data = inner_data;
             } else {
-                eprintln!("Key '{}' not found in the response from {}", key, price_feed.name);
+                eprintln!(
+                    "Key '{}' not found in the response from {}",
+                    key, price_feed.name
+                );
                 continue 'feeds;
             }
         }
 
         // If the value is an array (e.g., Kraken "c": ["<last>", "<vol>"]), take the first item.
         if let Some(arr) = data.as_array() {
-            if let Some(first) = arr.get(0) {
+            if let Some(first) = arr.first() {
                 data = first;
             }
         }
@@ -129,10 +139,16 @@ pub fn fetch_prices(
             if let Ok(price) = price_str.parse::<f64>() {
                 prices.push((price_feed.name.clone(), price));
             } else {
-                eprintln!("Invalid price format for {}: {}", price_feed.name, price_str);
+                eprintln!(
+                    "Invalid price format for {}: {}",
+                    price_feed.name, price_str
+                );
             }
         } else {
-            eprintln!("Price data not found or invalid format for {}", price_feed.name);
+            eprintln!(
+                "Price data not found or invalid format for {}",
+                price_feed.name
+            );
         }
     }
 
@@ -165,14 +181,21 @@ pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
 
 /// Fetch daily OHLC data from Kraken
 /// Returns Vec of (date_string, open, high, low, close, volume)
-pub fn fetch_kraken_ohlc(agent: &Agent, since_timestamp: Option<i64>) -> Result<Vec<(String, f64, f64, f64, f64, Option<f64>)>, Box<dyn Error>> {
+pub fn fetch_kraken_ohlc(
+    agent: &Agent,
+    since_timestamp: Option<i64>,
+) -> Result<Vec<(String, f64, f64, f64, f64, Option<f64>)>, Box<dyn Error>> {
     let mut url = "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1440".to_string();
     if let Some(since) = since_timestamp {
         url = format!("{}&since={}", url, since);
     }
 
-    let response = agent.get(&url).call()
-        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
+    let response = agent.get(&url).call().map_err(|e| -> Box<dyn Error> {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))
+    })?;
 
     let json: Value = response.into_json()?;
 
@@ -202,10 +225,22 @@ pub fn fetch_kraken_ohlc(agent: &Agent, since_timestamp: Option<i64>) -> Result<
                                 .map(|dt| dt.format("%Y-%m-%d").to_string())
                                 .unwrap_or_default();
 
-                            let open = arr[1].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let high = arr[2].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let low = arr[3].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                            let close = arr[4].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                            let open = arr[1]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let high = arr[2]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let low = arr[3]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let close = arr[4]
+                                .as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
                             let volume = arr[6].as_str().and_then(|s| s.parse::<f64>().ok());
 
                             if !date.is_empty() && close > 0.0 {
@@ -227,15 +262,20 @@ pub fn fetch_kraken_intraday(agent: &Agent) -> Result<Vec<(i64, f64)>, Box<dyn E
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64 - 86400;
+        .as_secs() as i64
+        - 86400;
 
     let url = format!(
         "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=15&since={}",
         since
     );
 
-    let response = agent.get(&url).call()
-        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
+    let response = agent.get(&url).call().map_err(|e| -> Box<dyn Error> {
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))
+    })?;
 
     let json: Value = response.into_json()?;
 
@@ -249,13 +289,16 @@ pub fn fetch_kraken_intraday(agent: &Agent) -> Result<Vec<(i64, f64)>, Box<dyn E
 
     if let Some(result) = json.get("result") {
         for (key, value) in result.as_object().unwrap_or(&serde_json::Map::new()) {
-            if key == "last" { continue; }
+            if key == "last" {
+                continue;
+            }
             if let Some(ohlc_array) = value.as_array() {
                 for candle in ohlc_array {
                     if let Some(arr) = candle.as_array() {
                         if arr.len() >= 5 {
                             let timestamp = arr[0].as_i64().unwrap_or(0);
-                            let close = arr[4].as_str()
+                            let close = arr[4]
+                                .as_str()
                                 .and_then(|s| s.parse::<f64>().ok())
                                 .unwrap_or(0.0);
                             if timestamp > 0 && close > 0.0 {
@@ -291,7 +334,8 @@ mod tests {
             "https://example.com/{currency_lc}/{currency}",
             vec!["price"],
         );
-        let url = feed.url_format
+        let url = feed
+            .url_format
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD");
         assert_eq!(url, "https://example.com/usd/USD");

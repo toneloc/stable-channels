@@ -2,7 +2,7 @@ import Foundation
 
 @Observable
 class PriceService {
-    private(set) var currentPrice: Double = 0.0
+    var currentPrice: Double = 0.0
     private(set) var lastUpdate: Date = .distantPast
     private(set) var isUpdating = false
     private var refreshTask: Task<Void, Never>?

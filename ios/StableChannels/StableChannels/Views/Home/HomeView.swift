@@ -7,6 +7,7 @@ struct HomeView: View {
     @State private var showBuySheet = false
     @State private var showSellSheet = false
     @State private var flashScale: CGFloat = 1.0
+    @State private var showBTC = false
 
     var body: some View {
         NavigationStack {
@@ -14,6 +15,17 @@ struct HomeView: View {
                 VStack(spacing: 24) {
                     // Total Balance
                     balanceSection
+
+                    // Syncing indicator
+                    if appState.isSyncing {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Syncing...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
                     // Stable / Native Split
                     if appState.stableUSD > 0 {
@@ -60,21 +72,54 @@ struct HomeView: View {
 
     // MARK: - Balance Section
 
-    private var balanceSection: some View {
-        VStack(spacing: 8) {
-            Text(appState.totalBalanceUSD.usdFormatted)
-                .font(.system(size: 48, weight: .bold, design: .rounded))
-                .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                .contentTransition(.numericText())
-                .animation(.default, value: appState.totalBalanceUSD)
-                .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
+    private var displaySats: UInt64 {
+        appState.totalBalanceSats > 0
+            ? appState.totalBalanceSats
+            : appState.stableChannel.stableReceiverBTC.sats
+    }
 
-            Text(appState.totalBalanceSats.satsFormatted)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+    private var balanceSection: some View {
+        let hasBalance = appState.totalBalanceUSD > 0 || displaySats > 0
+
+        return VStack(spacing: 8) {
+            if !hasBalance && appState.isSyncing {
+                Text("—")
+                    .font(.system(size: 48, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+
+                Text("Loading balance...")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+            } else if showBTC {
+                Text("\(displaySats.btcSpacedFormatted) BTC")
+                    .font(.system(size: 36, weight: .bold, design: .monospaced))
+                    .foregroundStyle(appState.paymentFlash ? .green : .primary)
+                    .contentTransition(.numericText())
+                    .animation(.default, value: displaySats)
+
+                Text(appState.totalBalanceUSD.usdFormatted)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(appState.totalBalanceUSD.usdFormatted)
+                    .font(.system(size: 48, weight: .bold, design: .rounded))
+                    .foregroundStyle(appState.paymentFlash ? .green : .primary)
+                    .contentTransition(.numericText())
+                    .animation(.default, value: appState.totalBalanceUSD)
+                    .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
+
+                Text(displaySats.satsFormatted)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
         .scaleEffect(flashScale)
         .padding(.top, 16)
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showBTC.toggle()
+            }
+        }
     }
 
     // MARK: - Balance Bar (Stable / Native)

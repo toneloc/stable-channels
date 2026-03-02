@@ -52,6 +52,8 @@ send_push.sh
 /data/
 Cargo.lock
 **/*.rs.bk
+src/bin/recover.rs
+src/bin/sweep.rs
 
 # JavaScript / Node.js
 node_modules/

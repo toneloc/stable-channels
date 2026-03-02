@@ -131,9 +131,14 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        // Include node_id so LSP can send targeted push notifications
+        let nodeId = UserDefaults(suiteName: Constants.appGroupIdentifier)?
+            .string(forKey: "node_id") ?? ""
+
         let body: [String: String] = [
             "device_token": token,
             "platform": "ios",
+            "node_id": nodeId,
         ]
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
@@ -142,7 +147,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse {
-                print("[Push] LSP registration response: \(http.statusCode)")
+                print("[Push] LSP registration response: \(http.statusCode) node_id: \(nodeId.prefix(16))...")
             }
         } catch {
             print("[Push] LSP registration failed: \(error.localizedDescription)")
