@@ -181,6 +181,7 @@ pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
 
 /// Fetch daily OHLC data from Kraken
 /// Returns Vec of (date_string, open, high, low, close, volume)
+#[allow(clippy::type_complexity)]
 pub fn fetch_kraken_ohlc(
     agent: &Agent,
     since_timestamp: Option<i64>,

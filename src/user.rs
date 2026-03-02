@@ -281,11 +281,13 @@ impl UserApp {
         set_audit_log_path(&audit_log_path);
 
         // Trust the LSP peer so no on-chain anchor reserve is held for their channel
-        let mut config = Config::default();
-        config.anchor_channels_config = Some(AnchorChannelsConfig {
-            trusted_peers_no_reserve: vec![lsp_pubkey],
-            per_channel_reserve_sats: 25_000,
-        });
+        let config = Config {
+            anchor_channels_config: Some(AnchorChannelsConfig {
+                trusted_peers_no_reserve: vec![lsp_pubkey],
+                per_channel_reserve_sats: 25_000,
+            }),
+            ..Default::default()
+        };
 
         let mut builder = Builder::from_config(config);
 
