@@ -42,11 +42,18 @@ fastlane/test_output
 # Code Injection
 iOSInjectionProject/
 
+# APNs auth keys and push test scripts
+AuthKey*.p8
+send_push.sh
+*.apns
+
 # Rust
 /target/
 /data/
 Cargo.lock
 **/*.rs.bk
+src/bin/recover.rs
+src/bin/sweep.rs
 
 # JavaScript / Node.js
 node_modules/

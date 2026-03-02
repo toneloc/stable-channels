@@ -2,8 +2,8 @@ mod common;
 
 use ldk_node::bitcoin::Amount;
 use stable_channels::stable::{
-    check_stability, update_balances,
-    reconcile_outgoing, reconcile_incoming, reconcile_forwarded, apply_trade,
+    apply_trade, check_stability, reconcile_forwarded, reconcile_incoming, reconcile_outgoing,
+    update_balances,
 };
 
 use common::*;
@@ -25,7 +25,12 @@ async fn test_stability_price_drop_lsp_pays() {
     // Build LSP first (we need its pubkey for user config)
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
 
     // Build User node pointing to LSP
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
@@ -110,7 +115,10 @@ async fn test_stability_price_drop_lsp_pays() {
     print_stable_channel("LSP (initial)", &lsp_sc);
 
     let result = check_stability(&lsp_node, &mut lsp_sc, initial_price);
-    assert!(result.is_none(), "No payment needed from LSP at initial price");
+    assert!(
+        result.is_none(),
+        "No payment needed from LSP at initial price"
+    );
     println!("[check] LSP-side at initial price: no payment needed (correct)");
 
     // --- Simulate price DROP: $100k -> $90k ---
@@ -195,7 +203,12 @@ async fn test_stability_price_rise_user_pays() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund and open channel
@@ -228,13 +241,8 @@ async fn test_stability_price_rise_user_pays() {
     set_mock_price(initial_price);
     let expected_usd = 500.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node,
-        lsp_pubkey,
-        true,
-        expected_usd,
-        initial_price,
-    );
+    let mut user_sc =
+        create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, initial_price);
 
     // Verify initial equilibrium
     let (ok, _) = update_balances(&user_node, &mut user_sc);
@@ -300,7 +308,12 @@ async fn test_multiple_stability_cycles() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund and open channel
@@ -332,8 +345,15 @@ async fn test_multiple_stability_cycles() {
     set_mock_price(initial_price);
     let expected_usd = 500.0;
 
-    let mut user_sc = create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, initial_price);
-    let mut lsp_sc = create_stable_channel(&lsp_node, user_node.node_id(), false, expected_usd, initial_price);
+    let mut user_sc =
+        create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, initial_price);
+    let mut lsp_sc = create_stable_channel(
+        &lsp_node,
+        user_node.node_id(),
+        false,
+        expected_usd,
+        initial_price,
+    );
 
     // --- Cycle 1: Price drops 5% ($100k -> $95k) — LSP pays ---
     println!("\n--- Cycle 1: Price drop 5% ---");
@@ -421,7 +441,12 @@ async fn test_jit_onboarding() {
     // Create all 3 nodes
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
 
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr.clone());
     let funder_node = setup_node(&electrsd, "funder", true);
@@ -508,7 +533,10 @@ async fn test_jit_onboarding() {
     // Verify user now has a channel
     user_node.sync_wallets().unwrap();
     let user_channels = user_node.list_channels();
-    assert!(!user_channels.is_empty(), "User should have a channel after JIT");
+    assert!(
+        !user_channels.is_empty(),
+        "User should have a channel after JIT"
+    );
 
     print_channel_balances("User (after JIT)", &user_node);
 
@@ -542,7 +570,12 @@ async fn test_outgoing_payment_deducts_from_stable() {
     // Create 3 nodes
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
 
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
     let funder_node = setup_node(&electrsd, "funder", true);
@@ -599,13 +632,7 @@ async fn test_outgoing_payment_deducts_from_stable() {
     // User has ~1M sats = $1000 at $100k. Stabilize ALL of it ($1000).
     // This means user has no native BTC — everything is stable.
     let expected_usd = 1000.0;
-    let mut user_sc = create_stable_channel(
-        &user_node,
-        lsp_pubkey,
-        true,
-        expected_usd,
-        price,
-    );
+    let mut user_sc = create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, price);
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
     assert!(ok);
@@ -625,7 +652,7 @@ async fn test_outgoing_payment_deducts_from_stable() {
     );
     let invoice = funder_node
         .bolt11_payment()
-        .receive(payment_msat, &description.into(), 3600)
+        .receive(payment_msat, &description, 3600)
         .expect("Funder failed to create invoice");
 
     println!("\n[send] User sending {} sats to Funder...", payment_sats);
@@ -651,48 +678,67 @@ async fn test_outgoing_payment_deducts_from_stable() {
     let user_sats_after = user_sc.stable_receiver_btc.sats;
     let sats_spent = user_sats_before.saturating_sub(user_sats_after);
     println!("\n[balance] User sats after: {}", user_sats_after);
-    println!("[balance] Sats spent: {} (expected ~{})", sats_spent, payment_sats);
+    println!(
+        "[balance] Sats spent: {} (expected ~{})",
+        sats_spent, payment_sats
+    );
 
     // Sats spent should be approximately the payment amount (may differ slightly due to fees)
     assert!(
         sats_spent >= payment_sats,
         "User should have spent at least {} sats, but only spent {}",
-        payment_sats, sats_spent
+        payment_sats,
+        sats_spent
     );
     assert!(
         sats_spent <= payment_sats + 5000, // allow up to 5k sats for routing fees
         "User spent way too much: {} sats (expected ~{})",
-        sats_spent, payment_sats
+        sats_spent,
+        payment_sats
     );
 
     // --- Reconcile using the shared function (same code as user.rs handler) ---
     let old_expected = user_sc.expected_usd.0;
     if let Some(usd_deducted) = reconcile_outgoing(&mut user_sc, price) {
         println!("\n[reconcile] USD deducted: ${:.2}", usd_deducted);
-        println!("[reconcile] Expected USD: ${:.2} -> ${:.2}", old_expected, user_sc.expected_usd.0);
+        println!(
+            "[reconcile] Expected USD: ${:.2} -> ${:.2}",
+            old_expected, user_sc.expected_usd.0
+        );
     }
 
     // --- Verify the deduction ---
     let expected_usd_after = user_sc.expected_usd.0;
     let expected_deduction_usd = payment_sats as f64 / 100_000_000.0 * price; // $100
 
-    println!("\n[verify] Expected USD after reconciliation: ${:.2}", expected_usd_after);
-    println!("[verify] Expected deduction: ~${:.2}", expected_deduction_usd);
+    println!(
+        "\n[verify] Expected USD after reconciliation: ${:.2}",
+        expected_usd_after
+    );
+    println!(
+        "[verify] Expected deduction: ~${:.2}",
+        expected_deduction_usd
+    );
 
     // Since user had no native BTC, the full payment should come from stable
     // expected_usd should decrease by approximately $100 (100k sats at $100k)
     let actual_deduction = expected_usd - expected_usd_after;
-    println!("[verify] Actual deduction from stable: ${:.2}", actual_deduction);
+    println!(
+        "[verify] Actual deduction from stable: ${:.2}",
+        actual_deduction
+    );
 
     assert!(
         actual_deduction > expected_deduction_usd * 0.95,
         "Stable deduction ${:.2} should be close to ${:.2}",
-        actual_deduction, expected_deduction_usd
+        actual_deduction,
+        expected_deduction_usd
     );
     assert!(
         actual_deduction < expected_deduction_usd * 1.10, // allow 10% for fees
         "Stable deduction ${:.2} is too large vs expected ${:.2}",
-        actual_deduction, expected_deduction_usd
+        actual_deduction,
+        expected_deduction_usd
     );
 
     // After reconciliation, backing_sats should match the new expected_usd
@@ -703,12 +749,21 @@ async fn test_outgoing_payment_deducts_from_stable() {
     );
 
     // Verify the stable position is still approximately right
-    println!("\n[final] Stable position: ${:.2} (was ${:.2})", expected_usd_after, expected_usd);
-    println!("[final] Backing sats: {} (was {})", user_sc.backing_sats, backing_sats_before);
+    println!(
+        "\n[final] Stable position: ${:.2} (was ${:.2})",
+        expected_usd_after, expected_usd
+    );
+    println!(
+        "[final] Backing sats: {} (was {})",
+        user_sc.backing_sats, backing_sats_before
+    );
 
     // Now run check_stability — should be close to equilibrium
     let result = check_stability(&user_node, &mut user_sc, price);
-    println!("[final] User check_stability: {:?}", result.as_ref().map(|i| i.amount_msat));
+    println!(
+        "[final] User check_stability: {:?}",
+        result.as_ref().map(|i| i.amount_msat)
+    );
 
     // =================================================================
     // LSP side: verify the LSP also reconciles correctly
@@ -745,13 +800,16 @@ async fn test_outgoing_payment_deducts_from_stable() {
             }
         }
     }
-    assert!(forwarded_msat > 0, "LSP should have received PaymentForwarded event");
+    assert!(
+        forwarded_msat > 0,
+        "LSP should have received PaymentForwarded event"
+    );
 
     // Create LSP-side StableChannel and update balances
     let mut lsp_sc = create_stable_channel(
         &lsp_node,
         user_node.node_id(),
-        false, // LSP is stable provider
+        false,        // LSP is stable provider
         expected_usd, // original expected_usd (before user's reconciliation)
         price,
     );
@@ -762,23 +820,38 @@ async fn test_outgoing_payment_deducts_from_stable() {
 
     // LSP sees user's balance (stable_receiver_btc from LSP perspective = user's sats)
     let user_sats_from_lsp_view = lsp_sc.stable_receiver_btc.sats;
-    println!("\n[lsp] User's balance as seen by LSP: {} sats", user_sats_from_lsp_view);
-    println!("[lsp] LSP's balance (provider): {} sats", lsp_sc.stable_provider_btc.sats);
+    println!(
+        "\n[lsp] User's balance as seen by LSP: {} sats",
+        user_sats_from_lsp_view
+    );
+    println!(
+        "[lsp] LSP's balance (provider): {} sats",
+        lsp_sc.stable_provider_btc.sats
+    );
 
     // The LSP should see the user's balance decreased by ~100k sats
     // LSP's backing_sats (1M) > user's actual sats (~900k) -> overflow
     assert!(
         lsp_sc.backing_sats > user_sats_from_lsp_view,
         "LSP backing_sats ({}) should exceed user's actual sats ({})",
-        lsp_sc.backing_sats, user_sats_from_lsp_view
+        lsp_sc.backing_sats,
+        user_sats_from_lsp_view
     );
 
     // LSP reconciliation using the shared function (same code as lsp_backend.rs handler)
     let total_forwarded_sats = forwarded_msat / 1000;
     let old_lsp_expected = lsp_sc.expected_usd.0;
-    if let Some(usd_deducted) = reconcile_forwarded(&mut lsp_sc, user_sats_from_lsp_view, total_forwarded_sats, price) {
+    if let Some(usd_deducted) = reconcile_forwarded(
+        &mut lsp_sc,
+        user_sats_from_lsp_view,
+        total_forwarded_sats,
+        price,
+    ) {
         println!("\n[lsp reconcile] USD deducted: ${:.2}", usd_deducted);
-        println!("[lsp reconcile] Expected USD: ${:.2} -> ${:.2}", old_lsp_expected, lsp_sc.expected_usd.0);
+        println!(
+            "[lsp reconcile] Expected USD: ${:.2} -> ${:.2}",
+            old_lsp_expected, lsp_sc.expected_usd.0
+        );
     }
 
     // Both sides should now agree on expected_usd (approximately)
@@ -797,7 +870,10 @@ async fn test_outgoing_payment_deducts_from_stable() {
 
     // LSP check_stability should also be near equilibrium
     let result = check_stability(&lsp_node, &mut lsp_sc, price);
-    println!("[final] LSP check_stability: {:?}", result.as_ref().map(|i| i.amount_msat));
+    println!(
+        "[final] LSP check_stability: {:?}",
+        result.as_ref().map(|i| i.amount_msat)
+    );
 
     println!("\n[PASS] test_outgoing_payment_deducts_from_stable");
 
@@ -821,7 +897,12 @@ async fn test_buy_btc_reduces_stable_position() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund and open channel
@@ -854,11 +935,14 @@ async fn test_buy_btc_reduces_stable_position() {
     set_mock_price(price);
     let initial_expected_usd = 500.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node, lsp_pubkey, true, initial_expected_usd, price,
-    );
+    let mut user_sc =
+        create_stable_channel(&user_node, lsp_pubkey, true, initial_expected_usd, price);
     let mut lsp_sc = create_stable_channel(
-        &lsp_node, user_node.node_id(), false, initial_expected_usd, price,
+        &lsp_node,
+        user_node.node_id(),
+        false,
+        initial_expected_usd,
+        price,
     );
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
@@ -867,7 +951,10 @@ async fn test_buy_btc_reduces_stable_position() {
     assert!(ok);
 
     print_stable_channel("User (before buy)", &user_sc);
-    println!("[state] User native BTC: ~${:.2}", user_sc.stable_receiver_usd.0 - initial_expected_usd);
+    println!(
+        "[state] User native BTC: ~${:.2}",
+        user_sc.stable_receiver_usd.0 - initial_expected_usd
+    );
 
     // Verify equilibrium before trade
     let result = check_stability(&user_node, &mut user_sc, price);
@@ -880,8 +967,14 @@ async fn test_buy_btc_reduces_stable_position() {
 
     // Buying BTC means reducing expected_usd by full amount
     let new_expected_usd = initial_expected_usd - buy_amount_usd; // $500 -> $300
-    println!("\n[buy] Buying ${:.2} BTC (fee: ${:.2})", buy_amount_usd, fee_usd);
-    println!("[buy] expected_usd: ${:.2} -> ${:.2}", initial_expected_usd, new_expected_usd);
+    println!(
+        "\n[buy] Buying ${:.2} BTC (fee: ${:.2})",
+        buy_amount_usd, fee_usd
+    );
+    println!(
+        "[buy] expected_usd: ${:.2} -> ${:.2}",
+        initial_expected_usd, new_expected_usd
+    );
 
     // Send the fee as keysend to LSP (this is what send_trade does)
     let fee_btc = fee_usd / price;
@@ -932,9 +1025,15 @@ async fn test_buy_btc_reduces_stable_position() {
 
     // --- Verify stability works at same price (should be STABLE) ---
     let result = check_stability(&user_node, &mut user_sc, price);
-    assert!(result.is_none(), "Should be stable right after buy at same price");
+    assert!(
+        result.is_none(),
+        "Should be stable right after buy at same price"
+    );
     let result = check_stability(&lsp_node, &mut lsp_sc, price);
-    assert!(result.is_none(), "LSP should also be stable right after buy");
+    assert!(
+        result.is_none(),
+        "LSP should also be stable right after buy"
+    );
     println!("\n[check] Both sides STABLE at same price after buy (correct)");
 
     // --- Verify stability works after price change ---
@@ -943,10 +1042,16 @@ async fn test_buy_btc_reduces_stable_position() {
     set_mock_price(drop_price);
 
     let user_result = check_stability(&user_node, &mut user_sc, drop_price);
-    assert!(user_result.is_none(), "User should not pay on price drop (CHECK_ONLY)");
+    assert!(
+        user_result.is_none(),
+        "User should not pay on price drop (CHECK_ONLY)"
+    );
 
     let lsp_result = check_stability(&lsp_node, &mut lsp_sc, drop_price);
-    assert!(lsp_result.is_some(), "LSP should pay to stabilize $300 after price drop");
+    assert!(
+        lsp_result.is_some(),
+        "LSP should pay to stabilize $300 after price drop"
+    );
 
     let payment_info = lsp_result.unwrap();
     println!(
@@ -963,7 +1068,8 @@ async fn test_buy_btc_reduces_stable_position() {
         payment_info.amount_msat > expected_payment_msats - tolerance
             && payment_info.amount_msat < expected_payment_msats + tolerance,
         "Payment {} msats should be ~{} msats (for $300 position, not $500)",
-        payment_info.amount_msat, expected_payment_msats
+        payment_info.amount_msat,
+        expected_payment_msats
     );
 
     // Drain events
@@ -991,7 +1097,12 @@ async fn test_sell_btc_increases_stable_position() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund and open channel
@@ -1025,11 +1136,14 @@ async fn test_sell_btc_increases_stable_position() {
     set_mock_price(price);
     let initial_expected_usd = 300.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node, lsp_pubkey, true, initial_expected_usd, price,
-    );
+    let mut user_sc =
+        create_stable_channel(&user_node, lsp_pubkey, true, initial_expected_usd, price);
     let mut lsp_sc = create_stable_channel(
-        &lsp_node, user_node.node_id(), false, initial_expected_usd, price,
+        &lsp_node,
+        user_node.node_id(),
+        false,
+        initial_expected_usd,
+        price,
     );
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
@@ -1052,14 +1166,21 @@ async fn test_sell_btc_increases_stable_position() {
 
     // Selling BTC means increasing expected_usd by net amount
     let new_expected_usd = initial_expected_usd + net_amount; // $300 -> $498
-    println!("\n[sell] Selling ${:.2} BTC into stable (fee: ${:.2})", sell_amount_usd, fee_usd);
-    println!("[sell] expected_usd: ${:.2} -> ${:.2}", initial_expected_usd, new_expected_usd);
+    println!(
+        "\n[sell] Selling ${:.2} BTC into stable (fee: ${:.2})",
+        sell_amount_usd, fee_usd
+    );
+    println!(
+        "[sell] expected_usd: ${:.2} -> ${:.2}",
+        initial_expected_usd, new_expected_usd
+    );
 
     // Verify user has enough native BTC to sell
     assert!(
         sell_amount_usd <= native_btc_usd,
         "Can't sell ${:.2} — only ${:.2} native BTC available",
-        sell_amount_usd, native_btc_usd
+        sell_amount_usd,
+        native_btc_usd
     );
 
     // Send the fee as keysend to LSP
@@ -1110,7 +1231,10 @@ async fn test_sell_btc_increases_stable_position() {
 
     // Native BTC should have decreased
     let new_native_btc_usd = user_sc.stable_receiver_usd.0 - user_sc.expected_usd.0;
-    println!("\n[verify] Native BTC: ${:.2} -> ${:.2}", native_btc_usd, new_native_btc_usd);
+    println!(
+        "\n[verify] Native BTC: ${:.2} -> ${:.2}",
+        native_btc_usd, new_native_btc_usd
+    );
     assert!(
         new_native_btc_usd < native_btc_usd,
         "Native BTC should decrease after selling into stable"
@@ -1118,9 +1242,15 @@ async fn test_sell_btc_increases_stable_position() {
 
     // --- Verify stability at same price (STABLE) ---
     let result = check_stability(&user_node, &mut user_sc, price);
-    assert!(result.is_none(), "Should be stable right after sell at same price");
+    assert!(
+        result.is_none(),
+        "Should be stable right after sell at same price"
+    );
     let result = check_stability(&lsp_node, &mut lsp_sc, price);
-    assert!(result.is_none(), "LSP should also be stable right after sell");
+    assert!(
+        result.is_none(),
+        "LSP should also be stable right after sell"
+    );
     println!("[check] Both sides STABLE at same price after sell (correct)");
 
     // --- Verify stability after price rise ---
@@ -1130,7 +1260,10 @@ async fn test_sell_btc_increases_stable_position() {
 
     // User-side: receiver is above expected, should PAY
     let user_result = check_stability(&user_node, &mut user_sc, rise_price);
-    assert!(user_result.is_some(), "User should pay when price rises after sell");
+    assert!(
+        user_result.is_some(),
+        "User should pay when price rises after sell"
+    );
 
     let payment_info = user_result.unwrap();
     println!(
@@ -1147,7 +1280,8 @@ async fn test_sell_btc_increases_stable_position() {
         payment_info.amount_msat > expected_payment_msats.saturating_sub(tolerance)
             && payment_info.amount_msat < expected_payment_msats + tolerance,
         "Payment {} msats should be ~{} msats (for $498 position, not $300)",
-        payment_info.amount_msat, expected_payment_msats
+        payment_info.amount_msat,
+        expected_payment_msats
     );
 
     expect_payment_successful_event!(user_node);
@@ -1161,8 +1295,10 @@ async fn test_sell_btc_increases_stable_position() {
     let net2 = sell2_amount - fee2; // $99
     let pre_sell2_expected = user_sc.expected_usd.0;
     let new_expected_usd2 = pre_sell2_expected + net2;
-    println!("[sell2] expected_usd: ${:.2} -> ${:.2} at price ${:.2}",
-        pre_sell2_expected, new_expected_usd2, rise_price);
+    println!(
+        "[sell2] expected_usd: ${:.2} -> ${:.2} at price ${:.2}",
+        pre_sell2_expected, new_expected_usd2, rise_price
+    );
 
     // Send fee
     let fee2_btc = fee2 / rise_price;
@@ -1187,7 +1323,10 @@ async fn test_sell_btc_increases_stable_position() {
 
     // Should be stable at current price
     let result = check_stability(&user_node, &mut user_sc, rise_price);
-    assert!(result.is_none(), "Should be stable after second sell at same price");
+    assert!(
+        result.is_none(),
+        "Should be stable after second sell at same price"
+    );
     let result = check_stability(&lsp_node, &mut lsp_sc, rise_price);
     assert!(result.is_none(), "LSP should be stable after second sell");
     println!("[check] Both sides STABLE after second sell (correct)");
@@ -1214,7 +1353,12 @@ async fn test_bolt11_receive_preserves_stable() {
     // 3-node setup: Funder → LSP → User
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
     let funder_node = setup_node(&electrsd, "funder", true);
 
@@ -1237,28 +1381,35 @@ async fn test_bolt11_receive_preserves_stable() {
     let stable_funding = 2_000_000;
     let stable_push = (stable_funding / 2) * 1000;
     open_channel_and_confirm(
-        &lsp_node, &user_node, stable_funding, Some(stable_push),
-        &bitcoind.client, &electrsd,
-    ).await;
+        &lsp_node,
+        &user_node,
+        stable_funding,
+        Some(stable_push),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
 
     // Channel 2: Funder → LSP (Funder has outbound to send through LSP)
     let funder_funding = 2_000_000;
     open_channel_and_confirm(
-        &funder_node, &lsp_node, funder_funding, None,
-        &bitcoind.client, &electrsd,
-    ).await;
+        &funder_node,
+        &lsp_node,
+        funder_funding,
+        None,
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
 
     // --- Set up stable position: $500 stable out of ~$1000 ---
     let price = 100_000.0;
     set_mock_price(price);
     let expected_usd = 500.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node, lsp_pubkey, true, expected_usd, price,
-    );
-    let mut lsp_sc = create_stable_channel(
-        &lsp_node, user_node.node_id(), false, expected_usd, price,
-    );
+    let mut user_sc = create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, price);
+    let mut lsp_sc =
+        create_stable_channel(&lsp_node, user_node.node_id(), false, expected_usd, price);
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
     assert!(ok);
@@ -1266,8 +1417,10 @@ async fn test_bolt11_receive_preserves_stable() {
 
     let user_sats_before = user_sc.stable_receiver_btc.sats;
     let backing_before = user_sc.backing_sats;
-    println!("[state] User sats: {}, backing: {}, expected_usd: ${:.2}",
-        user_sats_before, backing_before, user_sc.expected_usd.0);
+    println!(
+        "[state] User sats: {}, backing: {}, expected_usd: ${:.2}",
+        user_sats_before, backing_before, user_sc.expected_usd.0
+    );
 
     // --- User creates bolt11 invoice ---
     let receive_sats: u64 = 50_000;
@@ -1277,7 +1430,7 @@ async fn test_bolt11_receive_preserves_stable() {
     );
     let invoice = user_node
         .bolt11_payment()
-        .receive(receive_msat, &description.into(), 3600)
+        .receive(receive_msat, &description, 3600)
         .expect("User failed to create invoice");
 
     println!("\n[receive] User invoice for {} sats", receive_sats);
@@ -1310,15 +1463,25 @@ async fn test_bolt11_receive_preserves_stable() {
     let user_sats_after = user_sc.stable_receiver_btc.sats;
     let sats_gained = user_sats_after.saturating_sub(user_sats_before);
 
-    println!("\n[verify] User sats: {} -> {} (gained {})", user_sats_before, user_sats_after, sats_gained);
-    println!("[verify] expected_usd: ${:.2} (unchanged)", user_sc.expected_usd.0);
-    println!("[verify] backing_sats: {} (was {})", user_sc.backing_sats, backing_before);
+    println!(
+        "\n[verify] User sats: {} -> {} (gained {})",
+        user_sats_before, user_sats_after, sats_gained
+    );
+    println!(
+        "[verify] expected_usd: ${:.2} (unchanged)",
+        user_sc.expected_usd.0
+    );
+    println!(
+        "[verify] backing_sats: {} (was {})",
+        user_sc.backing_sats, backing_before
+    );
 
     // Stable position should be UNCHANGED
     assert!(
         (user_sc.expected_usd.0 - expected_usd).abs() < 0.01,
         "expected_usd should stay at ${:.2}, got ${:.2}",
-        expected_usd, user_sc.expected_usd.0
+        expected_usd,
+        user_sc.expected_usd.0
     );
 
     // backing_sats should be the same (same expected_usd, same price)
@@ -1331,13 +1494,17 @@ async fn test_bolt11_receive_preserves_stable() {
     assert!(
         sats_gained >= receive_sats - 100, // small tolerance for fees
         "User should have gained ~{} sats, got {}",
-        receive_sats, sats_gained
+        receive_sats,
+        sats_gained
     );
 
     // Native BTC should have increased
     let native_usd_after = user_sc.stable_receiver_usd.0 - user_sc.expected_usd.0;
     let native_usd_before = user_sats_before as f64 / 100_000_000.0 * price - expected_usd;
-    println!("[verify] Native BTC: ${:.2} -> ${:.2}", native_usd_before, native_usd_after);
+    println!(
+        "[verify] Native BTC: ${:.2} -> ${:.2}",
+        native_usd_before, native_usd_after
+    );
     assert!(
         native_usd_after > native_usd_before,
         "Native BTC USD should increase after receive"
@@ -1394,7 +1561,12 @@ async fn test_keysend_send_deducts_from_stable() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund and open channel
@@ -1413,18 +1585,21 @@ async fn test_keysend_send_deducts_from_stable() {
     let stable_funding = 2_000_000;
     let stable_push = (stable_funding / 2) * 1000;
     open_channel_and_confirm(
-        &lsp_node, &user_node, stable_funding, Some(stable_push),
-        &bitcoind.client, &electrsd,
-    ).await;
+        &lsp_node,
+        &user_node,
+        stable_funding,
+        Some(stable_push),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
 
     // --- Stabilize entire balance: $1000 all stable, no native ---
     let price = 100_000.0;
     set_mock_price(price);
     let expected_usd = 1000.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node, lsp_pubkey, true, expected_usd, price,
-    );
+    let mut user_sc = create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, price);
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
     assert!(ok);
@@ -1462,7 +1637,10 @@ async fn test_keysend_send_deducts_from_stable() {
     let old_expected = user_sc.expected_usd.0;
     if let Some(usd_deducted) = reconcile_outgoing(&mut user_sc, price) {
         println!("[reconcile] Deducted ${:.2} from stable", usd_deducted);
-        println!("[reconcile] expected_usd: ${:.2} -> ${:.2}", old_expected, user_sc.expected_usd.0);
+        println!(
+            "[reconcile] expected_usd: ${:.2} -> ${:.2}",
+            old_expected, user_sc.expected_usd.0
+        );
     }
 
     print_stable_channel("User (after keysend send)", &user_sc);
@@ -1470,26 +1648,44 @@ async fn test_keysend_send_deducts_from_stable() {
     // Verify deduction
     let expected_deduction_usd = send_sats as f64 / 100_000_000.0 * price; // ~$75
     let actual_deduction = expected_usd - user_sc.expected_usd.0;
-    println!("\n[verify] Sats spent: {} (expected ~{})", sats_spent, send_sats);
-    println!("[verify] Stable deduction: ${:.2} (expected ~${:.2})", actual_deduction, expected_deduction_usd);
+    println!(
+        "\n[verify] Sats spent: {} (expected ~{})",
+        sats_spent, send_sats
+    );
+    println!(
+        "[verify] Stable deduction: ${:.2} (expected ~${:.2})",
+        actual_deduction, expected_deduction_usd
+    );
 
     assert!(
         sats_spent >= send_sats,
-        "Should spend at least {} sats, spent {}", send_sats, sats_spent
+        "Should spend at least {} sats, spent {}",
+        send_sats,
+        sats_spent
     );
     assert!(
         actual_deduction > expected_deduction_usd * 0.95,
-        "Deduction ${:.2} should be close to ${:.2}", actual_deduction, expected_deduction_usd
+        "Deduction ${:.2} should be close to ${:.2}",
+        actual_deduction,
+        expected_deduction_usd
     );
     assert!(
         actual_deduction < expected_deduction_usd * 1.10,
-        "Deduction ${:.2} too large vs ${:.2}", actual_deduction, expected_deduction_usd
+        "Deduction ${:.2} too large vs ${:.2}",
+        actual_deduction,
+        expected_deduction_usd
     );
 
     // Stability check after reconciliation
     let result = check_stability(&user_node, &mut user_sc, price);
-    println!("[check] User check_stability: {:?}", result.as_ref().map(|i| i.amount_msat));
-    assert!(result.is_none(), "Should be stable after keysend reconciliation");
+    println!(
+        "[check] User check_stability: {:?}",
+        result.as_ref().map(|i| i.amount_msat)
+    );
+    assert!(
+        result.is_none(),
+        "Should be stable after keysend reconciliation"
+    );
 
     println!("\n[PASS] test_keysend_send_deducts_from_stable");
 
@@ -1513,7 +1709,12 @@ async fn test_keysend_receive_preserves_stable() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund and open channel
@@ -1532,18 +1733,21 @@ async fn test_keysend_receive_preserves_stable() {
     let stable_funding = 2_000_000;
     let stable_push = (stable_funding / 2) * 1000;
     open_channel_and_confirm(
-        &lsp_node, &user_node, stable_funding, Some(stable_push),
-        &bitcoind.client, &electrsd,
-    ).await;
+        &lsp_node,
+        &user_node,
+        stable_funding,
+        Some(stable_push),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
 
     // --- Stabilize $500 out of ~$1000 ---
     let price = 100_000.0;
     set_mock_price(price);
     let expected_usd = 500.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node, lsp_pubkey, true, expected_usd, price,
-    );
+    let mut user_sc = create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, price);
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
     assert!(ok);
@@ -1583,15 +1787,25 @@ async fn test_keysend_receive_preserves_stable() {
     let user_sats_after = user_sc.stable_receiver_btc.sats;
     let sats_gained = user_sats_after.saturating_sub(user_sats_before);
 
-    println!("\n[verify] User sats: {} -> {} (gained {})", user_sats_before, user_sats_after, sats_gained);
-    println!("[verify] expected_usd: ${:.2} (should be unchanged)", user_sc.expected_usd.0);
-    println!("[verify] backing_sats: {} (was {})", user_sc.backing_sats, backing_before);
+    println!(
+        "\n[verify] User sats: {} -> {} (gained {})",
+        user_sats_before, user_sats_after, sats_gained
+    );
+    println!(
+        "[verify] expected_usd: ${:.2} (should be unchanged)",
+        user_sc.expected_usd.0
+    );
+    println!(
+        "[verify] backing_sats: {} (was {})",
+        user_sc.backing_sats, backing_before
+    );
 
     // Stable position must be preserved
     assert!(
         (user_sc.expected_usd.0 - expected_usd).abs() < 0.01,
         "expected_usd should stay ${:.2}, got ${:.2}",
-        expected_usd, user_sc.expected_usd.0
+        expected_usd,
+        user_sc.expected_usd.0
     );
     assert_eq!(
         user_sc.backing_sats, backing_before,
@@ -1601,7 +1815,9 @@ async fn test_keysend_receive_preserves_stable() {
     // Should have gained sats
     assert!(
         sats_gained >= receive_sats - 100,
-        "Should gain ~{} sats, got {}", receive_sats, sats_gained
+        "Should gain ~{} sats, got {}",
+        receive_sats,
+        sats_gained
     );
 
     // Stability check
@@ -1639,7 +1855,12 @@ async fn test_onchain_send_preserves_lightning_stable() {
 
     let lsp_node = setup_lsp_node(&electrsd);
     let lsp_pubkey = lsp_node.node_id();
-    let lsp_addr = lsp_node.listening_addresses().unwrap().first().unwrap().clone();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
     let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
 
     // Fund with extra on-chain balance
@@ -1658,24 +1879,30 @@ async fn test_onchain_send_preserves_lightning_stable() {
     user_node.sync_wallets().unwrap();
 
     let user_onchain_before_channel = user_node.list_balances().spendable_onchain_balance_sats;
-    println!("[state] User onchain before channel: {} sats", user_onchain_before_channel);
+    println!(
+        "[state] User onchain before channel: {} sats",
+        user_onchain_before_channel
+    );
 
     // Open channel
     let funding_sats = 2_000_000;
     let push_msat = (funding_sats / 2) * 1000;
     open_channel_and_confirm(
-        &lsp_node, &user_node, funding_sats, Some(push_msat),
-        &bitcoind.client, &electrsd,
-    ).await;
+        &lsp_node,
+        &user_node,
+        funding_sats,
+        Some(push_msat),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
 
     // --- Set up stable position ---
     let price = 100_000.0;
     set_mock_price(price);
     let expected_usd = 500.0;
 
-    let mut user_sc = create_stable_channel(
-        &user_node, lsp_pubkey, true, expected_usd, price,
-    );
+    let mut user_sc = create_stable_channel(&user_node, lsp_pubkey, true, expected_usd, price);
 
     let (ok, _) = update_balances(&user_node, &mut user_sc);
     assert!(ok);
@@ -1690,7 +1917,10 @@ async fn test_onchain_send_preserves_lightning_stable() {
     println!("[state] On-chain balance: {} sats", onchain_before);
 
     if onchain_before < 10_000 {
-        println!("[skip] Not enough on-chain balance to test send ({}), skipping", onchain_before);
+        println!(
+            "[skip] Not enough on-chain balance to test send ({}), skipping",
+            onchain_before
+        );
         user_node.stop().unwrap();
         lsp_node.stop().unwrap();
         return;
@@ -1722,10 +1952,22 @@ async fn test_onchain_send_preserves_lightning_stable() {
     let lightning_sats_after = user_node.list_balances().total_lightning_balance_sats;
     let onchain_after = user_node.list_balances().spendable_onchain_balance_sats;
 
-    println!("\n[verify] Lightning: {} -> {} sats", lightning_sats_before, lightning_sats_after);
-    println!("[verify] On-chain: {} -> {} sats", onchain_before, onchain_after);
-    println!("[verify] expected_usd: ${:.2} (was ${:.2})", user_sc.expected_usd.0, expected_usd_before);
-    println!("[verify] backing_sats: {} (was {})", user_sc.backing_sats, backing_before);
+    println!(
+        "\n[verify] Lightning: {} -> {} sats",
+        lightning_sats_before, lightning_sats_after
+    );
+    println!(
+        "[verify] On-chain: {} -> {} sats",
+        onchain_before, onchain_after
+    );
+    println!(
+        "[verify] expected_usd: ${:.2} (was ${:.2})",
+        user_sc.expected_usd.0, expected_usd_before
+    );
+    println!(
+        "[verify] backing_sats: {} (was {})",
+        user_sc.backing_sats, backing_before
+    );
 
     // Lightning balance should be unchanged
     assert_eq!(

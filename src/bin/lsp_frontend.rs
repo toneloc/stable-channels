@@ -11,11 +11,11 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Clone, Deserialize, Default)]
 struct Balance {
     total_sats: u64,
-    total_usd:  f64,
+    total_usd: f64,
     lightning_sats: u64,
-    lightning_usd:  f64,
-    onchain_sats:   u64,
-    onchain_usd:    f64,
+    lightning_usd: f64,
+    onchain_sats: u64,
+    onchain_usd: f64,
 }
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -26,9 +26,9 @@ struct ChannelInfo {
     remote_pubkey: String,
     capacity_sats: u64,
     local_balance_sats: u64,
-    local_balance_usd:  f64,
+    local_balance_usd: f64,
     remote_balance_sats: u64,
-    remote_balance_usd:  f64,
+    remote_balance_usd: f64,
     status: String,
     is_channel_ready: bool,
     is_usable: bool,
@@ -41,18 +41,18 @@ struct ChannelInfo {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PaymentInfo {
     amount_msat: u64,
-    direction:   String,
-    status:      String,
-    timestamp:   String,
+    direction: String,
+    status: String,
+    timestamp: String,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 struct InvoiceInfo {
     amount_sats: u64,
-    bolt11:      String,
-    paid:        bool,
-    timestamp:   String,
+    bolt11: String,
+    paid: bool,
+    timestamp: String,
 }
 
 #[allow(dead_code)]
@@ -76,25 +76,24 @@ struct Dashboard {
     rt: Runtime,
     client: Client,
 
-    bal_task:      Option<JoinHandle<reqwest::Result<Balance>>>,
-    ch_task:       Option<JoinHandle<reqwest::Result<Vec<ChannelInfo>>>>,
-    price_task:    Option<JoinHandle<reqwest::Result<f64>>>,
+    bal_task: Option<JoinHandle<reqwest::Result<Balance>>>,
+    ch_task: Option<JoinHandle<reqwest::Result<Vec<ChannelInfo>>>>,
+    price_task: Option<JoinHandle<reqwest::Result<f64>>>,
     payments_task: Option<JoinHandle<reqwest::Result<Vec<PaymentInfo>>>>,
     invoices_task: Option<JoinHandle<reqwest::Result<Vec<InvoiceInfo>>>>,
-    logs_task:     Option<JoinHandle<reqwest::Result<String>>>,
+    logs_task: Option<JoinHandle<reqwest::Result<String>>>,
     edit_task: Option<JoinHandle<reqwest::Result<EditStableChannelRes>>>,
-    close_task:     Option<JoinHandle<reqwest::Result<String>>>,
-    pay_task:      Option<JoinHandle<reqwest::Result<String>>>,
-    onchain_send_task:    Option<JoinHandle<reqwest::Result<String>>>,
-    onchain_send_result:  Option<String>,
-    pay_result:    Option<String>,
-    close_result:   Option<String>,      
+    close_task: Option<JoinHandle<reqwest::Result<String>>>,
+    pay_task: Option<JoinHandle<reqwest::Result<String>>>,
+    onchain_send_task: Option<JoinHandle<reqwest::Result<String>>>,
+    onchain_send_result: Option<String>,
+    pay_result: Option<String>,
+    close_result: Option<String>,
     get_address_task: Option<JoinHandle<reqwest::Result<String>>>,
-    connect_task:  Option<JoinHandle<reqwest::Result<String>>>,
-    connect_result: Option<String>,   
+    connect_task: Option<JoinHandle<reqwest::Result<String>>>,
+    connect_result: Option<String>,
 
-
-    balance:  Option<Balance>,
+    balance: Option<Balance>,
     channels: Vec<ChannelInfo>,
     price_usd: Option<f64>,
     payments: Vec<PaymentInfo>,
@@ -120,7 +119,7 @@ struct Dashboard {
     last_log_refresh: Instant,
     edit_channel_id: String,
     edit_channel_usd: String,
-    edit_channel_note: String, 
+    edit_channel_note: String,
     edit_stable_result: Option<String>,
 }
 
@@ -148,8 +147,8 @@ impl Dashboard {
             close_result: None,
             pay_task: None,
             pay_result: None,
-            connect_task:      None, 
-            connect_result:     None,
+            connect_task: None,
+            connect_result: None,
 
             balance: None,
             channels: Vec::new(),
@@ -180,14 +179,15 @@ impl Dashboard {
             edit_stable_result: None,
             edit_task: None,
             onchain_send_task: None,
-            onchain_send_result:  None,
+            onchain_send_result: None,
             get_address_task: None,
-
         }
     }
 
     fn fetch_balance(&mut self) {
-        if self.bal_task.is_some() { return; }
+        if self.bal_task.is_some() {
+            return;
+        }
         let client = self.client.clone();
         self.bal_task = Some(self.rt.spawn(async move {
             client
@@ -200,7 +200,9 @@ impl Dashboard {
     }
 
     fn fetch_channels(&mut self) {
-        if self.ch_task.is_some() { return; }
+        if self.ch_task.is_some() {
+            return;
+        }
         let client = self.client.clone();
         self.ch_task = Some(self.rt.spawn(async move {
             client
@@ -213,7 +215,9 @@ impl Dashboard {
     }
 
     fn fetch_price(&mut self) {
-        if self.price_task.is_some() { return; }
+        if self.price_task.is_some() {
+            return;
+        }
         let client = self.client.clone();
         self.price_task = Some(self.rt.spawn(async move {
             let resp = client
@@ -226,7 +230,9 @@ impl Dashboard {
     }
 
     fn fetch_onchain_address(&mut self) {
-        if self.get_address_task.is_some() { return; }
+        if self.get_address_task.is_some() {
+            return;
+        }
         let client = self.client.clone();
         self.get_address_task = Some(self.rt.spawn(async move {
             client
@@ -257,11 +263,11 @@ impl Dashboard {
                         bal.total_sats, bal.total_usd
                     ));
                 }
-                None => {                     
-                    ui.label("Balance: —");  
+                None => {
+                    ui.label("Balance: —");
                 }
             }
-    
+
             if let Some(p) = self.price_usd {
                 ui.label(format!("BTC/USD price: ${:.2}", p));
             }
@@ -274,17 +280,21 @@ impl Dashboard {
 
     fn show_channels(&mut self, ui: &mut egui::Ui) {
         use egui::{RichText, ScrollArea};
-    
+
         fn short(s: &str, n: usize) -> String {
-            if s.len() > n { format!("{}…", &s[..n]) } else { s.to_owned() }
+            if s.len() > n {
+                format!("{}…", &s[..n])
+            } else {
+                s.to_owned()
+            }
         }
-    
+
         ui.group(|ui| {
             ui.heading("Channels");
             if ui.button("Refresh Channels").clicked() {
                 self.fetch_channels();
             }
-    
+
             ScrollArea::both()
                 .max_height(160.0)
                 .auto_shrink([true; 2])
@@ -295,22 +305,30 @@ impl Dashboard {
                         .show(ui, |ui| {
                             // ── headers ───────────────────────────────────────────
                             for h in [
-                                "Notes","ID", "User Ch ID", "Peer", "Capacity",
-                                "LSP Sats", "LSP $",      // local sats / local USD
-                                "User Sats", "User $",    // remote sats / remote USD
-                                "Stable $",               // target stable balance
-                                "Status", "Ready", "Usable"
+                                "Notes",
+                                "ID",
+                                "User Ch ID",
+                                "Peer",
+                                "Capacity",
+                                "LSP Sats",
+                                "LSP $", // local sats / local USD
+                                "User Sats",
+                                "User $",   // remote sats / remote USD
+                                "Stable $", // target stable balance
+                                "Status",
+                                "Ready",
+                                "Usable",
                             ] {
                                 ui.label(RichText::new(h).strong().small());
                             }
                             ui.end_row();
-    
+
                             // ── rows ─────────────────────────────────────────────
                             for ch in &self.channels {
                                 // Note (copy)
-                                let note_text = ch.note.clone().unwrap_or_else(|| "---".to_string());
+                                let note_text =
+                                    ch.note.clone().unwrap_or_else(|| "---".to_string());
 
-                                
                                 ui.horizontal(|ui| {
                                     ui.label(note_text.clone());
                                     if ui.button("📋").clicked() {
@@ -321,29 +339,42 @@ impl Dashboard {
                                 // ID (copy)
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(short(&ch.id, 8)).monospace());
-                                    if ui.small_button("⧉").on_hover_text("Copy full ID").clicked() {
+                                    if ui.small_button("⧉").on_hover_text("Copy full ID").clicked()
+                                    {
                                         ui.ctx().copy_text(ch.id.clone());
                                     }
                                 });
 
                                 // User Channel ID (copy)
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(short(&ch.user_channel_id, 8)).monospace());
-                                    if ui.small_button("⧉").on_hover_text("Copy user channel ID").clicked() {
+                                    ui.label(
+                                        RichText::new(short(&ch.user_channel_id, 8)).monospace(),
+                                    );
+                                    if ui
+                                        .small_button("⧉")
+                                        .on_hover_text("Copy user channel ID")
+                                        .clicked()
+                                    {
                                         ui.ctx().copy_text(ch.user_channel_id.clone());
                                     }
                                 });
 
                                 // Peer (copy)
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(short(&ch.remote_pubkey, 8)).monospace());
-                                    if ui.small_button("⧉").on_hover_text("Copy full peer key").clicked() {
+                                    ui.label(
+                                        RichText::new(short(&ch.remote_pubkey, 8)).monospace(),
+                                    );
+                                    if ui
+                                        .small_button("⧉")
+                                        .on_hover_text("Copy full peer key")
+                                        .clicked()
+                                    {
                                         ui.ctx().copy_text(ch.remote_pubkey.clone());
                                     }
                                 });
-    
+
                                 ui.label(ch.capacity_sats.to_string());
-    
+
                                 // LSP sats + USD
                                 ui.label(ch.local_balance_sats.to_string());
                                 ui.label(format!("{:.2}", ch.local_balance_usd));
@@ -353,7 +384,8 @@ impl Dashboard {
                                 ui.label(format!("{:.2}", ch.remote_balance_usd));
 
                                 // Stable target USD - highlight in green if set
-                                let stable_text = ch.expected_usd
+                                let stable_text = ch
+                                    .expected_usd
                                     .map(|v| format!("${:.2}", v))
                                     .unwrap_or_else(|| "---".into());
                                 let stable_color = if ch.expected_usd.is_some() {
@@ -366,30 +398,32 @@ impl Dashboard {
                                 ui.label(&ch.status);
                                 ui.label(ch.is_channel_ready.to_string());
                                 ui.label(ch.is_usable.to_string());
-    
+
                                 ui.end_row();
                             }
                         });
                 });
-
-
         });
     }
-    
+
     fn edit_stable_channel(&mut self) {
         if self.edit_task.is_some() {
             return;
         }
-    
+
         let client = self.client.clone();
         let channel_id = self.edit_channel_id.trim().to_string();
         let target_usd = self.edit_channel_usd.trim().to_string();
         let note = self.edit_channel_note.trim().to_string();
-    
+
         self.edit_task = Some(self.rt.spawn(async move {
             let req = EditStableChannelReq {
                 channel_id,
-                target_usd: if target_usd.is_empty() { None } else { Some(target_usd) },
+                target_usd: if target_usd.is_empty() {
+                    None
+                } else {
+                    Some(target_usd)
+                },
                 note: if note.is_empty() { None } else { Some(note) },
             };
             client
@@ -403,15 +437,22 @@ impl Dashboard {
     }
 
     fn close_specific_channel(&mut self) {
-        if self.close_task.is_some() { return; }
+        if self.close_task.is_some() {
+            return;
+        }
         let id = self.close_channel_id.trim().to_string();
-        if id.is_empty() { return; }
-    
-        self.close_channel_id.clear();              // clear box immediately
+        if id.is_empty() {
+            return;
+        }
+
+        self.close_channel_id.clear(); // clear box immediately
         let client = self.client.clone();
         self.close_task = Some(self.rt.spawn(async move {
             client
-                .post(format!("http://100.25.168.115:8080/api/close_channel/{}", id))
+                .post(format!(
+                    "http://100.25.168.115:8080/api/close_channel/{}",
+                    id
+                ))
                 .send()
                 .await?
                 .text()
@@ -420,39 +461,57 @@ impl Dashboard {
     }
 
     fn pay_invoice(&mut self) {
-        if self.pay_task.is_some() { return; }
+        if self.pay_task.is_some() {
+            return;
+        }
         let inv = self.invoice_to_pay.trim().to_string();
-        if inv.is_empty() { return; }
-    
-        self.invoice_to_pay.clear();           // clear textbox
+        if inv.is_empty() {
+            return;
+        }
+
+        self.invoice_to_pay.clear(); // clear textbox
         let client = self.client.clone();
         self.pay_task = Some(self.rt.spawn(async move {
-            #[derive(Serialize)] struct Req { invoice: String }
+            #[derive(Serialize)]
+            struct Req {
+                invoice: String,
+            }
             client
                 .post("http://100.25.168.115:8080/api/pay")
                 .json(&Req { invoice: inv })
                 .send()
                 .await?
-                .json::<String>()              // backend returns status string
+                .json::<String>() // backend returns status string
                 .await
         }));
     }
 
     fn send_onchain(&mut self) {
-        if self.onchain_send_task.is_some() { return; }
-        let addr  = self.onchain_address.trim().to_string();
-        let amt   = self.onchain_amount.trim().to_string();
-        if addr.is_empty() || amt.is_empty() { return; }
-    
+        if self.onchain_send_task.is_some() {
+            return;
+        }
+        let addr = self.onchain_address.trim().to_string();
+        let amt = self.onchain_amount.trim().to_string();
+        if addr.is_empty() || amt.is_empty() {
+            return;
+        }
+
         self.onchain_address.clear();
         self.onchain_amount.clear();
-    
+
         let client = self.client.clone();
-        #[derive(Serialize)] struct Req { address: String, amount: String }
+        #[derive(Serialize)]
+        struct Req {
+            address: String,
+            amount: String,
+        }
         self.onchain_send_task = Some(self.rt.spawn(async move {
             client
                 .post("http://100.25.168.115:8080/api/onchain_send")
-                .json(&Req { address: addr, amount: amt })
+                .json(&Req {
+                    address: addr,
+                    amount: amt,
+                })
                 .send()
                 .await?
                 .json::<String>()
@@ -466,7 +525,7 @@ impl Dashboard {
             if ui.button("Get Address").clicked() {
                 self.fetch_onchain_address();
             }
-    
+
             if !self.onchain_address.is_empty() {
                 ui.label(&self.onchain_address);
                 if ui.button("Copy").clicked() {
@@ -477,27 +536,33 @@ impl Dashboard {
     }
 
     fn connect_to_node(&mut self) {
-        if self.connect_task.is_some() { return; }
-    
+        if self.connect_task.is_some() {
+            return;
+        }
+
         let node_id = self.open_channel_pubkey.trim().to_owned();
         let address = self.open_channel_address.trim().to_owned();
-        if node_id.is_empty() || address.is_empty() { return; }
-    
+        if node_id.is_empty() || address.is_empty() {
+            return;
+        }
+
         let client = self.client.clone();
-        #[derive(Serialize)] struct Req { node_id: String, address: String }
-    
+        #[derive(Serialize)]
+        struct Req {
+            node_id: String,
+            address: String,
+        }
+
         self.connect_task = Some(self.rt.spawn(async move {
             client
                 .post("http://100.25.168.115:8080/api/connect")
                 .json(&Req { node_id, address })
                 .send()
                 .await?
-                .json::<String>()        // <— now just a String
+                .json::<String>() // <— now just a String
                 .await
         }));
     }
-
-
 }
 
 impl App for Dashboard {
@@ -516,7 +581,7 @@ impl App for Dashboard {
                         ctx.request_repaint();
                     }
                 }
-            }
+            };
         }
         poll_task!(bal_task => |v| self.balance = Some(v));
         poll_task!(ch_task => |v| self.channels = v);
@@ -539,26 +604,26 @@ impl App for Dashboard {
             self.show_channels(ui);
             ui.group(|ui| {
                 ui.heading("Edit Stable Channel");
-            
+
                 ui.horizontal(|ui| {
                     ui.label("Channel ID:");
                     ui.text_edit_singleline(&mut self.edit_channel_id);
                 });
-            
+
                 ui.horizontal(|ui| {
                     ui.label("Target USD amount:");
                     ui.text_edit_singleline(&mut self.edit_channel_usd);
                 });
-            
+
                 ui.horizontal(|ui| {
                     ui.label("Note:");
                     ui.text_edit_singleline(&mut self.edit_channel_note);
                 });
-            
+
                 if ui.button("Submit Edits").clicked() {
                     self.edit_stable_channel();
                 }
-            
+
                 if let Some(msg) = &self.edit_stable_result {
                     ui.label(msg);
                 }
@@ -603,11 +668,11 @@ impl App for Dashboard {
                 ui.heading("Connect to Node");
                 ui.horizontal(|ui| {
                     ui.label("Node ID:");
-                    ui.text_edit_singleline(&mut self.open_channel_pubkey);   // reuse existing field
+                    ui.text_edit_singleline(&mut self.open_channel_pubkey); // reuse existing field
                 });
                 ui.horizontal(|ui| {
                     ui.label("Address:");
-                    ui.text_edit_singleline(&mut self.open_channel_address);  // reuse existing field
+                    ui.text_edit_singleline(&mut self.open_channel_address); // reuse existing field
                 });
                 if ui.button("Connect").clicked() {
                     self.connect_to_node();
@@ -617,7 +682,6 @@ impl App for Dashboard {
                 }
             });
 
-            
             ui.group(|ui| {
                 ui.heading("Close Specific Channel");
                 ui.horizontal(|ui| {
@@ -642,7 +706,6 @@ impl App for Dashboard {
         if self.price_usd.is_none() && self.price_task.is_none() {
             self.fetch_price();
         }
-
 
         ctx.request_repaint_after(Duration::from_millis(100));
     }

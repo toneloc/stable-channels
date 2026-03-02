@@ -1,12 +1,15 @@
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::types::ChannelId;
-use std::{ops::{Div, Sub}, time::{SystemTime, UNIX_EPOCH}};
 use serde::{Deserialize, Serialize};
+use std::{
+    ops::{Div, Sub},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 // Custom serialization for ChannelId
 mod channel_id_serde {
     use super::ChannelId;
-    use serde::{Deserialize, Deserializer, Serializer, Serialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S>(channel_id: &ChannelId, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -29,7 +32,7 @@ mod channel_id_serde {
 // Custom serialization for PublicKey
 mod pubkey_serde {
     use ldk_node::bitcoin::secp256k1::PublicKey;
-    use serde::{Deserialize, Deserializer, Serializer, Serialize};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::str::FromStr;
 
     pub fn serialize<S>(pubkey: &PublicKey, serializer: S) -> Result<S::Ok, S::Error>
@@ -50,15 +53,9 @@ mod pubkey_serde {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize, Default)]
 pub struct Bitcoin {
     pub sats: u64, // Stored in Satoshis for precision
-}
-
-impl Default for Bitcoin {
-    fn default() -> Self {
-        Self { sats: 0 }
-    }
 }
 
 impl Bitcoin {
@@ -81,7 +78,6 @@ impl Bitcoin {
         let btc = usd.0 / btcusd_price;
         Bitcoin::from_btc(btc)
     }
-
 }
 
 impl Sub for Bitcoin {
@@ -101,7 +97,13 @@ impl std::fmt::Display for Bitcoin {
         let with_spaces = formatted_btc
             .chars()
             .enumerate()
-            .map(|(i, c)| if i == 4 || i == 7 { format!(" {}", c) } else { c.to_string() })
+            .map(|(i, c)| {
+                if i == 4 || i == 7 {
+                    format!(" {}", c)
+                } else {
+                    c.to_string()
+                }
+            })
             .collect::<String>();
 
         write!(f, "{} BTC", with_spaces)
@@ -253,7 +255,7 @@ mod tests {
     fn test_usd_to_msats() {
         let usd = USD::from_f64(100.0);
         let msats = usd.to_msats(100_000.0); // $100k/BTC
-        // $100 at $100k = 0.001 BTC = 100,000 sats = 100,000,000 msats
+                                             // $100 at $100k = 0.001 BTC = 100,000 sats = 100,000,000 msats
         assert_eq!(msats, 100_000_000);
     }
 
@@ -295,7 +297,8 @@ impl Default for StableChannel {
                     0x02, 0x50, 0x86, 0x3A, 0xD6, 0x4A, 0x87, 0xAE, 0x8A, 0x2F, 0xE8, 0x3C, 0x1A,
                     0xF1, 0xA8, 0x40, 0x3C, 0xB5, 0x3F, 0x53, 0xE4, 0x86, 0xD8, 0x51, 0x1D, 0xAD,
                     0x8A, 0x04, 0x88, 0x7E, 0x5B, 0x23, 0x52,
-                ]).unwrap()
+                ])
+                .unwrap()
             }),
             expected_usd: USD(0.0),
             expected_btc: Bitcoin::from_sats(0),
@@ -304,7 +307,10 @@ impl Default for StableChannel {
             stable_receiver_usd: USD(0.0),
             stable_provider_usd: USD(0.0),
             risk_level: 0,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
             formatted_datetime: "".to_string(),
             payment_made: false,
             sc_dir: ".data".to_string(),
