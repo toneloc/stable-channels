@@ -7,6 +7,7 @@ struct SellView: View {
     @State private var step: Step = .amount
     @State private var errorMessage: String?
     @State private var isExecuting = false
+    @State private var pendingPaymentId: String?
 
     enum Step {
         case amount
@@ -126,18 +127,43 @@ struct SellView: View {
         }
     }
 
+    private var tradeConfirmed: Bool {
+        guard let pid = pendingPaymentId else { return false }
+        return appState.pendingTradePayments[pid] == nil
+    }
+
     private var doneScreen: some View {
         VStack(spacing: 20) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.green)
+            if tradeConfirmed {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.green)
 
-            Text("Trade Complete")
-                .font(.title2.bold())
+                Text("Trade Confirmed")
+                    .font(.title2.bold())
 
-            Text(String(format: "Sold %.8f BTC for %@", btcAmount, (amountUSD * 0.99).usdFormatted))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                Text(String(format: "Sold %.8f BTC for %@", btcAmount, (amountUSD * 0.99).usdFormatted))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                Image(systemName: "clock.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.orange)
+
+                Text("Trade Pending")
+                    .font(.title2.bold())
+
+                Text(String(format: "Selling %.8f BTC for %@", btcAmount, (amountUSD * 0.99).usdFormatted))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                ProgressView()
+                    .padding(.top, 4)
+
+                Text("Waiting for LSP confirmation...")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
 
             Button("Done") { dismiss() }
                 .buttonStyle(.borderedProminent)
@@ -174,15 +200,9 @@ struct SellView: View {
                 return
             }
 
-            // Apply trade immediately (optimistic — matches desktop behavior)
-            StabilityService.applyTrade(
-                &appState.stableChannel,
-                newExpectedUSD: result.newExpectedUSD,
-                price: price
-            )
-            appState.saveChannelToDB()
+            // Do NOT apply trade yet — wait for PaymentSuccessful event (matches desktop)
 
-            // Record trade in DB
+            // Record trade in DB as pending
             let tradeDbId = try appState.databaseService?.recordTrade(
                 channelId: sc.channelId,
                 action: "sell",
@@ -194,7 +214,7 @@ struct SellView: View {
                 status: "pending"
             ) ?? 0
 
-            // Track for DB status update on PaymentSuccessful/PaymentFailed
+            // Track so PaymentSuccessful/PaymentFailed can apply or revert
             appState.pendingTradePayments[result.paymentId] = PendingTradePayment(
                 newExpectedUSD: result.newExpectedUSD,
                 price: price,
@@ -202,6 +222,8 @@ struct SellView: View {
                 action: "sell"
             )
 
+            pendingPaymentId = result.paymentId
+            appState.statusMessage = String(format: "Sell pending (fee: $%.2f)", feeUSD)
             step = .done
         } catch {
             errorMessage = error.localizedDescription

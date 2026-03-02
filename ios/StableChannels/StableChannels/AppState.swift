@@ -625,9 +625,16 @@ class AppState {
     ) {
         let paymentHashStr = "\(paymentHash)"
 
-        // Check if this is a pending trade payment — trade was already applied optimistically,
-        // just update DB status
+        // Check if this is a pending trade payment — apply trade now that payment confirmed
         if let pid = paymentId, let trade = pendingTradePayments.removeValue(forKey: "\(pid)") {
+            // Apply the trade (deferred until confirmation — matches desktop)
+            StabilityService.applyTrade(
+                &stableChannel,
+                newExpectedUSD: trade.newExpectedUSD,
+                price: trade.price
+            )
+            saveChannelToDB()
+
             try? databaseService?.updateTradeStatus(trade.tradeDbId, status: "completed")
 
             AuditService.log("TRADE_CONFIRMED", data: [
@@ -642,6 +649,12 @@ class AppState {
 
             let verb = trade.action == "buy" ? "Buy" : "Sell"
             statusMessage = "\(verb) confirmed"
+
+            // Flash so user notices the confirmation
+            paymentFlash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.paymentFlash = false
+            }
             return
         }
 

@@ -28,6 +28,9 @@ class TradeService {
         // Send trade message to counterparty — payment must succeed before we apply the trade
         let paymentId = try sendTradeMessage(
             expectedUSD: newExpectedUSD,
+            feeUSD: feeUSD,
+            price: price,
+            channelId: sc.channelId,
             userChannelId: sc.userChannelId,
             counterparty: sc.counterparty
         )
@@ -51,6 +54,9 @@ class TradeService {
 
         let paymentId = try sendTradeMessage(
             expectedUSD: newExpectedUSD,
+            feeUSD: feeUSD,
+            price: price,
+            channelId: sc.channelId,
             userChannelId: sc.userChannelId,
             counterparty: sc.counterparty
         )
@@ -61,14 +67,19 @@ class TradeService {
     // MARK: - Custom TLV Messages
 
     /// Send a TRADE_V1 message to the counterparty. Returns the PaymentId string.
+    /// The fee is sent as the keysend payment amount (matching desktop behavior).
     @discardableResult
     func sendTradeMessage(
         expectedUSD: Double,
+        feeUSD: Double = 0,
+        price: Double = 0,
+        channelId: String,
         userChannelId: String,
         counterparty: String
     ) throws -> String {
         let payload: [String: Any] = [
             "type": Constants.tradeMessageType,
+            "channel_id": channelId,
             "user_channel_id": "\(userChannelId)",
             "expected_usd": expectedUSD,
         ]
@@ -95,8 +106,18 @@ class TradeService {
             value: Array(envelopeStr.utf8)
         )
 
+        // Send fee as payment amount (matches desktop: fee_msats.max(1))
+        let feeMsat: UInt64
+        if price > 0 && feeUSD > 0 {
+            let feeBtc = feeUSD / price
+            let feeSats = UInt64(feeBtc * 100_000_000)
+            feeMsat = max(feeSats * 1000, 1)
+        } else {
+            feeMsat = 1
+        }
+
         let paymentId = try nodeService.sendKeysendWithTLV(
-            amountMsat: 1,
+            amountMsat: feeMsat,
             to: counterparty,
             tlvs: [tlv]
         )

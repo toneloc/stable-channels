@@ -90,6 +90,7 @@ pub struct ServerApp {
     status_message: String,
     last_update: Instant,
     last_stability_check: Instant,
+    last_push_sent: std::collections::HashMap<String, Instant>, // node_id → last push time
 
     lightning_balance_btc: f64,
     onchain_balance_btc: f64,
@@ -255,9 +256,26 @@ async fn main() -> Result<()> {
                     // Check which peers are offline and need push notifications
                     let push_targets = app.get_stability_push_targets();
 
+                    // Filter by per-peer cooldown (10 minutes between pushes)
+                    let now = Instant::now();
+                    let push_cooldown = Duration::from_secs(600);
+                    let filtered: Vec<StabilityPushTarget> = push_targets
+                        .into_iter()
+                        .filter(|t| {
+                            app.last_push_sent
+                                .get(&t.node_id)
+                                .is_none_or(|last| now.duration_since(*last) >= push_cooldown)
+                        })
+                        .collect();
+
+                    // Record push times for the targets we'll actually notify
+                    for t in &filtered {
+                        app.last_push_sent.insert(t.node_id.clone(), now);
+                    }
+
                     let sent = app.check_and_update_stable_channels();
                     app.last_stability_check = Instant::now();
-                    (sent, push_targets)
+                    (sent, filtered)
                 } else {
                     (false, Vec::new())
                 }
@@ -804,6 +822,7 @@ impl ServerApp {
             status_message: String::new(),
             last_update: Instant::now(),
             last_stability_check: Instant::now(),
+            last_push_sent: std::collections::HashMap::new(),
 
             lightning_balance_btc: 0.0,
             onchain_balance_btc: 0.0,
