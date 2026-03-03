@@ -39,6 +39,9 @@ const APNS_TEAM_ID: &str = "VJF3VBKXV9";
 const APNS_TOPIC: &str = "com.stablechannels.app";
 const APNS_KEY_FILE: &str = "AuthKey.p8";
 
+// FCM push notification support
+const FCM_SERVICE_ACCOUNT_FILE: &str = "firebase-service-account.json";
+
 // ============================================================================
 // TRADE MESSAGE TYPES
 // ============================================================================
@@ -230,6 +233,221 @@ static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
         }
     }
 });
+
+/// Firebase service account credentials for FCM HTTP v1 API
+#[derive(Clone)]
+struct FcmCredentials {
+    private_key: String,
+    client_email: String,
+    project_id: String,
+}
+
+/// Lazily loaded FCM credentials from firebase-service-account.json
+static FCM_CREDENTIALS: Lazy<Mutex<Option<FcmCredentials>>> = Lazy::new(|| {
+    let path = format!("{}/{}", LSP_DATA_DIR, FCM_SERVICE_ACCOUNT_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            match serde_json::from_str::<serde_json::Value>(&contents) {
+                Ok(json) => {
+                    let private_key = json["private_key"].as_str().unwrap_or("").to_string();
+                    let client_email = json["client_email"].as_str().unwrap_or("").to_string();
+                    let project_id = json["project_id"].as_str().unwrap_or("").to_string();
+                    if private_key.is_empty() || client_email.is_empty() || project_id.is_empty() {
+                        println!("[FCM] Service account file missing required fields");
+                        Mutex::new(None)
+                    } else {
+                        println!("[FCM] Credentials loaded from {}", path);
+                        Mutex::new(Some(FcmCredentials { private_key, client_email, project_id }))
+                    }
+                }
+                Err(e) => {
+                    println!("[FCM] Failed to parse {}: {}", path, e);
+                    Mutex::new(None)
+                }
+            }
+        }
+        Err(e) => {
+            println!("[FCM] Service account not found at {}: {} — Android pushes will be logged only", path, e);
+            Mutex::new(None)
+        }
+    }
+});
+
+/// Generate a short-lived OAuth2 access token for FCM using the service account JWT.
+/// Uses openssl for RS256 signing (already a dependency) to avoid adding jsonwebtoken.
+async fn generate_fcm_access_token(creds: &FcmCredentials) -> Option<String> {
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::sign::Signer;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Base64url encode helper (no padding)
+    fn b64url(data: &[u8]) -> String {
+        use openssl::base64::encode_block;
+        encode_block(data)
+            .replace('+', "-")
+            .replace('/', "_")
+            .trim_end_matches('=')
+            .to_string()
+    }
+
+    let header = b64url(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+
+    let claims = json!({
+        "iss": creds.client_email,
+        "scope": "https://www.googleapis.com/auth/firebase.messaging",
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now,
+        "exp": now + 3600,
+    });
+    let claims_b64 = b64url(claims.to_string().as_bytes());
+
+    let signing_input = format!("{}.{}", header, claims_b64);
+
+    let pkey = match PKey::private_key_from_pem(creds.private_key.as_bytes()) {
+        Ok(k) => k,
+        Err(e) => {
+            println!("[FCM] Failed to parse RSA key: {}", e);
+            return None;
+        }
+    };
+
+    let mut signer = match Signer::new(MessageDigest::sha256(), &pkey) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[FCM] Failed to create signer: {}", e);
+            return None;
+        }
+    };
+
+    if let Err(e) = signer.update(signing_input.as_bytes()) {
+        println!("[FCM] Failed to update signer: {}", e);
+        return None;
+    }
+
+    let signature = match signer.sign_to_vec() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[FCM] Failed to sign JWT: {}", e);
+            return None;
+        }
+    };
+
+    let jwt = format!("{}.{}", signing_input, b64url(&signature));
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", &jwt),
+        ])
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            let body: serde_json::Value = r.json().await.ok()?;
+            body["access_token"].as_str().map(|s| s.to_string())
+        }
+        Err(e) => {
+            println!("[FCM] OAuth2 token exchange failed: {}", e);
+            None
+        }
+    }
+}
+
+/// Send an FCM data-only message to an Android device
+async fn send_fcm_push(device_token: &str, direction: &str, node_id: &str) {
+    let creds = {
+        let guard = FCM_CREDENTIALS.lock().unwrap();
+        guard.clone()
+    };
+    let creds = match creds {
+        Some(c) => c,
+        None => {
+            println!(
+                "[FCM] (no credentials) Would send to {}... direction={}",
+                &device_token[..device_token.len().min(16)],
+                direction
+            );
+            return;
+        }
+    };
+
+    let access_token = match generate_fcm_access_token(&creds).await {
+        Some(t) => t,
+        None => {
+            println!("[FCM] Failed to get access token");
+            return;
+        }
+    };
+
+    let payload = json!({
+        "message": {
+            "token": device_token,
+            "data": {
+                "stability": json!({"direction": direction}).to_string()
+            },
+            "android": {
+                "priority": "high"
+            }
+        }
+    });
+
+    let url = format!(
+        "https://fcm.googleapis.com/v1/projects/{}/messages:send",
+        creds.project_id
+    );
+
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .bearer_auth(&access_token)
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            println!(
+                "[FCM] Sent to {}... direction={}: {}",
+                &device_token[..device_token.len().min(16)],
+                direction,
+                status
+            );
+            audit_event(
+                "FCM_SENT",
+                json!({
+                    "token_prefix": &device_token[..device_token.len().min(16)],
+                    "node_id_prefix": &node_id[..node_id.len().min(16)],
+                    "direction": direction,
+                    "status": status.as_u16(),
+                }),
+            );
+        }
+        Err(e) => {
+            println!(
+                "[FCM] Error for {}...: {}",
+                &device_token[..device_token.len().min(16)],
+                e
+            );
+            audit_event(
+                "FCM_ERROR",
+                json!({
+                    "token_prefix": &device_token[..device_token.len().min(16)],
+                    "node_id_prefix": &node_id[..node_id.len().min(16)],
+                    "direction": direction,
+                    "error": e.to_string(),
+                }),
+            );
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -604,15 +822,6 @@ fn notify(node_id: &str, direction: &str) {
         }
     };
 
-    if platform != "ios" {
-        // TODO: FCM for Android
-        println!(
-            "[Push] Android push not yet implemented for node {}...",
-            &node_id[..node_id.len().min(16)]
-        );
-        return;
-    }
-
     let rt = match tokio::runtime::Handle::try_current() {
         Ok(h) => h,
         Err(_) => {
@@ -624,6 +833,13 @@ fn notify(node_id: &str, direction: &str) {
     let device_token = device_token.clone();
     let direction = direction.to_string();
     let node_id = node_id.to_string();
+
+    if platform == "android" {
+        rt.spawn(async move {
+            send_fcm_push(&device_token, &direction, &node_id).await;
+        });
+        return;
+    }
 
     rt.spawn(async move {
         let client = {

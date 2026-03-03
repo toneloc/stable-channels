@@ -1,9 +1,13 @@
 package com.stablechannels.app
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.models.*
+import com.stablechannels.app.push.FCMService
+import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.*
 import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.*
@@ -51,8 +55,12 @@ class AppState(private val context: Context) : ViewModel() {
     private val _onchainBalanceSats = MutableStateFlow(0L)
     val onchainBalanceSats: StateFlow<Long> = _onchainBalanceSats
 
-    val pendingTradePayments = mutableMapOf<String, PendingTradePayment>()
+    private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
+    val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
     var pendingSplice: PendingSplice? = null
+
+    private val _paymentFlash = MutableStateFlow(false)
+    val paymentFlash: StateFlow<Boolean> = _paymentFlash
 
     private var isSweeping = false
     private var sweepOnchainStart: Long = 0
@@ -79,10 +87,13 @@ class AppState(private val context: Context) : ViewModel() {
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
                 if (seedFile.exists()) {
                     _phase.value = Phase.SYNCING
+                    waitForBackgroundService()
                     nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
                     prevOnchainSats = nodeService.spendableOnchainSats()
+                    reregisterPushTokenIfNeeded()
+                    processPendingPushPayment()
                     startStabilityTimer()
                 } else {
                     _phase.value = Phase.ONBOARDING
@@ -102,6 +113,7 @@ class AppState(private val context: Context) : ViewModel() {
                 _phase.value = Phase.WALLET
                 refreshBalances()
                 prevOnchainSats = nodeService.spendableOnchainSats()
+                reregisterPushTokenIfNeeded()
                 startStabilityTimer()
             } catch (e: Exception) {
                 _errorMessage.value = e.message ?: "Failed to create wallet"
@@ -159,11 +171,16 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 is Event.PaymentFailed -> {
                     val pid = event.paymentId
-                    if (pid != null && pendingTradePayments.containsKey(pid)) {
-                        val ptp = pendingTradePayments.remove(pid)!!
+                    val curPending = _pendingTradePayments.value
+                    if (pid != null && curPending.containsKey(pid)) {
+                        val ptp = curPending[pid]!!
+                        _pendingTradePayments.value = curPending - pid
                         databaseService?.updateTradeStatus(ptp.tradeDbId, "failed")
+                        val verb = if (ptp.action == "buy") "Buy" else "Sell"
+                        _statusMessage.value = "$verb trade failed"
                         AuditService.log("TRADE_PAYMENT_FAILED", mapOf("payment_id" to pid))
                     } else {
+                        _statusMessage.value = "Payment failed"
                         AuditService.log("PAYMENT_FAILED", mapOf("payment_hash" to (event.paymentHash ?: "")))
                     }
                 }
@@ -185,7 +202,11 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun handlePaymentReceived(paymentId: String?, amountMsat: Long, paymentHash: String, customRecords: List<CustomTlvRecord>) {
         // Check for sync message
-        if (handleSyncMessage(customRecords, paymentHash)) return
+        if (handleSyncMessage(customRecords, paymentHash)) {
+            refreshBalances()
+            updateStableBalances()
+            return
+        }
 
         val price = priceService.currentPrice.value
         databaseService?.recordPayment(
@@ -199,6 +220,7 @@ class AppState(private val context: Context) : ViewModel() {
         _stableChannel.value = sc
         saveChannelToDB()
         _statusMessage.value = "Payment received: ${amountMsat / 1000} sats"
+        triggerPaymentFlash()
     }
 
     private fun handleSyncMessage(customRecords: List<CustomTlvRecord>, paymentHash: String): Boolean {
@@ -219,16 +241,40 @@ class AppState(private val context: Context) : ViewModel() {
         return true
     }
 
+    fun setStatus(message: String) {
+        _statusMessage.value = message
+    }
+
+    fun addPendingTradePayment(paymentId: String, payment: PendingTradePayment) {
+        _pendingTradePayments.value = _pendingTradePayments.value + (paymentId to payment)
+    }
+
+    fun triggerPaymentFlash() {
+        _paymentFlash.value = true
+        viewModelScope.launch {
+            delay(1500)
+            _paymentFlash.value = false
+        }
+    }
+
     private fun handlePaymentSuccessful(paymentId: String?, paymentHash: String, feePaidMsat: Long?) {
-        if (paymentId != null && pendingTradePayments.containsKey(paymentId)) {
-            val ptp = pendingTradePayments.remove(paymentId)!!
+        val currentPending = _pendingTradePayments.value
+        if (paymentId != null && currentPending.containsKey(paymentId)) {
+            val ptp = currentPending[paymentId]!!
+            _pendingTradePayments.value = currentPending - paymentId
             val sc = StabilityService.applyTrade(_stableChannel.value, ptp.newExpectedUSD, ptp.price)
             _stableChannel.value = sc
+            saveChannelToDB()
             databaseService?.updateTradeStatus(ptp.tradeDbId, "completed")
             refreshBalances()
-            saveChannelToDB()
+            updateStableBalances()
+            val verb = if (ptp.action == "buy") "Buy" else "Sell"
+            _statusMessage.value = "$verb confirmed"
+            triggerPaymentFlash()
             AuditService.log("TRADE_COMPLETED", mapOf("payment_id" to paymentId, "action" to ptp.action))
         } else {
+            refreshBalances()
+            updateStableBalances()
             val price = priceService.currentPrice.value
             val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
             _stableChannel.value = result.first
@@ -236,6 +282,7 @@ class AppState(private val context: Context) : ViewModel() {
                 databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
             }
             saveChannelToDB()
+            _statusMessage.value = "Payment confirmed"
         }
     }
 
@@ -275,6 +322,7 @@ class AppState(private val context: Context) : ViewModel() {
         stabilityJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(Constants.STABILITY_CHECK_INTERVAL_SECS * 1000)
+                FCMService.updateHeartbeat(context)
                 recordCurrentPrice()
                 runStabilityCheck()
                 detectOnchainDeposit()
@@ -319,9 +367,14 @@ class AppState(private val context: Context) : ViewModel() {
         val currentSats = nodeService.spendableOnchainSats()
         if (currentSats > prevOnchainSats && !isSweeping) {
             val depositSats = currentSats - prevOnchainSats
+            if (depositSats < 1000) {
+                prevOnchainSats = currentSats
+                return
+            }
             val price = priceService.currentPrice.value
+            val dedupId = "onchain_${System.currentTimeMillis() / 1000}_$depositSats"
             databaseService?.recordPayment(
-                paymentId = null, paymentType = "onchain", direction = "received",
+                paymentId = dedupId, paymentType = "onchain", direction = "received",
                 amountMsat = depositSats * 1000,
                 amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
                 btcPrice = price
@@ -346,7 +399,7 @@ class AppState(private val context: Context) : ViewModel() {
         if (totalOnchain < Constants.AUTO_SWEEP_MIN_SATS) return
 
         val feeRate = fetchFeeRate() ?: return
-        val feeReserve = feeRate * 340  // ~340 vbytes for splice tx
+        val feeReserve = feeRate * 170  // ~170 vbytes for splice tx
         val spendable = nodeService.spendableOnchainSats()
         if (spendable <= feeReserve) return
 
@@ -411,7 +464,9 @@ class AppState(private val context: Context) : ViewModel() {
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return
         databaseService?.saveChannel(
-            sc.channelId, sc.userChannelId, sc.expectedUSD.amount, sc.backingSats, sc.note
+            sc.channelId, sc.userChannelId, sc.expectedUSD.amount, sc.backingSats, sc.note,
+            receiverSats = sc.stableReceiverBTC.sats,
+            latestPrice = sc.latestPrice
         )
     }
 
@@ -426,6 +481,17 @@ class AppState(private val context: Context) : ViewModel() {
             backingSats = record.backingSats,
             note = record.note
         )
+        if (record.receiverSats > 0) {
+            updated.stableReceiverBTC = Bitcoin(record.receiverSats)
+            updated.stableReceiverUSD = if (record.latestPrice > 0) {
+                USD.fromBitcoin(Bitcoin(record.receiverSats), record.latestPrice)
+            } else USD.ZERO
+            StabilityService.recomputeNative(updated)
+        }
+        if (record.latestPrice > 0) {
+            updated.latestPrice = record.latestPrice
+            priceService.seedPrice(record.latestPrice)
+        }
         _stableChannel.value = updated
     }
 
@@ -434,5 +500,42 @@ class AppState(private val context: Context) : ViewModel() {
         if (price > 0) {
             databaseService?.recordPrice(price, "median")
         }
+    }
+
+    private fun waitForBackgroundService() {
+        if (!StabilityProcessingService.isRunning) return
+        Log.d("AppState", "Waiting for background stability service to finish...")
+        val deadline = System.currentTimeMillis() + 30_000
+        while (StabilityProcessingService.isRunning && System.currentTimeMillis() < deadline) {
+            Thread.sleep(500)
+        }
+        if (StabilityProcessingService.isRunning) {
+            Log.w("AppState", "Background service still running after 30s, proceeding anyway")
+        }
+    }
+
+    private fun reregisterPushTokenIfNeeded() {
+        val nodeId = nodeService.nodeId
+        if (nodeId.isEmpty()) return
+
+        FCMService.saveNodeId(context, nodeId)
+
+        FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+            FCMService.saveToken(context, token)
+            viewModelScope.launch(Dispatchers.IO) {
+                FCMService.registerTokenWithLSP(token, nodeId)
+            }
+        }
+    }
+
+    private fun processPendingPushPayment() {
+        if (!FCMService.hasPendingPayment(context)) return
+        Log.d("AppState", "Processing pending push payment")
+        FCMService.clearPendingPayment(context)
+        try {
+            nodeService.node?.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+        } catch (_: Exception) {}
+        refreshBalances()
+        updateStableBalances()
     }
 }

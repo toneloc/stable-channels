@@ -25,7 +25,7 @@ class TradeService(private val nodeService: NodeService) {
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0.0)
         val btcAmount = netAmount / price
-        val paymentId = sendTradeMessage(newExpectedUSD, sc.userChannelId, sc.counterparty)
+        val paymentId = sendTradeMessage(newExpectedUSD, sc.userChannelId, sc.channelId, sc.counterparty, feeUSD, price)
         return TradeResult(paymentId, newExpectedUSD, btcAmount)
     }
 
@@ -40,14 +40,15 @@ class TradeService(private val nodeService: NodeService) {
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = min(sc.expectedUSD.amount + netAmount, maxUSD)
         val btcAmount = netAmount / price
-        val paymentId = sendTradeMessage(newExpectedUSD, sc.userChannelId, sc.counterparty)
+        val paymentId = sendTradeMessage(newExpectedUSD, sc.userChannelId, sc.channelId, sc.counterparty, feeUSD, price)
         return TradeResult(paymentId, newExpectedUSD, btcAmount)
     }
 
-    fun sendTradeMessage(expectedUSD: Double, userChannelId: String, counterparty: String): String {
+    fun sendTradeMessage(expectedUSD: Double, userChannelId: String, channelId: String, counterparty: String, feeUSD: Double, price: Double): String {
         val payload = JSONObject().apply {
             put("type", Constants.TRADE_MESSAGE_TYPE)
             put("user_channel_id", userChannelId)
+            put("channel_id", channelId)
             put("expected_usd", expectedUSD)
         }
         val payloadStr = payload.toString()
@@ -59,8 +60,9 @@ class TradeService(private val nodeService: NodeService) {
         }
         val envelopeBytes = envelope.toString().toByteArray(Charsets.UTF_8)
 
+        val feeMsat = max((feeUSD / price * Constants.SATS_IN_BTC).toLong() * 1000, 1)
         val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelopeBytes.toList())
-        return nodeService.sendKeysendWithTLV(1, counterparty, listOf(tlv))
+        return nodeService.sendKeysendWithTLV(feeMsat, counterparty, listOf(tlv))
     }
 
     companion object {

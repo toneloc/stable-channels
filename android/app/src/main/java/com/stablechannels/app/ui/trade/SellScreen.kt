@@ -1,10 +1,13 @@
 package com.stablechannels.app.ui.trade
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
@@ -21,6 +24,7 @@ fun SellScreen(appState: AppState, onDismiss: () -> Unit) {
     var amountText by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var isExecuting by remember { mutableStateOf(false) }
+    var pendingPaymentId by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     val sc by appState.stableChannel.collectAsState()
@@ -107,12 +111,14 @@ fun SellScreen(appState: AppState, onDismiss: () -> Unit) {
                                     btcPrice = btcPrice, feeUSD = feeUSD,
                                     paymentId = result.paymentId, status = "pending"
                                 ) ?: 0
-                                appState.pendingTradePayments[result.paymentId] = PendingTradePayment(
+                                appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
                                     price = btcPrice,
                                     tradeDbId = tradeDbId,
                                     action = "sell"
-                                )
+                                ))
+                                pendingPaymentId = result.paymentId
+                                appState.setStatus(String.format(Locale.US, "Sell pending (fee: $%.2f)", feeUSD))
                                 step = TradeStep.DONE
                             } catch (e: Exception) {
                                 error = e.message ?: "Trade failed"
@@ -131,12 +137,33 @@ fun SellScreen(appState: AppState, onDismiss: () -> Unit) {
             }
 
             TradeStep.DONE -> {
-                Text("Trade Pending", style = MaterialTheme.typography.headlineMedium)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Your sell order is being processed. Balance will update when the payment confirms.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                val pendingPayments by appState.pendingTradePayments.collectAsState()
+                val isConfirmed = pendingPaymentId != null && !pendingPayments.containsKey(pendingPaymentId)
+
+                if (isConfirmed) {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = "Confirmed",
+                        tint = Color(0xFF4CAF50),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("Trade Confirmed", style = MaterialTheme.typography.headlineMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Your sell order has been confirmed.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else {
+                    CircularProgressIndicator(Modifier.size(48.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text("Trade Pending", style = MaterialTheme.typography.headlineMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Your sell order is being processed. Balance will update when the payment confirms.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
                 Spacer(Modifier.height(16.dp))
                 Button(onClick = onDismiss) { Text("Done") }
             }

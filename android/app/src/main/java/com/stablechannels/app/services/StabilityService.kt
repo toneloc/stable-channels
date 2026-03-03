@@ -63,6 +63,19 @@ object StabilityService {
         return updated
     }
 
+    fun deductOutgoing(sc: StableChannel, amountSats: Long, price: Double): Double? {
+        if (sc.expectedUSD.amount < 0.01 || price <= 0.0) return null
+        val nativeSats = sc.nativeChannelBTC.sats
+        if (amountSats <= nativeSats) return null  // Fully covered by native balance
+        val overflowSats = amountSats - nativeSats
+        val usdToDeduct = overflowSats.toDouble() / Constants.SATS_IN_BTC * price
+        val newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
+        sc.expectedUSD = USD(newExpected)
+        sc.backingSats = (newExpected / price * Constants.SATS_IN_BTC).toLong()
+        recomputeNative(sc)
+        return usdToDeduct
+    }
+
     fun recomputeNative(sc: StableChannel) {
         val nativeSats = max(sc.stableReceiverBTC.sats - sc.backingSats, 0)
         sc.nativeChannelBTC = Bitcoin(nativeSats)

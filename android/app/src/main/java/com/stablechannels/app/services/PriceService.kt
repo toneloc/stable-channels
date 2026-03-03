@@ -31,6 +31,12 @@ class PriceService {
     @Volatile
     private var isUpdating = false
 
+    fun seedPrice(price: Double) {
+        if (_currentPrice.value <= 0.0 && price > 0.0) {
+            _currentPrice.value = price
+        }
+    }
+
     fun startAutoRefresh(intervalSecs: Long = Constants.PRICE_CACHE_REFRESH_SECS) {
         refreshJob?.cancel()
         refreshJob = scope.launch {

@@ -44,7 +44,9 @@ data class ChannelRecord(
     val userChannelId: String,
     val expectedUSD: Double,
     val note: String?,
-    val backingSats: Long
+    val backingSats: Long,
+    val receiverSats: Long = 0,
+    val latestPrice: Double = 0.0
 )
 
 data class TradeRecord(

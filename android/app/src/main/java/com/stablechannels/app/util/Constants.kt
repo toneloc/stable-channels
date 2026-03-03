@@ -15,6 +15,8 @@ object Constants {
     const val DEFAULT_LSP_ALIAS = "lsp"
     const val DEFAULT_LSP_PORT = 9737
 
+    const val LSP_PUSH_REGISTER_URL = "http://100.25.168.115:8080/api/register-push"
+
     const val DEFAULT_CHAIN_URL = "https://blockstream.info/api"
     const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     const val DEFAULT_LSP_ADDRESS = "100.25.168.115:9737"

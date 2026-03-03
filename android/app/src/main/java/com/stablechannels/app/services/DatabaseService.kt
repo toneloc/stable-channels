@@ -17,7 +17,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 ) {
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -28,6 +28,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 expected_usd REAL DEFAULT 0,
                 stable_sats INTEGER DEFAULT 0,
                 note TEXT,
+                receiver_sats INTEGER NOT NULL DEFAULT 0,
+                latest_price REAL NOT NULL DEFAULT 0.0,
                 created_at INTEGER DEFAULT (strftime('%s','now')),
                 updated_at INTEGER DEFAULT (strftime('%s','now'))
             )
@@ -102,11 +104,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE channels ADD COLUMN receiver_sats INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE channels ADD COLUMN latest_price REAL NOT NULL DEFAULT 0.0")
+        }
+    }
 
     // --- Channels ---
 
-    fun saveChannel(channelId: String, userChannelId: String, expectedUSD: Double, backingSats: Long, note: String?) {
+    fun saveChannel(channelId: String, userChannelId: String, expectedUSD: Double, backingSats: Long, note: String?, receiverSats: Long = 0, latestPrice: Double = 0.0) {
         val db = writableDatabase
         val now = System.currentTimeMillis() / 1000
         val cv = ContentValues().apply {
@@ -115,6 +122,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             put("expected_usd", expectedUSD)
             put("stable_sats", backingSats)
             put("note", note)
+            put("receiver_sats", receiverSats)
+            put("latest_price", latestPrice)
             put("updated_at", now)
         }
         val updated = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
@@ -127,7 +136,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     fun loadChannel(userChannelId: String): ChannelRecord? {
         val db = readableDatabase
         val cursor = db.rawQuery(
-            "SELECT channel_id, user_channel_id, expected_usd, note, stable_sats FROM channels WHERE user_channel_id = ?",
+            "SELECT channel_id, user_channel_id, expected_usd, note, stable_sats, receiver_sats, latest_price FROM channels WHERE user_channel_id = ?",
             arrayOf(userChannelId)
         )
         return cursor.use {
@@ -137,7 +146,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     userChannelId = it.getString(1),
                     expectedUSD = it.getDouble(2),
                     note = it.getStringOrNull(3),
-                    backingSats = it.getLong(4)
+                    backingSats = it.getLong(4),
+                    receiverSats = it.getLong(5),
+                    latestPrice = it.getDouble(6)
                 )
             } else null
         }
