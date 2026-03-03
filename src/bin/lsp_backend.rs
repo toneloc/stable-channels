@@ -246,28 +246,33 @@ struct FcmCredentials {
 static FCM_CREDENTIALS: Lazy<Mutex<Option<FcmCredentials>>> = Lazy::new(|| {
     let path = format!("{}/{}", LSP_DATA_DIR, FCM_SERVICE_ACCOUNT_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(contents) => {
-            match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(json) => {
-                    let private_key = json["private_key"].as_str().unwrap_or("").to_string();
-                    let client_email = json["client_email"].as_str().unwrap_or("").to_string();
-                    let project_id = json["project_id"].as_str().unwrap_or("").to_string();
-                    if private_key.is_empty() || client_email.is_empty() || project_id.is_empty() {
-                        println!("[FCM] Service account file missing required fields");
-                        Mutex::new(None)
-                    } else {
-                        println!("[FCM] Credentials loaded from {}", path);
-                        Mutex::new(Some(FcmCredentials { private_key, client_email, project_id }))
-                    }
-                }
-                Err(e) => {
-                    println!("[FCM] Failed to parse {}: {}", path, e);
+        Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
+            Ok(json) => {
+                let private_key = json["private_key"].as_str().unwrap_or("").to_string();
+                let client_email = json["client_email"].as_str().unwrap_or("").to_string();
+                let project_id = json["project_id"].as_str().unwrap_or("").to_string();
+                if private_key.is_empty() || client_email.is_empty() || project_id.is_empty() {
+                    println!("[FCM] Service account file missing required fields");
                     Mutex::new(None)
+                } else {
+                    println!("[FCM] Credentials loaded from {}", path);
+                    Mutex::new(Some(FcmCredentials {
+                        private_key,
+                        client_email,
+                        project_id,
+                    }))
                 }
             }
-        }
+            Err(e) => {
+                println!("[FCM] Failed to parse {}: {}", path, e);
+                Mutex::new(None)
+            }
+        },
         Err(e) => {
-            println!("[FCM] Service account not found at {}: {} — Android pushes will be logged only", path, e);
+            println!(
+                "[FCM] Service account not found at {}: {} — Android pushes will be logged only",
+                path, e
+            );
             Mutex::new(None)
         }
     }
