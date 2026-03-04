@@ -63,6 +63,8 @@ class AppState(private val context: Context) : ViewModel() {
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
 
     private var isSweeping = false
+    /** True when any splice (in or out) is in flight — prevents concurrent splices. */
+    val isSpliceInFlight: Boolean get() = isSweeping
     private var sweepOnchainStart: Long = 0
     private var prevOnchainSats: Long = 0
     private var stabilityJob: Job? = null
@@ -423,6 +425,43 @@ class AppState(private val context: Context) : ViewModel() {
             isSweeping = false
             pendingSplice = null
             AuditService.log("AUTO_SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
+        }
+    }
+
+    /** Manual sweep-to-channel (called from SettingsScreen).
+     *  Guards against concurrent splices using the same isSweeping flag as auto-sweep. */
+    fun manualSweepToChannel() {
+        if (isSweeping) {
+            _statusMessage.value = "Sweep already in progress"
+            return
+        }
+
+        val channel = nodeService.channels.find { it.isChannelReady } ?: run {
+            _statusMessage.value = "No ready channel"
+            return
+        }
+
+        val spendable = nodeService.spendableOnchainSats()
+        val feeReserve = 340L * 10  // conservative
+        val sweepAmount = spendable - feeReserve
+        if (sweepAmount <= 0) {
+            _statusMessage.value = "Insufficient on-chain balance"
+            return
+        }
+
+        try {
+            isSweeping = true
+            sweepOnchainStart = spendable
+            pendingSplice = PendingSplice("in", sweepAmount)
+            val sc = _stableChannel.value
+            nodeService.spliceIn(sc.userChannelId, sc.counterparty, sweepAmount)
+            _statusMessage.value = "Sweep initiated ($sweepAmount sats)"
+            AuditService.log("MANUAL_SWEEP_INITIATED", mapOf("sats" to sweepAmount))
+        } catch (e: Exception) {
+            isSweeping = false
+            pendingSplice = null
+            _statusMessage.value = "Sweep failed: ${e.message}"
+            AuditService.log("MANUAL_SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
         }
     }
 

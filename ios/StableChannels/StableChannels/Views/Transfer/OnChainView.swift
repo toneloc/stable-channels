@@ -104,6 +104,9 @@ struct OnChainSendView: View {
         do {
             // If channel exists, route through splice-out
             if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }), !sendAll {
+                guard !appState.isSweeping else {
+                    throw NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"])
+                }
                 try appState.nodeService.spliceOut(
                     userChannelId: channel.userChannelId,
                     counterpartyNodeId: channel.counterpartyNodeId,

@@ -123,6 +123,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     val sats = amountSats.toLongOrNull() ?: throw Exception("Enter amount")
                                     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
                                     if (hasChannel) {
+                                        if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                         val sc = appState.stableChannel.value
                                         appState.pendingSplice = com.stablechannels.app.models.PendingSplice("out", sats, trimmed)
                                         appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)

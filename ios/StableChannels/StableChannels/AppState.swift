@@ -56,7 +56,7 @@ class AppState {
     private var stabilityTimer: Task<Void, Never>?
 
     // Auto-sweep state
-    private var isSweeping = false
+    private(set) var isSweeping = false
     private var sweepOnchainStart: UInt64 = 0
     private var prevOnchainSats: UInt64 = 0
 
@@ -953,6 +953,49 @@ class AppState {
             ])
         } catch {
             AuditService.log("AUTO_SWEEP_FAILED", data: [
+                "error": error.localizedDescription,
+            ])
+        }
+    }
+
+    /// Manual sweep-to-channel (called from SettingsView).
+    /// Guards against concurrent splices using the same isSweeping flag as auto-sweep.
+    func manualSweepToChannel() {
+        guard !isSweeping else {
+            statusMessage = "Sweep already in progress"
+            return
+        }
+
+        guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
+            statusMessage = "No ready channel"
+            return
+        }
+
+        let spendable = nodeService.spendableOnchainSats()
+        let feeReserve: UInt64 = 2 * 170
+        guard spendable > feeReserve else {
+            statusMessage = "Insufficient on-chain balance"
+            return
+        }
+        let sweepAmount = spendable - feeReserve
+
+        do {
+            try nodeService.spliceIn(
+                userChannelId: channel.userChannelId,
+                counterpartyNodeId: channel.counterpartyNodeId,
+                amountSats: sweepAmount
+            )
+            isSweeping = true
+            sweepOnchainStart = nodeService.balances()?.totalOnchainBalanceSats ?? 0
+            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
+            statusMessage = "Sweep initiated (\(sweepAmount) sats)"
+
+            AuditService.log("MANUAL_SWEEP_INITIATED", data: [
+                "amount_sats": "\(sweepAmount)",
+            ])
+        } catch {
+            statusMessage = "Sweep failed: \(error.localizedDescription)"
+            AuditService.log("MANUAL_SWEEP_FAILED", data: [
                 "error": error.localizedDescription,
             ])
         }

@@ -1248,6 +1248,12 @@ impl UserApp {
                             .find(|c| c.is_channel_ready);
 
                         if let Some(ch) = ready_channel {
+                            // Block if a splice is already in flight (auto-sweep or prior splice)
+                            if self.auto_sweep_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                                self.send_error = "A splice is already in progress — try again shortly".to_string();
+                                return false;
+                            }
+
                             // Splice-first: withdraw from channel via splice_out
                             let amount_sats = match self.send_amount.trim().parse::<f64>() {
                                 Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
@@ -1264,6 +1270,13 @@ impl UserApp {
                                 amount_sats,
                             ) {
                                 Ok(()) => {
+                                    // Block auto-sweep while this splice is in flight
+                                    self.auto_sweep_in_progress.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    self.auto_sweep_onchain_at_start.store(
+                                        self.node.list_balances().total_onchain_balance_sats,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+
                                     *self.pending_splice.lock().unwrap() = Some(PendingSplice {
                                         direction: "out".to_string(),
                                         amount_sats,

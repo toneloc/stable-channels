@@ -234,6 +234,9 @@ struct SendView: View {
                 let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
                 // Route through splice-out if channel exists
                 if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }) {
+                    guard !appState.isSweeping else {
+                        throw NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"])
+                    }
                     try appState.nodeService.spliceOut(
                         userChannelId: channel.userChannelId,
                         counterpartyNodeId: channel.counterpartyNodeId,

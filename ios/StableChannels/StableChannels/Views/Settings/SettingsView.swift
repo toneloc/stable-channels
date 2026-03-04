@@ -256,20 +256,6 @@ struct SettingsView: View {
     }
 
     private func sweepToChannel() {
-        guard let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }) else { return }
-        let spendable = appState.nodeService.spendableOnchainSats()
-        let feeReserve: UInt64 = 2 * 170  // conservative 2 sat/vB * 170 vB
-        guard spendable > feeReserve else { return }
-        let sweepAmount = spendable - feeReserve
-        do {
-            try appState.nodeService.spliceIn(
-                userChannelId: channel.userChannelId,
-                counterpartyNodeId: channel.counterpartyNodeId,
-                amountSats: sweepAmount
-            )
-            appState.statusMessage = "Sweep initiated (\(sweepAmount) sats)"
-        } catch {
-            appState.statusMessage = "Sweep failed: \(error.localizedDescription)"
-        }
+        appState.manualSweepToChannel()
     }
 }

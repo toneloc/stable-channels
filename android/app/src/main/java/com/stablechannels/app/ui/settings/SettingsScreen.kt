@@ -162,18 +162,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             Button(
                 onClick = {
                     scope.launch(Dispatchers.IO) {
-                        try {
-                            val spendable = appState.nodeService.spendableOnchainSats()
-                            val feeReserve = 340L * 10  // conservative
-                            val sweepAmount = spendable - feeReserve
-                            if (sweepAmount > 0) {
-                                appState.pendingSplice = PendingSplice("in", sweepAmount)
-                                appState.nodeService.spliceIn(
-                                    sc.userChannelId, sc.counterparty, sweepAmount
-                                )
-                                AuditService.log("MANUAL_SWEEP", mapOf("sats" to sweepAmount))
-                            }
-                        } catch (_: Exception) {}
+                        appState.manualSweepToChannel()
                     }
                 },
                 modifier = Modifier.fillMaxWidth()

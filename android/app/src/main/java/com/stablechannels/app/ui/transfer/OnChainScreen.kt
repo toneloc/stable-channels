@@ -104,6 +104,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                             } else {
                                 val sats = amountSats.toLongOrNull() ?: throw Exception("Enter amount")
                                 if (hasChannel) {
+                                    if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value
                                     appState.pendingSplice = PendingSplice("out", sats, addr)
                                     appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
