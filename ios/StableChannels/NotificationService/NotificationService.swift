@@ -380,51 +380,72 @@ class NotificationService: UNNotificationServiceExtension {
 
     // MARK: - Price Fetch
 
-    /// Fetch BTC/USD price from multiple sources, return median.
+    /// Fetch BTC/USD price from 5 sources concurrently, return median.
+    /// All requests fire at once via DispatchGroup so wall time = slowest feed, not sum.
     private static func fetchBTCPrice() -> Double {
+        let lock = NSLock()
         var prices: [Double] = []
-        let semaphore = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+
+        func append(_ p: Double) { lock.lock(); prices.append(p); lock.unlock() }
 
         // Bitstamp
+        group.enter()
         if let url = URL(string: "https://www.bitstamp.net/api/v2/ticker/btcusd/") {
-            let task = URLSession.shared.dataTask(with: url) { data, _, _ in
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                defer { group.leave() }
                 if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let lastStr = json["last"] as? String, let p = Double(lastStr) {
-                    prices.append(p)
-                }
-                semaphore.signal()
-            }
-            task.resume()
-            semaphore.wait()
-        }
+                   let s = json["last"] as? String, let p = Double(s) { append(p) }
+            }.resume()
+        } else { group.leave() }
 
         // Coinbase
+        group.enter()
         if let url = URL(string: "https://api.coinbase.com/v2/prices/spot?currency=USD") {
-            let task = URLSession.shared.dataTask(with: url) { data, _, _ in
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                defer { group.leave() }
                 if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let dataObj = json["data"] as? [String: Any],
-                   let amountStr = dataObj["amount"] as? String, let p = Double(amountStr) {
-                    prices.append(p)
-                }
-                semaphore.signal()
-            }
-            task.resume()
-            semaphore.wait()
-        }
+                   let d = json["data"] as? [String: Any],
+                   let s = d["amount"] as? String, let p = Double(s) { append(p) }
+            }.resume()
+        } else { group.leave() }
 
         // Blockchain.com
+        group.enter()
         if let url = URL(string: "https://blockchain.info/ticker") {
-            let task = URLSession.shared.dataTask(with: url) { data, _, _ in
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                defer { group.leave() }
                 if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let usd = json["USD"] as? [String: Any],
-                   let p = usd["last"] as? Double {
-                    prices.append(p)
-                }
-                semaphore.signal()
-            }
-            task.resume()
-            semaphore.wait()
-        }
+                   let p = usd["last"] as? Double { append(p) }
+            }.resume()
+        } else { group.leave() }
+
+        // Kraken
+        group.enter()
+        if let url = URL(string: "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD") {
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                defer { group.leave() }
+                if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let result = json["result"] as? [String: Any],
+                   let pair = result["XXBTZUSD"] as? [String: Any],
+                   let c = pair["c"] as? [Any],
+                   let s = c.first as? String, let p = Double(s) { append(p) }
+            }.resume()
+        } else { group.leave() }
+
+        // CoinGecko
+        group.enter()
+        if let url = URL(string: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd") {
+            URLSession.shared.dataTask(with: url) { data, _, _ in
+                defer { group.leave() }
+                if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let btc = json["bitcoin"] as? [String: Any],
+                   let p = btc["usd"] as? Double { append(p) }
+            }.resume()
+        } else { group.leave() }
+
+        group.wait()
 
         guard !prices.isEmpty else { return 0 }
         let sorted = prices.sorted()

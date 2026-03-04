@@ -62,6 +62,24 @@ struct EditStableChannelRes {
     status: String,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+struct ChannelStabilityStatus {
+    note: String,
+    channel_id: String,
+    peer: String,
+    expected_usd: f64,
+    current_usd: f64,
+    percent_from_par: f64,
+    dollars_from_par: f64,
+    direction: String,
+    backing_sats: u64,
+    native_btc_sats: u64,
+    peer_connected: bool,
+    last_stability_payment: i64,
+    btc_price: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct EditStableChannelReq {
     channel_id: String,
@@ -92,6 +110,7 @@ struct Dashboard {
     get_address_task: Option<JoinHandle<reqwest::Result<String>>>,
     connect_task: Option<JoinHandle<reqwest::Result<String>>>,
     connect_result: Option<String>,
+    stability_task: Option<JoinHandle<reqwest::Result<Vec<ChannelStabilityStatus>>>>,
 
     balance: Option<Balance>,
     channels: Vec<ChannelInfo>,
@@ -99,6 +118,8 @@ struct Dashboard {
     payments: Vec<PaymentInfo>,
     invoices: Vec<InvoiceInfo>,
     log_tail: String,
+    stability_status: Vec<ChannelStabilityStatus>,
+    last_stability_refresh: Instant,
 
     status_msg: String,
 
@@ -149,6 +170,7 @@ impl Dashboard {
             pay_result: None,
             connect_task: None,
             connect_result: None,
+            stability_task: None,
 
             balance: None,
             channels: Vec::new(),
@@ -156,6 +178,8 @@ impl Dashboard {
             payments: Vec::new(),
             invoices: Vec::new(),
             log_tail: String::new(),
+            stability_status: Vec::new(),
+            last_stability_refresh: Instant::now() - Duration::from_secs(60),
 
             status_msg: String::new(),
 
@@ -240,6 +264,21 @@ impl Dashboard {
                 .send()
                 .await?
                 .json::<String>()
+                .await
+        }));
+    }
+
+    fn fetch_stability_status(&mut self) {
+        if self.stability_task.is_some() {
+            return;
+        }
+        let client = self.client.clone();
+        self.stability_task = Some(self.rt.spawn(async move {
+            client
+                .get("http://100.25.168.115:8080/api/stability_status")
+                .send()
+                .await?
+                .json::<Vec<ChannelStabilityStatus>>()
                 .await
         }));
     }
@@ -403,6 +442,184 @@ impl Dashboard {
                             }
                         });
                 });
+        });
+    }
+
+    fn show_stability_status(&mut self, ui: &mut egui::Ui) {
+        use egui::RichText;
+
+        ui.group(|ui| {
+            ui.heading("Stability Overview");
+
+            if self.stability_status.is_empty() {
+                ui.label("No active stable channels");
+                if ui.button("Refresh").clicked() {
+                    self.fetch_stability_status();
+                }
+                return;
+            }
+
+            // Summary line
+            let total_expected: f64 = self.stability_status.iter().map(|s| s.expected_usd).sum();
+            let total_current: f64 = self.stability_status.iter().map(|s| s.current_usd).sum();
+            let total_drift = total_current - total_expected;
+            let connected_count = self.stability_status.iter().filter(|s| s.peer_connected).count();
+
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{} stable channel(s)  |  {} peer(s) online  |  Target: ${:.2}  |  Current: ${:.2}  |  Drift: ",
+                    self.stability_status.len(),
+                    connected_count,
+                    total_expected,
+                    total_current,
+                ));
+                let drift_color = if total_drift.abs() < 0.01 {
+                    egui::Color32::from_rgb(100, 200, 100)
+                } else {
+                    egui::Color32::from_rgb(255, 165, 0)
+                };
+                ui.label(RichText::new(format!("{:+.2}", total_drift)).color(drift_color).strong());
+            });
+
+            if let Some(price) = self.stability_status.first().map(|s| s.btc_price) {
+                ui.label(format!("BTC/USD: ${:.2}", price));
+            }
+
+            ui.add_space(4.0);
+
+            egui::ScrollArea::both()
+                .max_height(200.0)
+                .auto_shrink([true; 2])
+                .show(ui, |ui| {
+                    egui::Grid::new("stability_table")
+                        .striped(true)
+                        .min_col_width(60.0)
+                        .show(ui, |ui| {
+                            // Headers
+                            for h in [
+                                "Note",
+                                "Target $",
+                                "Current $",
+                                "Drift $",
+                                "Drift %",
+                                "Direction",
+                                "Backing",
+                                "Native BTC",
+                                "Peer",
+                                "Last Payment",
+                            ] {
+                                ui.label(RichText::new(h).strong().small());
+                            }
+                            ui.end_row();
+
+                            // Rows
+                            for st in &self.stability_status {
+                                // Note
+                                let note = if st.note.is_empty() {
+                                    "---".to_string()
+                                } else {
+                                    st.note.clone()
+                                };
+                                ui.label(&note);
+
+                                // Target USD
+                                ui.label(format!("${:.2}", st.expected_usd));
+
+                                // Current USD — color based on drift
+                                let current_color = if st.percent_from_par.abs() < 0.1 {
+                                    egui::Color32::from_rgb(100, 200, 100) // green = at par
+                                } else if st.percent_from_par.abs() < 1.0 {
+                                    egui::Color32::from_rgb(255, 200, 0) // yellow = small drift
+                                } else {
+                                    egui::Color32::from_rgb(255, 80, 80) // red = large drift
+                                };
+                                ui.label(
+                                    RichText::new(format!("${:.2}", st.current_usd))
+                                        .color(current_color),
+                                );
+
+                                // Drift $ — signed
+                                let drift_color = if st.dollars_from_par.abs() < 0.01 {
+                                    egui::Color32::GRAY
+                                } else if st.dollars_from_par > 0.0 {
+                                    egui::Color32::from_rgb(255, 165, 0) // orange = user owes
+                                } else {
+                                    egui::Color32::from_rgb(100, 150, 255) // blue = LSP owes
+                                };
+                                ui.label(
+                                    RichText::new(format!("{:+.4}", st.dollars_from_par))
+                                        .color(drift_color),
+                                );
+
+                                // Drift %
+                                ui.label(
+                                    RichText::new(format!("{:+.3}%", st.percent_from_par))
+                                        .color(current_color),
+                                );
+
+                                // Direction
+                                let (dir_text, dir_color) = match st.direction.as_str() {
+                                    "at_par" => (
+                                        "At Par",
+                                        egui::Color32::from_rgb(100, 200, 100),
+                                    ),
+                                    "user_owes_lsp" => (
+                                        "User -> LSP",
+                                        egui::Color32::from_rgb(255, 165, 0),
+                                    ),
+                                    "lsp_owes_user" => (
+                                        "LSP -> User",
+                                        egui::Color32::from_rgb(100, 150, 255),
+                                    ),
+                                    _ => ("Unknown", egui::Color32::GRAY),
+                                };
+                                ui.label(RichText::new(dir_text).color(dir_color).strong());
+
+                                // Backing sats
+                                ui.label(format!("{}", st.backing_sats));
+
+                                // Native BTC sats
+                                ui.label(format!("{}", st.native_btc_sats));
+
+                                // Peer connected
+                                let (peer_text, peer_color) = if st.peer_connected {
+                                    ("Online", egui::Color32::from_rgb(100, 200, 100))
+                                } else {
+                                    ("Offline", egui::Color32::from_rgb(255, 80, 80))
+                                };
+                                ui.label(RichText::new(peer_text).color(peer_color));
+
+                                // Last stability payment
+                                if st.last_stability_payment > 0 {
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs() as i64;
+                                    let ago = now - st.last_stability_payment;
+                                    let ago_text = if ago < 60 {
+                                        format!("{}s ago", ago)
+                                    } else if ago < 3600 {
+                                        format!("{}m ago", ago / 60)
+                                    } else if ago < 86400 {
+                                        format!("{}h ago", ago / 3600)
+                                    } else {
+                                        format!("{}d ago", ago / 86400)
+                                    };
+                                    ui.label(ago_text);
+                                } else {
+                                    ui.label("Never");
+                                }
+
+                                ui.end_row();
+                            }
+                        });
+                });
+
+            ui.horizontal(|ui| {
+                if ui.button("Refresh Stability").clicked() {
+                    self.fetch_stability_status();
+                }
+            });
         });
     }
 
@@ -597,9 +814,16 @@ impl App for Dashboard {
         poll_task!(onchain_send_task => |v| self.onchain_send_result = Some(v));
         poll_task!(get_address_task => |addr| self.onchain_address = addr);
         poll_task!(connect_task => |v| self.connect_result = Some(v));
+        poll_task!(stability_task => |v| {
+            self.stability_status = v;
+            self.last_stability_refresh = Instant::now();
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             self.show_balance(ui);
+            ui.add_space(10.0);
+            self.show_stability_status(ui);
             ui.add_space(10.0);
             self.show_channels(ui);
             ui.group(|ui| {
@@ -695,6 +919,7 @@ impl App for Dashboard {
                     ui.label(msg);
                 }
             });
+            }); // end ScrollArea
         });
 
         if self.balance.is_none() && self.bal_task.is_none() {
@@ -705,6 +930,13 @@ impl App for Dashboard {
         }
         if self.price_usd.is_none() && self.price_task.is_none() {
             self.fetch_price();
+        }
+
+        // Auto-refresh stability status every 30 seconds
+        if self.last_stability_refresh.elapsed() >= Duration::from_secs(30)
+            && self.stability_task.is_none()
+        {
+            self.fetch_stability_status();
         }
 
         ctx.request_repaint_after(Duration::from_millis(100));

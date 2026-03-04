@@ -194,6 +194,23 @@ struct RegisterPushReq {
     node_id: String, // Lightning node pubkey hex
 }
 
+#[derive(Serialize)]
+struct ChannelStabilityStatus {
+    note: String,
+    channel_id: String,
+    peer: String,
+    expected_usd: f64,
+    current_usd: f64,
+    percent_from_par: f64,
+    dollars_from_par: f64,
+    direction: String, // "lsp_owes_user", "user_owes_lsp", "at_par"
+    backing_sats: u64,
+    native_btc_sats: u64,
+    peer_connected: bool,
+    last_stability_payment: i64,
+    btc_price: f64,
+}
+
 /// A stability payment that needs a push notification to wake the peer.
 pub struct StabilityPushTarget {
     node_id: String,   // Lightning pubkey hex
@@ -547,7 +564,8 @@ async fn main() -> Result<()> {
         .route("/api/onchain_send", post(onchain_send_handler))
         .route("/api/onchain_address", get(get_onchain_address))
         .route("/api/connect", post(connect_handler))
-        .route("/api/register-push", post(register_push_handler));
+        .route("/api/register-push", post(register_push_handler))
+        .route("/api/stability_status", get(get_stability_status));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     println!("Backend running at http://0.0.0.0:8080");
@@ -751,6 +769,58 @@ async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String>
     );
 
     Json("ok".to_string())
+}
+
+/// GET /api/stability_status — per-channel stability health for the dashboard
+async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
+    let app = APP.lock().expect("APP mutex poisoned");
+    let price = app.btc_price;
+
+    let out: Vec<ChannelStabilityStatus> = app
+        .stable_channels
+        .iter()
+        .filter(|sc| sc.expected_usd.0 >= 0.01)
+        .map(|sc| {
+            let expected = sc.expected_usd.0;
+            let current_usd = if sc.backing_sats > 0 {
+                (sc.backing_sats as f64 / 100_000_000.0) * price
+            } else {
+                sc.stable_receiver_usd.0
+            };
+            let dollars_from_par = current_usd - expected;
+            let percent_from_par = if expected > 0.0 {
+                ((current_usd - expected) / expected) * 100.0
+            } else {
+                0.0
+            };
+            let direction = if percent_from_par.abs() < STABILITY_THRESHOLD_PERCENT {
+                "at_par".to_string()
+            } else if dollars_from_par > 0.0 {
+                "user_owes_lsp".to_string()
+            } else {
+                "lsp_owes_user".to_string()
+            };
+            let peer_connected = app.is_peer_connected(sc.user_channel_id);
+
+            ChannelStabilityStatus {
+                note: sc.note.clone().unwrap_or_default(),
+                channel_id: hex::encode(sc.channel_id.0),
+                peer: sc.counterparty.to_string(),
+                expected_usd: expected,
+                current_usd,
+                percent_from_par,
+                dollars_from_par,
+                direction,
+                backing_sats: sc.backing_sats,
+                native_btc_sats: sc.native_channel_btc.sats,
+                peer_connected,
+                last_stability_payment: sc.last_stability_payment,
+                btc_price: price,
+            }
+        })
+        .collect();
+
+    Json(out)
 }
 
 // ── Push token persistence (SQLite) ──────────────────────────────────────

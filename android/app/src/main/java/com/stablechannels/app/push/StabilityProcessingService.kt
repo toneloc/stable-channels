@@ -237,7 +237,9 @@ class StabilityProcessingService : Service() {
         val feeds = listOf(
             "https://www.bitstamp.net/api/v2/ticker/btcusd/" to listOf("last"),
             "https://api.coinbase.com/v2/prices/BTC-USD/spot" to listOf("data", "amount"),
-            "https://blockchain.info/ticker" to listOf("USD", "last")
+            "https://blockchain.info/ticker" to listOf("USD", "last"),
+            "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD" to listOf("result", "XXBTZUSD", "c"),
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd" to listOf("bitcoin", "usd")
         )
 
         val prices = mutableListOf<Double>()
@@ -276,6 +278,7 @@ class StabilityProcessingService : Service() {
             is Int -> current.toDouble()
             is Long -> current.toDouble()
             is String -> current.toDoubleOrNull()
+            is JSONArray -> (current.opt(0) as? String)?.toDoubleOrNull()
             else -> null
         }
     }
