@@ -1249,8 +1249,13 @@ impl UserApp {
 
                         if let Some(ch) = ready_channel {
                             // Block if a splice is already in flight (auto-sweep or prior splice)
-                            if self.auto_sweep_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
-                                self.send_error = "A splice is already in progress — try again shortly".to_string();
+                            if self
+                                .auto_sweep_in_progress
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                self.send_error =
+                                    "A splice is already in progress — try again shortly"
+                                        .to_string();
                                 return false;
                             }
 
@@ -1271,7 +1276,8 @@ impl UserApp {
                             ) {
                                 Ok(()) => {
                                     // Block auto-sweep while this splice is in flight
-                                    self.auto_sweep_in_progress.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    self.auto_sweep_in_progress
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
                                     self.auto_sweep_onchain_at_start.store(
                                         self.node.list_balances().total_onchain_balance_sats,
                                         std::sync::atomic::Ordering::Relaxed,
