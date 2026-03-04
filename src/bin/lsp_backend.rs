@@ -206,6 +206,8 @@ struct ChannelStabilityStatus {
     direction: String, // "lsp_owes_user", "user_owes_lsp", "at_par"
     backing_sats: u64,
     native_btc_sats: u64,
+    capacity_sats: u64,
+    user_sats: u64,
     peer_connected: bool,
     last_stability_payment: i64,
     btc_price: f64,
@@ -775,6 +777,7 @@ async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String>
 async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
     let app = APP.lock().expect("APP mutex poisoned");
     let price = app.btc_price;
+    let ldk_channels = app.node.list_channels();
 
     let out: Vec<ChannelStabilityStatus> = app
         .stable_channels
@@ -782,11 +785,23 @@ async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
         .filter(|sc| sc.expected_usd.0 >= 0.01)
         .map(|sc| {
             let expected = sc.expected_usd.0;
-            let current_usd = if sc.backing_sats > 0 {
-                (sc.backing_sats as f64 / 100_000_000.0) * price
-            } else {
-                sc.stable_receiver_usd.0
-            };
+
+            // Get actual user sats from LDK channel (inbound = user's side from LSP perspective)
+            let ldk_chan = ldk_channels
+                .iter()
+                .find(|c| c.user_channel_id.0 == sc.user_channel_id);
+
+            let user_sats = ldk_chan
+                .map(|c| c.inbound_capacity_msat / 1_000)
+                .unwrap_or(0);
+            let capacity_sats = ldk_chan.map(|c| c.channel_value_sats).unwrap_or(0);
+
+            // Current USD = user's actual sats at current price
+            let current_usd = user_sats as f64 / 100_000_000.0 * price;
+
+            // Native BTC = user sats beyond what's backing the stable position
+            let native_sats = user_sats.saturating_sub(sc.backing_sats);
+
             let dollars_from_par = current_usd - expected;
             let percent_from_par = if expected > 0.0 {
                 ((current_usd - expected) / expected) * 100.0
@@ -812,7 +827,9 @@ async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
                 dollars_from_par,
                 direction,
                 backing_sats: sc.backing_sats,
-                native_btc_sats: sc.native_channel_btc.sats,
+                native_btc_sats: native_sats,
+                capacity_sats,
+                user_sats,
                 peer_connected,
                 last_stability_payment: sc.last_stability_payment,
                 btc_price: price,

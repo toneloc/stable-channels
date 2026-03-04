@@ -75,6 +75,8 @@ struct ChannelStabilityStatus {
     direction: String,
     backing_sats: u64,
     native_btc_sats: u64,
+    capacity_sats: u64,
+    user_sats: u64,
     peer_connected: bool,
     last_stability_payment: i64,
     btc_price: f64,
@@ -335,6 +337,7 @@ impl Dashboard {
             }
 
             ScrollArea::both()
+                .id_salt("channels_scroll")
                 .max_height(160.0)
                 .auto_shrink([true; 2])
                 .show(ui, |ui| {
@@ -488,6 +491,7 @@ impl Dashboard {
             ui.add_space(4.0);
 
             egui::ScrollArea::both()
+                .id_salt("stability_scroll")
                 .max_height(200.0)
                 .auto_shrink([true; 2])
                 .show(ui, |ui| {
@@ -499,12 +503,13 @@ impl Dashboard {
                             for h in [
                                 "Note",
                                 "Target $",
-                                "Current $",
+                                "User $",
                                 "Drift $",
                                 "Drift %",
                                 "Direction",
+                                "User Sats",
                                 "Backing",
-                                "Native BTC",
+                                "Native",
                                 "Peer",
                                 "Last Payment",
                             ] {
@@ -574,6 +579,9 @@ impl Dashboard {
                                     _ => ("Unknown", egui::Color32::GRAY),
                                 };
                                 ui.label(RichText::new(dir_text).color(dir_color).strong());
+
+                                // User sats (actual from LDK)
+                                ui.label(format!("{}", st.user_sats));
 
                                 // Backing sats
                                 ui.label(format!("{}", st.backing_sats));
@@ -821,104 +829,105 @@ impl App for Dashboard {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-            self.show_balance(ui);
-            ui.add_space(10.0);
-            self.show_stability_status(ui);
-            ui.add_space(10.0);
-            self.show_channels(ui);
-            ui.group(|ui| {
-                ui.heading("Edit Stable Channel");
+                self.show_balance(ui);
+                ui.add_space(10.0);
+                self.show_stability_status(ui);
+                ui.add_space(10.0);
+                self.show_channels(ui);
+                ui.group(|ui| {
+                    ui.heading("Edit Stable Channel");
 
-                ui.horizontal(|ui| {
-                    ui.label("Channel ID:");
-                    ui.text_edit_singleline(&mut self.edit_channel_id);
-                });
+                    ui.horizontal(|ui| {
+                        ui.label("Channel ID:");
+                        ui.text_edit_singleline(&mut self.edit_channel_id);
+                    });
 
-                ui.horizontal(|ui| {
-                    ui.label("Target USD amount:");
-                    ui.text_edit_singleline(&mut self.edit_channel_usd);
-                });
+                    ui.horizontal(|ui| {
+                        ui.label("Target USD amount:");
+                        ui.text_edit_singleline(&mut self.edit_channel_usd);
+                    });
 
-                ui.horizontal(|ui| {
-                    ui.label("Note:");
-                    ui.text_edit_singleline(&mut self.edit_channel_note);
-                });
+                    ui.horizontal(|ui| {
+                        ui.label("Note:");
+                        ui.text_edit_singleline(&mut self.edit_channel_note);
+                    });
 
-                if ui.button("Submit Edits").clicked() {
-                    self.edit_stable_channel();
-                }
+                    if ui.button("Submit Edits").clicked() {
+                        self.edit_stable_channel();
+                    }
 
-                if let Some(msg) = &self.edit_stable_result {
-                    ui.label(msg);
-                }
-            });
-
-            ui.add_space(10.0);
-            self.show_onchain_address_section(ui);
-            ui.add_space(10.0);
-
-            ui.group(|ui| {
-                ui.heading("On-chain Send");
-                ui.horizontal(|ui| {
-                    ui.label("Address:");
-                    ui.text_edit_singleline(&mut self.onchain_address);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Amount (sats):");
-                    ui.text_edit_singleline(&mut self.onchain_amount);
-                });
-                if ui.button("Send On-chain").clicked() {
-                    self.send_onchain();
-                }
-                if let Some(msg) = &self.onchain_send_result {
-                    ui.label(msg);
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.group(|ui| {
-                ui.heading("Pay Invoice");
-                ui.text_edit_multiline(&mut self.invoice_to_pay);
-                if ui.button("Pay Invoice").clicked() {
-                    self.pay_invoice();
-                }
-                if let Some(msg) = &self.pay_result {
-                    ui.label(msg);
-                }
-            });
-            ui.add_space(10.0);
-
-            ui.group(|ui| {
-                ui.heading("Connect to Node");
-                ui.horizontal(|ui| {
-                    ui.label("Node ID:");
-                    ui.text_edit_singleline(&mut self.open_channel_pubkey); // reuse existing field
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Address:");
-                    ui.text_edit_singleline(&mut self.open_channel_address); // reuse existing field
-                });
-                if ui.button("Connect").clicked() {
-                    self.connect_to_node();
-                }
-                if let Some(msg) = &self.connect_result {
-                    ui.label(msg);
-                }
-            });
-
-            ui.group(|ui| {
-                ui.heading("Close Specific Channel");
-                ui.horizontal(|ui| {
-                    ui.label("Channel ID:");
-                    ui.text_edit_singleline(&mut self.close_channel_id);
-                    if ui.button("Close Channel").clicked() {
-                        self.close_specific_channel();
+                    if let Some(msg) = &self.edit_stable_result {
+                        ui.label(msg);
                     }
                 });
-                if let Some(msg) = &self.close_result {
-                    ui.label(msg);
-                }
-            });
+
+                ui.add_space(10.0);
+                self.show_onchain_address_section(ui);
+                ui.add_space(10.0);
+
+                ui.group(|ui| {
+                    ui.heading("On-chain Send");
+                    ui.horizontal(|ui| {
+                        ui.label("Address:");
+                        ui.text_edit_singleline(&mut self.onchain_address);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Amount (sats):");
+                        ui.text_edit_singleline(&mut self.onchain_amount);
+                    });
+                    if ui.button("Send On-chain").clicked() {
+                        self.send_onchain();
+                    }
+                    if let Some(msg) = &self.onchain_send_result {
+                        ui.label(msg);
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.heading("Pay Invoice");
+                    ui.text_edit_multiline(&mut self.invoice_to_pay);
+                    if ui.button("Pay Invoice").clicked() {
+                        self.pay_invoice();
+                    }
+                    if let Some(msg) = &self.pay_result {
+                        ui.label(msg);
+                    }
+                });
+                ui.add_space(10.0);
+
+                ui.group(|ui| {
+                    ui.heading("Connect to Node");
+                    ui.horizontal(|ui| {
+                        ui.label("Node ID:");
+                        ui.text_edit_singleline(&mut self.open_channel_pubkey); // reuse existing field
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Address:");
+                        ui.text_edit_singleline(&mut self.open_channel_address);
+                        // reuse existing field
+                    });
+                    if ui.button("Connect").clicked() {
+                        self.connect_to_node();
+                    }
+                    if let Some(msg) = &self.connect_result {
+                        ui.label(msg);
+                    }
+                });
+
+                ui.group(|ui| {
+                    ui.heading("Close Specific Channel");
+                    ui.horizontal(|ui| {
+                        ui.label("Channel ID:");
+                        ui.text_edit_singleline(&mut self.close_channel_id);
+                        if ui.button("Close Channel").clicked() {
+                            self.close_specific_channel();
+                        }
+                    });
+                    if let Some(msg) = &self.close_result {
+                        ui.label(msg);
+                    }
+                });
             }); // end ScrollArea
         });
 
