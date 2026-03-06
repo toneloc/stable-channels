@@ -9,9 +9,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import java.io.File
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.services.AuditService
@@ -22,6 +24,8 @@ import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import withContext
+import org.lightningdevkit.ldknode.Network
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -30,12 +34,17 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var showNodeId by remember { mutableStateOf(false) }
     var showCloseConfirm by remember { mutableStateOf(false) }
     var showFundWallet by remember { mutableStateOf(false) }
     var showOnchainSend by remember { mutableStateOf(false) }
+    var showSeedWords by remember { mutableStateOf(false) }
+    var showRestore by remember { mutableStateOf(false) }
+    var restoreMnemonic by remember { mutableStateOf("") }
+    var restoreError by remember { mutableStateOf<String?>(null) }
 
     val channels = appState.nodeService.channels
     val hasReadyChannel = channels.any { it.isChannelReady }
@@ -169,6 +178,57 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             ) { Text("Sweep to Channel Now") }
         }
 
+        // Backup
+        Spacer(Modifier.height(16.dp))
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Backup", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { showSeedWords = !showSeedWords },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (showSeedWords) "Hide Seed Words" else "Backup Seed Words") }
+                if (showSeedWords) {
+                    val words = appState.nodeService.savedMnemonic
+                    if (!words.isNullOrEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFD97706)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        words.split(" ").forEachIndexed { index, word ->
+                            Text(
+                                "${index + 1}. $word",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        var copied by remember { mutableStateOf(false) }
+                        OutlinedButton(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(words))
+                                copied = true
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (copied) "Copied" else "Copy Seed Words") }
+                    } else {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Seed phrase not available for this wallet.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { showRestore = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Restore from Seed") }
+            }
+        }
+
         // About
         Spacer(Modifier.height(16.dp))
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -200,6 +260,79 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             },
             dismissButton = {
                 TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Restore from seed dialog
+    if (showRestore) {
+        AlertDialog(
+            onDismissRequest = {
+                showRestore = false
+                restoreMnemonic = ""
+                restoreError = null
+            },
+            title = { Text("Restore from Seed") },
+            text = {
+                Column {
+                    Text(
+                        "Enter your 12 or 24-word seed phrase to restore a wallet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = restoreMnemonic,
+                        onValueChange = { restoreMnemonic = it },
+                        label = { Text("word1 word2 word3 ...") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3
+                    )
+                    if (restoreError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            restoreError!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val input = restoreMnemonic.trim()
+                        val wordCount = input.split("\\s+".toRegex()).size
+                        if (wordCount != 12 && wordCount != 24) {
+                            restoreError = "Seed phrase must be 12 or 24 words"
+                            return@TextButton
+                        }
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                appState.nodeService.stop()
+                                appState.nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, input)
+                                withContext(Dispatchers.Main) {
+                                    showRestore = false
+                                    restoreMnemonic = ""
+                                    restoreError = null
+                                    appState.refreshBalances()
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    restoreError = e.message ?: "Restore failed"
+                                }
+                            }
+                        }
+                    },
+                    enabled = restoreMnemonic.trim().isNotEmpty()
+                ) { Text("Restore") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showRestore = false
+                    restoreMnemonic = ""
+                    restoreError = null
+                }) { Text("Cancel") }
             }
         )
     }

@@ -192,6 +192,8 @@ struct RegisterPushReq {
     platform: String, // "ios" or "android"
     #[serde(default)]
     node_id: String, // Lightning node pubkey hex
+    #[serde(default)]
+    environment: String, // "sandbox" or "production" (APNs); defaults to "sandbox" for backwards compat)
 }
 
 #[derive(Serialize)]
@@ -250,6 +252,31 @@ static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
             );
             Mutex::new(None)
         }
+    }
+});
+
+/// Lazily initialized APNs client for production (App Store / TestFlight builds)
+static APNS_CLIENT_PRODUCTION: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
+    let key_path = format!("{}/{}", LSP_DATA_DIR, APNS_KEY_FILE);
+    match std::fs::read(&key_path) {
+        Ok(key_data) => {
+            match ApnsClient::token(
+                &mut std::io::Cursor::new(key_data),
+                APNS_KEY_ID,
+                APNS_TEAM_ID,
+                ApnsClientConfig::new(a2::Endpoint::Production),
+            ) {
+                Ok(client) => {
+                    println!("[APNs] Production client initialized");
+                    Mutex::new(Some(client))
+                }
+                Err(e) => {
+                    println!("[APNs] Failed to create production client: {}", e);
+                    Mutex::new(None)
+                }
+            }
+        }
+        Err(_) => Mutex::new(None),
     }
 });
 
@@ -567,7 +594,9 @@ async fn main() -> Result<()> {
         .route("/api/onchain_address", get(get_onchain_address))
         .route("/api/connect", post(connect_handler))
         .route("/api/register-push", post(register_push_handler))
-        .route("/api/stability_status", get(get_stability_status));
+        .route("/api/stability_status", get(get_stability_status))
+        .route("/api/audit_log", get(get_audit_log))
+        .route("/api/ldk_log", get(get_ldk_log));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     println!("Backend running at http://0.0.0.0:8080");
@@ -757,7 +786,7 @@ async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
 
 // POST /api/register-push
 async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String> {
-    save_push_token(&req.device_token, &req.platform, &req.node_id);
+    save_push_token(&req.device_token, &req.platform, &req.node_id, &req.environment);
 
     println!(
         "[Push] Registered {} device: {}... node_id: {}",
@@ -840,6 +869,39 @@ async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
     Json(out)
 }
 
+// ── Log endpoints ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct LogQuery {
+    lines: Option<usize>,
+}
+
+async fn get_audit_log(axum::extract::Query(q): axum::extract::Query<LogQuery>) -> String {
+    let max_lines = q.lines.unwrap_or(500);
+    let path = format!("{}/audit_log.txt", LSP_DATA_DIR);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let all: Vec<&str> = content.lines().collect();
+            let start = all.len().saturating_sub(max_lines);
+            all[start..].join("\n")
+        }
+        Err(e) => format!("Error reading audit log: {}", e),
+    }
+}
+
+async fn get_ldk_log(axum::extract::Query(q): axum::extract::Query<LogQuery>) -> String {
+    let max_lines = q.lines.unwrap_or(1000);
+    let path = format!("{}/ldk_node.log", LSP_DATA_DIR);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let all: Vec<&str> = content.lines().collect();
+            let start = all.len().saturating_sub(max_lines);
+            all[start..].join("\n")
+        }
+        Err(e) => format!("Error reading LDK log: {}", e),
+    }
+}
+
 // ── Push token persistence (SQLite) ──────────────────────────────────────
 
 fn push_tokens_db_path() -> String {
@@ -864,34 +926,61 @@ fn init_push_tokens_table(data_dir: &str) {
             "ALTER TABLE push_tokens ADD COLUMN node_id TEXT NOT NULL DEFAULT ''",
             [],
         )
-        .ok(); // Silently fails if column already exists
+        .ok();
+        // Migration: add environment column (sandbox vs production APNs)
+        conn.execute(
+            "ALTER TABLE push_tokens ADD COLUMN environment TEXT NOT NULL DEFAULT 'sandbox'",
+            [],
+        )
+        .ok();
+        // Migration: add last_seen column for stale token cleanup
+        conn.execute(
+            "ALTER TABLE push_tokens ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .ok();
     }
 }
 
-fn save_push_token(device_token: &str, platform: &str, node_id: &str) {
+fn save_push_token(device_token: &str, platform: &str, node_id: &str, environment: &str) {
     let db_path = push_tokens_db_path();
     if let Ok(conn) = rusqlite::Connection::open(&db_path) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let env = if environment.is_empty() {
+            "sandbox"
+        } else {
+            environment
+        };
         conn.execute(
-                    "INSERT OR REPLACE INTO push_tokens (device_token, platform, registered_at, node_id) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![device_token, platform, now, node_id],
-                ).ok();
+            "INSERT OR REPLACE INTO push_tokens (device_token, platform, registered_at, node_id, environment, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![device_token, platform, now, node_id, env, now],
+        ).ok();
     }
 }
 
 /// Look up the push token for a specific Lightning node_id.
-/// Returns (device_token, platform) if found.
-fn load_push_token_for_node(node_id: &str) -> Option<(String, String)> {
+/// Returns (device_token, platform, environment) if found.
+/// Skips tokens not seen in 30 days.
+fn load_push_token_for_node(node_id: &str) -> Option<(String, String, String)> {
     let db_path = push_tokens_db_path();
     let conn = rusqlite::Connection::open(&db_path).ok()?;
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+        - 30 * 86400;
     let mut stmt = conn
-        .prepare("SELECT device_token, platform FROM push_tokens WHERE node_id = ?1 LIMIT 1")
+        .prepare("SELECT device_token, platform, environment FROM push_tokens WHERE node_id = ?1 AND last_seen > ?2 LIMIT 1")
         .ok()?;
-    stmt.query_row(rusqlite::params![node_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    stmt.query_row(rusqlite::params![node_id, cutoff], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2).unwrap_or_else(|_| "sandbox".to_string()),
+        ))
     })
     .ok()
 }
@@ -903,7 +992,7 @@ fn load_push_token_for_node(node_id: &str) -> Option<(String, String)> {
 /// Uses the `a2` crate for real APNs delivery when a .p8 key is configured.
 fn notify(node_id: &str, direction: &str) {
     let token_info = load_push_token_for_node(node_id);
-    let (device_token, platform) = match token_info {
+    let (device_token, platform, environment) = match token_info {
         Some(t) => t,
         None => {
             println!(
@@ -934,7 +1023,11 @@ fn notify(node_id: &str, direction: &str) {
     }
 
     rt.spawn(async move {
-        let client = {
+        // Use the correct APNs endpoint based on the device's environment
+        let client = if environment == "production" {
+            let guard = APNS_CLIENT_PRODUCTION.lock().unwrap();
+            guard.clone()
+        } else {
             let guard = APNS_CLIENT.lock().unwrap();
             guard.clone()
         };
@@ -1016,8 +1109,10 @@ const LSP_DATA_DIR: &str = "data-2/lsp";
 /// then extracts the output value at the given vout index.
 ///
 /// Returns None if the lookup fails (tx not found, RPC error, etc.)
-fn lookup_funding_output_sats(txid: &str, vout: u32) -> Option<u64> {
+fn get_output_sats(txid: &str, vout: u32) -> Option<u64> {
     let rpc_url = "http://127.0.0.1:8332";
+    let rpc_user = std::env::var("BITCOIND_RPC_USER").unwrap_or_default();
+    let rpc_pass = std::env::var("BITCOIND_RPC_PASS").unwrap_or_default();
 
     let body = json!({
         "jsonrpc": "1.0",
@@ -1026,8 +1121,10 @@ fn lookup_funding_output_sats(txid: &str, vout: u32) -> Option<u64> {
         "params": [txid, true]
     });
 
+    let credentials = format!("{}:{}", rpc_user, rpc_pass);
+    let auth_value = format!("Basic {}", openssl::base64::encode_block(credentials.as_bytes()));
     let response = ureq::post(rpc_url)
-        .set("Authorization", "Basic Og==") // base64(":")  — empty user:password
+        .set("Authorization", &auth_value)
         .set("Content-Type", "application/json")
         .send_json(&body)
         .ok()?;
@@ -1067,8 +1164,10 @@ impl ServerApp {
         // println!("[Init] Setting Esplora API URL: {}", DEFAULT_CHAIN_SOURCE_URL);
         // builder.set_chain_source_esplora(DEFAULT_CHAIN_SOURCE_URL.to_string(), None);
 
+        let rpc_user = std::env::var("BITCOIND_RPC_USER").unwrap_or_default();
+        let rpc_pass = std::env::var("BITCOIND_RPC_PASS").unwrap_or_default();
         println!("[Init] Setting Bitcoin RPC connection");
-        builder.set_chain_source_bitcoind_rpc("127.0.0.1".into(), 8332, "".into(), "".into());
+        builder.set_chain_source_bitcoind_rpc("127.0.0.1".into(), 8332, rpc_user, rpc_pass);
 
         println!("[Init] Setting storage directory: {}", data_dir);
         builder.set_storage_dir_path(data_dir.to_string());
@@ -1232,7 +1331,10 @@ impl ServerApp {
 
             let is_receiver_below_expected = stable_usd_value < target_usd;
 
+            let dollars_from_par_abs = (stable_usd_value - target_usd).abs();
+
             if percent_from_par >= STABILITY_THRESHOLD_PERCENT
+                && dollars_from_par_abs >= STABILITY_THRESHOLD_USD
                 && !self.is_peer_connected(sc.user_channel_id)
             {
                 // Determine direction from LSP perspective:
@@ -1490,7 +1592,7 @@ impl ServerApp {
 
                     // Look up new funding output value from bitcoind
                     if let Some(old_value) = old_channel_value_sats {
-                        match lookup_funding_output_sats(&txid_str, vout) {
+                        match get_output_sats(&txid_str, vout) {
                             Some(new_value) => {
                                 audit_event(
                                     "SPLICE_PENDING_LOOKUP",

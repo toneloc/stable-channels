@@ -7,7 +7,20 @@ class NodeService {
     private(set) var isRunning = false
     private(set) var nodeId: String = ""
     private(set) var channels: [ChannelDetails] = []
+    private(set) var savedMnemonic: String?
     private var eventTask: Task<Void, Never>?
+
+    init() {
+        // Pre-load saved mnemonic from disk so it's available immediately,
+        // even before start() completes (avoids race with early UI display)
+        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        if let words = try? String(contentsOfFile: path.path, encoding: .utf8) {
+            let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                savedMnemonic = trimmed
+            }
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -60,10 +73,33 @@ class NodeService {
             token: nil
         )
 
-        if mnemonic.isEmpty {
-            // New wallet or existing seed on disk — ldk-node handles it
+        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        let keySeedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
+
+        // Determine which mnemonic to use
+        let words: String
+        if !mnemonic.isEmpty {
+            // Restore — wipe ALL wallet data so new seed takes effect
+            Self.wipeWalletData()
+            words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let saved = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
+                  !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Existing wallet — re-read saved mnemonic
+            words = saved.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
+            // Truly new wallet — no seed_phrase, no keys_seed
+            Self.wipeWalletData()
+            words = generateEntropyMnemonic(wordCount: nil)
         } else {
-            builder.setEntropyBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
+            // Pre-upgrade wallet with only keys_seed, no mnemonic available
+            words = ""
+        }
+
+        // Save mnemonic to file and set on builder
+        if !words.isEmpty {
+            try words.write(toFile: seedPhrasePath.path, atomically: true, encoding: .utf8)
+            self.savedMnemonic = words
+            builder.setEntropyBip39Mnemonic(mnemonic: words, passphrase: nil)
         }
 
         let ldkNode = try builder.build()
@@ -276,6 +312,22 @@ class NodeService {
 
     func verifySignature(message: [UInt8], signature: String, pubkey: PublicKey) -> Bool {
         node?.verifySignature(msg: message, sig: signature, pkey: pubkey) ?? false
+    }
+
+    /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)
+    /// so a fresh wallet can be created without descriptor conflicts.
+    static func wipeWalletData() {
+        let dir = Constants.userDataDir
+        let filesToDelete = [
+            "keys_seed",
+            "seed_phrase",
+            "ldk_node_data.sqlite",
+            "ldk_node_data.sqlite-wal",
+            "ldk_node_data.sqlite-shm",
+        ]
+        for file in filesToDelete {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
+        }
     }
 }
 

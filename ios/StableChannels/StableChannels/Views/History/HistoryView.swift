@@ -1,40 +1,16 @@
 import SwiftUI
-import Charts
 
 struct HistoryView: View {
     @Environment(AppState.self) private var appState
     @State private var trades: [TradeRecord] = []
     @State private var payments: [PaymentRecord] = []
-    @State private var priceHistory: [PriceRecord] = []
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
     @State private var selectedPayment: PaymentRecord?
-    @State private var chartPeriod: ChartPeriod = .day
-
-    enum ChartPeriod: String, CaseIterable {
-        case day = "1D"
-        case week = "1W"
-        case month = "1M"
-        case year = "1Y"
-
-        var hours: UInt32 {
-            switch self {
-            case .day: return 24
-            case .week: return 168
-            case .month: return 720
-            case .year: return 8760
-            }
-        }
-    }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Price chart
-                if appState.btcPrice > 0 {
-                    priceChartSection
-                }
-
                 // Segment picker
                 Picker("History", selection: $selectedSegment) {
                     Text("Trades").tag(0)
@@ -63,6 +39,7 @@ struct HistoryView: View {
                 }
             }
             .navigationTitle("History")
+            .navigationBarTitleDisplayMode(.inline)
             .task {
                 loadHistory()
             }
@@ -76,73 +53,6 @@ struct HistoryView: View {
             .sheet(item: $selectedPayment) { payment in
                 PaymentDetailView(payment: payment)
             }
-        }
-    }
-
-    // MARK: - Price Chart
-
-    private var priceChartSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("BTC Price")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(appState.btcPrice.usdFormatted)
-                        .font(.title3.bold())
-                }
-
-                Spacer()
-
-                // Chart period selector
-                Picker("Period", selection: $chartPeriod) {
-                    ForEach(ChartPeriod.allCases, id: \.self) { period in
-                        Text(period.rawValue).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 180)
-            }
-            .padding(.horizontal)
-
-            if priceHistory.count >= 2 {
-                Chart(priceHistory) { record in
-                    LineMark(
-                        x: .value("Time", record.date),
-                        y: .value("Price", record.price)
-                    )
-                    .foregroundStyle(.blue)
-                    .interpolationMethod(.catmullRom)
-                }
-                .chartYScale(domain: .automatic(includesZero: false))
-                .chartXAxis(.hidden)
-                .chartYAxis {
-                    AxisMarks(position: .trailing) { value in
-                        AxisValueLabel {
-                            if let price = value.as(Double.self) {
-                                Text(price.usdFormatted)
-                                    .font(.caption2)
-                            }
-                        }
-                    }
-                }
-                .frame(height: 120)
-                .padding(.horizontal)
-            } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
-                    .frame(height: 120)
-                    .overlay {
-                        Text("Collecting price data...")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                    .padding(.horizontal)
-            }
-        }
-        .padding(.vertical, 8)
-        .onChange(of: chartPeriod) {
-            loadPriceHistory()
         }
     }
 
@@ -171,11 +81,6 @@ struct HistoryView: View {
     private func loadHistory() {
         trades = (try? appState.databaseService?.getRecentTrades(limit: 50)) ?? []
         payments = (try? appState.databaseService?.getRecentPayments(limit: 50)) ?? []
-        loadPriceHistory()
-    }
-
-    private func loadPriceHistory() {
-        priceHistory = (try? appState.databaseService?.getPriceHistory(hours: chartPeriod.hours)) ?? []
     }
 }
 

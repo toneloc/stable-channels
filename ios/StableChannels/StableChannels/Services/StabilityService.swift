@@ -134,7 +134,8 @@ enum StabilityService {
         let isReceiverBelowExpected = stableUSDValue < targetUSD
 
         let action: StabilityAction
-        if percentFromPar < Constants.stabilityThresholdPercent {
+        if percentFromPar < Constants.stabilityThresholdPercent
+            || abs(dollarsFromPar) < Constants.stabilityThresholdUSD {
             action = .stable
         } else if sc.riskLevel > Constants.maxRiskLevel {
             action = .highRiskNoAction

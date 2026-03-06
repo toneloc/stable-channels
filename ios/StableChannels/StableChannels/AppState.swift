@@ -92,6 +92,9 @@ class AppState {
         // Load saved channel state from DB
         loadChannelFromDB()
 
+        // Seed historical price data for charts
+        seedHistoricalPrices()
+
         // Seed price from cache so UI can compute native USD immediately
         if stableChannel.latestPrice > 0 {
             priceService.currentPrice = stableChannel.latestPrice
@@ -106,9 +109,11 @@ class AppState {
         // Subscribe to push notifications (background wake)
         subscribeToPushNotifications()
 
-        // Check for existing seed / mnemonic
+        // Check for existing wallet (keys_seed from default path, OR seed_phrase from mnemonic path)
         let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
-        if FileManager.default.fileExists(atPath: seedPath.path) {
+        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
+        if FileManager.default.fileExists(atPath: seedPath.path)
+            || FileManager.default.fileExists(atPath: seedPhrasePath.path) {
             // Show wallet immediately with cached data from DB
             let hasCachedData = !stableChannel.userChannelId.isEmpty
             await MainActor.run {
@@ -146,7 +151,30 @@ class AppState {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
         } else {
-            await MainActor.run { phase = .onboarding }
+            // New wallet — auto-create
+            await MainActor.run { phase = .syncing }
+            do {
+                try await nodeService.start(
+                    network: .bitcoin,
+                    esploraURL: Constants.defaultChainURL,
+                    mnemonic: ""
+                )
+                let nodeId = nodeService.nodeId
+                if !nodeId.isEmpty {
+                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .set(nodeId, forKey: "node_id")
+                }
+                await MainActor.run {
+                    phase = .wallet
+                    refreshBalances()
+                    updateStableBalances()
+                    prevOnchainSats = nodeService.balances()?.totalOnchainBalanceSats ?? 0
+                }
+                startStabilityTimer()
+                reregisterPushTokenIfNeeded()
+            } catch {
+                await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
+            }
         }
     }
 
@@ -236,6 +264,7 @@ class AppState {
                 mnemonic: ""
             )
             refreshBalances()
+            reregisterPushTokenIfNeeded()
             startStabilityTimer()
             await processPendingPushPayment()
         } catch {
@@ -326,10 +355,17 @@ class AppState {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+            #if DEBUG
+            let apnsEnvironment = "sandbox"
+            #else
+            let apnsEnvironment = "production"
+            #endif
+
             let body: [String: String] = [
                 "device_token": token,
                 "platform": "ios",
                 "node_id": nodeId,
+                "environment": apnsEnvironment,
             ]
 
             guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
@@ -571,11 +607,11 @@ class AppState {
         StabilityService.reconcileIncoming(&stableChannel)
         saveChannelToDB()
 
-        let sats = amountMsat / 1000
         if let usd = amountUSD {
-            statusMessage = "Received \(sats) sats ($\(String(format: "%.2f", usd)))"
+            statusMessage = "Received \(usd.usdFormatted)"
         } else {
-            statusMessage = "Received \(sats) sats"
+            let sats = amountMsat / 1000
+            statusMessage = "Received \(sats.btcSpacedFormatted) BTC"
         }
 
         // Trigger payment received animation
@@ -1013,14 +1049,10 @@ class AppState {
     // MARK: - Balance Refresh
 
     func refreshBalances() {
+        nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
         let onchain = balances.totalOnchainBalanceSats
-
-        nodeService.refreshChannels()
-        let lightning = nodeService.channels.reduce(UInt64(0)) { sum, ch in
-            let reserve = ch.unspendablePunishmentReserve ?? 0
-            return sum + (ch.outboundCapacityMsat / 1000) + reserve
-        }
+        let lightning = balances.totalLightningBalanceSats
 
         totalBalanceSats = onchain + lightning
         lightningBalanceSats = lightning
@@ -1097,6 +1129,36 @@ class AppState {
             try databaseService?.recordPrice(price, source: "median")
         } catch {
             // Price recording is best-effort, don't log every failure
+        }
+    }
+
+    // MARK: - Historical Price Seeding
+
+    private func seedHistoricalPrices() {
+        guard let db = databaseService else { return }
+
+        let needsSeed: Bool
+        do {
+            if let oldest = try db.getOldestDailyPriceDate() {
+                needsSeed = !oldest.hasPrefix("2013")
+            } else {
+                needsSeed = true
+            }
+        } catch {
+            needsSeed = true
+        }
+
+        guard needsSeed else {
+            print("[Chart] Historical prices already seeded")
+            return
+        }
+
+        print("[Chart] Seeding historical price data (2013-present)...")
+        do {
+            let count = try db.bulkInsertDailyPrices(HistoricalPrices.seedPrices)
+            print("[Chart] Seeded \(count) historical price records")
+        } catch {
+            print("[Chart] Failed to seed historical prices: \(error)")
         }
     }
 }

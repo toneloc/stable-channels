@@ -75,22 +75,30 @@ struct SendView: View {
                             Label("Bolt11 Invoice", systemImage: "bolt.fill")
                                 .foregroundStyle(.blue)
                             if let msat = parsedBolt11Msat, msat > 0 {
+                                let sats = msat / 1000
                                 HStack {
                                     Text("Amount")
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 2) {
-                                        Text((msat / 1000).satsFormatted)
-                                            .fontWeight(.medium)
                                         if let usd = displayUSD {
                                             Text(usd.usdFormatted)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                                .fontWeight(.medium)
                                         }
+                                        Text("\(sats.btcSpacedFormatted) BTC")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
                                     }
                                 }
+                                HStack {
+                                    Text("Fee")
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("< 1%")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             } else if parsedBolt11Msat == nil && detectedType == .bolt11 {
-                                // No amount in invoice (zero-amount invoice)
                                 Text("No amount specified in invoice")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -101,9 +109,26 @@ struct SendView: View {
                             TextField("Amount (sats)", text: $amountSats)
                                 .keyboardType(.numberPad)
                             if let usd = displayUSD {
-                                Text("≈ \(usd.usdFormatted)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                HStack {
+                                    Text("Amount")
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(usd.usdFormatted)
+                                            .fontWeight(.medium)
+                                        Text("\(displaySats.btcSpacedFormatted) BTC")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                HStack {
+                                    Text("Fee")
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("< 1%")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         case .onchain:
                             Label("On-chain Address", systemImage: "link")
@@ -111,9 +136,26 @@ struct SendView: View {
                             TextField("Amount (sats)", text: $amountSats)
                                 .keyboardType(.numberPad)
                             if let usd = displayUSD {
-                                Text("≈ \(usd.usdFormatted)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                HStack {
+                                    Text("Amount")
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(usd.usdFormatted)
+                                            .fontWeight(.medium)
+                                        Text("\(displaySats.btcSpacedFormatted) BTC")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                HStack {
+                                    Text("Fee")
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("Network fee")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                             if appState.nodeService.channels.contains(where: { $0.isChannelReady }) {
                                 Text("Will route via splice-out")
@@ -123,6 +165,13 @@ struct SendView: View {
                         case .unknown:
                             Label("Unrecognized format", systemImage: "questionmark.circle")
                                 .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let error = errorMessage {
+                        Section {
+                            Label(error, systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.red)
                         }
                     }
 
@@ -142,20 +191,19 @@ struct SendView: View {
                     }
                 }
 
-                if let error = errorMessage {
-                    Section {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.red)
-                    }
-                }
-
                 if success {
                     Section {
                         VStack(spacing: 4) {
                             Label("Payment sent!", systemImage: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
                             if sentAmountSats > 0 {
-                                Text("\(sentAmountSats.satsFormatted)")
+                                let price = appState.btcPrice
+                                if price > 0 {
+                                    let usd = Double(sentAmountSats) / Double(Constants.satsInBTC) * price
+                                    Text(usd.usdFormatted)
+                                        .fontWeight(.medium)
+                                }
+                                Text("\(sentAmountSats.btcSpacedFormatted) BTC")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }

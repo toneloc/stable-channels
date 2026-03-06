@@ -7,6 +7,11 @@ struct SettingsView: View {
     @State private var showNodeId = false
     @State private var copiedField: String?
     @State private var notificationsEnabled = true
+    @State private var showSeedWords = false
+    @State private var showRestore = false
+    @State private var restoreMnemonic = ""
+    @State private var isRestoring = false
+    @State private var restoreError: String?
 
     var body: some View {
         NavigationStack {
@@ -177,6 +182,44 @@ struct SettingsView: View {
                     }
                 }
 
+                // Backup
+                Section("Backup") {
+                    Button(showSeedWords ? "Hide Seed Words" : "Backup Seed Words") {
+                        showSeedWords.toggle()
+                    }
+                    if showSeedWords {
+                        if let words = appState.nodeService.savedMnemonic, !words.isEmpty {
+                            Text("Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            ForEach(Array(words.split(separator: " ").enumerated()), id: \.offset) { index, word in
+                                HStack {
+                                    Text("\(index + 1).")
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 30, alignment: .trailing)
+                                    Text(String(word))
+                                        .font(.system(.body, design: .monospaced))
+                                }
+                            }
+                            Button {
+                                UIPasteboard.general.string = words
+                                copiedField = "Seed Words"
+                            } label: {
+                                HStack {
+                                    Image(systemName: copiedField == "Seed Words" ? "checkmark" : "doc.on.doc")
+                                    Text(copiedField == "Seed Words" ? "Copied" : "Copy Seed Words")
+                                }
+                            }
+                        } else {
+                            Text("Seed phrase not available for this wallet.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Button("Restore from Seed") {
+                        showRestore = true
+                    }
+                }
+
                 // About
                 Section("About") {
                     HStack {
@@ -194,6 +237,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 appState.refreshBalances()
             }
@@ -201,6 +245,59 @@ struct SettingsView: View {
                 UNUserNotificationCenter.current().getNotificationSettings { settings in
                     DispatchQueue.main.async {
                         notificationsEnabled = settings.authorizationStatus == .authorized
+                    }
+                }
+            }
+            .sheet(isPresented: $showRestore) {
+                NavigationStack {
+                    VStack(spacing: 20) {
+                        Text("Enter your 12 or 24-word seed phrase to restore a wallet.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal)
+
+                        TextField("word1 word2 word3 ...", text: $restoreMnemonic, axis: .vertical)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .lineLimit(3...5)
+                            .font(.system(.body, design: .monospaced))
+                            .padding()
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                            .padding(.horizontal)
+
+                        if let error = restoreError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .padding(.horizontal)
+                        }
+
+                        Button {
+                            Task { await restoreWallet() }
+                        } label: {
+                            if isRestoring {
+                                ProgressView().frame(maxWidth: .infinity)
+                            } else {
+                                Text("Restore").frame(maxWidth: .infinity)
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .disabled(isRestoring || restoreMnemonic.trimmingCharacters(in: .whitespaces).isEmpty)
+                        .padding(.horizontal, 32)
+
+                        Spacer()
+                    }
+                    .padding(.top)
+                    .navigationTitle("Restore from Seed")
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") {
+                                showRestore = false
+                                restoreMnemonic = ""
+                                restoreError = nil
+                            }
+                        }
                     }
                 }
             }
@@ -257,5 +354,38 @@ struct SettingsView: View {
 
     private func sweepToChannel() {
         appState.manualSweepToChannel()
+    }
+
+    private func restoreWallet() async {
+        isRestoring = true
+        restoreError = nil
+        defer { isRestoring = false }
+
+        let input = restoreMnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
+        let wordCount = input.split(separator: " ").count
+        guard wordCount == 12 || wordCount == 24 else {
+            restoreError = "Seed phrase must be 12 or 24 words"
+            return
+        }
+
+        // Stop existing node first
+        appState.nodeService.stop()
+
+        do {
+            try await appState.nodeService.start(
+                network: .bitcoin,
+                esploraURL: Constants.defaultChainURL,
+                mnemonic: input
+            )
+            await MainActor.run {
+                showRestore = false
+                restoreMnemonic = ""
+                appState.refreshBalances()
+            }
+        } catch {
+            await MainActor.run {
+                restoreError = error.localizedDescription
+            }
+        }
     }
 }

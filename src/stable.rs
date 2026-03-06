@@ -1,6 +1,7 @@
 use crate::audit::audit_event;
 use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
+    STABILITY_THRESHOLD_USD,
 };
 use crate::price_feeds::get_cached_price;
 use crate::types::{Bitcoin, StableChannel, USD};
@@ -340,7 +341,9 @@ pub fn check_stability(
     };
     let is_receiver_below_expected = stable_usd_value < target_usd;
 
-    let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT {
+    let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT
+        || dollars_from_par.0.abs() < STABILITY_THRESHOLD_USD
+    {
         "STABLE"
     } else if sc.risk_level > MAX_RISK_LEVEL {
         "HIGH_RISK_NO_ACTION"

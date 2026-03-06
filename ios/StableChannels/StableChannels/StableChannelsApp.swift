@@ -135,10 +135,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         let nodeId = UserDefaults(suiteName: Constants.appGroupIdentifier)?
             .string(forKey: "node_id") ?? ""
 
+        #if DEBUG
+        let apnsEnvironment = "sandbox"
+        #else
+        let apnsEnvironment = "production"
+        #endif
+
         let body: [String: String] = [
             "device_token": token,
             "platform": "ios",
             "node_id": nodeId,
+            "environment": apnsEnvironment,
         ]
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }

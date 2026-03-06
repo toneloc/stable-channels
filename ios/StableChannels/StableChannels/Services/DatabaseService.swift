@@ -405,6 +405,26 @@ class DatabaseService {
         )
     }
 
+    func bulkInsertDailyPrices(_ prices: [(String, Double, Double, Double, Double, Double?)]) throws -> Int {
+        var count = 0
+        for (date, open, high, low, close, volume) in prices {
+            try execute(
+                "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'seed')",
+                params: [
+                    .text(date), .real(open), .real(high), .real(low), .real(close),
+                    volume.map { .real($0) } ?? .null
+                ]
+            )
+            count += 1
+        }
+        return count
+    }
+
+    func getOldestDailyPriceDate() throws -> String? {
+        let rows = try query("SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1", params: [])
+        return rows.first?[0] as? String
+    }
+
     // MARK: - Raw SQLite Helpers
 
     private enum SQLValue {

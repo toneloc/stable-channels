@@ -64,6 +64,7 @@ class FCMService : FirebaseMessagingService() {
                     put("device_token", token)
                     put("platform", "android")
                     put("node_id", nodeId)
+                    put("environment", "production")
                 }
                 val body = json.toString()
                     .toRequestBody("application/json".toMediaType())

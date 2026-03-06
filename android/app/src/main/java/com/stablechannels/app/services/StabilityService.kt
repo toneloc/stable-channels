@@ -97,7 +97,8 @@ object StabilityService {
         val percentFromPar = if (targetUSD > 0) abs(dollarsFromPar / targetUSD) * 100.0 else 0.0
 
         val action = when {
-            percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT -> StabilityAction.STABLE
+            percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT
+                || abs(dollarsFromPar) < Constants.STABILITY_THRESHOLD_USD -> StabilityAction.STABLE
             sc.riskLevel > Constants.MAX_RISK_LEVEL -> StabilityAction.HIGH_RISK_NO_ACTION
             sc.isStableReceiver && stableUSDValue < targetUSD -> StabilityAction.CHECK_ONLY
             else -> StabilityAction.PAY

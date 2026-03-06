@@ -113,6 +113,8 @@ struct Dashboard {
     connect_task: Option<JoinHandle<reqwest::Result<String>>>,
     connect_result: Option<String>,
     stability_task: Option<JoinHandle<reqwest::Result<Vec<ChannelStabilityStatus>>>>,
+    audit_log_task: Option<JoinHandle<reqwest::Result<String>>>,
+    ldk_log_task: Option<JoinHandle<reqwest::Result<String>>>,
 
     balance: Option<Balance>,
     channels: Vec<ChannelInfo>,
@@ -122,6 +124,10 @@ struct Dashboard {
     log_tail: String,
     stability_status: Vec<ChannelStabilityStatus>,
     last_stability_refresh: Instant,
+    audit_log_text: String,
+    ldk_log_text: String,
+    show_audit_log: bool,
+    show_ldk_log: bool,
 
     status_msg: String,
 
@@ -173,6 +179,8 @@ impl Dashboard {
             connect_task: None,
             connect_result: None,
             stability_task: None,
+            audit_log_task: None,
+            ldk_log_task: None,
 
             balance: None,
             channels: Vec::new(),
@@ -182,6 +190,10 @@ impl Dashboard {
             log_tail: String::new(),
             stability_status: Vec::new(),
             last_stability_refresh: Instant::now() - Duration::from_secs(60),
+            audit_log_text: String::new(),
+            ldk_log_text: String::new(),
+            show_audit_log: false,
+            show_ldk_log: false,
 
             status_msg: String::new(),
 
@@ -281,6 +293,36 @@ impl Dashboard {
                 .send()
                 .await?
                 .json::<Vec<ChannelStabilityStatus>>()
+                .await
+        }));
+    }
+
+    fn fetch_audit_log(&mut self) {
+        if self.audit_log_task.is_some() {
+            return;
+        }
+        let client = self.client.clone();
+        self.audit_log_task = Some(self.rt.spawn(async move {
+            client
+                .get("http://100.25.168.115:8080/api/audit_log?lines=500")
+                .send()
+                .await?
+                .text()
+                .await
+        }));
+    }
+
+    fn fetch_ldk_log(&mut self) {
+        if self.ldk_log_task.is_some() {
+            return;
+        }
+        let client = self.client.clone();
+        self.ldk_log_task = Some(self.rt.spawn(async move {
+            client
+                .get("http://100.25.168.115:8080/api/ldk_log?lines=1000")
+                .send()
+                .await?
+                .text()
                 .await
         }));
     }
@@ -826,6 +868,30 @@ impl App for Dashboard {
             self.stability_status = v;
             self.last_stability_refresh = Instant::now();
         });
+        if let Some(t) = &mut self.audit_log_task {
+            if let Some(res) = t.now_or_never() {
+                self.audit_log_task = None;
+                match res {
+                    Ok(Ok(v)) => self.audit_log_text = v,
+                    Ok(Err(e)) => self.audit_log_text = format!("Error fetching audit log: {}", e),
+                    Err(e) => self.audit_log_text = format!("Error fetching audit log: {}", e),
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if let Some(t) = &mut self.ldk_log_task {
+            if let Some(res) = t.now_or_never() {
+                self.ldk_log_task = None;
+                match res {
+                    Ok(Ok(v)) => self.ldk_log_text = v,
+                    Ok(Err(e)) => self.ldk_log_text = format!("Error fetching LDK log: {}", e),
+                    Err(e) => self.ldk_log_text = format!("Error fetching LDK log: {}", e),
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -926,6 +992,62 @@ impl App for Dashboard {
                     });
                     if let Some(msg) = &self.close_result {
                         ui.label(msg);
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Audit Log");
+                        if ui.button(if self.show_audit_log { "Hide" } else { "Show" }).clicked() {
+                            self.show_audit_log = !self.show_audit_log;
+                            if self.show_audit_log && self.audit_log_text.is_empty() {
+                                self.fetch_audit_log();
+                            }
+                        }
+                        if self.show_audit_log && ui.button("Refresh").clicked() {
+                            self.fetch_audit_log();
+                        }
+                    });
+                    if self.show_audit_log {
+                        egui::ScrollArea::vertical()
+                            .id_salt("audit_log_scroll")
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.audit_log_text.as_str())
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(f32::INFINITY),
+                                );
+                            });
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("LDK Node Log");
+                        if ui.button(if self.show_ldk_log { "Hide" } else { "Show" }).clicked() {
+                            self.show_ldk_log = !self.show_ldk_log;
+                            if self.show_ldk_log && self.ldk_log_text.is_empty() {
+                                self.fetch_ldk_log();
+                            }
+                        }
+                        if self.show_ldk_log && ui.button("Refresh").clicked() {
+                            self.fetch_ldk_log();
+                        }
+                    });
+                    if self.show_ldk_log {
+                        egui::ScrollArea::vertical()
+                            .id_salt("ldk_log_scroll")
+                            .max_height(400.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.ldk_log_text.as_str())
+                                        .font(egui::TextStyle::Monospace)
+                                        .desired_width(f32::INFINITY),
+                                );
+                            });
                     }
                 });
             }); // end ScrollArea

@@ -23,7 +23,7 @@ fun ContentView() {
 
     when (phase) {
         Phase.LOADING -> LoadingView()
-        Phase.ONBOARDING -> OnboardingView(appState)
+        Phase.ONBOARDING -> SyncingView() // Auto-create handles this
         Phase.SYNCING -> SyncingView()
         Phase.WALLET -> MainTabView(appState)
         Phase.ERROR -> ErrorView(errorMessage) { appState.start() }
@@ -68,46 +68,3 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
     }
 }
 
-@Composable
-private fun OnboardingView(appState: AppState) {
-    var showRestore by remember { mutableStateOf(false) }
-    var mnemonic by remember { mutableStateOf("") }
-
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(32.dp)
-        ) {
-            Text("Stable Channels", style = MaterialTheme.typography.headlineLarge)
-            Spacer(Modifier.height(32.dp))
-
-            if (!showRestore) {
-                Button(
-                    onClick = { appState.createWallet(null) },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Create New Wallet") }
-                Spacer(Modifier.height(12.dp))
-                OutlinedButton(
-                    onClick = { showRestore = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Restore from Seed") }
-            } else {
-                OutlinedTextField(
-                    value = mnemonic,
-                    onValueChange = { mnemonic = it },
-                    label = { Text("Enter 12 or 24 word mnemonic") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3
-                )
-                Spacer(Modifier.height(12.dp))
-                Button(
-                    onClick = { appState.createWallet(mnemonic.trim()) },
-                    enabled = mnemonic.trim().split("\\s+".toRegex()).size in listOf(12, 24),
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Restore Wallet") }
-                Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { showRestore = false }) { Text("Back") }
-            }
-        }
-    }
-}

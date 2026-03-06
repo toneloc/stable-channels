@@ -1,5 +1,9 @@
 package com.stablechannels.app.ui.home
 
+import android.Manifest
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -8,15 +12,22 @@ import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Sell
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.core.content.PermissionChecker
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
@@ -40,8 +51,22 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    var notificationsEnabled by remember { mutableStateOf(true) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                notificationsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PermissionChecker.PERMISSION_GRANTED
+                } else true
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val totalUSD = (totalSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-    val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
     val scope = rememberCoroutineScope()
 
     val pullRefreshState = rememberPullToRefreshState()
@@ -64,6 +89,42 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Notification warning
+            if (!notificationsEnabled) {
+                Card(
+                    onClick = {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        }
+                        context.startActivity(intent)
+                    },
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFDC2626)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = Color.White)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Notifications Disabled",
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                "Enable notifications for stability payments",
+                                color = Color.White.copy(alpha = 0.9f),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
             Spacer(Modifier.height(24.dp))
 
             // Balance
@@ -100,15 +161,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 ActionButton("Receive", Icons.AutoMirrored.Filled.CallReceived, Color(0xFF10B981), Modifier.weight(1f)) { showReceive = true }
             }
 
-            if (hasChannel) {
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ActionButton("Buy BTC", Icons.Default.ShoppingCart, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
-                    ActionButton("Sell BTC", Icons.Default.Sell, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
-                }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ActionButton("Buy BTC", Icons.Default.ShoppingCart, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
+                ActionButton("Sell BTC", Icons.Default.Sell, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
             }
 
             Spacer(Modifier.height(24.dp))

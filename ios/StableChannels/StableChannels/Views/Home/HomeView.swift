@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 struct HomeView: View {
     @Environment(AppState.self) private var appState
@@ -6,13 +7,20 @@ struct HomeView: View {
     @State private var showReceiveSheet = false
     @State private var showBuySheet = false
     @State private var showSellSheet = false
+    @Environment(\.scenePhase) private var scenePhase
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
+    @State private var notificationsEnabled = true
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(spacing: 16) {
+                    // Notification warning
+                    if !notificationsEnabled {
+                        notificationWarning
+                    }
+
                     // Total Balance
                     balanceSection
 
@@ -32,11 +40,14 @@ struct HomeView: View {
                         balanceBarSection
                     }
 
+                    // Price Chart
+                    if appState.btcPrice > 0 {
+                        PriceChartView(compact: true)
+                            .padding(.bottom, 8)
+                    }
+
                     // Action Buttons
                     actionButtons
-
-                    // BTC Price
-                    priceSection
 
                     // Status Message
                     if !appState.statusMessage.isEmpty {
@@ -44,13 +55,19 @@ struct HomeView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.3), value: appState.statusMessage)
-                .padding()
+                .padding(.horizontal)
+                .padding(.bottom)
             }
             .navigationTitle("Stable Channels")
+            .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 appState.refreshBalances()
                 appState.recordCurrentPrice()
             }
+        }
+        .onAppear { checkNotifications() }
+        .onChange(of: scenePhase) {
+            if scenePhase == .active { checkNotifications() }
         }
         .sheet(isPresented: $showSendSheet) { SendView() }
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
@@ -70,6 +87,44 @@ struct HomeView: View {
         }
     }
 
+    private func checkNotifications() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async {
+                notificationsEnabled = settings.authorizationStatus == .authorized
+            }
+        }
+    }
+
+    // MARK: - Notification Warning
+
+    private var notificationWarning: some View {
+        Button {
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Notifications Disabled")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                    Text("Enable notifications for stability payments")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(12)
+            .background(.red, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
     // MARK: - Balance Section
 
     private var displaySats: UInt64 {
@@ -81,40 +136,50 @@ struct HomeView: View {
     private var balanceSection: some View {
         let hasBalance = appState.totalBalanceUSD > 0 || displaySats > 0
 
-        return VStack(spacing: 8) {
+        return VStack(spacing: 4) {
             if !hasBalance && appState.isSyncing {
                 Text("—")
-                    .font(.system(size: 48, weight: .bold, design: .rounded))
+                    .font(.system(size: 42, weight: .bold, design: .rounded))
                     .foregroundStyle(.secondary)
 
                 Text("Loading balance...")
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(.tertiary)
             } else if showBTC {
-                Text("\(displaySats.btcSpacedFormatted) BTC")
-                    .font(.system(size: 36, weight: .bold, design: .monospaced))
-                    .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                    .contentTransition(.numericText())
-                    .animation(.default, value: displaySats)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(displaySats.btcSpacedFormatted)")
+                        .font(.system(size: 32, weight: .bold, design: .monospaced))
+                        .foregroundStyle(appState.paymentFlash ? .green : .primary)
+                        .contentTransition(.numericText())
+                        .animation(.default, value: displaySats)
+                    Text("BTC")
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
 
                 Text(appState.totalBalanceUSD.usdFormatted)
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                Text(appState.totalBalanceUSD.usdFormatted)
-                    .font(.system(size: 48, weight: .bold, design: .rounded))
-                    .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                    .contentTransition(.numericText())
-                    .animation(.default, value: appState.totalBalanceUSD)
-                    .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(appState.totalBalanceUSD.usdFormatted)
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                        .foregroundStyle(appState.paymentFlash ? .green : .primary)
+                        .contentTransition(.numericText())
+                        .animation(.default, value: appState.totalBalanceUSD)
+                        .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
+                    Text("USD")
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
 
-                Text(displaySats.satsFormatted)
-                    .font(.subheadline)
+                Text("\(displaySats.btcSpacedFormatted) BTC")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .scaleEffect(flashScale)
-        .padding(.top, 16)
+        .padding(.top, 8)
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.2)) {
                 showBTC.toggle()
@@ -124,8 +189,20 @@ struct HomeView: View {
 
     // MARK: - Balance Bar (Stable / Native)
 
+    private var nativeUSD: Double {
+        appState.btcPrice > 0
+            ? Double(appState.nativeBTC.sats) / Double(Constants.satsInBTC) * appState.btcPrice
+            : 0.0
+    }
+
+    private var stableSats: UInt64 {
+        appState.btcPrice > 0
+            ? UInt64(appState.stableUSD / appState.btcPrice * Double(Constants.satsInBTC))
+            : 0
+    }
+
     private var balanceBarSection: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             BalanceBarView(
                 stableUSD: appState.stableUSD,
                 nativeSats: appState.nativeBTC.sats,
@@ -133,24 +210,50 @@ struct HomeView: View {
                 btcPrice: appState.btcPrice
             )
 
-            HStack {
-                Label(appState.stableUSD.usdFormatted, systemImage: "shield.fill")
-                    .font(.caption)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "shield.fill")
+                            .font(.caption2)
+                        Text("USD")
+                            .font(.caption.bold())
+                    }
                     .foregroundStyle(.green)
+                    Text(showBTC ? "\(stableSats.btcSpacedFormatted) BTC" : appState.stableUSD.usdFormatted)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .contentTransition(.numericText())
+                }
+
                 Spacer()
-                Label(appState.nativeBTC.sats.satsFormatted, systemImage: "bitcoinsign.circle.fill")
-                    .font(.caption)
+
+                VStack(alignment: .trailing, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text("BTC")
+                            .font(.caption.bold())
+                        Image(systemName: "bitcoinsign.circle.fill")
+                            .font(.caption2)
+                    }
                     .foregroundStyle(.orange)
+                    Text(showBTC ? "\(appState.nativeBTC.sats.btcSpacedFormatted) BTC" : nativeUSD.usdFormatted)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .contentTransition(.numericText())
+                }
+            }
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showBTC.toggle()
+                }
             }
         }
-        .padding(.horizontal)
     }
 
     // MARK: - Action Buttons
 
     private var actionButtons: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
                 ActionButton(title: "Send", icon: "arrow.up.circle.fill", color: .blue) {
                     showSendSheet = true
                 }
@@ -159,43 +262,15 @@ struct HomeView: View {
                 }
             }
 
-            if !appState.nodeService.channels.isEmpty {
-                HStack(spacing: 12) {
-                    ActionButton(title: "Buy BTC", icon: "arrow.up.right.circle.fill", color: .orange) {
-                        showBuySheet = true
-                    }
-                    ActionButton(title: "Sell BTC", icon: "arrow.down.right.circle.fill", color: .purple) {
-                        showSellSheet = true
-                    }
+            HStack(spacing: 8) {
+                ActionButton(title: "Buy BTC", icon: "arrow.up.right.circle.fill", color: .orange) {
+                    showBuySheet = true
+                }
+                ActionButton(title: "Sell BTC", icon: "arrow.down.right.circle.fill", color: .purple) {
+                    showSellSheet = true
                 }
             }
         }
-    }
-
-    // MARK: - Price Section
-
-    private var priceSection: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("BTC Price")
-                    .foregroundStyle(.secondary)
-                if appState.priceService.lastUpdate != .distantPast {
-                    Text(appState.priceService.lastUpdate, style: .relative)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            Spacer()
-            if appState.priceService.isUpdating {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.trailing, 4)
-            }
-            Text(appState.btcPrice.usdFormatted)
-                .fontWeight(.medium)
-        }
-        .padding()
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Status Section

@@ -87,7 +87,8 @@ class AppState(private val context: Context) : ViewModel() {
                 launch { nodeService.events.collect { handleEvent(it) } }
 
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
-                if (seedFile.exists()) {
+                val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
+                if (seedFile.exists() || seedPhraseFile.exists()) {
                     _phase.value = Phase.SYNCING
                     waitForBackgroundService()
                     nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, null)
@@ -98,7 +99,14 @@ class AppState(private val context: Context) : ViewModel() {
                     processPendingPushPayment()
                     startStabilityTimer()
                 } else {
-                    _phase.value = Phase.ONBOARDING
+                    // New wallet — auto-create
+                    _phase.value = Phase.SYNCING
+                    nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, null)
+                    _phase.value = Phase.WALLET
+                    refreshBalances()
+                    prevOnchainSats = nodeService.spendableOnchainSats()
+                    reregisterPushTokenIfNeeded()
+                    startStabilityTimer()
                 }
             } catch (e: Exception) {
                 _errorMessage.value = e.message ?: "Unknown error"
@@ -479,11 +487,7 @@ class AppState(private val context: Context) : ViewModel() {
     fun refreshBalances() {
         nodeService.refreshChannels()
         val balances = nodeService.balances() ?: return
-        var lightning = 0L
-        for (ch in nodeService.channels) {
-            lightning += (ch.outboundCapacityMsat / 1000u).toLong()
-            lightning += ch.unspendablePunishmentReserve?.toLong() ?: 0
-        }
+        val lightning = balances.totalLightningBalanceSats.toLong()
         val onchain = balances.totalOnchainBalanceSats.toLong()
         _totalBalanceSats.value = lightning + onchain
         _lightningBalanceSats.value = lightning

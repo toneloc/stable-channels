@@ -28,6 +28,7 @@
 		76D934F4495402F7B4944BE3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8811E90D4B2B5C5C51093A95 /* Assets.xcassets */; };
 		8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BB0D1D623E0794FC1ED6ED /* NodeService.swift */; };
 		88769D82377C43BCF549A52C /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 702A9339F75D1A3A7B5313C7 /* HistoryView.swift */; };
+		8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 786B669FA976C4646AF0D206 /* PriceChartView.swift */; };
 		8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2CB01DD108B12E75FFEAB11 /* BuyView.swift */; };
 		8D7AA44935C2E984E70D42AE /* StabilityService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF383D962C3260EA8D14692A /* StabilityService.swift */; };
 		96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */; };
@@ -39,6 +40,7 @@
 		C6F3CDD0424F8A1BC7C7A1C9 /* LDKNode in Frameworks */ = {isa = PBXBuildFile; productRef = 74AB91D77B62D8BA24840317 /* LDKNode */; };
 		CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B3E864653E657FB0FCA3D2 /* Trade.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
+		E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B46630309755AE15EF291D4 /* HistoricalPrices.swift */; };
 		E8C9430FF8920728747EF550 /* SendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0FAABBD08BCBF20220C850 /* SendView.swift */; };
 		F54F1E51D4AF15D8700AB399 /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A2BA7D52F62DF17EFF532635 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -79,6 +81,7 @@
 		07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		24158DEF5FC6BF7AE004C56B /* StableChannels.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StableChannels.entitlements; sourceTree = "<group>"; };
 		3940DC5406ABC63AA090441A /* DatabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseService.swift; sourceTree = "<group>"; };
+		3B46630309755AE15EF291D4 /* HistoricalPrices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoricalPrices.swift; sourceTree = "<group>"; };
 		445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveView.swift; sourceTree = "<group>"; };
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		4F10632049E3C904E518EDD2 /* TradeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeDetailView.swift; sourceTree = "<group>"; };
@@ -89,6 +92,7 @@
 		6DCB92A88D9FEEAE6BF49737 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		6DDD82B198645873A6F492F2 /* StableChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableChannel.swift; sourceTree = "<group>"; };
 		702A9339F75D1A3A7B5313C7 /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
+		786B669FA976C4646AF0D206 /* PriceChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartView.swift; sourceTree = "<group>"; };
 		7DB261201C1C656BAAED5283 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		7E0FAABBD08BCBF20220C850 /* SendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendView.swift; sourceTree = "<group>"; };
 		840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FundWalletView.swift; sourceTree = "<group>"; };
@@ -215,6 +219,7 @@
 			children = (
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
+				3B46630309755AE15EF291D4 /* HistoricalPrices.swift */,
 			);
 			path = Utilities;
 			sourceTree = "<group>";
@@ -269,6 +274,7 @@
 				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
+				786B669FA976C4646AF0D206 /* PriceChartView.swift */,
 			);
 			path = Home;
 			sourceTree = "<group>";
@@ -423,12 +429,14 @@
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
+				E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */,
 				88769D82377C43BCF549A52C /* HistoryView.swift in Sources */,
 				1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */,
 				3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */,
 				8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */,
 				C1911B3A7E4C92444F07A5C6 /* OnChainView.swift in Sources */,
 				6B789335CAF664AC4DA75B1A /* PaymentDetailView.swift in Sources */,
+				8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */,
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
 				37DA6E9D4F5D4BF36DD86BC8 /* ReceiveView.swift in Sources */,
 				B4C85619D6A5506E1BD9FC11 /* SellView.swift in Sources */,

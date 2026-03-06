@@ -41,6 +41,7 @@ enum Constants {
 
     static let maxRiskLevel: Int32 = 100
     static let stabilityThresholdPercent: Double = 0.1
+    static let stabilityThresholdUSD: Double = 0.10
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     static let minDisplayUSD: Double = 2.0
     static let autoSweepMinSats: UInt64 = 10_000

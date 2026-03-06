@@ -265,6 +265,10 @@ pub struct UserApp {
     // Detail modals for history rows
     selected_payment: Option<PaymentRecord>,
     selected_trade: Option<TradeRecord>,
+
+    // Seed phrase backup
+    show_seed_words: bool,
+    saved_mnemonic: Option<String>,
 }
 
 impl UserApp {
@@ -328,6 +332,35 @@ impl UserApp {
 
         builder.set_liquidity_source_lsps2(lsp_pubkey, lsp_address.clone(), None);
         builder.set_liquidity_source_lsps1(lsp_pubkey, lsp_address, None);
+
+        // Determine mnemonic for wallet
+        let seed_phrase_path = data_dir.join("seed_phrase");
+        let keys_seed_path = data_dir.join("keys_seed");
+        let mut mnemonic_words: Option<String> = None;
+
+        if seed_phrase_path.exists() {
+            // Existing wallet — re-read saved mnemonic
+            if let Ok(saved) = std::fs::read_to_string(&seed_phrase_path) {
+                let trimmed = saved.trim().to_string();
+                if !trimmed.is_empty() {
+                    let mnemonic = ldk_node::bip39::Mnemonic::from_str(&trimmed)
+                        .expect("Invalid saved mnemonic");
+                    builder.set_entropy_bip39_mnemonic(mnemonic, None);
+                    mnemonic_words = Some(trimmed);
+                }
+            }
+        } else if !keys_seed_path.exists() {
+            // Truly new wallet — no seed_phrase, no keys_seed
+            for name in ["ldk_node_data.sqlite", "ldk_node_data.sqlite-wal", "ldk_node_data.sqlite-shm"] {
+                std::fs::remove_file(data_dir.join(name)).ok();
+            }
+            let mnemonic = ldk_node::generate_entropy_mnemonic(None);
+            let words = mnemonic.to_string();
+            std::fs::write(&seed_phrase_path, &words).expect("Failed to save seed phrase");
+            builder.set_entropy_bip39_mnemonic(mnemonic, None);
+            mnemonic_words = Some(words);
+        }
+        // Only remaining case: keys_seed exists but no seed_phrase → pre-upgrade wallet
 
         let node = Arc::new(builder.build().expect("Failed to build node"));
         node.start().expect("Failed to start node");
@@ -484,6 +517,8 @@ impl UserApp {
             history_show_btc: false,
             selected_payment: None,
             selected_trade: None,
+            show_seed_words: false,
+            saved_mnemonic: mnemonic_words,
         };
 
         // Seed historical price data if needed
@@ -4592,6 +4627,27 @@ impl UserApp {
                     }
                     ui.add_space(5.0);
                     ui.label(RichText::new("Your backup will be saved to your Downloads folder.").color(Color32::GRAY).size(11.0));
+
+                    ui.add_space(15.0);
+
+                    let seed_btn = egui::Button::new(RichText::new("Backup Seed Words").color(Color32::WHITE))
+                        .fill(Color32::from_rgb(59, 130, 246));
+                    if ui.add(seed_btn).clicked() {
+                        self.show_seed_words = !self.show_seed_words;
+                    }
+
+                    if self.show_seed_words {
+                        ui.add_space(10.0);
+                        if let Some(ref words) = self.saved_mnemonic {
+                            ui.label(RichText::new("Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.").color(Color32::from_rgb(217, 119, 6)).size(12.0));
+                            ui.add_space(8.0);
+                            for (i, word) in words.split_whitespace().enumerate() {
+                                ui.label(RichText::new(format!("{}. {}", i + 1, word)).size(13.0).color(Color32::BLACK).monospace());
+                            }
+                        } else {
+                            ui.label(RichText::new("Seed phrase not available for this wallet.").color(Color32::GRAY).size(12.0));
+                        }
+                    }
                 });
 
                 ui.add_space(20.0);

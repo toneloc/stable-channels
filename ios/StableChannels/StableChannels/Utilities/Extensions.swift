@@ -31,19 +31,20 @@ extension UInt64 {
         return String(format: "%.8f BTC", btc)
     }
 
-    /// Format as BTC with spaced digit groups: "0.00 009 000"
+    /// Format as BTC with spaced digit groups: "0.00 190 079"
+    /// Two decimal digits, then groups of three separated by thin spaces.
     var btcSpacedFormatted: String {
         let btc = Double(self) / Double(Constants.satsInBTC)
         let raw = String(format: "%.8f", btc)
         guard let dotIndex = raw.firstIndex(of: ".") else { return raw }
         let whole = raw[raw.startIndex..<dotIndex]
-        let decimals = raw[raw.index(after: dotIndex)...]
-        // Group decimal digits in threes: "00 009 000"
-        var grouped = ""
-        for (i, ch) in decimals.enumerated() {
-            if i > 0 && i % 3 == 0 { grouped += "\u{2009}" }  // thin space
-            grouped += String(ch)
-        }
+        let decimals = Array(raw[raw.index(after: dotIndex)...])
+        // Format as: XX XXX XXX (2 then 3 then 3)
+        var grouped = String(decimals[0..<2])
+        grouped += "\u{2009}" // thin space
+        grouped += String(decimals[2..<5])
+        grouped += "\u{2009}" // thin space
+        grouped += String(decimals[5..<8])
         return "\(whole).\(grouped)"
     }
 }

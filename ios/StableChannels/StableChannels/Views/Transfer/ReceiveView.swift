@@ -5,7 +5,7 @@ import LDKNode
 struct ReceiveView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
-    @State private var amountSats = ""
+    @State private var amountUSD = ""
     @State private var invoice: String?
     @State private var invoiceAmountSats: UInt64?
     @State private var errorMessage: String?
@@ -15,14 +15,14 @@ struct ReceiveView: View {
         appState.nodeService.channels.contains { $0.isChannelReady }
     }
 
-    private var enteredSats: UInt64 {
-        UInt64(amountSats) ?? 0
+    private var enteredUSDValue: Double {
+        Double(amountUSD) ?? 0
     }
 
-    private var enteredUSD: Double? {
+    private var enteredSats: UInt64 {
         let price = appState.btcPrice
-        guard price > 0, enteredSats > 0 else { return nil }
-        return Double(enteredSats) / Double(Constants.satsInBTC) * price
+        guard price > 0, enteredUSDValue > 0 else { return 0 }
+        return UInt64(enteredUSDValue / price * Double(Constants.satsInBTC))
     }
 
     var body: some View {
@@ -56,16 +56,16 @@ struct ReceiveView: View {
 
     private var amountInput: some View {
         VStack(spacing: 16) {
-            Text("Amount (sats)")
+            Text("Amount (USD)")
                 .font(.headline)
 
-            TextField("0", text: $amountSats)
-                .keyboardType(.numberPad)
+            TextField("0.00", text: $amountUSD)
+                .keyboardType(.decimalPad)
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
 
-            if let usd = enteredUSD {
-                Text("≈ \(usd.usdFormatted)")
+            if enteredSats > 0 {
+                Text("\(enteredSats.btcSpacedFormatted) BTC")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -83,7 +83,7 @@ struct ReceiveView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(amountSats.isEmpty)
+            .disabled(enteredSats == 0)
 
             if hasChannel {
                 Button("Any Amount") {
@@ -102,15 +102,15 @@ struct ReceiveView: View {
             // Amount summary
             if let sats = invoiceAmountSats, sats > 0 {
                 VStack(spacing: 2) {
-                    Text(sats.satsFormatted)
-                        .font(.title2.bold())
                     let price = appState.btcPrice
                     if price > 0 {
                         let usd = Double(sats) / Double(Constants.satsInBTC) * price
                         Text(usd.usdFormatted)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .font(.title2.bold())
                     }
+                    Text("\(sats.btcSpacedFormatted) BTC")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 Text("Any amount")
@@ -150,7 +150,8 @@ struct ReceiveView: View {
     // MARK: - Invoice Creation
 
     private func createInvoice() {
-        guard let sats = UInt64(amountSats), sats > 0 else { return }
+        let sats = enteredSats
+        guard sats > 0 else { return }
         errorMessage = nil
         do {
             let inv: Bolt11Invoice
