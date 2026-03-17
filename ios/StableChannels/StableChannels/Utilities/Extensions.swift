@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 // MARK: - Date Formatting
 
@@ -56,5 +57,15 @@ extension Double {
         formatter.currencyCode = "USD"
         formatter.maximumFractionDigits = 2
         return formatter.string(from: NSNumber(value: self)) ?? "$0.00"
+    }
+}
+
+extension UIFont {
+    static func rounded(ofSize size: CGFloat, weight: UIFont.Weight) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: weight)
+        if let descriptor = base.fontDescriptor.withDesign(.rounded) {
+            return UIFont(descriptor: descriptor, size: size)
+        }
+        return base
     }
 }

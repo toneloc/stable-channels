@@ -21,6 +21,8 @@ enum StabilityService {
         sc.expectedUSD = USD(amount: newExpected)
         let btcAmount = newExpected / price
         sc.backingSats = UInt64(btcAmount * 100_000_000.0)
+        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
+            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
         recomputeNative(&sc)
 
         return usdToDeduct
@@ -49,6 +51,8 @@ enum StabilityService {
             let btcAmount = newExpected / price
             sc.backingSats = UInt64(btcAmount * 100_000_000.0)
         }
+        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
+            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
         recomputeNative(&sc)
 
         return usdToDeduct
@@ -69,6 +73,8 @@ enum StabilityService {
         sc.expectedUSD = USD(amount: newExpected)
         let btcAmount = newExpected / price
         sc.backingSats = UInt64(btcAmount * 100_000_000.0)
+        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
+            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
         recomputeNative(&sc)
 
         return usdToDeduct
@@ -82,22 +88,26 @@ enum StabilityService {
         sc.nativeChannelBTC = Bitcoin(sats: nativeSats)
     }
 
-    /// Reconcile an incoming payment — reset backing sats to equilibrium.
+    /// Reconcile an incoming payment — derive backing sats from channel balance.
+    /// native_sats hasn't changed, so backing = receiver - native.
     static func reconcileIncoming(_ sc: inout StableChannel) {
-        if sc.expectedUSD.amount > 0.01 && sc.latestPrice > 0.0 {
-            let btcAmount = sc.expectedUSD.amount / sc.latestPrice
-            sc.backingSats = UInt64(btcAmount * 100_000_000.0)
+        if sc.expectedUSD.amount > 0.01 {
+            sc.backingSats = sc.stableReceiverBTC.sats >= sc.nativeSats
+                ? sc.stableReceiverBTC.sats - sc.nativeSats : 0
         }
         recomputeNative(&sc)
     }
 
-    /// Apply a trade — set new expected USD and recalculate backing sats.
+    /// Apply a trade — set new expected USD and recalculate backing sats + native sats.
     static func applyTrade(_ sc: inout StableChannel, newExpectedUSD: Double, price: Double) {
         sc.expectedUSD = USD(amount: newExpectedUSD)
         if price > 0.0 {
             let btcAmount = newExpectedUSD / price
             sc.backingSats = UInt64(btcAmount * 100_000_000.0)
         }
+        // native_sats is everything NOT backing the stable position
+        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
+            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
         recomputeNative(&sc)
     }
 

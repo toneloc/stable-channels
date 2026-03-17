@@ -3,11 +3,19 @@ import SwiftUI
 struct BuyView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
-    @State private var amountStr = ""
+    @State private var amountStr: String
     @State private var step: Step = .amount
     @State private var errorMessage: String?
     @State private var isExecuting = false
     @State private var pendingPaymentId: String?
+    let prefillAmountUSD: Double
+
+    init(prefillAmountUSD: Double = 0) {
+        self.prefillAmountUSD = prefillAmountUSD
+        _amountStr = State(initialValue: prefillAmountUSD > 0
+            ? String(format: "%.2f", prefillAmountUSD)
+            : "")
+    }
 
     enum Step {
         case amount
@@ -56,10 +64,24 @@ struct BuyView: View {
             Text("How much USD to convert to BTC?")
                 .font(.headline)
 
-            TextField("$0.00", text: $amountStr)
+            TextField("0.00", text: $amountStr)
                 .keyboardType(.decimalPad)
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
+                .overlay(alignment: .leading) {
+                    if !amountStr.isEmpty {
+                        // Measure the text width to position $ immediately before it
+                        GeometryReader { geo in
+                            let textWidth = amountStr.size(withAttributes: [
+                                .font: UIFont.rounded(ofSize: 36, weight: .bold)
+                            ]).width
+                            Text("$")
+                                .font(.system(size: 36, weight: .bold, design: .rounded))
+                                .position(x: geo.size.width / 2 - textWidth / 2 - 10,
+                                          y: geo.size.height / 2)
+                        }
+                    }
+                }
 
             if amountUSD > 0 {
                 Text(String(format: "≈ %.8f BTC", btcAmount))

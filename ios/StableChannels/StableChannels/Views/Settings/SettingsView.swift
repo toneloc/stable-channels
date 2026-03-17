@@ -125,29 +125,9 @@ struct SettingsView: View {
                         Text(appState.onchainBalanceSats.satsFormatted)
                     }
 
-                    NavigationLink("Receive On-Chain") {
-                        FundWalletView()
-                    }
-
                     if appState.onchainBalanceSats > 0 {
                         NavigationLink("Send On-Chain") {
                             OnChainSendView()
-                        }
-                    }
-                }
-
-                // Sweep
-                if appState.onchainBalanceSats > 0,
-                   appState.nodeService.channels.contains(where: { $0.isChannelReady }) {
-                    Section("On-Chain Balance") {
-                        HStack {
-                            Text("Pending Sweep")
-                            Spacer()
-                            Text(appState.onchainBalanceSats.satsFormatted)
-                                .foregroundStyle(.secondary)
-                        }
-                        Button("Sweep to Channel Now") {
-                            sweepToChannel()
                         }
                     }
                 }
@@ -352,10 +332,6 @@ struct SettingsView: View {
         )
     }
 
-    private func sweepToChannel() {
-        appState.manualSweepToChannel()
-    }
-
     private func restoreWallet() async {
         isRestoring = true
         restoreError = nil
@@ -374,7 +350,7 @@ struct SettingsView: View {
         do {
             try await appState.nodeService.start(
                 network: .bitcoin,
-                esploraURL: Constants.defaultChainURL,
+                esploraURL: appState.chainURL,
                 mnemonic: input
             )
             await MainActor.run {

@@ -99,6 +99,12 @@ impl Database {
         // Migration: Add user_channel_id column (stable across splices, unlike channel_id)
         let _ = conn.execute("ALTER TABLE channels ADD COLUMN user_channel_id TEXT", []); // Ignore error if column already exists
 
+        // Migration: Add native_sats column — sats NOT backing the stable position
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0",
+            [],
+        ); // Ignore error if column already exists
+
         // Price history table - stores historical prices for charts
         conn.execute(
             "CREATE TABLE IF NOT EXISTS price_history (
@@ -220,13 +226,14 @@ impl Database {
         user_channel_id: &str,
         expected_usd: f64,
         backing_sats: u64,
+        native_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         // Try to update by user_channel_id first (handles channel_id changes from splices)
         let updated = conn.execute(
             "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
-                                 note = ?4, user_channel_id = ?5,
+                                 note = ?4, user_channel_id = ?5, native_sats = ?6,
                                  updated_at = strftime('%s', 'now')
              WHERE user_channel_id = ?5",
             params![
@@ -234,21 +241,23 @@ impl Database {
                 expected_usd,
                 backing_sats as i64,
                 note,
-                user_channel_id
+                user_channel_id,
+                native_sats as i64
             ],
         )?;
         if updated == 0 {
             // No existing row — insert new
             conn.execute(
-                "INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, note)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, note)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(channel_id) DO UPDATE SET
                     user_channel_id = ?2,
                     expected_usd = ?3,
                     stable_sats = ?4,
-                    note = ?5,
+                    native_sats = ?5,
+                    note = ?6,
                     updated_at = strftime('%s', 'now')",
-                params![channel_id, user_channel_id, expected_usd, backing_sats as i64, note],
+                params![channel_id, user_channel_id, expected_usd, backing_sats as i64, native_sats as i64, note],
             )?;
         }
         Ok(())
@@ -268,7 +277,7 @@ impl Database {
     pub fn load_channel(&self, user_channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id
+            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, native_sats
              FROM channels WHERE user_channel_id = ?1",
         )?;
 
@@ -276,12 +285,14 @@ impl Database {
 
         if let Some(row) = rows.next()? {
             let backing_sats: i64 = row.get(3).unwrap_or(0);
+            let native_sats: i64 = row.get(5).unwrap_or(0);
             Ok(Some(ChannelRecord {
                 channel_id: row.get(0)?,
                 user_channel_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
                 backing_sats: backing_sats as u64,
+                native_sats: native_sats as u64,
             }))
         } else {
             Ok(None)
@@ -292,17 +303,19 @@ impl Database {
     pub fn load_all_channels(&self) -> SqliteResult<Vec<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id FROM channels",
+            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, native_sats FROM channels",
         )?;
 
         let rows = stmt.query_map([], |row| {
             let backing_sats: i64 = row.get(3).unwrap_or(0);
+            let native_sats: i64 = row.get(5).unwrap_or(0);
             Ok(ChannelRecord {
                 channel_id: row.get(0)?,
                 user_channel_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 expected_usd: row.get(1)?,
                 note: row.get(2)?,
                 backing_sats: backing_sats as u64,
+                native_sats: native_sats as u64,
             })
         })?;
 
@@ -799,6 +812,7 @@ pub struct ChannelRecord {
     pub expected_usd: f64,
     pub note: Option<String>,
     pub backing_sats: u64,
+    pub native_sats: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -882,12 +896,13 @@ mod tests {
     fn test_save_and_load_channel() {
         let db = Database::open_in_memory().unwrap();
 
-        // backing_sats = 100_000 (backing $100 at some price)
+        // backing_sats = 100_000 (backing $100 at some price), native_sats = 50_000
         db.save_channel(
             "test_channel_123",
             "uch_123",
             100.0,
             100_000,
+            50_000,
             Some("test note"),
         )
         .unwrap();
@@ -897,6 +912,7 @@ mod tests {
         assert_eq!(loaded.user_channel_id, "uch_123");
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
+        assert_eq!(loaded.native_sats, 50_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
     }
 
@@ -904,15 +920,17 @@ mod tests {
     fn test_channel_upsert() {
         let db = Database::open_in_memory().unwrap();
 
-        db.save_channel("ch1", "uch1", 50.0, 50_000, None).unwrap();
+        db.save_channel("ch1", "uch1", 50.0, 50_000, 10_000, None)
+            .unwrap();
         // Same user_channel_id, new channel_id (simulates splice)
-        db.save_channel("ch2", "uch1", 100.0, 100_000, Some("updated"))
+        db.save_channel("ch2", "uch1", 100.0, 100_000, 20_000, Some("updated"))
             .unwrap();
 
         let loaded = db.load_channel("uch1").unwrap().unwrap();
         assert_eq!(loaded.channel_id, "ch2"); // channel_id updated
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
+        assert_eq!(loaded.native_sats, 20_000);
     }
 
     #[test]

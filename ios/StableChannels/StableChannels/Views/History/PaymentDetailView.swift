@@ -30,6 +30,15 @@ struct PaymentDetailView: View {
                     }
                     if let txid = payment.txid {
                         row("TXID", txid)
+                        if let url = URL(string: "https://mempool.space/tx/\(txid)") {
+                            Link(destination: url) {
+                                HStack(spacing: 4) {
+                                    Text("View on explorer")
+                                    Image(systemName: "arrow.up.right.square")
+                                }
+                                .font(.caption)
+                            }
+                        }
                     }
                     if let address = payment.address {
                         row("Address", address)
@@ -66,6 +75,7 @@ struct PaymentDetailView: View {
         case "splice_in": return "Splice In"
         case "splice_out": return "Splice Out"
         case "onchain": return "On-chain"
+        case "channel_close": return "Channel Close"
         case "bolt12": return "Bolt12"
         default: return payment.paymentType
         }

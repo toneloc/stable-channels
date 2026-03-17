@@ -8,7 +8,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.util.usdFormatted
@@ -51,6 +53,7 @@ fun BuyScreen(appState: AppState, onDismiss: () -> Unit) {
                     value = amountText,
                     onValueChange = { amountText = it },
                     label = { Text("Amount (USD)") },
+                    prefix = if (amountText.isNotEmpty()) {{ Text("$", fontSize = 16.sp, fontWeight = FontWeight.Medium) }} else null,
                     modifier = Modifier.fillMaxWidth()
                 )
 

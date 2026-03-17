@@ -54,6 +54,7 @@ Cargo.lock
 **/*.rs.bk
 src/bin/recover.rs
 src/bin/sweep.rs
+src/bin/recover_2of2.rs
 
 # JavaScript / Node.js
 node_modules/

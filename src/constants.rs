@@ -35,6 +35,7 @@ pub const DEFAULT_LSP_PORT: u16 = 9737;
 
 /// Default chain source URL
 pub const DEFAULT_CHAIN_URL: &str = "https://blockstream.info/api";
+pub const FALLBACK_CHAIN_URL: &str = "https://mempool.space/api";
 
 /// Default LSP public key
 pub const DEFAULT_LSP_PUBKEY: &str =

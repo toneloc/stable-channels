@@ -999,7 +999,10 @@ impl App for Dashboard {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.heading("Audit Log");
-                        if ui.button(if self.show_audit_log { "Hide" } else { "Show" }).clicked() {
+                        if ui
+                            .button(if self.show_audit_log { "Hide" } else { "Show" })
+                            .clicked()
+                        {
                             self.show_audit_log = !self.show_audit_log;
                             if self.show_audit_log && self.audit_log_text.is_empty() {
                                 self.fetch_audit_log();
@@ -1027,7 +1030,10 @@ impl App for Dashboard {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.heading("LDK Node Log");
-                        if ui.button(if self.show_ldk_log { "Hide" } else { "Show" }).clicked() {
+                        if ui
+                            .button(if self.show_ldk_log { "Hide" } else { "Show" })
+                            .clicked()
+                        {
                             self.show_ldk_log = !self.show_ldk_log;
                             if self.show_ldk_log && self.ldk_log_text.is_empty() {
                                 self.fetch_ldk_log();

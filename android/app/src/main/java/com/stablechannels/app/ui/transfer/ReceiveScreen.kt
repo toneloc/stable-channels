@@ -13,10 +13,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.home.generateQRCode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     var amountSats by remember { mutableStateOf("") }
@@ -24,10 +26,16 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     var isGenerating by remember { mutableStateOf(false) }
     var isCopied by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var showOnChain by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+
+    if (showOnChain) {
+        FundWalletScreen(appState)
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -35,7 +43,14 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Receive", style = MaterialTheme.typography.headlineSmall)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Receive", style = MaterialTheme.typography.headlineSmall)
+            TextButton(onClick = { showOnChain = true }) { Text("On-Chain") }
+        }
         Spacer(Modifier.height(16.dp))
 
         if (invoice != null) {

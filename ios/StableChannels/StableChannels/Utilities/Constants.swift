@@ -17,7 +17,8 @@ enum Constants {
     static let defaultLSPAlias = "lsp"
     static let defaultLSPPort: UInt16 = 9737
 
-    static let defaultChainURL = "https://blockstream.info/api"
+    static let primaryChainURL = "https://blockstream.info/api"
+    static let fallbackChainURL = "https://mempool.space/api"
     static let defaultLSPPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     static let defaultLSPAddress = "100.25.168.115:9737"
     static let defaultGatewayPubkey = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"
@@ -44,7 +45,7 @@ enum Constants {
     static let stabilityThresholdUSD: Double = 0.10
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     static let minDisplayUSD: Double = 2.0
-    static let autoSweepMinSats: UInt64 = 10_000
+
 
     // MARK: - Channel
 

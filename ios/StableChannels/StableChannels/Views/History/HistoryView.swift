@@ -166,6 +166,7 @@ struct PaymentRowView: View {
         case "splice_in": return "Splice In"
         case "splice_out": return "Splice Out"
         case "onchain": return "On-chain"
+        case "channel_close": return "Channel Close"
         case "bolt12": return "Bolt12"
         default: return payment.paymentType
         }

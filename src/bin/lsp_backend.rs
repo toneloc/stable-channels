@@ -544,6 +544,7 @@ async fn main() -> Result<()> {
 
                     let sent = app.check_and_update_stable_channels();
                     app.last_stability_check = Instant::now();
+
                     (sent, filtered)
                 } else {
                     (false, Vec::new())
@@ -786,7 +787,12 @@ async fn connect_handler(Json(req): Json<ConnectReq>) -> Json<String> {
 
 // POST /api/register-push
 async fn register_push_handler(Json(req): Json<RegisterPushReq>) -> Json<String> {
-    save_push_token(&req.device_token, &req.platform, &req.node_id, &req.environment);
+    save_push_token(
+        &req.device_token,
+        &req.platform,
+        &req.node_id,
+        &req.environment,
+    );
 
     println!(
         "[Push] Registered {} device: {}... node_id: {}",
@@ -828,12 +834,15 @@ async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
             // Current USD = user's actual sats at current price
             let current_usd = user_sats as f64 / 100_000_000.0 * price;
 
-            // Native BTC = user sats beyond what's backing the stable position
-            let native_sats = user_sats.saturating_sub(sc.backing_sats);
+            // Derive backing_sats from balance using native_sats invariant
+            let derived_backing = user_sats.saturating_sub(sc.native_sats);
+            let native_sats = user_sats.saturating_sub(derived_backing);
 
-            let dollars_from_par = current_usd - expected;
+            // Use derived backing for USD calculation
+            let stable_usd = (derived_backing as f64 / 100_000_000.0) * price;
+            let dollars_from_par = stable_usd - expected;
             let percent_from_par = if expected > 0.0 {
-                ((current_usd - expected) / expected) * 100.0
+                ((stable_usd - expected) / expected) * 100.0
             } else {
                 0.0
             };
@@ -979,7 +988,8 @@ fn load_push_token_for_node(node_id: &str) -> Option<(String, String, String)> {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
-            row.get::<_, String>(2).unwrap_or_else(|_| "sandbox".to_string()),
+            row.get::<_, String>(2)
+                .unwrap_or_else(|_| "sandbox".to_string()),
         ))
     })
     .ok()
@@ -1043,9 +1053,15 @@ fn notify(node_id: &str, direction: &str) {
             }
         };
 
+        let (title, body) = if direction == "incoming_payment" {
+            ("Payment", "Receiving payment...")
+        } else {
+            ("Stability", "Processing stability payment...")
+        };
+
         let mut payload = DefaultNotificationBuilder::new()
-            .set_title("Stability")
-            .set_body("Processing stability payment...")
+            .set_title(title)
+            .set_body(body)
             .set_mutable_content()
             .set_sound("default")
             .build(
@@ -1122,7 +1138,10 @@ fn get_output_sats(txid: &str, vout: u32) -> Option<u64> {
     });
 
     let credentials = format!("{}:{}", rpc_user, rpc_pass);
-    let auth_value = format!("Basic {}", openssl::base64::encode_block(credentials.as_bytes()));
+    let auth_value = format!(
+        "Basic {}",
+        openssl::base64::encode_block(credentials.as_bytes())
+    );
     let response = ureq::post(rpc_url)
         .set("Authorization", &auth_value)
         .set("Content-Type", "application/json")
@@ -1136,6 +1155,12 @@ fn get_output_sats(txid: &str, vout: u32) -> Option<u64> {
     let value_sats = (value_btc * 100_000_000.0).round() as u64;
 
     Some(value_sats)
+}
+
+impl Default for ServerApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ServerApp {
@@ -1198,7 +1223,10 @@ impl ServerApp {
             builder.set_liquidity_provider_lsps2(service_config);
         }
 
-        let node = Arc::new(match builder.build() {
+        let seed_path = format!("{}/keys_seed", data_dir);
+        let node_entropy = ldk_node::entropy::NodeEntropy::from_seed_path(seed_path)
+            .expect("Failed to load or generate seed");
+        let node = Arc::new(match builder.build(node_entropy) {
             Ok(n) => {
                 println!("[Init] Node built successfully");
                 n
@@ -1316,9 +1344,23 @@ impl ServerApp {
                 continue;
             }
 
+            // Derive backing_sats from channel balance (same as check_stability)
+            let user_sats = self
+                .node
+                .list_channels()
+                .iter()
+                .find(|c| c.user_channel_id.0 == sc.user_channel_id)
+                .map(|c| {
+                    let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
+                    let lsp_sats = (c.outbound_capacity_msat / 1000) + unspendable;
+                    c.channel_value_sats.saturating_sub(lsp_sats)
+                })
+                .unwrap_or(0);
+            let derived_backing = user_sats.saturating_sub(sc.native_sats);
+
             // Quick drift check — does this channel need a stability payment?
-            let stable_usd_value = if sc.backing_sats > 0 {
-                (sc.backing_sats as f64 / 100_000_000.0) * current_price
+            let stable_usd_value = if derived_backing > 0 {
+                (derived_backing as f64 / 100_000_000.0) * current_price
             } else {
                 sc.stable_receiver_usd.0
             };
@@ -1858,7 +1900,7 @@ impl ServerApp {
                 .unwrap_or(0);
 
             let old_expected = sc.expected_usd.0;
-            let native_sats = user_total_sats.saturating_sub(sc.backing_sats);
+            let native_sats = sc.native_sats;
 
             if let Some(usd_deducted) =
                 stable::reconcile_forwarded(sc, user_total_sats, total_sats, self.btc_price)
@@ -2574,6 +2616,7 @@ impl ServerApp {
                     note,
                     native_channel_btc: Bitcoin::from_sats(0),
                     backing_sats,
+                    native_sats: stable_receiver_btc.sats.saturating_sub(backing_sats),
                     last_stability_payment: 0,
                 };
 
@@ -2617,12 +2660,13 @@ impl ServerApp {
         for sc in &self.stable_channels {
             let ch_id = sc.channel_id.to_string();
             let uch_id = format!("{}", sc.user_channel_id);
-            println!("[save_stable] saving channel={} user_channel_id={} expected_usd={} backing_sats={}", ch_id, uch_id, sc.expected_usd.0, sc.backing_sats);
+            println!("[save_stable] saving channel={} user_channel_id={} expected_usd={} backing_sats={} native_sats={}", ch_id, uch_id, sc.expected_usd.0, sc.backing_sats, sc.native_sats);
             if let Err(e) = self.db.save_channel(
                 &ch_id,
                 &uch_id,
                 sc.expected_usd.0,
                 sc.backing_sats,
+                sc.native_sats,
                 sc.note.as_deref(),
             ) {
                 eprintln!("[save_stable] ERROR saving channel {} to DB: {}", ch_id, e);
@@ -2650,6 +2694,7 @@ impl ServerApp {
                             uch_id,
                             entry.expected_usd,
                             entry.backing_sats,
+                            0, // native_sats unknown during migration; will be derived on first stability check
                             entry.note.as_deref(),
                         );
                     }
@@ -2709,7 +2754,7 @@ impl ServerApp {
                     let stable_receiver_usd =
                         USD::from_bitcoin(stable_receiver_btc, self.btc_price);
 
-                    let stable_channel = StableChannel {
+                    let mut stable_channel = StableChannel {
                         channel_id: channel.channel_id,
                         user_channel_id: channel.user_channel_id.0,
                         counterparty: channel.counterparty_node_id,
@@ -2732,8 +2777,19 @@ impl ServerApp {
                         note: entry.note.clone(),
                         native_channel_btc: Bitcoin::from_sats(0),
                         backing_sats: entry.backing_sats,
+                        native_sats: entry.native_sats,
                         last_stability_payment: 0,
                     };
+
+                    // Migrate: if native_sats not set yet, derive from balance
+                    if stable_channel.native_sats == 0 && stable_channel.backing_sats > 0 {
+                        stable_channel.native_sats =
+                            their_balance_sats.saturating_sub(stable_channel.backing_sats);
+                        println!(
+                            "[load_stable] Migrated native_sats={} for channel {}",
+                            stable_channel.native_sats, stable_channel.channel_id
+                        );
+                    }
 
                     self.stable_channels.push(stable_channel);
                     break;

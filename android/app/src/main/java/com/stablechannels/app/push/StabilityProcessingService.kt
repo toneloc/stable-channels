@@ -72,9 +72,10 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Processing stability: direction=$direction")
 
         val dataDir = Constants.userDataDir(this)
-        val seedFile = File(dataDir, "keys_seed")
-        if (!seedFile.exists()) {
-            Log.w(TAG, "No seed file, skipping")
+        val keySeedFile = File(dataDir, "keys_seed")
+        val seedPhraseFile = File(dataDir, "seed_phrase")
+        if (!keySeedFile.exists() && !seedPhraseFile.exists()) {
+            Log.w(TAG, "No seed file (checked keys_seed and seed_phrase), skipping")
             return
         }
 
@@ -90,7 +91,16 @@ class StabilityProcessingService : Service() {
         config.anchorChannelsConfig = anchorConfig
 
         val builder = Builder.fromConfig(config)
-        builder.setEsploraServer(Constants.DEFAULT_CHAIN_URL)
+        builder.setEsploraServer(Constants.PRIMARY_CHAIN_URL)
+
+        // If wallet uses mnemonic (seed_phrase), set it on the builder
+        if (seedPhraseFile.exists()) {
+            val words = seedPhraseFile.readText().trim()
+            if (words.isNotEmpty()) {
+                Log.d(TAG, "Using seed_phrase mnemonic")
+                builder.setEntropyBip39Mnemonic(Mnemonic(words))
+            }
+        }
         // No RGS gossip (saves ~5s startup + ~8MB RAM)
         // No LSPS2 (not needed for stability payments)
 
@@ -105,9 +115,12 @@ class StabilityProcessingService : Service() {
                 Log.w(TAG, "LSP connect: ${e.message}")
             }
 
+            val dbPath = File(dataDir, "stablechannels.db").absolutePath
+
             when (direction) {
-                "lsp_to_user" -> handleLspToUser(node)
-                "user_to_lsp" -> handleUserToLsp(node)
+                "lsp_to_user" -> handleLspToUser(node, dbPath)
+                "user_to_lsp" -> handleUserToLsp(node, dbPath)
+                "incoming_payment" -> handleIncomingPayment(node, dbPath)
                 else -> Log.w(TAG, "Unknown direction: $direction")
             }
         } finally {
@@ -115,7 +128,7 @@ class StabilityProcessingService : Service() {
         }
     }
 
-    private fun handleLspToUser(node: Node) {
+    private fun handleLspToUser(node: Node, dbPath: String) {
         // Price dropped — LSP sends us sats. Just poll for incoming payment.
         Log.d(TAG, "Polling for incoming payment...")
         val deadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
@@ -127,6 +140,11 @@ class StabilityProcessingService : Service() {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
                         node.eventHandled()
+                        val price = fetchMedianPrice()
+                        recordPaymentInDB(
+                            dbPath, null, "stability", "received",
+                            event.amountMsat.toLong(), price
+                        )
                         return
                     }
                     else -> node.eventHandled()
@@ -138,7 +156,42 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Poll timeout — no payment received")
     }
 
-    private fun handleUserToLsp(node: Node) {
+    private fun handleIncomingPayment(node: Node, dbPath: String) {
+        // Wake push — stay online for POLL_TIMEOUT_SECS to receive any pending payments.
+        Log.d(TAG, "Polling for incoming payments (wake push)...")
+        val deadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
+        var received = false
+        var price = 0.0
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val event = node.nextEvent()
+                when (event) {
+                    is Event.PaymentReceived -> {
+                        Log.d(TAG, "Payment received: ${event.amountMsat} msat")
+                        node.eventHandled()
+                        if (price <= 0) price = fetchMedianPrice()
+                        recordPaymentInDB(
+                            dbPath, null, "lightning", "received",
+                            event.amountMsat.toLong(), price
+                        )
+                        received = true
+                        // Keep polling — there might be more payments
+                    }
+                    else -> node.eventHandled()
+                }
+            } catch (_: Exception) {
+                Thread.sleep(500)
+            }
+        }
+        if (received) {
+            Log.d(TAG, "Incoming payment(s) received during wake")
+        } else {
+            Log.d(TAG, "No incoming payments during wake poll")
+        }
+    }
+
+    private fun handleUserToLsp(node: Node, dbPath: String) {
         // Price rose — user owes LSP sats. Read channel state and send keysend.
         val channelState = loadChannelStateFromDB() ?: run {
             Log.w(TAG, "No channel state in DB")
@@ -152,17 +205,25 @@ class StabilityProcessingService : Service() {
         }
 
         val expectedUsd = channelState.expectedUsd
-        val stableReceiverSats = channelState.receiverSats
-        val latestPrice = channelState.latestPrice
 
         if (expectedUsd < 0.01) {
             Log.d(TAG, "No stable position, skipping")
             return
         }
 
-        // Calculate stability check
-        val stableUsdValue = if (stableReceiverSats > 0) {
-            (stableReceiverSats.toDouble() / Constants.SATS_IN_BTC) * price
+        // Derive backing_sats from LDK channel balance using native_sats invariant
+        val userSatsFromLDK = node.listChannels().firstOrNull()?.let { channel ->
+            val unspendable = channel.unspendablePunishmentReserve ?: 0UL
+            (channel.outboundCapacityMsat / 1000UL) + unspendable
+        }?.toLong() ?: channelState.receiverSats
+
+        val derivedBacking = maxOf(userSatsFromLDK - channelState.nativeSats, 0)
+
+        Log.d(TAG, "Derived backing=$derivedBacking, nativeSats=${channelState.nativeSats}, userSatsLDK=$userSatsFromLDK")
+
+        // Calculate stability check using derived backing
+        val stableUsdValue = if (derivedBacking > 0) {
+            (derivedBacking.toDouble() / Constants.SATS_IN_BTC) * price
         } else {
             0.0
         }
@@ -194,6 +255,12 @@ class StabilityProcessingService : Service() {
                 null
             )
             Log.d(TAG, "Stability keysend sent successfully")
+            recordPaymentInDB(
+                dbPath, null, "stability", "sent",
+                amountMsat, price
+            )
+            // No manual backing_sats reset needed — derived from
+            // receiver_sats - native_sats on each check.
         } catch (e: Exception) {
             Log.e(TAG, "Stability keysend failed", e)
             throw e
@@ -203,6 +270,7 @@ class StabilityProcessingService : Service() {
     private data class ChannelState(
         val expectedUsd: Double,
         val receiverSats: Long,
+        val nativeSats: Long,
         val latestPrice: Double
     )
 
@@ -213,7 +281,7 @@ class StabilityProcessingService : Service() {
         return try {
             val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
-                "SELECT expected_usd, receiver_sats, latest_price FROM channels LIMIT 1",
+                "SELECT expected_usd, receiver_sats, latest_price, native_sats FROM channels LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -221,6 +289,7 @@ class StabilityProcessingService : Service() {
                     ChannelState(
                         expectedUsd = it.getDouble(0),
                         receiverSats = it.getLong(1),
+                        nativeSats = if (it.columnCount > 3) it.getLong(3) else 0,
                         latestPrice = it.getDouble(2)
                     )
                 } else null
@@ -261,6 +330,48 @@ class StabilityProcessingService : Service() {
             (prices[mid - 1] + prices[mid]) / 2.0
         } else {
             prices[mid]
+        }
+    }
+
+    private fun recordPaymentInDB(
+        dbPath: String,
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: Long,
+        btcPrice: Double
+    ) {
+        try {
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+
+            // Dedup: skip if payment_id already exists
+            if (paymentId != null && paymentId.isNotEmpty()) {
+                val cursor = db.rawQuery(
+                    "SELECT id FROM payments WHERE payment_id = ?",
+                    arrayOf(paymentId)
+                )
+                val exists = cursor.moveToFirst()
+                cursor.close()
+                if (exists) {
+                    db.close()
+                    Log.d(TAG, "recordPayment: already exists, skipping")
+                    return
+                }
+            }
+
+            val amountUsd = if (btcPrice > 0) {
+                (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * btcPrice
+            } else 0.0
+
+            db.execSQL(
+                """INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
+                   VALUES (?, ?, ?, ?, ?, ?, 'completed')""",
+                arrayOf(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
+            )
+            Log.d(TAG, "recordPayment: saved $direction $amountMsat msat (${"%.2f".format(amountUsd)} USD)")
+            db.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "recordPayment failed", e)
         }
     }
 

@@ -36,6 +36,7 @@ class AppState {
     var totalBalanceSats: UInt64 = 0
     var lightningBalanceSats: UInt64 = 0
     var onchainBalanceSats: UInt64 = 0
+    var onchainReceiveAddress: String?
 
     var totalBalanceUSD: Double {
         guard btcPrice > 0 else { return 0 }
@@ -54,11 +55,13 @@ class AppState {
 
     private var eventObserver: NSObjectProtocol?
     private var stabilityTimer: Task<Void, Never>?
+    private(set) var chainURL: String = Constants.primaryChainURL
 
     // Auto-sweep state
     private(set) var isSweeping = false
     private var sweepOnchainStart: UInt64 = 0
     private var prevOnchainSats: UInt64 = 0
+    private var fundingTxid: String?
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
@@ -74,6 +77,9 @@ class AppState {
 
         // Wait for NSE to finish if it was recently active
         await waitForNSE()
+
+        // Pick best esplora endpoint
+        chainURL = await resolveChainURL()
 
         // Initialize database
         do {
@@ -124,7 +130,7 @@ class AppState {
             do {
                 try await nodeService.start(
                     network: .bitcoin,
-                    esploraURL: Constants.defaultChainURL,
+                    esploraURL: chainURL,
                     mnemonic: ""  // Uses existing seed from data dir
                 )
                 // Store node_id in shared UserDefaults for NSE and push registration
@@ -156,7 +162,7 @@ class AppState {
             do {
                 try await nodeService.start(
                     network: .bitcoin,
-                    esploraURL: Constants.defaultChainURL,
+                    esploraURL: chainURL,
                     mnemonic: ""
                 )
                 let nodeId = nodeService.nodeId
@@ -260,10 +266,14 @@ class AppState {
         do {
             try await nodeService.start(
                 network: .bitcoin,
-                esploraURL: Constants.defaultChainURL,
+                esploraURL: chainURL,
                 mnemonic: ""
             )
             refreshBalances()
+            updateStableBalances()
+            // Reconcile backingSats — NSE may have received payments while backgrounded
+            StabilityService.reconcileIncoming(&stableChannel)
+            saveChannelToDB()
             reregisterPushTokenIfNeeded()
             startStabilityTimer()
             await processPendingPushPayment()
@@ -454,6 +464,7 @@ class AppState {
             if stableChannel.userChannelId.isEmpty {
                 stableChannel.userChannelId = userChannelId
             }
+            fundingTxid = "\(fundingTxo.txid)"
             refreshBalances()
             updateStableBalances()
 
@@ -737,17 +748,38 @@ class AppState {
         userChannelId: UserChannelId,
         reason: ClosureReason?
     ) {
+        let reasonStr = reason.map { "\($0)" } ?? "unknown"
+        let balanceSats = stableChannel.stableReceiverBTC.sats
+        let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
+        let balanceUSD: Double? = price > 0
+            ? Double(balanceSats) / Double(Constants.satsInBTC) * price
+            : nil
+
         AuditService.log("CHANNEL_CLOSED", data: [
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
-            "reason": reason.map { "\($0)" } ?? "unknown",
+            "reason": reasonStr,
+            "balance_sats": "\(balanceSats)",
         ])
+
+        // Record in payment history
+        _ = try? databaseService?.recordPayment(
+            paymentId: "close_\(channelId)",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: balanceSats * 1000,
+            amountUSD: balanceUSD,
+            btcPrice: price > 0 ? price : nil,
+            counterparty: stableChannel.counterparty.isEmpty ? nil : stableChannel.counterparty,
+            status: "completed"
+        )
 
         // Clear stable state if this is our channel or no channels remain
         if stableChannel.userChannelId == userChannelId || nodeService.channels.isEmpty {
             try? databaseService?.deleteChannel(userChannelId: stableChannel.userChannelId)
             stableChannel.expectedUSD = .zero
             stableChannel.backingSats = 0
+            stableChannel.nativeSats = 0
             stableChannel.nativeChannelBTC = .zero
             stableChannel.stableReceiverBTC = .zero
             stableChannel.stableReceiverUSD = .zero
@@ -755,6 +787,8 @@ class AppState {
             stableChannel.userChannelId = ""
         }
 
+        // Refresh balances so lightning drops to 0 immediately
+        refreshBalances()
         statusMessage = "Channel closed"
     }
 
@@ -765,6 +799,8 @@ class AppState {
         userChannelId: UserChannelId,
         newFundingTxo: OutPoint
     ) {
+        fundingTxid = "\(newFundingTxo.txid)"
+
         AuditService.log("SPLICE_PENDING", data: [
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
@@ -819,7 +855,6 @@ class AppState {
                     self?.recordCurrentPrice()
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
-                    self?.runAutoSweep()
                 }
             }
         }
@@ -834,6 +869,11 @@ class AppState {
 
         guard stableChannel.expectedUSD.amount > 0,
               !nodeService.channels.isEmpty else { return }
+
+        // Derive backing_sats from channel balance: native_sats is the invariant
+        // that only changes on trades, so this automatically adjusts after stability payments.
+        stableChannel.backingSats = stableChannel.stableReceiverBTC.sats >= stableChannel.nativeSats
+            ? stableChannel.stableReceiverBTC.sats - stableChannel.nativeSats : 0
 
         let result = StabilityService.checkStabilityAction(stableChannel, price: price)
 
@@ -854,6 +894,10 @@ class AppState {
             )
             stableChannel.lastStabilityPayment = now
             stableChannel.paymentMade = true
+
+            // No manual backing_sats reset needed — it's derived from
+            // receiver_sats - native_sats at the start of each check.
+            saveChannelToDB()
 
             // Record as pending payment
             _ = try? databaseService?.recordPayment(
@@ -887,7 +931,7 @@ class AppState {
         guard let balances = nodeService.balances() else { return }
         let currentOnchain = balances.totalOnchainBalanceSats
 
-        if currentOnchain > prevOnchainSats && !isSweeping {
+        if currentOnchain > prevOnchainSats && !isSweeping && pendingSplice == nil {
             let depositSats = currentOnchain - prevOnchainSats
             // Ignore tiny fluctuations from fee estimation changes
             guard depositSats >= 1000 else {
@@ -920,83 +964,10 @@ class AppState {
         prevOnchainSats = currentOnchain
     }
 
-    // MARK: - Auto-Sweep
+    // MARK: - Sweep to Channel
 
-    private func runAutoSweep() {
-        // If a sweep is in progress, check if on-chain balance dropped (confirming splice tx)
-        if isSweeping {
-            let current = nodeService.balances()?.totalOnchainBalanceSats ?? 0
-            if sweepOnchainStart > 0 && current < sweepOnchainStart {
-                isSweeping = false
-                sweepOnchainStart = 0
-                AuditService.log("AUTO_SWEEP_CONFIRMED", data: [
-                    "prev_onchain": "\(sweepOnchainStart)",
-                    "new_onchain": "\(current)",
-                ])
-            }
-            return
-        }
-
-        // Find a ready channel to sweep into
-        guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else { return }
-        guard let balances = nodeService.balances() else { return }
-
-        guard balances.totalOnchainBalanceSats > Constants.autoSweepMinSats else { return }
-
-        // Fetch fee rate from esplora (6-block target)
-        let feeRateSatVb = fetchFeeRate() ?? 2  // conservative fallback
-
-        // Splice tx ~170 vbytes; reserve exactly enough for fees
-        let feeReserve = feeRateSatVb * 170
-        let spendable = balances.spendableOnchainBalanceSats
-        guard spendable > feeReserve else { return }
-        let sweepAmount = spendable - feeReserve
-
-        guard sweepAmount > 0 else { return }
-
-        AuditService.log("AUTO_SWEEP_ATTEMPT", data: [
-            "onchain_sats": "\(balances.totalOnchainBalanceSats)",
-            "spendable_sats": "\(spendable)",
-            "fee_rate_sat_vb": "\(feeRateSatVb)",
-            "fee_reserve": "\(feeReserve)",
-            "sweep_amount": "\(sweepAmount)",
-        ])
-
-        do {
-            try nodeService.spliceIn(
-                userChannelId: channel.userChannelId,
-                counterpartyNodeId: channel.counterpartyNodeId,
-                amountSats: sweepAmount
-            )
-            isSweeping = true
-            sweepOnchainStart = balances.totalOnchainBalanceSats
-            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
-
-            // Record pending splice-in in payment history
-            _ = try? databaseService?.recordPayment(
-                paymentId: nil,
-                paymentType: "splice_in",
-                direction: "received",
-                amountMsat: sweepAmount * 1000,
-                amountUSD: nil,
-                btcPrice: nil,
-                counterparty: nil,
-                status: "pending"
-            )
-
-            AuditService.log("AUTO_SWEEP_INITIATED", data: [
-                "amount_sats": "\(sweepAmount)",
-            ])
-        } catch {
-            AuditService.log("AUTO_SWEEP_FAILED", data: [
-                "error": error.localizedDescription,
-            ])
-        }
-    }
-
-    /// Manual sweep-to-channel (called from SettingsView).
-    /// Guards against concurrent splices using the same isSweeping flag as auto-sweep.
-    func manualSweepToChannel() {
+    /// Sweep all on-chain funds into the Lightning channel (user-initiated splice-in).
+    func sweepToChannel() {
         guard !isSweeping else {
             statusMessage = "Sweep already in progress"
             return
@@ -1007,8 +978,14 @@ class AppState {
             return
         }
 
-        let spendable = nodeService.spendableOnchainSats()
-        let feeReserve: UInt64 = 2 * 170
+        guard let balances = nodeService.balances() else {
+            statusMessage = "Could not read balances"
+            return
+        }
+
+        let feeRateSatVb = fetchFeeRate() ?? 2
+        let feeReserve = feeRateSatVb * 170
+        let spendable = balances.spendableOnchainBalanceSats
         guard spendable > feeReserve else {
             statusMessage = "Insufficient on-chain balance"
             return
@@ -1022,28 +999,61 @@ class AppState {
                 amountSats: sweepAmount
             )
             isSweeping = true
-            sweepOnchainStart = nodeService.balances()?.totalOnchainBalanceSats ?? 0
+            sweepOnchainStart = balances.totalOnchainBalanceSats
             pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
-            statusMessage = "Sweep initiated (\(sweepAmount) sats)"
+            statusMessage = "Moving \(sweepAmount) sats to channel..."
 
-            AuditService.log("MANUAL_SWEEP_INITIATED", data: [
+            _ = try? databaseService?.recordPayment(
+                paymentId: nil,
+                paymentType: "splice_in",
+                direction: "received",
+                amountMsat: sweepAmount * 1000,
+                amountUSD: nil,
+                btcPrice: nil,
+                counterparty: nil,
+                status: "pending"
+            )
+
+            AuditService.log("SWEEP_TO_CHANNEL", data: [
                 "amount_sats": "\(sweepAmount)",
+                "fee_rate_sat_vb": "\(feeRateSatVb)",
             ])
         } catch {
             statusMessage = "Sweep failed: \(error.localizedDescription)"
-            AuditService.log("MANUAL_SWEEP_FAILED", data: [
+            AuditService.log("SWEEP_FAILED", data: [
                 "error": error.localizedDescription,
             ])
         }
     }
 
-    /// Fetch fee rate (sat/vB) for 6-block target from esplora.
+    /// Fetch fee rate (sat/vB) for 6-block target from esplora (with fallback).
     private func fetchFeeRate() -> UInt64? {
-        guard let url = URL(string: "\(Constants.defaultChainURL)/fee-estimates") else { return nil }
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rate = json["6"] as? Double else { return nil }
-        return UInt64(rate.rounded(.up))
+        for baseURL in [Constants.primaryChainURL, Constants.fallbackChainURL] {
+            guard let url = URL(string: "\(baseURL)/fee-estimates") else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rate = json["6"] as? Double else { continue }
+            return UInt64(rate.rounded(.up))
+        }
+        return nil
+    }
+
+    /// Test Blockstream connectivity; fall back to mempool.space if unreachable.
+    private func resolveChainURL() async -> String {
+        guard let url = URL(string: "\(Constants.primaryChainURL)/blocks/tip/height") else {
+            return Constants.fallbackChainURL
+        }
+        do {
+            let (_, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                return Constants.primaryChainURL
+            }
+        } catch {}
+        AuditService.log("CHAIN_SOURCE_FALLBACK", data: [
+            "primary": Constants.primaryChainURL,
+            "using": Constants.fallbackChainURL,
+        ])
+        return Constants.fallbackChainURL
     }
 
     // MARK: - Balance Refresh
@@ -1085,6 +1095,7 @@ class AppState {
                 userChannelId: stableChannel.userChannelId,
                 expectedUSD: stableChannel.expectedUSD.amount,
                 backingSats: stableChannel.backingSats,
+                nativeSats: stableChannel.nativeSats,
                 note: stableChannel.note,
                 receiverSats: stableChannel.stableReceiverBTC.sats,
                 latestPrice: stableChannel.latestPrice
@@ -1103,6 +1114,7 @@ class AppState {
                 stableChannel.userChannelId = record.userChannelId
                 stableChannel.expectedUSD = USD(amount: record.expectedUSD)
                 stableChannel.backingSats = record.backingSats
+                stableChannel.nativeSats = record.nativeSats
                 stableChannel.note = record.note
 
                 // Restore cached balances so UI shows immediately

@@ -7,6 +7,8 @@ struct HomeView: View {
     @State private var showReceiveSheet = false
     @State private var showBuySheet = false
     @State private var showSellSheet = false
+    @State private var prefillTradeAmount: Double = 0
+    @State private var tradeRequest: TradeRequest?
     @Environment(\.scenePhase) private var scenePhase
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
@@ -40,6 +42,11 @@ struct HomeView: View {
                         balanceBarSection
                     }
 
+                    // On-chain balance
+                    if appState.onchainBalanceSats > 0 {
+                        savingsSection
+                    }
+
                     // Price Chart
                     if appState.btcPrice > 0 {
                         PriceChartView(compact: true)
@@ -58,8 +65,12 @@ struct HomeView: View {
                 .padding(.horizontal)
                 .padding(.bottom)
             }
-            .navigationTitle("Stable Channels")
-            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Text("Stable Channels")
+                        .font(.headline)
+                }
+            }
             .refreshable {
                 appState.refreshBalances()
                 appState.recordCurrentPrice()
@@ -71,8 +82,19 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showSendSheet) { SendView() }
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
-        .sheet(isPresented: $showBuySheet) { BuyView() }
-        .sheet(isPresented: $showSellSheet) { SellView() }
+        .sheet(isPresented: $showBuySheet) {
+            BuyView(prefillAmountUSD: prefillTradeAmount)
+        }
+        .sheet(isPresented: $showSellSheet) {
+            SellView(prefillAmountUSD: prefillTradeAmount)
+        }
+        .sheet(item: $tradeRequest) { request in
+            if request.direction == .buy {
+                BuyView(prefillAmountUSD: request.amountUSD)
+            } else {
+                SellView(prefillAmountUSD: request.amountUSD)
+            }
+        }
         .onChange(of: appState.paymentFlash) {
             if appState.paymentFlash {
                 withAnimation(.easeOut(duration: 0.3)) {
@@ -207,7 +229,10 @@ struct HomeView: View {
                 stableUSD: appState.stableUSD,
                 nativeSats: appState.nativeBTC.sats,
                 totalSats: appState.lightningBalanceSats,
-                btcPrice: appState.btcPrice
+                btcPrice: appState.btcPrice,
+                onTradeRequest: { direction, amountUSD in
+                    tradeRequest = TradeRequest(direction: direction, amountUSD: amountUSD)
+                }
             )
 
             HStack(alignment: .top) {
@@ -247,6 +272,73 @@ struct HomeView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Savings (On-Chain)
+
+    private var onchainUSD: Double {
+        appState.btcPrice > 0
+            ? Double(appState.onchainBalanceSats) / Double(Constants.satsInBTC) * appState.btcPrice
+            : 0
+    }
+
+    private var hasReadyChannel: Bool {
+        appState.nodeService.channels.contains { $0.isChannelReady }
+    }
+
+    private var savingsSection: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("On-chain")
+                    .font(.caption.bold())
+                Spacer()
+                Text(showBTC
+                     ? "\(appState.onchainBalanceSats.btcSpacedFormatted) BTC"
+                     : onchainUSD.usdFormatted)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if hasReadyChannel && !appState.isSweeping {
+                Button {
+                    appState.sweepToChannel()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.right.circle.fill")
+                            .font(.caption2)
+                        Text("Move to Spending & Trading")
+                            .font(.caption)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(.blue.opacity(0.1))
+                    .foregroundStyle(.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+            } else if appState.isSweeping {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Moving to channel...")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let addr = appState.onchainReceiveAddress,
+                   let url = URL(string: "https://mempool.space/address/\(addr)") {
+                    Link(destination: url) {
+                        HStack(spacing: 4) {
+                            Text("View on explorer")
+                            Image(systemName: "arrow.up.right.square")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.blue)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 
     // MARK: - Action Buttons

@@ -10,6 +10,7 @@ struct ReceiveView: View {
     @State private var invoiceAmountSats: UInt64?
     @State private var errorMessage: String?
     @State private var isCopied = false
+    @State private var showOnChain = false
 
     private var hasChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
@@ -48,6 +49,16 @@ struct ReceiveView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showOnChain = true
+                    } label: {
+                        Label("On-Chain", systemImage: "link")
+                    }
+                }
+            }
+            .navigationDestination(isPresented: $showOnChain) {
+                FundWalletView()
             }
         }
     }
@@ -63,6 +74,19 @@ struct ReceiveView: View {
                 .keyboardType(.decimalPad)
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
+                .overlay(alignment: .leading) {
+                    if !amountUSD.isEmpty {
+                        GeometryReader { geo in
+                            let textWidth = amountUSD.size(withAttributes: [
+                                .font: UIFont.rounded(ofSize: 32, weight: .bold)
+                            ]).width
+                            Text("$")
+                                .font(.system(size: 32, weight: .bold, design: .rounded))
+                                .position(x: geo.size.width / 2 - textWidth / 2 - 10,
+                                          y: geo.size.height / 2)
+                        }
+                    }
+                }
 
             if enteredSats > 0 {
                 Text("\(enteredSats.btcSpacedFormatted) BTC")

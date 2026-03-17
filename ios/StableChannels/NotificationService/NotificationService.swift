@@ -107,10 +107,12 @@ class NotificationService: UNNotificationServiceExtension {
         let dataDir = container
             .appendingPathComponent("StableChannels")
             .appendingPathComponent("user")
-        let seedPath = dataDir.appendingPathComponent("keys_seed")
+        let keySeedPath = dataDir.appendingPathComponent("keys_seed")
+        let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
 
-        guard FileManager.default.fileExists(atPath: seedPath.path) else {
-            nseLog("FAILED: No seed")
+        guard FileManager.default.fileExists(atPath: keySeedPath.path)
+           || FileManager.default.fileExists(atPath: seedPhrasePath.path) else {
+            nseLog("FAILED: No seed (checked keys_seed and seed_phrase)")
             cleanup()
             contentHandler(content)
             return
@@ -129,6 +131,14 @@ class NotificationService: UNNotificationServiceExtension {
             )
 
             let builder = Builder.fromConfig(config: config)
+
+            // If wallet uses mnemonic (seed_phrase), set it on the builder
+            if FileManager.default.fileExists(atPath: seedPhrasePath.path),
+               let words = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               !words.isEmpty {
+                nseLog("Using seed_phrase mnemonic")
+                builder.setEntropyBip39Mnemonic(mnemonic: words, passphrase: nil)
+            }
 
             // Relaxed sync intervals — NSE doesn't need frequent syncing
             let syncConfig = EsploraSyncConfig(
@@ -168,8 +178,10 @@ class NotificationService: UNNotificationServiceExtension {
             switch direction {
             case "user_to_lsp":
                 handleUserToLSP(node: ldkNode, dataDir: dataDir, content: content, contentHandler: contentHandler)
+            case "incoming_payment":
+                handleIncomingPayment(node: ldkNode, dataDir: dataDir, content: content, contentHandler: contentHandler)
             default: // "lsp_to_user"
-                handleLSPToUser(node: ldkNode, content: content, contentHandler: contentHandler)
+                handleLSPToUser(node: ldkNode, dataDir: dataDir, content: content, contentHandler: contentHandler)
             }
 
             heartbeatTimer.invalidate()
@@ -187,6 +199,7 @@ class NotificationService: UNNotificationServiceExtension {
 
     private func handleLSPToUser(
         node: Node,
+        dataDir: URL,
         content: UNMutableNotificationContent,
         contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
@@ -195,15 +208,17 @@ class NotificationService: UNNotificationServiceExtension {
         let startTime = Date()
         let timeout: TimeInterval = 22  // Leave ~8s for cleanup + notification delivery
         var received = false
-        var amountSats: UInt64 = 0
+        var amountMsatTotal: UInt64 = 0
+        var paymentIdStr: String?
 
         while Date().timeIntervalSince(startTime) < timeout {
             if let event = node.nextEvent() {
                 nseLog("Event: \(event)")
                 switch event {
-                case .paymentReceived(_, _, let amountMsat, _):
-                    amountSats = amountMsat / 1000
-                    nseLog("Payment received: \(amountSats) sats")
+                case .paymentReceived(let paymentId, _, let amountMsat, _):
+                    amountMsatTotal = amountMsat
+                    paymentIdStr = paymentId.map { "\($0)" }
+                    nseLog("Payment received: \(amountMsat / 1000) sats")
                     try? node.eventHandled()
                     received = true
                 default:
@@ -215,13 +230,98 @@ class NotificationService: UNNotificationServiceExtension {
         }
 
         if received {
-            content.title = "Stability Payment Received"
-            content.body = "\(amountSats) sats received"
+            let price = Self.fetchBTCPrice()
+            let amountSats = amountMsatTotal / 1000
+            if price > 0 {
+                let usd = Double(amountSats) / Self.satsInBTC * price
+                content.title = "Stability Payment Received"
+                content.body = String(format: "$%.2f received", usd)
+            } else {
+                content.title = "Stability Payment Received"
+                content.body = "\(amountSats) sats received"
+            }
+            let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
+            recordPaymentInDB(
+                dbPath: dbPath,
+                paymentId: paymentIdStr,
+                paymentType: "stability",
+                direction: "received",
+                amountMsat: amountMsatTotal,
+                btcPrice: price
+            )
             UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
         } else {
             content.title = "Payment Pending"
             content.body = "Open app to receive your payment"
             UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+        }
+
+        cleanup()
+        contentHandler(content)
+    }
+
+    // MARK: - incoming_payment: Wake node to receive any pending payments
+
+    private func handleIncomingPayment(
+        node: Node,
+        dataDir: URL,
+        content: UNMutableNotificationContent,
+        contentHandler: @escaping (UNNotificationContent) -> Void
+    ) {
+        nseLog("incoming_payment: Waking node to receive payments")
+
+        let startTime = Date()
+        let timeout: TimeInterval = 22
+        var received = false
+        var totalMsat: UInt64 = 0
+        var lastPaymentId: String?
+        let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
+
+        while Date().timeIntervalSince(startTime) < timeout {
+            if let event = node.nextEvent() {
+                nseLog("Event: \(event)")
+                switch event {
+                case .paymentReceived(let paymentId, _, let amountMsat, _):
+                    totalMsat += amountMsat
+                    lastPaymentId = paymentId.map { "\($0)" }
+                    nseLog("Payment received: \(amountMsat / 1000) sats")
+                    try? node.eventHandled()
+                    received = true
+                    // Keep polling — there might be more payments
+                default:
+                    try? node.eventHandled()
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        if received {
+            let price = Self.fetchBTCPrice()
+            let totalSats = totalMsat / 1000
+            if price > 0 {
+                let usd = Double(totalSats) / Self.satsInBTC * price
+                content.title = "Payment Received"
+                content.body = String(format: "$%.2f received", usd)
+            } else {
+                content.title = "Payment Received"
+                content.body = "\(totalSats) sats received"
+            }
+            recordPaymentInDB(
+                dbPath: dbPath,
+                paymentId: lastPaymentId,
+                paymentType: "lightning",
+                direction: "received",
+                amountMsat: totalMsat,
+                btcPrice: price
+            )
+            content.sound = .default
+            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+        } else {
+            // No payment arrived — this wake push just kept the node online briefly.
+            // Can't fully suppress an NSE notification, so show a minimal message.
+            content.title = ""
+            content.body = ""
+            content.sound = nil
         }
 
         cleanup()
@@ -250,7 +350,16 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        nseLog("Channel state: expectedUSD=\(channelState.expectedUSD), backingSats=\(channelState.backingSats), receiverSats=\(channelState.receiverSats)")
+        // Derive backing_sats from LDK channel balance using native_sats invariant
+        let userSatsFromLDK: UInt64 = node.listChannels().first.map { channel in
+            let unspendable = channel.unspendablePunishmentReserve ?? 0
+            return (channel.outboundCapacityMsat / 1000) + unspendable
+        } ?? channelState.receiverSats
+
+        let derivedBacking = userSatsFromLDK >= channelState.nativeSats
+            ? userSatsFromLDK - channelState.nativeSats : 0
+
+        nseLog("Channel state: expectedUSD=\(channelState.expectedUSD), derivedBacking=\(derivedBacking), nativeSats=\(channelState.nativeSats), userSatsLDK=\(userSatsFromLDK)")
 
         guard channelState.expectedUSD >= 0.01 else {
             nseLog("expectedUSD too small, skipping")
@@ -273,8 +382,8 @@ class NotificationService: UNNotificationServiceExtension {
 
         nseLog("Price: $\(String(format: "%.0f", price))")
 
-        // 3. Calculate stability payment (same logic as StabilityService.checkStabilityAction)
-        let stableUSDValue = Double(channelState.backingSats) / Self.satsInBTC * price
+        // 3. Calculate stability payment using derived backing_sats
+        let stableUSDValue = Double(derivedBacking) / Self.satsInBTC * price
         let targetUSD = channelState.expectedUSD
         let dollarsFromPar = stableUSDValue - targetUSD
         let percentFromPar = targetUSD > 0 ? abs(dollarsFromPar / targetUSD) * 100.0 : 0.0
@@ -320,6 +429,18 @@ class NotificationService: UNNotificationServiceExtension {
             // Wait for payment to settle
             Thread.sleep(forTimeInterval: 3)
 
+            recordPaymentInDB(
+                dbPath: dbPath,
+                paymentId: "\(paymentId)",
+                paymentType: "stability",
+                direction: "sent",
+                amountMsat: amountMsat,
+                btcPrice: price
+            )
+
+            // No manual backing_sats reset needed — derived from
+            // receiver_sats - native_sats on each check.
+
             content.title = "Stability Payment Sent"
             content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
             UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
@@ -334,11 +455,77 @@ class NotificationService: UNNotificationServiceExtension {
         contentHandler(content)
     }
 
+    // MARK: - Record Payment in DB
+
+    /// Write a payment record to stablechannels.db so the main app's history is complete.
+    /// Uses INSERT with dedup on payment_id (matches DatabaseService.recordPayment schema).
+    private func recordPaymentInDB(
+        dbPath: String,
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: UInt64,
+        btcPrice: Double
+    ) {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            nseLog("recordPayment: SQLite open failed")
+            return
+        }
+        defer { sqlite3_close(db) }
+
+        // Dedup: skip if payment_id already exists
+        if let pid = paymentId, !pid.isEmpty {
+            var checkStmt: OpaquePointer?
+            let checkSql = "SELECT id FROM payments WHERE payment_id = ?"
+            if sqlite3_prepare_v2(db, checkSql, -1, &checkStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(checkStmt, 1, (pid as NSString).utf8String, -1, nil)
+                if sqlite3_step(checkStmt) == SQLITE_ROW {
+                    sqlite3_finalize(checkStmt)
+                    nseLog("recordPayment: already exists, skipping")
+                    return
+                }
+                sqlite3_finalize(checkStmt)
+            }
+        }
+
+        let amountUSD = btcPrice > 0 ? (Double(amountMsat) / 1000.0 / Self.satsInBTC) * btcPrice : 0.0
+
+        var stmt: OpaquePointer?
+        let sql = """
+            INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'completed')
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            nseLog("recordPayment: prepare failed")
+            return
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        if let pid = paymentId {
+            sqlite3_bind_text(stmt, 1, (pid as NSString).utf8String, -1, nil)
+        } else {
+            sqlite3_bind_null(stmt, 1)
+        }
+        sqlite3_bind_text(stmt, 2, (paymentType as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 3, (direction as NSString).utf8String, -1, nil)
+        sqlite3_bind_int64(stmt, 4, Int64(amountMsat))
+        sqlite3_bind_double(stmt, 5, amountUSD)
+        sqlite3_bind_double(stmt, 6, btcPrice)
+
+        if sqlite3_step(stmt) == SQLITE_DONE {
+            nseLog("recordPayment: saved \(direction) \(amountMsat) msat ($\(String(format: "%.2f", amountUSD)))")
+        } else {
+            nseLog("recordPayment: insert failed")
+        }
+    }
+
     // MARK: - Lightweight SQLite Reader
 
     struct ChannelState {
         let expectedUSD: Double
         let backingSats: UInt64
+        let nativeSats: UInt64
         let receiverSats: UInt64
         let latestPrice: Double
     }
@@ -353,7 +540,7 @@ class NotificationService: UNNotificationServiceExtension {
         defer { sqlite3_close(db) }
 
         var stmt: OpaquePointer?
-        let sql = "SELECT expected_usd, stable_sats, receiver_sats, latest_price FROM channels LIMIT 1"
+        let sql = "SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats FROM channels LIMIT 1"
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             nseLog("SQLite prepare failed")
             return nil
@@ -369,10 +556,12 @@ class NotificationService: UNNotificationServiceExtension {
         let backingSats = UInt64(sqlite3_column_int64(stmt, 1))
         let receiverSats = UInt64(sqlite3_column_int64(stmt, 2))
         let latestPrice = sqlite3_column_double(stmt, 3)
+        let nativeSats = UInt64(sqlite3_column_int64(stmt, 4))
 
         return ChannelState(
             expectedUSD: expectedUSD,
             backingSats: backingSats,
+            nativeSats: nativeSats,
             receiverSats: receiverSats,
             latestPrice: latestPrice
         )

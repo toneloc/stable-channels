@@ -62,6 +62,8 @@ class AppState(private val context: Context) : ViewModel() {
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
 
+    var onchainReceiveAddress: String? = null
+
     private var isSweeping = false
     /** True when any splice (in or out) is in flight — prevents concurrent splices. */
     val isSpliceInFlight: Boolean get() = isSweeping
@@ -69,11 +71,18 @@ class AppState(private val context: Context) : ViewModel() {
     private var prevOnchainSats: Long = 0
     private var stabilityJob: Job? = null
 
+    /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
+    var chainUrl: String = Constants.PRIMARY_CHAIN_URL
+        private set
+
     private val httpClient = OkHttpClient()
 
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // Resolve best esplora endpoint
+                chainUrl = resolveChainUrl()
+
                 databaseService = DatabaseService(context)
                 tradeService = TradeService(nodeService)
 
@@ -91,7 +100,7 @@ class AppState(private val context: Context) : ViewModel() {
                 if (seedFile.exists() || seedPhraseFile.exists()) {
                     _phase.value = Phase.SYNCING
                     waitForBackgroundService()
-                    nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, null)
+                    nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
                     prevOnchainSats = nodeService.spendableOnchainSats()
@@ -101,7 +110,7 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
-                    nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, null)
+                    nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
                     prevOnchainSats = nodeService.spendableOnchainSats()
@@ -119,7 +128,7 @@ class AppState(private val context: Context) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, mnemonic)
+                nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
                 _phase.value = Phase.WALLET
                 refreshBalances()
                 prevOnchainSats = nodeService.spendableOnchainSats()
@@ -319,13 +328,35 @@ class AppState(private val context: Context) : ViewModel() {
     private fun handleChannelClosed(channelId: String, userChannelId: String, reason: String?) {
         val sc = _stableChannel.value
         if (sc.channelId == channelId || sc.userChannelId == userChannelId || nodeService.channels.isEmpty()) {
-            databaseService?.deleteChannel(sc.userChannelId)
-            _stableChannel.value = StableChannel.DEFAULT
+            val balanceSats = sc.stableReceiverBTC.sats
+            val price = priceService.currentPrice.value.let { if (it > 0) it else sc.latestPrice }
+            val balanceUSD = if (price > 0) (balanceSats.toDouble() / Constants.SATS_IN_BTC) * price else null
+
             AuditService.log("CHANNEL_CLOSED", mapOf(
                 "channel_id" to channelId,
-                "reason" to (reason ?: "unknown")
+                "reason" to (reason ?: "unknown"),
+                "balance_sats" to balanceSats
             ))
+
+            // Record in payment history before clearing state
+            databaseService?.recordPayment(
+                paymentId = "close_$channelId",
+                paymentType = "channel_close",
+                direction = "received",
+                amountMsat = balanceSats * 1000,
+                amountUSD = balanceUSD,
+                btcPrice = if (price > 0) price else null,
+                counterparty = sc.counterparty.ifEmpty { null },
+                status = "completed"
+            )
+
+            databaseService?.deleteChannel(sc.userChannelId)
+            _stableChannel.value = StableChannel.DEFAULT
         }
+
+        // Refresh balances so lightning drops to 0 immediately
+        refreshBalances()
+        statusMessage = "Channel closed"
     }
 
     private fun startStabilityTimer() {
@@ -336,7 +367,6 @@ class AppState(private val context: Context) : ViewModel() {
                 recordCurrentPrice()
                 runStabilityCheck()
                 detectOnchainDeposit()
-                runAutoSweep()
             }
         }
     }
@@ -375,7 +405,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun detectOnchainDeposit() {
         val currentSats = nodeService.spendableOnchainSats()
-        if (currentSats > prevOnchainSats && !isSweeping) {
+        if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
                 prevOnchainSats = currentSats
@@ -394,51 +424,8 @@ class AppState(private val context: Context) : ViewModel() {
         prevOnchainSats = currentSats
     }
 
-    private fun runAutoSweep() {
-        if (isSweeping) {
-            val currentOnchain = nodeService.spendableOnchainSats()
-            if (currentOnchain < sweepOnchainStart) {
-                isSweeping = false
-                AuditService.log("AUTO_SWEEP_CONFIRMED")
-            }
-            return
-        }
-
-        val readyChannel = nodeService.channels.find { it.isChannelReady } ?: return
-        val totalOnchain = nodeService.totalOnchainSats()
-        if (totalOnchain < Constants.AUTO_SWEEP_MIN_SATS) return
-
-        val feeRate = fetchFeeRate() ?: return
-        val feeReserve = feeRate * 170  // ~170 vbytes for splice tx
-        val spendable = nodeService.spendableOnchainSats()
-        if (spendable <= feeReserve) return
-
-        val sweepAmount = spendable - feeReserve
-        try {
-            isSweeping = true
-            sweepOnchainStart = spendable
-            val sc = _stableChannel.value
-            pendingSplice = PendingSplice("in", sweepAmount)
-            nodeService.spliceIn(sc.userChannelId, sc.counterparty, sweepAmount)
-
-            val price = priceService.currentPrice.value
-            databaseService?.recordPayment(
-                paymentId = null, paymentType = "splice_in", direction = "sent",
-                amountMsat = sweepAmount * 1000,
-                amountUSD = (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price,
-                btcPrice = price, status = "pending"
-            )
-            AuditService.log("AUTO_SWEEP_STARTED", mapOf("sats" to sweepAmount))
-        } catch (e: Exception) {
-            isSweeping = false
-            pendingSplice = null
-            AuditService.log("AUTO_SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
-        }
-    }
-
-    /** Manual sweep-to-channel (called from SettingsScreen).
-     *  Guards against concurrent splices using the same isSweeping flag as auto-sweep. */
-    fun manualSweepToChannel() {
+    /** Sweep all on-chain funds into the Lightning channel (user-initiated splice-in). */
+    fun sweepToChannel() {
         if (isSweeping) {
             _statusMessage.value = "Sweep already in progress"
             return
@@ -449,39 +436,77 @@ class AppState(private val context: Context) : ViewModel() {
             return
         }
 
+        val feeRate = fetchFeeRate() ?: 2L
+        val feeReserve = feeRate * 170  // ~170 vbytes for splice tx
         val spendable = nodeService.spendableOnchainSats()
-        val feeReserve = 340L * 10  // conservative
-        val sweepAmount = spendable - feeReserve
-        if (sweepAmount <= 0) {
+        if (spendable <= feeReserve) {
             _statusMessage.value = "Insufficient on-chain balance"
             return
         }
+        val sweepAmount = spendable - feeReserve
 
         try {
+            nodeService.spliceIn(channel.userChannelId, channel.counterpartyNodeId, sweepAmount)
             isSweeping = true
             sweepOnchainStart = spendable
             pendingSplice = PendingSplice("in", sweepAmount)
-            val sc = _stableChannel.value
-            nodeService.spliceIn(sc.userChannelId, sc.counterparty, sweepAmount)
-            _statusMessage.value = "Sweep initiated ($sweepAmount sats)"
-            AuditService.log("MANUAL_SWEEP_INITIATED", mapOf("sats" to sweepAmount))
+            _statusMessage.value = "Moving $sweepAmount sats to channel..."
+
+            databaseService?.recordPayment(
+                paymentId = null, paymentType = "splice_in", direction = "received",
+                amountMsat = sweepAmount * 1000,
+                amountUSD = null, btcPrice = null, status = "pending"
+            )
+            AuditService.log("SWEEP_TO_CHANNEL", mapOf(
+                "amount_sats" to sweepAmount,
+                "fee_rate_sat_vb" to feeRate
+            ))
         } catch (e: Exception) {
-            isSweeping = false
-            pendingSplice = null
             _statusMessage.value = "Sweep failed: ${e.message}"
-            AuditService.log("MANUAL_SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
+            AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
         }
     }
 
     private fun fetchFeeRate(): Long? {
-        return try {
-            val url = "${Constants.DEFAULT_CHAIN_URL}/fee-estimates"
-            val request = Request.Builder().url(url).build()
-            val response = httpClient.newCall(request).execute()
-            val body = response.body?.string() ?: return null
-            val json = JSONObject(body)
-            json.optDouble("6", -1.0).let { if (it > 0) it.roundToLong() else null }
-        } catch (_: Exception) { null }
+        val urls = listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+        for (baseUrl in urls) {
+            try {
+                val request = Request.Builder().url("$baseUrl/fee-estimates").build()
+                val response = httpClient.newCall(request).execute()
+                val body = response.body?.string() ?: continue
+                val json = JSONObject(body)
+                val rate = json.optDouble("6", -1.0)
+                if (rate > 0) return rate.roundToLong()
+            } catch (_: Exception) { /* try next */ }
+        }
+        return null
+    }
+
+    /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */
+    private suspend fun resolveChainUrl(): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url("${Constants.PRIMARY_CHAIN_URL}/blocks/tip/height")
+                    .build()
+                val response = httpClient.newCall(request).execute()
+                if (response.isSuccessful) {
+                    Constants.PRIMARY_CHAIN_URL
+                } else {
+                    AuditService.log("CHAIN_SOURCE_FALLBACK", mapOf(
+                        "primary" to Constants.PRIMARY_CHAIN_URL,
+                        "using" to Constants.FALLBACK_CHAIN_URL
+                    ))
+                    Constants.FALLBACK_CHAIN_URL
+                }
+            } catch (_: Exception) {
+                AuditService.log("CHAIN_SOURCE_FALLBACK", mapOf(
+                    "primary" to Constants.PRIMARY_CHAIN_URL,
+                    "using" to Constants.FALLBACK_CHAIN_URL
+                ))
+                Constants.FALLBACK_CHAIN_URL
+            }
+        }
     }
 
     fun refreshBalances() {

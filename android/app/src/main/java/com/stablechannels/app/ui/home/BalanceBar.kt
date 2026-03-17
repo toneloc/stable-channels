@@ -40,22 +40,18 @@ fun BalanceBar(
                 .clip(RoundedCornerShape(6.dp))
         ) {
             Row(Modifier.fillMaxSize()) {
-                if (stableFraction > 0.01f) {
-                    Box(
-                        Modifier
-                            .weight(max(stableFraction, 0.03f))
-                            .fillMaxHeight()
-                            .background(Brush.horizontalGradient(listOf(stableColor, stableColor.copy(alpha = 0.7f))))
-                    )
-                }
-                if (nativeFraction > 0.01f) {
-                    Box(
-                        Modifier
-                            .weight(max(nativeFraction, 0.03f))
-                            .fillMaxHeight()
-                            .background(Brush.horizontalGradient(listOf(nativeColor.copy(alpha = 0.7f), nativeColor)))
-                    )
-                }
+                Box(
+                    Modifier
+                        .weight(max(stableFraction, 0.03f))
+                        .fillMaxHeight()
+                        .background(Brush.horizontalGradient(listOf(stableColor, stableColor.copy(alpha = 0.7f))))
+                )
+                Box(
+                    Modifier
+                        .weight(max(nativeFraction, 0.03f))
+                        .fillMaxHeight()
+                        .background(Brush.horizontalGradient(listOf(nativeColor.copy(alpha = 0.7f), nativeColor)))
+                )
             }
         }
         Spacer(Modifier.height(4.dp))

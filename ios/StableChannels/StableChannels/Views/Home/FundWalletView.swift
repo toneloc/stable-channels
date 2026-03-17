@@ -9,17 +9,6 @@ struct FundWalletView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.blue)
-
-                Text("Fund Your Wallet")
-                    .font(.title2.bold())
-
-                Text("Send Bitcoin to the address below to get started.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-
                 if let address {
                     VStack(spacing: 16) {
                         // QR Code
@@ -49,13 +38,15 @@ struct FundWalletView: View {
                 } else {
                     ProgressView()
                         .task {
-                            address = try? appState.nodeService.newOnchainAddress()
+                            let addr = try? appState.nodeService.newOnchainAddress()
+                            address = addr
+                            appState.onchainReceiveAddress = addr
                         }
                 }
             }
             .padding(32)
         }
-        .navigationTitle("Receive On-Chain")
+        .navigationTitle("On-chain Receive")
         .navigationBarTitleDisplayMode(.inline)
     }
 

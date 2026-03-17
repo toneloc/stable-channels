@@ -104,12 +104,7 @@ pub fn fetch_prices(
                 Err(e) => Err(e.to_string()),
             },
         )
-        .map_err(|e| -> Box<dyn Error> {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::other(e.to_string())) })?;
 
         let json: Value = response.into_json()?;
         let mut data = &json;
@@ -169,7 +164,7 @@ pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
 
     let mut price_values: Vec<f64> = prices.iter().map(|(_, price)| *price).collect();
     price_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_price = if price_values.len() % 2 == 0 {
+    let median_price = if price_values.len().is_multiple_of(2) {
         (price_values[price_values.len() / 2 - 1] + price_values[price_values.len() / 2]) / 2.0
     } else {
         price_values[price_values.len() / 2]
@@ -192,10 +187,7 @@ pub fn fetch_kraken_ohlc(
     }
 
     let response = agent.get(&url).call().map_err(|e| -> Box<dyn Error> {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        Box::new(std::io::Error::other(e.to_string()))
     })?;
 
     let json: Value = response.into_json()?;
@@ -272,10 +264,7 @@ pub fn fetch_kraken_intraday(agent: &Agent) -> Result<Vec<(i64, f64)>, Box<dyn E
     );
 
     let response = agent.get(&url).call().map_err(|e| -> Box<dyn Error> {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        Box::new(std::io::Error::other(e.to_string()))
     })?;
 
     let json: Value = response.into_json()?;

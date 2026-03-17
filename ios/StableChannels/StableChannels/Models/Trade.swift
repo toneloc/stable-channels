@@ -46,6 +46,7 @@ struct ChannelRecord: Codable {
     let expectedUSD: Double
     let note: String?
     let backingSats: UInt64
+    let nativeSats: UInt64
     let receiverSats: UInt64
     let latestPrice: Double
 }

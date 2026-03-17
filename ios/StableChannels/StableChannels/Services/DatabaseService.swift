@@ -125,6 +125,9 @@ class DatabaseService {
         if !colNames.contains("latest_price") {
             try execute("ALTER TABLE channels ADD COLUMN latest_price REAL NOT NULL DEFAULT 0.0")
         }
+        if !colNames.contains("native_sats") {
+            try execute("ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     // MARK: - Channel Operations
@@ -134,6 +137,7 @@ class DatabaseService {
         userChannelId: String,
         expectedUSD: Double,
         backingSats: UInt64,
+        nativeSats: UInt64 = 0,
         note: String?,
         receiverSats: UInt64 = 0,
         latestPrice: Double = 0.0
@@ -141,23 +145,25 @@ class DatabaseService {
         // Try update first
         let updateSQL = """
             UPDATE channels SET channel_id = ?, expected_usd = ?, stable_sats = ?,
-                note = ?, receiver_sats = ?, latest_price = ?, updated_at = strftime('%s', 'now')
+                native_sats = ?, note = ?, receiver_sats = ?, latest_price = ?, updated_at = strftime('%s', 'now')
             WHERE user_channel_id = ?
         """
         try execute(updateSQL, params: [
             .text(channelId), .real(expectedUSD), .integer(Int64(backingSats)),
+            .integer(Int64(nativeSats)),
             note.map { .text($0) } ?? .null, .integer(Int64(receiverSats)), .real(latestPrice),
             .text(userChannelId)
         ])
 
         if sqlite3_changes(db) == 0 {
             let insertSQL = """
-                INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, note, receiver_sats, latest_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, note, receiver_sats, latest_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(channel_id) DO UPDATE SET
                     user_channel_id = excluded.user_channel_id,
                     expected_usd = excluded.expected_usd,
                     stable_sats = excluded.stable_sats,
+                    native_sats = excluded.native_sats,
                     note = excluded.note,
                     receiver_sats = excluded.receiver_sats,
                     latest_price = excluded.latest_price,
@@ -165,7 +171,8 @@ class DatabaseService {
             """
             try execute(insertSQL, params: [
                 .text(channelId), .text(userChannelId), .real(expectedUSD),
-                .integer(Int64(backingSats)), note.map { .text($0) } ?? .null,
+                .integer(Int64(backingSats)), .integer(Int64(nativeSats)),
+                note.map { .text($0) } ?? .null,
                 .integer(Int64(receiverSats)), .real(latestPrice)
             ])
         }
@@ -175,10 +182,10 @@ class DatabaseService {
         let sql: String
         let params: [SQLValue]
         if let id = userChannelId, !id.isEmpty {
-            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price FROM channels WHERE user_channel_id = ?"
+            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price, native_sats FROM channels WHERE user_channel_id = ?"
             params = [.text(id)]
         } else {
-            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price FROM channels LIMIT 1"
+            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price, native_sats FROM channels LIMIT 1"
             params = []
         }
         let rows = try query(sql, params: params)
@@ -190,6 +197,7 @@ class DatabaseService {
             expectedUSD: row[1] as? Double ?? 0.0,
             note: row[2] as? String,
             backingSats: UInt64(row[3] as? Int64 ?? 0),
+            nativeSats: UInt64(row[7] as? Int64 ?? 0),
             receiverSats: UInt64(row[5] as? Int64 ?? 0),
             latestPrice: row[6] as? Double ?? 0.0
         )

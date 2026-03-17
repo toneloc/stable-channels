@@ -36,6 +36,7 @@ import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,6 +46,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val sc by appState.stableChannel.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
+    val onchainSats by appState.onchainBalanceSats.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var showReceive by remember { mutableStateOf(false) }
@@ -150,6 +152,57 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     btcPrice = btcPrice
                 )
                 Spacer(Modifier.height(16.dp))
+            }
+
+            // On-chain section
+            if (onchainSats > 0) {
+                val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                val hasReadyChannel = appState.nodeService.channels.any { it.isChannelReady }
+                val isSweeping = appState.isSpliceInFlight
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("On-chain", style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                "${onchainSats.satsFormatted()} (${onchainUSD.usdFormatted()})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (isSweeping) {
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                Text("Moving to channel...", style = MaterialTheme.typography.labelSmall)
+                            }
+                        } else if (hasReadyChannel) {
+                            Spacer(Modifier.height(8.dp))
+                            Button(
+                                onClick = {
+                                    scope.launch(Dispatchers.IO) {
+                                        appState.sweepToChannel()
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            ) {
+                                Text("Move to Spending & Trading", fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
             }
 
             // Action buttons

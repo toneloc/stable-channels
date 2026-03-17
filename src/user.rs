@@ -314,6 +314,7 @@ impl UserApp {
                 lightning_wallet_sync_interval_secs: LIGHTNING_WALLET_SYNC_INTERVAL_SECS,
                 fee_rate_cache_update_interval_secs: FEE_RATE_CACHE_UPDATE_INTERVAL_SECS,
             }),
+            ..Default::default()
         };
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
@@ -337,6 +338,7 @@ impl UserApp {
         let seed_phrase_path = data_dir.join("seed_phrase");
         let keys_seed_path = data_dir.join("keys_seed");
         let mut mnemonic_words: Option<String> = None;
+        let mut node_entropy: Option<ldk_node::entropy::NodeEntropy> = None;
 
         if seed_phrase_path.exists() {
             // Existing wallet — re-read saved mnemonic
@@ -345,24 +347,36 @@ impl UserApp {
                 if !trimmed.is_empty() {
                     let mnemonic = ldk_node::bip39::Mnemonic::from_str(&trimmed)
                         .expect("Invalid saved mnemonic");
-                    builder.set_entropy_bip39_mnemonic(mnemonic, None);
+                    let entropy = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+                    node_entropy = Some(entropy);
                     mnemonic_words = Some(trimmed);
                 }
             }
         } else if !keys_seed_path.exists() {
             // Truly new wallet — no seed_phrase, no keys_seed
-            for name in ["ldk_node_data.sqlite", "ldk_node_data.sqlite-wal", "ldk_node_data.sqlite-shm"] {
+            for name in [
+                "ldk_node_data.sqlite",
+                "ldk_node_data.sqlite-wal",
+                "ldk_node_data.sqlite-shm",
+            ] {
                 std::fs::remove_file(data_dir.join(name)).ok();
             }
-            let mnemonic = ldk_node::generate_entropy_mnemonic(None);
+            let mnemonic = ldk_node::entropy::generate_entropy_mnemonic(None);
             let words = mnemonic.to_string();
             std::fs::write(&seed_phrase_path, &words).expect("Failed to save seed phrase");
-            builder.set_entropy_bip39_mnemonic(mnemonic, None);
+            let entropy = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+            node_entropy = Some(entropy);
             mnemonic_words = Some(words);
         }
         // Only remaining case: keys_seed exists but no seed_phrase → pre-upgrade wallet
 
-        let node = Arc::new(builder.build().expect("Failed to build node"));
+        // Use provided entropy or fall back to seed file
+        let entropy = node_entropy.unwrap_or_else(|| {
+            ldk_node::entropy::NodeEntropy::from_seed_path(
+                keys_seed_path.to_string_lossy().to_string()
+            ).expect("Failed to load seed")
+        });
+        let node = Arc::new(builder.build(entropy).expect("Failed to build node"));
         node.start().expect("Failed to start node");
 
         println!("User node started: {}", node.node_id());
@@ -420,6 +434,7 @@ impl UserApp {
             note: Some(String::new()),
             native_channel_btc: Bitcoin::from_sats(0),
             backing_sats: 0,
+            native_sats: 0,
             last_stability_payment: 0,
         };
         let stable_channel = Arc::new(Mutex::new(sc_init));
@@ -631,6 +646,7 @@ impl UserApp {
                                         &uch_id,
                                         sc.expected_usd.0,
                                         sc.backing_sats,
+                                        sc.native_sats,
                                         sc.note.as_deref(),
                                     );
                                 }
@@ -1085,7 +1101,7 @@ impl UserApp {
         // Auto-fix double-paste
         let input = {
             let len = input.len();
-            if len > 60 && len % 2 == 0 {
+            if len > 60 && len.is_multiple_of(2) {
                 let (first, second) = input.split_at(len / 2);
                 if first == second {
                     first.to_string()
@@ -1714,6 +1730,7 @@ impl UserApp {
             &user_channel_id_str,
             sc.expected_usd.0,
             sc.backing_sats,
+            sc.native_sats,
             note_ref,
         ) {
             eprintln!("Failed to save channel: {}", e);
@@ -1732,6 +1749,7 @@ impl UserApp {
             let mut sc = self.stable_channel.lock().unwrap();
             sc.expected_usd = USD::from_f64(record.expected_usd);
             sc.backing_sats = record.backing_sats;
+            sc.native_sats = record.native_sats;
             if record.note.is_some() {
                 sc.note = record.note;
             }
@@ -1801,6 +1819,7 @@ impl UserApp {
                 &uch_id,
                 expected_usd,
                 backing_sats,
+                0, // native_sats unknown during migration; derived on first stability check
                 note.as_deref(),
             );
 
@@ -2327,6 +2346,7 @@ impl UserApp {
                             let _ = self.db.delete_channel(&format!("{}", sc.user_channel_id));
                             sc.expected_usd = USD::from_f64(0.0);
                             sc.backing_sats = 0;
+                            sc.native_sats = 0;
                             sc.native_channel_btc = Bitcoin::from_sats(0);
                             sc.stable_receiver_btc = Bitcoin::from_sats(0);
                             sc.stable_receiver_usd = USD::from_f64(0.0);

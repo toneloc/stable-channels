@@ -24,7 +24,7 @@ The LSP/Server keeps the user stable by overcollateralizing the Stable Channel b
 The stability mechanism works like this: each node queries five exchange price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
 
 <p align="center">
-  <img src="./sc.gif" alt="Stable Channels Architecture" width="700"/>
+  <img src="./photos/sc.gif" alt="Stable Channels Architecture" width="700"/>
 </p>
 
 Both parties remain self-custodial and can opt out anytime via cooperative or forced on-chain channel closure. 

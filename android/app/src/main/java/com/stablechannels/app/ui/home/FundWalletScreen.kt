@@ -35,7 +35,7 @@ fun FundWalletScreen(appState: AppState) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Fund Wallet", style = MaterialTheme.typography.headlineSmall)
+        Text("On-chain Receive", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(16.dp))
 
         val addr = address

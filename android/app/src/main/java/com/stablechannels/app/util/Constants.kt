@@ -17,7 +17,8 @@ object Constants {
 
     const val LSP_PUSH_REGISTER_URL = "http://100.25.168.115:8080/api/register-push"
 
-    const val DEFAULT_CHAIN_URL = "https://blockstream.info/api"
+    const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
+    const val FALLBACK_CHAIN_URL = "https://mempool.space/api"
     const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     const val DEFAULT_LSP_ADDRESS = "100.25.168.115:9737"
     const val DEFAULT_GATEWAY_PUBKEY = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"
@@ -39,8 +40,6 @@ object Constants {
     const val STABILITY_THRESHOLD_USD: Double = 0.10
     const val STABILITY_PAYMENT_COOLDOWN_SECS: Long = 120
     const val MIN_DISPLAY_USD: Double = 2.0
-    const val AUTO_SWEEP_MIN_SATS: Long = 10_000L
-
     const val DEFAULT_CHANNEL_LIFETIME: Int = 2016
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000

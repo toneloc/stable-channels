@@ -158,6 +158,7 @@ fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
         "splice_in" -> "Splice In"
         "splice_out" -> "Splice Out"
         "onchain" -> "On-chain"
+        "channel_close" -> "Channel Close"
         else -> "Lightning"
     }
 

@@ -17,7 +17,15 @@ fun PaymentDetailDialog(payment: PaymentRecord, onDismiss: () -> Unit) {
         text = {
             Column {
                 DetailRow("Direction", if (payment.isIncoming) "Received" else "Sent")
-                DetailRow("Type", payment.paymentType)
+                val typeLabel = when (payment.paymentType) {
+                    "stability" -> "Stability"
+                    "splice_in" -> "Splice In"
+                    "splice_out" -> "Splice Out"
+                    "onchain" -> "On-chain"
+                    "channel_close" -> "Channel Close"
+                    else -> "Lightning"
+                }
+                DetailRow("Type", typeLabel)
                 DetailRow("Amount", payment.amountSats.satsFormatted())
                 payment.amountUSD?.let { DetailRow("USD Value", it.usdFormatted()) }
                 payment.btcPrice?.let { DetailRow("BTC Price", it.usdFormatted()) }

@@ -18,7 +18,6 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.StabilityService
-import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -39,7 +38,6 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
 
     var showNodeId by remember { mutableStateOf(false) }
     var showCloseConfirm by remember { mutableStateOf(false) }
-    var showFundWallet by remember { mutableStateOf(false) }
     var showOnchainSend by remember { mutableStateOf(false) }
     var showSeedWords by remember { mutableStateOf(false) }
     var showRestore by remember { mutableStateOf(false) }
@@ -158,24 +156,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(8.dp))
                 DetailRow("Balance", onchainSats.satsFormatted())
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { showFundWallet = true }) { Text("Fund Wallet") }
-                    TextButton(onClick = { showOnchainSend = true }) { Text("Send On-Chain") }
-                }
+                TextButton(onClick = { showOnchainSend = true }) { Text("Send On-Chain") }
             }
-        }
-
-        // Sweep to channel
-        if (onchainSats > 0 && hasReadyChannel) {
-            Spacer(Modifier.height(12.dp))
-            Button(
-                onClick = {
-                    scope.launch(Dispatchers.IO) {
-                        appState.manualSweepToChannel()
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Sweep to Channel Now") }
         }
 
         // Backup
@@ -310,7 +292,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                         scope.launch(Dispatchers.IO) {
                             try {
                                 appState.nodeService.stop()
-                                appState.nodeService.start(Network.BITCOIN, Constants.DEFAULT_CHAIN_URL, input)
+                                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
                                 withContext(Dispatchers.Main) {
                                     showRestore = false
                                     restoreMnemonic = ""
@@ -335,13 +317,6 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }) { Text("Cancel") }
             }
         )
-    }
-
-    // Fund wallet sheet
-    if (showFundWallet) {
-        ModalBottomSheet(onDismissRequest = { showFundWallet = false }) {
-            FundWalletScreen(appState)
-        }
     }
 
     // On-chain send sheet

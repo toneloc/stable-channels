@@ -40,6 +40,7 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
     sc.expected_usd = USD::from_f64(new_expected);
     let btc_amount = new_expected / price;
     sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
     Some(usd_to_deduct)
@@ -77,6 +78,7 @@ pub fn reconcile_forwarded(
         let btc_amount = new_expected / price;
         sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
     }
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
     Some(usd_to_deduct)
@@ -106,6 +108,7 @@ pub fn deduct_outgoing(sc: &mut StableChannel, amount_sats: u64, price: f64) -> 
     sc.expected_usd = USD::from_f64(new_expected);
     let btc_amount = new_expected / price;
     sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
     Some(usd_to_deduct)
@@ -118,30 +121,32 @@ pub fn recompute_native(sc: &mut StableChannel) {
     sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 }
 
-/// Reconcile an incoming payment — reset backing_sats to equilibrium.
+/// Reconcile an incoming payment — derive backing_sats from channel balance.
 ///
 /// After receiving a payment, the user's balance increased but
-/// `expected_usd` hasn't changed. Recalculate `backing_sats` so
-/// the extra sats are treated as native BTC, not stable.
+/// `native_sats` hasn't changed. Derive `backing_sats` from the
+/// actual balance so the extra sats are attributed correctly.
 pub fn reconcile_incoming(sc: &mut StableChannel) {
-    if sc.expected_usd.0 > 0.01 && sc.latest_price > 0.0 {
-        let btc_amount = sc.expected_usd.0 / sc.latest_price;
-        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    if sc.expected_usd.0 > 0.01 {
+        sc.backing_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.native_sats);
     }
     recompute_native(sc);
 }
 
-/// Apply a trade — set new expected_usd and recalculate backing_sats.
+/// Apply a trade — set new expected_usd and recalculate backing_sats + native_sats.
 ///
 /// Used after buy/sell trades and when the LSP processes a trade message.
 /// Sets `expected_usd` to the new value and recalculates `backing_sats`
-/// at the current price.
+/// at the current price. Updates `native_sats` (the invariant that stays
+/// fixed between stability payments).
 pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
     sc.expected_usd = USD::from_f64(new_expected_usd);
     if price > 0.0 {
         let btc_amount = new_expected_usd / price;
         sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
     }
+    // native_sats is everything NOT backing the stable position
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 }
 
@@ -304,6 +309,11 @@ pub fn check_stability(
         return None;
     }
 
+    // Derive backing_sats from channel balance: native_sats is the invariant
+    // that only changes on trades, so this automatically adjusts after stability
+    // payments without needing manual resets.
+    sc.backing_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.native_sats);
+
     // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {
         audit_event(
@@ -361,6 +371,7 @@ pub fn check_stability(
             "expected_usd": target_usd,
             "stable_usd_value": stable_usd_value,
             "backing_sats": sc.backing_sats,
+            "native_sats": sc.native_sats,
             "total_receiver_usd": sc.stable_receiver_usd.0,
             "percent_from_par": percent_from_par,
             "btc_price": sc.latest_price,
@@ -399,14 +410,8 @@ pub fn check_stability(
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // Recalculate backing_sats to new equilibrium after payment.
-            // Without this, the same drift is detected every check cycle,
-            // causing repeated one-directional payments.
-            if current_price > 0.0 {
-                let btc_amount = target_usd / current_price;
-                sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-            }
-            recompute_native(sc);
+            // No manual backing_sats reset needed — it's derived from
+            // receiver_sats - native_sats at the start of each check.
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
@@ -511,9 +516,11 @@ mod tests {
         } else {
             0
         };
+        let native = receiver_sats.saturating_sub(backing);
         StableChannel {
             expected_usd: USD::from_f64(expected_usd),
             backing_sats: backing,
+            native_sats: native,
             latest_price: price,
             stable_receiver_btc: Bitcoin::from_sats(receiver_sats),
             is_stable_receiver: true,
@@ -689,11 +696,15 @@ mod tests {
     }
 
     #[test]
-    fn incoming_skips_when_no_price() {
-        let mut sc = test_sc(500.0, 0.0, 500_000);
-        sc.backing_sats = 12345;
+    fn incoming_derives_from_balance_not_price() {
+        // With native_sats model, reconcile_incoming derives backing from balance,
+        // not from price. Even with zero price, it should work correctly.
+        let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
+        sc.latest_price = 0.0; // price unavailable
+        let backing_before = sc.backing_sats;
         reconcile_incoming(&mut sc);
-        assert_eq!(sc.backing_sats, 12345); // unchanged
+        // backing_sats = receiver_sats - native_sats = 1M - 500k = 500k
+        assert_eq!(sc.backing_sats, backing_before);
     }
 
     #[test]
