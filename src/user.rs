@@ -347,7 +347,8 @@ impl UserApp {
                 if !trimmed.is_empty() {
                     let mnemonic = ldk_node::bip39::Mnemonic::from_str(&trimmed)
                         .expect("Invalid saved mnemonic");
-                    let entropy = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+                    let entropy =
+                        ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic, None);
                     node_entropy = Some(entropy);
                     mnemonic_words = Some(trimmed);
                 }
@@ -373,8 +374,9 @@ impl UserApp {
         // Use provided entropy or fall back to seed file
         let entropy = node_entropy.unwrap_or_else(|| {
             ldk_node::entropy::NodeEntropy::from_seed_path(
-                keys_seed_path.to_string_lossy().to_string()
-            ).expect("Failed to load seed")
+                keys_seed_path.to_string_lossy().to_string(),
+            )
+            .expect("Failed to load seed")
         });
         let node = Arc::new(builder.build(entropy).expect("Failed to build node"));
         node.start().expect("Failed to start node");

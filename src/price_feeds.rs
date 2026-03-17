@@ -186,9 +186,10 @@ pub fn fetch_kraken_ohlc(
         url = format!("{}&since={}", url, since);
     }
 
-    let response = agent.get(&url).call().map_err(|e| -> Box<dyn Error> {
-        Box::new(std::io::Error::other(e.to_string()))
-    })?;
+    let response = agent
+        .get(&url)
+        .call()
+        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::other(e.to_string())) })?;
 
     let json: Value = response.into_json()?;
 
@@ -263,9 +264,10 @@ pub fn fetch_kraken_intraday(agent: &Agent) -> Result<Vec<(i64, f64)>, Box<dyn E
         since
     );
 
-    let response = agent.get(&url).call().map_err(|e| -> Box<dyn Error> {
-        Box::new(std::io::Error::other(e.to_string()))
-    })?;
+    let response = agent
+        .get(&url)
+        .call()
+        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::other(e.to_string())) })?;
 
     let json: Value = response.into_json()?;
 
