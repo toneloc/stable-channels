@@ -216,8 +216,15 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
                 Text("About", style = MaterialTheme.typography.titleMedium)
-                DetailRow("Version", "1.0")
+                DetailRow("Version", com.stablechannels.app.BuildConfig.VERSION_NAME)
                 DetailRow("Network", "bitcoin")
+                DetailRow("Custody", "Self-custodial")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 

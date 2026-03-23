@@ -22,24 +22,53 @@ struct ContentView: View {
 // MARK: - Loading / Syncing / Error
 
 struct LoadingView: View {
+    @State private var pulse = false
+
     var body: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-            Text("Starting...")
-                .foregroundStyle(.secondary)
+        VStack(spacing: 24) {
+            Image("SplashIcon")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 90, height: 90)
+                .clipShape(Circle())
+                .scaleEffect(pulse ? 1.06 : 0.94)
+                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }
+
+            VStack(spacing: 4) {
+                Text("Stable Channels")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text("Self-custodial bitcoin trading")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
 
 struct SyncingView: View {
+    @State private var pulse = false
+
     var body: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-            Text("Syncing wallet...")
-                .foregroundStyle(.secondary)
-            Text("This may take a moment")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+        VStack(spacing: 24) {
+            Image("SplashIcon")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 90, height: 90)
+                .clipShape(Circle())
+                .scaleEffect(pulse ? 1.06 : 0.94)
+                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
+                .onAppear { pulse = true }
+
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Syncing wallet...")
+                    .foregroundStyle(.secondary)
+                Text("This may take a moment")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 }

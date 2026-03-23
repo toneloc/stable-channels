@@ -12,8 +12,8 @@ regtest = []
 
 [dependencies]
 chrono = "0.4"
-ldk-node = { git = "https://github.com/lightningdevkit/ldk-node", rev = "9e0cfc5fa9b9dd74fefb795580d00b0a46c8f3a3" }
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "b6c17c593a5d7bacb18fe3b9f69074a0596ae8f0", features = ["std"] }
+ldk-node = { git = "https://github.com/lightningdevkit/ldk-node", rev = "9e0a8124cbe2c00a06fc5c880113213d4b36d8aa" }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "98393b3de3d8aec897e9ab783cb2418da504e204", features = ["std"] }
 bitcoin = "0.32"
 ureq = { version = "2.10.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }

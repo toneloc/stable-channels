@@ -131,6 +131,12 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             // Balance
             Text(
+                text = "Total Balance",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
                 text = totalUSD.usdFormatted(),
                 fontSize = 36.sp,
                 fontWeight = FontWeight.Bold

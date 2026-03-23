@@ -18,6 +18,12 @@ struct HomeView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    HStack {
+                        Text("Stable Channels")
+                            .font(.headline)
+                        Spacer()
+                    }
+
                     // Notification warning
                     if !notificationsEnabled {
                         notificationWarning
@@ -65,12 +71,7 @@ struct HomeView: View {
                 .padding(.horizontal)
                 .padding(.bottom)
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Text("Stable Channels")
-                        .font(.headline)
-                }
-            }
+            .navigationBarHidden(true)
             .refreshable {
                 appState.refreshBalances()
                 appState.recordCurrentPrice()
@@ -159,6 +160,10 @@ struct HomeView: View {
         let hasBalance = appState.totalBalanceUSD > 0 || displaySats > 0
 
         return VStack(spacing: 4) {
+            Text("Total Balance")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             if !hasBalance && appState.isSyncing {
                 Text("—")
                     .font(.system(size: 42, weight: .bold, design: .rounded))

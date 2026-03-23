@@ -358,6 +358,31 @@ class DatabaseService {
         )
     }
 
+    /// Bulk-insert hourly price records, skipping any timestamps that already exist within ±30 min.
+    func backfillHourlyPrices(_ prices: [(timestamp: Int64, price: Double)]) throws -> Int {
+        var count = 0
+        for (ts, price) in prices {
+            // Skip if a record already exists within 30 minutes of this timestamp
+            let existing = try query(
+                "SELECT 1 FROM price_history WHERE timestamp BETWEEN ? AND ? LIMIT 1",
+                params: [.integer(ts - 1800), .integer(ts + 1800)]
+            )
+            if existing.isEmpty {
+                try execute(
+                    "INSERT INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)",
+                    params: [.real(price), .integer(ts)]
+                )
+                count += 1
+            }
+        }
+        return count
+    }
+
+    func getOldestPriceHistoryTimestamp() throws -> Int64? {
+        let rows = try query("SELECT MIN(timestamp) FROM price_history")
+        return rows.first?[0] as? Int64
+    }
+
     func getPriceHistory(hours: UInt32) throws -> [PriceRecord] {
         let cutoff = Int64(Date().timeIntervalSince1970) - Int64(hours) * 3600
         let sql = """

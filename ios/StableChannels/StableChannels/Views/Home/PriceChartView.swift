@@ -147,9 +147,15 @@ struct PriceChartView: View {
     }
 
     private func loadPriceHistory() {
-        if chartPeriod == .day {
+        switch chartPeriod {
+        case .day:
             priceHistory = (try? appState.databaseService?.getPriceHistory(hours: 24)) ?? []
-        } else {
+        case .week:
+            priceHistory = (try? appState.databaseService?.getPriceHistory(hours: 24 * 7)) ?? []
+        case .month:
+            priceHistory = (try? appState.databaseService?.getPriceHistory(hours: 24 * 30)) ?? []
+        default:
+            // 1Y, 3Y, ALL — daily granularity is fine at this scale
             let dailyPrices = (try? appState.databaseService?.getDailyPrices(days: chartPeriod.days)) ?? []
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd"

@@ -205,7 +205,7 @@ struct SettingsView: View {
                     HStack {
                         Text("Version")
                         Spacer()
-                        Text("1.0")
+                        Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                             .foregroundStyle(.secondary)
                     }
                     HStack {
@@ -214,6 +214,15 @@ struct SettingsView: View {
                         Text(Constants.defaultNetwork)
                             .foregroundStyle(.secondary)
                     }
+                    HStack {
+                        Text("Custody")
+                        Spacer()
+                        Text("Self-custodial")
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Settings")

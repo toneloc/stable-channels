@@ -20,12 +20,7 @@
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-	</dict>
-	<key>NSCameraUsageDescription</key>
+<key>NSCameraUsageDescription</key>
 	<string>Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses.</string>
 	<key>UIBackgroundModes</key>
 	<array>
@@ -33,6 +28,8 @@
 		<string>processing</string>
 		<string>remote-notification</string>
 	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

@@ -101,6 +101,9 @@ class AppState {
         // Seed historical price data for charts
         seedHistoricalPrices()
 
+        // Backfill hourly prices from Kraken for smooth 1D/1W/1M charts
+        Task { await backfillHourlyPrices() }
+
         // Seed price from cache so UI can compute native USD immediately
         if stableChannel.latestPrice > 0 {
             priceService.currentPrice = stableChannel.latestPrice
@@ -358,7 +361,7 @@ class AppState {
               !nodeService.nodeId.isEmpty else { return }
 
         let nodeId = nodeService.nodeId
-        guard let url = URL(string: "http://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9737", with: ":8080"))/api/register-push") else { return }
+        guard let url = URL(string: "https://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9737", with: ":8443"))/api/register-push") else { return }
 
         Task {
             var request = URLRequest(url: url)
@@ -1141,6 +1144,35 @@ class AppState {
             try databaseService?.recordPrice(price, source: "median")
         } catch {
             // Price recording is best-effort, don't log every failure
+        }
+    }
+
+    // MARK: - Hourly Price Backfill
+
+    /// Fetch hourly candles from Kraken and backfill price_history for smooth 1D/1W/1M charts.
+    private func backfillHourlyPrices() async {
+        guard let db = databaseService else { return }
+
+        // Determine how far back we need data — up to 30 days
+        let thirtyDaysAgo = Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600
+        let since: Int64
+        if let oldest = try? db.getOldestPriceHistoryTimestamp(), oldest < thirtyDaysAgo {
+            // Already have old enough data, just fill gaps from the newest record
+            since = (try? db.getPriceHistory(hours: 1).last?.timestamp) ?? thirtyDaysAgo
+        } else {
+            since = thirtyDaysAgo
+        }
+
+        let candles = await priceService.fetchKrakenOHLC(since: since)
+        guard !candles.isEmpty else { return }
+
+        do {
+            let count = try db.backfillHourlyPrices(candles)
+            if count > 0 {
+                print("[Chart] Backfilled \(count) hourly price points from Kraken")
+            }
+        } catch {
+            print("[Chart] Hourly backfill failed: \(error)")
         }
     }
 

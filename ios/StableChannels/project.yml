@@ -52,6 +52,7 @@ targets:
         CFBundleDisplayName: Stable Channels
         CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "1"
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -59,9 +60,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
-        UIBackgroundModes:
+UIBackgroundModes:
           - fetch
           - processing
           - remote-notification
