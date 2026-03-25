@@ -93,8 +93,8 @@ Or open the `android/` directory in Android Studio and run on a device/emulator.
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `DEFAULT_LSP_PUBKEY` | `0388948c...` | LSP Lightning node public key |
-| `DEFAULT_LSP_ADDRESS` | `100.25.168.115:9737` | LSP Lightning peer address |
-| `LSP_PUSH_REGISTER_URL` | `http://100.25.168.115:8080/api/register-push` | Push token registration endpoint |
+| `DEFAULT_LSP_ADDRESS` | `34.198.44.89:9735` | LSP Lightning peer address |
+| `LSP_PUSH_REGISTER_URL` | `http://34.198.44.89:8080/api/register-push` | Push token registration endpoint |
 | `STABILITY_CHECK_INTERVAL_SECS` | 60 | Main app stability check frequency |
 | `STABILITY_THRESHOLD_PERCENT` | 0.1% | Minimum deviation to trigger payment |
 

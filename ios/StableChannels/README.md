@@ -192,7 +192,7 @@ The NSE target depends only on LDK Node (no KeychainAccess or CodeScanner needed
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `defaultLSPPubkey` | `0388948c...` | LSP Lightning node public key |
-| `defaultLSPAddress` | `100.25.168.115:9737` | LSP Lightning peer address |
+| `defaultLSPAddress` | `34.198.44.89:9735` | LSP Lightning peer address |
 | `appGroupIdentifier` | `group.com.stablechannels.app` | Shared container for app + NSE |
 | `stabilityCheckIntervalSecs` | 60 | Main app stability check frequency |
 | `stabilityThresholdPercent` | 0.1% | Minimum deviation to trigger payment |

@@ -31,7 +31,7 @@ pub const DEFAULT_USER_PORT: u16 = 9736;
 pub const DEFAULT_LSP_ALIAS: &str = "lsp";
 
 /// Default LSP port
-pub const DEFAULT_LSP_PORT: u16 = 9737;
+pub const DEFAULT_LSP_PORT: u16 = 9735;
 
 /// Default chain source URL
 pub const DEFAULT_CHAIN_URL: &str = "https://blockstream.info/api";
@@ -42,7 +42,7 @@ pub const DEFAULT_LSP_PUBKEY: &str =
     "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
 
 /// Default LSP address
-pub const DEFAULT_LSP_ADDRESS: &str = "100.25.168.115:9737";
+pub const DEFAULT_LSP_ADDRESS: &str = "34.198.44.89:9735";
 
 /// Default gateway public key
 pub const DEFAULT_GATEWAY_PUBKEY: &str =

@@ -1,5 +1,6 @@
 .git
 .DS_Store
+deploy_lsp.sh
 
 gitignore
 Copy code

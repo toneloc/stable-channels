@@ -2160,6 +2160,7 @@ impl UserApp {
                     payment_hash,
                     payment_preimage: _,
                     fee_paid_msat,
+                    ..
                 } => {
                     let payment_hash_str = format!("{payment_hash}");
 

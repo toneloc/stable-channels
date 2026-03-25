@@ -54,6 +54,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showReceive by remember { mutableStateOf(false) }
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
+    var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
 
     val context = LocalContext.current
     var notificationsEnabled by remember { mutableStateOf(true) }
@@ -152,12 +153,17 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(16.dp))
 
             // Balance bar
-            if (sc.expectedUSD.amount > 0) {
+            if (totalSats > 0) {
                 BalanceBar(
                     stableUSD = sc.expectedUSD.amount,
                     nativeSats = sc.nativeChannelBTC.sats,
                     totalSats = totalSats,
-                    btcPrice = btcPrice
+                    btcPrice = btcPrice,
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                    onTradeRequest = { direction, amountUSD ->
+                        prefillTradeAmount = amountUSD
+                        if (direction == TradeDirection.BUY) showBuy = true else showSell = true
+                    }
                 )
                 Spacer(Modifier.height(16.dp))
             }

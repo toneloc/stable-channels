@@ -119,20 +119,28 @@ struct BalanceBarView: View {
                         dragOffset = max(-baseX, min(barWidth - baseX, translation))
                     }
                     .onEnded { _ in
-                        defer {
+                        guard isPressing else {
                             withAnimation(.easeOut(duration: 0.25)) { dragOffset = 0 }
                             isPressing = false
+                            return
                         }
-                        guard isPressing else { return }
+                        isPressing = false
                         let fraction = barWidth > 0 ? dragOffset / barWidth : 0
                         let tradeUSD = abs(fraction) * totalUSD
-                        guard tradeUSD >= minTradeUSD else { return }
+                        guard tradeUSD >= minTradeUSD else {
+                            withAnimation(.easeOut(duration: 0.25)) { dragOffset = 0 }
+                            return
+                        }
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         let direction: TradeDirection = dragOffset > 0 ? .sell : .buy
                         let clamped = direction == .buy
                             ? min(tradeUSD, stableUSD)
                             : min(tradeUSD, nativeUSD)
                         onTradeRequest?(direction, clamped)
+                        // Hold thumb at dragged position, then snap back after sheet appears
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                            withAnimation(.easeOut(duration: 0.4)) { dragOffset = 0 }
+                        }
                     }
             )
         }

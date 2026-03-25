@@ -249,8 +249,46 @@ class AppState {
         nodeService.stop()
     }
 
+    private var backgroundStopWorkItem: DispatchWorkItem?
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+
     /// Stop the node and extract gossip data so the NSE can open the lightweight DB.
+    /// Delays shutdown by 30 seconds so in-flight JIT channel opens can complete.
     func stopNodeForBackground() {
+        print("[App] Scheduling node stop after 30s grace period")
+        backgroundStopWorkItem?.cancel()
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask {
+            self.performBackgroundStop()
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performBackgroundStop()
+        }
+        backgroundStopWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: workItem)
+    }
+
+    /// Cancel a pending background stop (called when returning to foreground).
+    func cancelBackgroundStop() {
+        if let workItem = backgroundStopWorkItem {
+            workItem.cancel()
+            backgroundStopWorkItem = nil
+            print("[App] Cancelled pending background stop")
+        }
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+    }
+
+    private func performBackgroundStop() {
+        backgroundStopWorkItem = nil
+        guard nodeService.isRunning else {
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
+            return
+        }
         print("[App] Stopping node for background")
         stabilityTimer?.cancel()
         stabilityTimer = nil
@@ -258,11 +296,21 @@ class AppState {
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
     }
 
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
+        cancelBackgroundStop()
+        if nodeService.isRunning {
+            print("[App] Node still running (grace period), skipping restart")
+            refreshBalances()
+            return
+        }
         print("[App] Restarting node from foreground")
         await waitForNSE()
         restoreGossipToDB()
@@ -361,7 +409,7 @@ class AppState {
               !nodeService.nodeId.isEmpty else { return }
 
         let nodeId = nodeService.nodeId
-        guard let url = URL(string: "https://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9737", with: ":8443"))/api/register-push") else { return }
+        guard let url = URL(string: "https://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9735", with: ":8443"))/api/register-push") else { return }
 
         Task {
             var request = URLRequest(url: url)

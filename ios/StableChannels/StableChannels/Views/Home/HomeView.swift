@@ -44,7 +44,7 @@ struct HomeView: View {
                     }
 
                     // Stable / Native Split
-                    if appState.stableUSD > 0 {
+                    if appState.lightningBalanceSats > 0 {
                         balanceBarSection
                     }
 
@@ -239,6 +239,7 @@ struct HomeView: View {
                     tradeRequest = TradeRequest(direction: direction, amountUSD: amountUSD)
                 }
             )
+            .padding(.horizontal, 24)
 
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 1) {
