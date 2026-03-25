@@ -61,7 +61,7 @@ class TradeService(private val nodeService: NodeService) {
         val envelopeBytes = envelope.toString().toByteArray(Charsets.UTF_8)
 
         val feeMsat = max((feeUSD / price * Constants.SATS_IN_BTC).toLong() * 1000, 1)
-        val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelopeBytes.toList())
+        val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelopeBytes.map { it.toUByte() })
         return nodeService.sendKeysendWithTLV(feeMsat, counterparty, listOf(tlv))
     }
 

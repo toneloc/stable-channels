@@ -80,25 +80,32 @@ class StabilityProcessingService : Service() {
         }
 
         // Build lightweight LDK node (no RGS, no LSPS2)
-        val config = Config()
-        config.storageDirPath = dataDir.absolutePath
-        config.network = Network.BITCOIN
-        config.trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY)
+        val anchorConfig = AnchorChannelsConfig(
+            trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
+            perChannelReserveSats = 25_000UL
+        )
 
-        val anchorConfig = AnchorChannelsConfig()
-        anchorConfig.trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY)
-        anchorConfig.perChannelReserveSats = 25_000UL
-        config.anchorChannelsConfig = anchorConfig
+        val config = Config(
+            storageDirPath = dataDir.absolutePath,
+            network = Network.BITCOIN,
+            listeningAddresses = null,
+            announcementAddresses = null,
+            nodeAlias = null,
+            trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
+            probingLiquidityLimitMultiplier = 3UL,
+            anchorChannelsConfig = anchorConfig,
+            routeParameters = null
+        )
 
         val builder = Builder.fromConfig(config)
-        builder.setEsploraServer(Constants.PRIMARY_CHAIN_URL)
+        builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
 
         // If wallet uses mnemonic (seed_phrase), set it on the builder
         if (seedPhraseFile.exists()) {
             val words = seedPhraseFile.readText().trim()
             if (words.isNotEmpty()) {
                 Log.d(TAG, "Using seed_phrase mnemonic")
-                builder.setEntropyBip39Mnemonic(Mnemonic(words))
+                builder.setEntropyBip39Mnemonic(words, null)
             }
         }
         // No RGS gossip (saves ~5s startup + ~8MB RAM)
@@ -247,12 +254,12 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
 
         try {
-            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf().toList())
+            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), emptyList())
             node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),
                 Constants.DEFAULT_LSP_PUBKEY,
-                listOf(tlv),
-                null
+                null,
+                listOf(tlv)
             )
             Log.d(TAG, "Stability keysend sent successfully")
             recordPaymentInDB(

@@ -23,7 +23,8 @@ import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import withContext
+import kotlinx.coroutines.withContext
+import com.stablechannels.app.util.Constants
 import org.lightningdevkit.ldknode.Network
 
 @OptIn(ExperimentalMaterial3Api::class)

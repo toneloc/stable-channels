@@ -38,19 +38,25 @@ class NodeService(private val context: Context) {
     fun start(network: Network, esploraURL: String, mnemonic: String?) {
         val dataDir = Constants.userDataDir(context)
 
-        val config = Config()
-        config.storageDirPath = dataDir.absolutePath
-        config.network = network
+        val anchorConfig = AnchorChannelsConfig(
+            trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
+            perChannelReserveSats = 25_000UL
+        )
 
-        config.trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY)
-
-        val anchorConfig = AnchorChannelsConfig()
-        anchorConfig.trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY)
-        anchorConfig.perChannelReserveSats = 25_000UL
-        config.anchorChannelsConfig = anchorConfig
+        val config = Config(
+            storageDirPath = dataDir.absolutePath,
+            network = network,
+            listeningAddresses = null,
+            announcementAddresses = null,
+            nodeAlias = null,
+            trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
+            probingLiquidityLimitMultiplier = 3UL,
+            anchorChannelsConfig = anchorConfig,
+            routeParameters = null
+        )
 
         val builder = Builder.fromConfig(config)
-        builder.setEsploraServer(esploraURL)
+        builder.setChainSourceEsplora(esploraURL, null)
 
         val rgsUrl = when (network) {
             Network.BITCOIN -> Constants.RGSServer.BITCOIN
@@ -61,8 +67,8 @@ class NodeService(private val context: Context) {
         builder.setGossipSourceRgs(rgsUrl)
 
         builder.setLiquiditySourceLsps2(
-            Constants.DEFAULT_LSP_ADDRESS,
             Constants.DEFAULT_LSP_PUBKEY,
+            Constants.DEFAULT_LSP_ADDRESS,
             null
         )
 
@@ -90,7 +96,7 @@ class NodeService(private val context: Context) {
         if (words.isNotEmpty()) {
             seedPhrasePath.writeText(words)
             savedMnemonic = words
-            builder.setEntropyBip39Mnemonic(Mnemonic(words))
+            builder.setEntropyBip39Mnemonic(words, null)
         }
 
         val ldkNode = builder.build()
@@ -150,7 +156,7 @@ class NodeService(private val context: Context) {
 
     fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) {
         val n = node ?: throw NodeServiceError()
-        n.spliceOut(userChannelId, counterpartyNodeId, amountSats.toULong(), address)
+        n.spliceOut(userChannelId, counterpartyNodeId, address, amountSats.toULong())
     }
 
     fun sendPayment(invoice: Bolt11Invoice): String {
@@ -160,7 +166,7 @@ class NodeService(private val context: Context) {
 
     fun sendBolt12(offer: Offer): String {
         val n = node ?: throw NodeServiceError()
-        return n.bolt12Payment().send(offer, null)
+        return n.bolt12Payment().send(offer, null, null, null)
     }
 
     fun sendBolt12UsingAmount(offer: Offer, amountMsat: Long): String {
@@ -170,12 +176,12 @@ class NodeService(private val context: Context) {
 
     fun sendKeysend(amountMsat: Long, toNodeId: String): String {
         val n = node ?: throw NodeServiceError()
-        return n.spontaneousPayment().send(amountMsat.toULong(), toNodeId, null, null)
+        return n.spontaneousPayment().send(amountMsat.toULong(), toNodeId, null)
     }
 
     fun sendKeysendWithTLV(amountMsat: Long, toNodeId: String, tlvs: List<CustomTlvRecord>): String {
         val n = node ?: throw NodeServiceError()
-        return n.spontaneousPayment().sendWithCustomTlvs(amountMsat.toULong(), toNodeId, tlvs, null)
+        return n.spontaneousPayment().sendWithCustomTlvs(amountMsat.toULong(), toNodeId, null, tlvs)
     }
 
     fun receivePayment(amountMsat: Long, description: String): Bolt11Invoice {
@@ -217,7 +223,7 @@ class NodeService(private val context: Context) {
 
     fun sendAllOnchain(address: String): String {
         val n = node ?: throw NodeServiceError()
-        return n.onchainPayment().sendAllToAddress(address, false)
+        return n.onchainPayment().sendAllToAddress(address, false, null)
     }
 
     fun balances(): BalanceDetails? = node?.listBalances()
@@ -234,13 +240,13 @@ class NodeService(private val context: Context) {
 
     fun signMessage(message: ByteArray): String {
         val n = node ?: throw NodeServiceError()
-        return n.signMessage(message.toList())
+        return n.signMessage(message.map { it.toUByte() })
     }
 
     fun verifySignature(message: ByteArray, signature: String, pubkey: String): Boolean {
         return try {
             val n = node ?: return false
-            n.verifySignature(message.toList(), signature, pubkey)
+            n.verifySignature(message.map { it.toUByte() }, signature, pubkey)
         } catch (_: Exception) { false }
     }
 

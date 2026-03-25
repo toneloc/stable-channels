@@ -204,7 +204,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 }
                 is Event.SplicePending -> {
-                    handleSplicePending(event.channelId, event.userChannelId, event.newFundingTxo)
+                    handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
                 }
                 is Event.SpliceFailed -> {
                     isSweeping = false
@@ -243,8 +243,8 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handleSyncMessage(customRecords: List<CustomTlvRecord>, paymentHash: String): Boolean {
-        val tlv = customRecords.find { it.typeId == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() } ?: return false
-        val data = tlv.value.toByteArray()
+        val tlv = customRecords.find { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() } ?: return false
+        val data = tlv.value.map { it.toByte() }.toByteArray()
         val parsed = TradeService.parseIncomingTLV(data, _stableChannel.value.counterparty) { msg, sig, pk ->
             nodeService.verifySignature(msg, sig, pk)
         } ?: return false
@@ -356,7 +356,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Refresh balances so lightning drops to 0 immediately
         refreshBalances()
-        statusMessage = "Channel closed"
+        _statusMessage.value = "Channel closed"
     }
 
     private fun startStabilityTimer() {
