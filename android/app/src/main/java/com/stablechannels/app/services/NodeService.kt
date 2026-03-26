@@ -164,6 +164,11 @@ class NodeService(private val context: Context) {
         return n.bolt11Payment().send(invoice, null)
     }
 
+    fun sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: Long): String {
+        val n = node ?: throw NodeServiceError()
+        return n.bolt11Payment().sendUsingAmount(invoice, amountMsat.toULong(), null)
+    }
+
     fun sendBolt12(offer: Offer): String {
         val n = node ?: throw NodeServiceError()
         return n.bolt12Payment().send(offer, null, null, null)

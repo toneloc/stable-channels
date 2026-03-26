@@ -65,11 +65,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 notificationsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PermissionChecker.PERMISSION_GRANTED
                 } else true
+                appState.ensureLSPConnected()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+
+    LaunchedEffect(Unit) { appState.ensureLSPConnected() }
 
     val totalUSD = (totalSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val scope = rememberCoroutineScope()
@@ -156,10 +159,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             if (totalSats > 0) {
                 BalanceBar(
                     stableUSD = sc.expectedUSD.amount,
-                    nativeSats = sc.nativeChannelBTC.sats,
+                    nativeSats = run {
+                        val stblSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
+                        if (totalSats > stblSats) totalSats - stblSats else 0L
+                    },
                     totalSats = totalSats,
                     btcPrice = btcPrice,
                     modifier = Modifier.padding(horizontal = 24.dp),
+                    onDragStarted = { appState.ensureLSPConnected() },
                     onTradeRequest = { direction, amountUSD ->
                         prefillTradeAmount = amountUSD
                         if (direction == TradeDirection.BUY) showBuy = true else showSell = true

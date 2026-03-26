@@ -88,13 +88,8 @@ enum StabilityService {
         sc.nativeChannelBTC = Bitcoin(sats: nativeSats)
     }
 
-    /// Reconcile an incoming payment — derive backing sats from channel balance.
-    /// native_sats hasn't changed, so backing = receiver - native.
+    /// Reconcile an incoming payment — backingSats stays the same, native absorbs the increase.
     static func reconcileIncoming(_ sc: inout StableChannel) {
-        if sc.expectedUSD.amount > 0.01 {
-            sc.backingSats = sc.stableReceiverBTC.sats >= sc.nativeSats
-                ? sc.stableReceiverBTC.sats - sc.nativeSats : 0
-        }
         recomputeNative(&sc)
     }
 

@@ -127,9 +127,7 @@ pub fn recompute_native(sc: &mut StableChannel) {
 /// `native_sats` hasn't changed. Derive `backing_sats` from the
 /// actual balance so the extra sats are attributed correctly.
 pub fn reconcile_incoming(sc: &mut StableChannel) {
-    if sc.expected_usd.0 > 0.01 {
-        sc.backing_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.native_sats);
-    }
+    // backingSats stays the same on incoming — native absorbs the increase.
     recompute_native(sc);
 }
 
@@ -309,10 +307,11 @@ pub fn check_stability(
         return None;
     }
 
-    // Derive backing_sats from channel balance: native_sats is the invariant
-    // that only changes on trades, so this automatically adjusts after stability
-    // payments without needing manual resets.
-    sc.backing_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.native_sats);
+    // Derive backing_sats from expected_usd and price — this is what backing represents.
+    // native_sats is unreliable as it can be stale after sends/receives.
+    if current_price > 0.0 {
+        sc.backing_sats = ((sc.expected_usd.0 / current_price) * 100_000_000.0) as u64;
+    }
 
     // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {

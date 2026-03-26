@@ -98,8 +98,17 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     scope.launch(Dispatchers.IO) {
                         try {
                             val addr = address.trim()
+                            val price = btcPrice
                             if (sendAll) {
                                 val txid = appState.nodeService.sendAllOnchain(addr)
+                                val sendSats = onchainSats
+                                appState.databaseService?.recordPayment(
+                                    paymentId = txid, paymentType = "onchain", direction = "sent",
+                                    amountMsat = sendSats * 1000,
+                                    amountUSD = if (price > 0) (sendSats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                                    btcPrice = if (price > 0) price else null,
+                                    txid = txid, address = addr
+                                )
                                 result = "All funds sent. TXID: $txid"
                             } else {
                                 val sats = amountSats.toLongOrNull() ?: throw Exception("Enter amount")
@@ -111,6 +120,13 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     result = "Splice-out initiated for $sats sats"
                                 } else {
                                     val txid = appState.nodeService.sendOnchain(addr, sats)
+                                    appState.databaseService?.recordPayment(
+                                        paymentId = txid, paymentType = "onchain", direction = "sent",
+                                        amountMsat = sats * 1000,
+                                        amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                                        btcPrice = if (price > 0) price else null,
+                                        txid = txid, address = addr
+                                    )
                                     result = "Sent. TXID: $txid"
                                 }
                             }

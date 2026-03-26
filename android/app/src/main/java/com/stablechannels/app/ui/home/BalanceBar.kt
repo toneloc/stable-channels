@@ -44,6 +44,7 @@ fun BalanceBar(
     totalSats: Long,
     btcPrice: Double,
     modifier: Modifier = Modifier,
+    onDragStarted: (() -> Unit)? = null,
     onTradeRequest: ((TradeDirection, Double) -> Unit)? = null
 ) {
     val nativeUSD = (nativeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
@@ -101,6 +102,7 @@ fun BalanceBar(
                                     if (abs(offset.x - baseXPx) < thumbDiameterPx * 1.5f) {
                                         isDragging = true
                                         dragOffsetPx = 0f
+                                        onDragStarted?.invoke()
                                     }
                                 },
                                 onDrag = { change, dragAmount ->

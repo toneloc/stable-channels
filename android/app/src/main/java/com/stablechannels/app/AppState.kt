@@ -46,18 +46,28 @@ class AppState(private val context: Context) : ViewModel() {
     private val _statusMessage = MutableStateFlow("")
     val statusMessage: StateFlow<String> = _statusMessage
 
-    private val _totalBalanceSats = MutableStateFlow(0L)
-    val totalBalanceSats: StateFlow<Long> = _totalBalanceSats
+    private val _lightningBalanceSats: MutableStateFlow<Long>
+    val lightningBalanceSats: StateFlow<Long> get() = _lightningBalanceSats
 
-    private val _lightningBalanceSats = MutableStateFlow(0L)
-    val lightningBalanceSats: StateFlow<Long> = _lightningBalanceSats
+    private val _onchainBalanceSats: MutableStateFlow<Long>
+    val onchainBalanceSats: StateFlow<Long> get() = _onchainBalanceSats
 
-    private val _onchainBalanceSats = MutableStateFlow(0L)
-    val onchainBalanceSats: StateFlow<Long> = _onchainBalanceSats
+    private val _totalBalanceSats: MutableStateFlow<Long>
+    val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
+
+    init {
+        val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+        val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
+        val cachedOnchain = prefs.getLong("cached_onchain_sats", 0L)
+        _lightningBalanceSats = MutableStateFlow(cachedLightning)
+        _onchainBalanceSats = MutableStateFlow(cachedOnchain)
+        _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
+    }
 
     private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
     var pendingSplice: PendingSplice? = null
+    var isChannelClosing = false
 
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
@@ -107,6 +117,11 @@ class AppState(private val context: Context) : ViewModel() {
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
+                    // Ensure LSP connection after startup settles
+                    viewModelScope.launch(Dispatchers.IO) {
+                        delay(3000)
+                        ensureLSPConnected()
+                    }
                 } else {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
@@ -116,6 +131,10 @@ class AppState(private val context: Context) : ViewModel() {
                     prevOnchainSats = nodeService.spendableOnchainSats()
                     reregisterPushTokenIfNeeded()
                     startStabilityTimer()
+                    viewModelScope.launch(Dispatchers.IO) {
+                        delay(3000)
+                        ensureLSPConnected()
+                    }
                 }
             } catch (e: Exception) {
                 _errorMessage.value = e.message ?: "Unknown error"
@@ -356,6 +375,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Refresh balances so lightning drops to 0 immediately
         refreshBalances()
+        isChannelClosing = false
         _statusMessage.value = "Channel closed"
     }
 
@@ -364,6 +384,7 @@ class AppState(private val context: Context) : ViewModel() {
             while (isActive) {
                 delay(Constants.STABILITY_CHECK_INTERVAL_SECS * 1000)
                 FCMService.updateHeartbeat(context)
+                ensureLSPConnected()
                 recordCurrentPrice()
                 runStabilityCheck()
                 detectOnchainDeposit()
@@ -376,6 +397,13 @@ class AppState(private val context: Context) : ViewModel() {
         updateStableBalances()
         val sc = _stableChannel.value
         val price = priceService.currentPrice.value
+
+        // Derive backing_sats from expectedUSD and price before stability check
+        if (price > 0 && sc.expectedUSD.amount > 0) {
+            sc.backingSats = ((sc.expectedUSD.amount / price) * Constants.SATS_IN_BTC).toLong()
+            _stableChannel.value = sc
+        }
+
         val result = StabilityService.checkStabilityAction(sc, price)
 
         if (result.action == StabilityService.StabilityAction.PAY) {
@@ -509,14 +537,28 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    fun ensureLSPConnected() {
+        val node = nodeService.node ?: return
+        nodeService.refreshChannels()
+        val allUsable = nodeService.channels.isNotEmpty() && nodeService.channels.all { it.isUsable }
+        if (allUsable) return
+        try { node.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true) } catch (_: Exception) {}
+    }
+
     fun refreshBalances() {
         nodeService.refreshChannels()
         val balances = nodeService.balances() ?: return
         val lightning = balances.totalLightningBalanceSats.toLong()
         val onchain = balances.totalOnchainBalanceSats.toLong()
-        _totalBalanceSats.value = lightning + onchain
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
+        _totalBalanceSats.value = if (isChannelClosing) onchain else lightning + onchain
+
+        // Cache for instant display on next launch
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+            .putLong("cached_lightning_sats", lightning)
+            .putLong("cached_onchain_sats", onchain)
+            .apply()
     }
 
     fun updateStableBalances() {

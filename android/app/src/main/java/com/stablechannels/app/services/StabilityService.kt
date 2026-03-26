@@ -46,9 +46,6 @@ object StabilityService {
 
     fun reconcileIncoming(sc: StableChannel): StableChannel {
         val updated = sc.copy()
-        if (updated.latestPrice > 0 && updated.expectedUSD.amount > 0) {
-            updated.backingSats = ((updated.expectedUSD.amount / updated.latestPrice) * Constants.SATS_IN_BTC).roundToLong()
-        }
         recomputeNative(updated)
         return updated
     }

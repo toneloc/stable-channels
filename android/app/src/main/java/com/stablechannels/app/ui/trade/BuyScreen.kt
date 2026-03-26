@@ -105,6 +105,7 @@ fun BuyScreen(appState: AppState, onDismiss: () -> Unit) {
                         error = null
                         scope.launch(Dispatchers.IO) {
                             try {
+                                appState.ensureLSPConnected()
                                 val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, btcPrice)
                                     ?: throw Exception("Trade service unavailable")
                                 val tradeDbId = appState.databaseService?.recordTrade(

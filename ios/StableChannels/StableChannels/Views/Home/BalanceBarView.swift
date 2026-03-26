@@ -16,6 +16,7 @@ struct BalanceBarView: View {
     let nativeSats: UInt64
     let totalSats: UInt64
     let btcPrice: Double
+    var onDragStarted: (() -> Void)? = nil
     var onTradeRequest: ((TradeDirection, Double) -> Void)? = nil
 
     @State private var dragOffset: CGFloat = 0
@@ -112,6 +113,7 @@ struct BalanceBarView: View {
                         if !isPressing {
                             guard abs(value.startLocation.x - baseX) < thumbDiameter * 1.5 else { return }
                             isPressing = true
+                            onDragStarted?()
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         }
                         guard isPressing else { return }

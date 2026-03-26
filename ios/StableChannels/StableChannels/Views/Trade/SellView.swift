@@ -25,7 +25,9 @@ struct SellView: View {
 
     private var maxSellUSD: Double {
         guard appState.btcPrice > 0 else { return 0 }
-        let nativeSats = appState.stableChannel.nativeChannelBTC.sats
+        let stableSats = UInt64(appState.stableUSD / appState.btcPrice * Double(Constants.satsInBTC))
+        let nativeSats = appState.lightningBalanceSats > stableSats
+            ? appState.lightningBalanceSats - stableSats : 0
         return Double(nativeSats) / Double(Constants.satsInBTC) * appState.btcPrice
     }
 
@@ -204,6 +206,7 @@ struct SellView: View {
     private func executeTrade() {
         isExecuting = true
         errorMessage = nil
+        appState.ensureLSPConnected()
         let sc = appState.stableChannel
         let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: appState.btcPrice).amount
         let feeUSD = amountUSD * 0.01  // 1% fee

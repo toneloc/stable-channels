@@ -118,9 +118,36 @@ struct OnChainSendView: View {
             } else if sendAll {
                 let result = try appState.nodeService.sendAllOnchain(address: address)
                 txid = result
+                let price = appState.btcPrice
+                let onchainSats = appState.onchainBalanceSats
+                _ = try? appState.databaseService?.recordPayment(
+                    paymentId: result,
+                    paymentType: "onchain",
+                    direction: "sent",
+                    amountMsat: onchainSats * 1000,
+                    amountUSD: price > 0 ? Double(onchainSats) / Double(Constants.satsInBTC) * price : nil,
+                    btcPrice: price > 0 ? price : nil,
+                    counterparty: nil,
+                    status: "pending",
+                    txid: result,
+                    address: address
+                )
             } else {
                 let result = try appState.nodeService.sendOnchain(address: address, amountSats: sats)
                 txid = result
+                let price = appState.btcPrice
+                _ = try? appState.databaseService?.recordPayment(
+                    paymentId: result,
+                    paymentType: "onchain",
+                    direction: "sent",
+                    amountMsat: sats * 1000,
+                    amountUSD: price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil,
+                    btcPrice: price > 0 ? price : nil,
+                    counterparty: nil,
+                    status: "pending",
+                    txid: result,
+                    address: address
+                )
             }
         } catch {
             errorMessage = error.localizedDescription

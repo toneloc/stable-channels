@@ -31,7 +31,10 @@ fun SellScreen(appState: AppState, onDismiss: () -> Unit) {
 
     val sc by appState.stableChannel.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
-    val maxSellUSD = if (btcPrice > 0) (sc.nativeChannelBTC.sats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else 0.0
+    val lightningSats by appState.lightningBalanceSats.collectAsState()
+    val stableSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
+    val nativeSatsDisplay = if (lightningSats > stableSats) lightningSats - stableSats else 0L
+    val maxSellUSD = if (btcPrice > 0) (nativeSatsDisplay.toDouble() / Constants.SATS_IN_BTC) * btcPrice else 0.0
     val amountUSD = amountText.toDoubleOrNull() ?: 0.0
     val feeUSD = amountUSD * 0.01
     val btcAmount = if (btcPrice > 0) (amountUSD - feeUSD) / btcPrice else 0.0
@@ -105,6 +108,7 @@ fun SellScreen(appState: AppState, onDismiss: () -> Unit) {
                         error = null
                         scope.launch(Dispatchers.IO) {
                             try {
+                                appState.ensureLSPConnected()
                                 val totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, btcPrice).amount
                                 val result = appState.tradeService?.executeSell(sc, amountUSD, feeUSD, btcPrice, totalUSD)
                                     ?: throw Exception("Trade service unavailable")

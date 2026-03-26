@@ -62,7 +62,7 @@ struct HomeView: View {
                     // Action Buttons
                     actionButtons
 
-                    // Status Message
+                    // Status
                     if !appState.statusMessage.isEmpty {
                         statusSection
                     }
@@ -77,9 +77,15 @@ struct HomeView: View {
                 appState.recordCurrentPrice()
             }
         }
-        .onAppear { checkNotifications() }
+        .onAppear {
+            checkNotifications()
+            appState.ensureLSPConnected()
+        }
         .onChange(of: scenePhase) {
-            if scenePhase == .active { checkNotifications() }
+            if scenePhase == .active {
+                checkNotifications()
+                appState.ensureLSPConnected()
+            }
         }
         .sheet(isPresented: $showSendSheet) { SendView() }
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
@@ -216,25 +222,32 @@ struct HomeView: View {
 
     // MARK: - Balance Bar (Stable / Native)
 
-    private var nativeUSD: Double {
-        appState.btcPrice > 0
-            ? Double(appState.nativeBTC.sats) / Double(Constants.satsInBTC) * appState.btcPrice
-            : 0.0
-    }
-
     private var stableSats: UInt64 {
         appState.btcPrice > 0
             ? UInt64(appState.stableUSD / appState.btcPrice * Double(Constants.satsInBTC))
             : 0
     }
 
+    private var nativeSatsDisplay: UInt64 {
+        appState.lightningBalanceSats > stableSats
+            ? appState.lightningBalanceSats - stableSats
+            : 0
+    }
+
+    private var nativeUSD: Double {
+        appState.btcPrice > 0
+            ? Double(nativeSatsDisplay) / Double(Constants.satsInBTC) * appState.btcPrice
+            : 0.0
+    }
+
     private var balanceBarSection: some View {
         VStack(spacing: 6) {
             BalanceBarView(
                 stableUSD: appState.stableUSD,
-                nativeSats: appState.nativeBTC.sats,
+                nativeSats: nativeSatsDisplay,
                 totalSats: appState.lightningBalanceSats,
                 btcPrice: appState.btcPrice,
+                onDragStarted: { appState.ensureLSPConnected() },
                 onTradeRequest: { direction, amountUSD in
                     tradeRequest = TradeRequest(direction: direction, amountUSD: amountUSD)
                 }
@@ -266,7 +279,7 @@ struct HomeView: View {
                             .font(.caption2)
                     }
                     .foregroundStyle(.orange)
-                    Text(showBTC ? "\(appState.nativeBTC.sats.btcSpacedFormatted) BTC" : nativeUSD.usdFormatted)
+                    Text(showBTC ? "\(nativeSatsDisplay.btcSpacedFormatted) BTC" : nativeUSD.usdFormatted)
                         .font(.caption)
                         .foregroundStyle(.primary)
                         .contentTransition(.numericText())

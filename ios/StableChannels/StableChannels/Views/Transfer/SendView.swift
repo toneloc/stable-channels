@@ -6,6 +6,7 @@ struct SendView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
     @State private var amountSats = ""
+    @State private var amountUSDStr = ""
     @State private var isSending = false
     @State private var errorMessage: String?
     @State private var success = false
@@ -39,11 +40,25 @@ struct SendView: View {
         return inv.amountMilliSatoshis()
     }
 
+    private var isAmountlessBolt11: Bool {
+        detectedType == .bolt11 && parsedBolt11Msat == nil &&
+            !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var manualAmountMsat: UInt64 {
+        guard appState.btcPrice > 0, let usd = Double(amountUSDStr), usd > 0 else { return 0 }
+        let btc = usd / appState.btcPrice
+        return UInt64(btc * Double(Constants.satsInBTC) * 1000)
+    }
+
     /// Sats being sent (from invoice or manual entry)
     private var displaySats: UInt64 {
         switch detectedType {
         case .bolt11:
-            return (parsedBolt11Msat ?? 0) / 1000
+            if let msat = parsedBolt11Msat, msat > 0 {
+                return msat / 1000
+            }
+            return manualAmountMsat / 1000
         case .bolt12, .onchain:
             return UInt64(amountSats) ?? 0
         case .unknown:
@@ -98,10 +113,33 @@ struct SendView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
-                            } else if parsedBolt11Msat == nil && detectedType == .bolt11 {
-                                Text("No amount specified in invoice")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                            } else if isAmountlessBolt11 {
+                                TextField("Amount (USD)", text: $amountUSDStr)
+                                    .keyboardType(.decimalPad)
+                                if manualAmountMsat > 0 {
+                                    HStack {
+                                        Text("Amount")
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            if let usd = displayUSD {
+                                                Text(usd.usdFormatted)
+                                                    .fontWeight(.medium)
+                                            }
+                                            Text("\(displaySats.btcSpacedFormatted) BTC")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    HStack {
+                                        Text("Fee")
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text("< 1%")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                         case .bolt12:
                             Label("Bolt12 Offer", systemImage: "bolt.fill")
@@ -223,6 +261,8 @@ struct SendView: View {
 
     private var needsAmount: Bool {
         switch detectedType {
+        case .bolt11:
+            return isAmountlessBolt11 && manualAmountMsat == 0
         case .bolt12, .onchain:
             return (UInt64(amountSats) ?? 0) == 0
         default:
@@ -234,6 +274,7 @@ struct SendView: View {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        appState.ensureLSPConnected()
         isSending = true
         errorMessage = nil
         defer { isSending = false }
@@ -245,19 +286,27 @@ struct SendView: View {
             case .bolt11:
                 let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: trimmed)
                 let invoiceMsat = bolt11.amountMilliSatoshis() ?? 0
-                let paymentId = try appState.nodeService.sendPayment(invoice: bolt11)
-                let invoiceUSD: Double? = (price > 0 && invoiceMsat > 0) ? (Double(invoiceMsat) / 1000.0 / 100_000_000.0) * price : nil
+                let paymentId: PaymentId
+                let actualMsat: UInt64
+                if invoiceMsat > 0 {
+                    paymentId = try appState.nodeService.sendPayment(invoice: bolt11)
+                    actualMsat = invoiceMsat
+                } else {
+                    actualMsat = manualAmountMsat
+                    paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: actualMsat)
+                }
+                let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (Double(actualMsat) / 1000.0 / 100_000_000.0) * price : nil
                 _ = try? appState.databaseService?.recordPayment(
                     paymentId: "\(paymentId)",
                     paymentType: "lightning",
                     direction: "sent",
-                    amountMsat: invoiceMsat,
+                    amountMsat: actualMsat,
                     amountUSD: invoiceUSD,
                     btcPrice: price > 0 ? price : nil,
                     counterparty: nil,
                     status: "pending"
                 )
-                sentAmountSats = invoiceMsat / 1000
+                sentAmountSats = actualMsat / 1000
 
             case .bolt12:
                 guard let sats = UInt64(amountSats), sats > 0 else { return }

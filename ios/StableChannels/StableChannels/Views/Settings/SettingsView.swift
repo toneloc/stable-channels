@@ -335,6 +335,7 @@ struct SettingsView: View {
 
     private func closeChannel() {
         guard let channel = appState.nodeService.channels.first else { return }
+        appState.isChannelClosing = true
         try? appState.nodeService.closeChannel(
             userChannelId: channel.userChannelId,
             counterpartyNodeId: channel.counterpartyNodeId

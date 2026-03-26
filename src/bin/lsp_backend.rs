@@ -1933,19 +1933,24 @@ impl ServerApp {
                 self.save_stable_channels();
                 self.send_sync_message(sc_user_channel_id, new_expected_usd, sc_counterparty);
             } else {
+                // Payment fully covered by native — update native_sats to reflect the spend
+                sc.native_sats = native_sats.saturating_sub(total_sats);
+                stable::recompute_native(sc);
                 println!(
-                            "[forwarded] channel {} spent {} sats from native BTC ({} native available), stable ${:.2} unchanged",
-                            prev_channel_id, total_sats, native_sats, sc.expected_usd.0
+                            "[forwarded] channel {} spent {} sats from native BTC ({} -> {} native), stable ${:.2} unchanged",
+                            prev_channel_id, total_sats, native_sats, sc.native_sats, sc.expected_usd.0
                         );
                 audit_event(
                     "FORWARDED_FROM_NATIVE",
                     json!({
                         "user_channel_id": format!("{}", sc.user_channel_id),
                         "sats_spent": total_sats,
-                        "native_sats": native_sats,
+                        "old_native_sats": native_sats,
+                        "new_native_sats": sc.native_sats,
                         "expected_usd": sc.expected_usd.0,
                     }),
                 );
+                self.save_stable_channels();
             }
         } else {
             println!(

@@ -241,6 +241,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             confirmButton = {
                 TextButton(onClick = {
                     showCloseConfirm = false
+                    appState.isChannelClosing = true
                     scope.launch(Dispatchers.IO) {
                         try {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)

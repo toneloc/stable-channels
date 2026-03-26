@@ -20,6 +20,7 @@ enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
 fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var input by remember { mutableStateOf("") }
     var amountSats by remember { mutableStateOf("") }
+    var amountUSDStr by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -35,7 +36,35 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             else -> InputType.UNKNOWN
         }
     }
-    val needsAmount = inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN
+
+    val parsedBolt11Msat = remember(input) {
+        if (inputType != InputType.BOLT11) null
+        else try { Bolt11Invoice.fromStr(input.trim()).amountMilliSatoshis()?.toLong() } catch (_: Exception) { null }
+    }
+
+    val isAmountlessBolt11 = inputType == InputType.BOLT11 && parsedBolt11Msat == null && input.isNotBlank()
+
+    val manualAmountMsat: Long = run {
+        if (btcPrice <= 0) return@run 0L
+        val usd = amountUSDStr.toDoubleOrNull() ?: return@run 0L
+        if (usd <= 0) return@run 0L
+        val btc = usd / btcPrice
+        (btc * Constants.SATS_IN_BTC * 1000).toLong()
+    }
+
+    val needsAmount = when {
+        isAmountlessBolt11 -> manualAmountMsat == 0L
+        inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN -> (amountSats.toLongOrNull() ?: 0) == 0L
+        else -> false
+    }
+
+    val displaySats: Long = when (inputType) {
+        InputType.BOLT11 -> if ((parsedBolt11Msat ?: 0) > 0) (parsedBolt11Msat ?: 0) / 1000 else manualAmountMsat / 1000
+        InputType.BOLT12, InputType.ONCHAIN -> amountSats.toLongOrNull() ?: 0
+        InputType.UNKNOWN -> 0
+    }
+
+    val displayUSD = if (btcPrice > 0 && displaySats > 0) (displaySats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
 
     Column(
         modifier = Modifier
@@ -70,7 +99,33 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
 
-            if (needsAmount) {
+            // Bolt11 with amount
+            if (inputType == InputType.BOLT11 && (parsedBolt11Msat ?: 0) > 0) {
+                displayUSD?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text("${it.usdFormatted()}", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+
+            // Amountless bolt11 — USD input
+            if (isAmountlessBolt11) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = amountUSDStr,
+                    onValueChange = { amountUSDStr = it },
+                    label = { Text("Amount (USD)") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (manualAmountMsat > 0) {
+                    displayUSD?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text("~ ${it.usdFormatted()}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+
+            // Bolt12 / onchain — sats input
+            if (inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN) {
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = amountSats,
@@ -97,15 +152,25 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     error = null
                     scope.launch(Dispatchers.IO) {
                         try {
+                            appState.ensureLSPConnected()
                             val trimmed = input.trim()
                             val price = btcPrice
                             when (inputType) {
                                 InputType.BOLT11 -> {
                                     val invoice = Bolt11Invoice.fromStr(trimmed)
-                                    val paymentId = appState.nodeService.sendPayment(invoice)
+                                    val invoiceMsat = invoice.amountMilliSatoshis()?.toLong() ?: 0L
+                                    val paymentId: String
+                                    val actualMsat: Long
+                                    if (invoiceMsat > 0) {
+                                        paymentId = appState.nodeService.sendPayment(invoice)
+                                        actualMsat = invoiceMsat
+                                    } else {
+                                        actualMsat = manualAmountMsat
+                                        paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
+                                    }
                                     appState.databaseService?.recordPayment(
                                         paymentId = paymentId, paymentType = "lightning",
-                                        direction = "sent", amountMsat = 0, btcPrice = price
+                                        direction = "sent", amountMsat = actualMsat, btcPrice = price
                                     )
                                     result = "Payment sent"
                                 }
@@ -146,7 +211,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         isSending = false
                     }
                 },
-                enabled = !isSending && input.isNotBlank(),
+                enabled = !isSending && input.isNotBlank() && !needsAmount,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (isSending) CircularProgressIndicator(Modifier.size(20.dp))

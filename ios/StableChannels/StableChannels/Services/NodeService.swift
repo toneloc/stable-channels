@@ -208,6 +208,11 @@ class NodeService {
         return try node.bolt11Payment().send(invoice: invoice, routeParameters: nil)
     }
 
+    func sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64) throws -> PaymentId {
+        guard let node else { throw NodeServiceError.notRunning }
+        return try node.bolt11Payment().sendUsingAmount(invoice: invoice, amountMsat: amountMsat, routeParameters: nil)
+    }
+
     func sendBolt12(offer: Offer, amountMsat: UInt64) throws -> PaymentId {
         guard let node else { throw NodeServiceError.notRunning }
         return try node.bolt12Payment().send(

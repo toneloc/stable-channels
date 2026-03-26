@@ -30,21 +30,25 @@ class AppState {
     var btcPrice: Double { priceService.currentPrice }
     var statusMessage: String = ""
     var paymentFlash: Bool = false
+    var isChannelClosing: Bool = false
     var isSyncing: Bool = false
 
-    // Balance (derived)
-    var totalBalanceSats: UInt64 = 0
-    var lightningBalanceSats: UInt64 = 0
-    var onchainBalanceSats: UInt64 = 0
+    // Balance (derived) — initialized from cache for instant display
+    var lightningBalanceSats: UInt64 = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_lightning_sats") ?? 0))
+    }()
+    var onchainBalanceSats: UInt64 = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+    }()
+    var totalBalanceSats: UInt64 {
+        isChannelClosing ? onchainBalanceSats : lightningBalanceSats + onchainBalanceSats
+    }
     var onchainReceiveAddress: String?
 
     var totalBalanceUSD: Double {
         guard btcPrice > 0 else { return 0 }
-        // Before node syncs, use cached channel balance if available
-        if totalBalanceSats == 0 && stableChannel.stableReceiverBTC.sats > 0 {
-            return Double(stableChannel.stableReceiverBTC.sats + stableChannel.onchainBTC.sats)
-                / Double(Constants.satsInBTC) * btcPrice
-        }
         return Double(totalBalanceSats) / Double(Constants.satsInBTC) * btcPrice
     }
 
@@ -130,6 +134,9 @@ class AppState {
                 if hasCachedData { isSyncing = true }
             }
 
+            // Purge empty network graph from DB to force fresh RGS sync
+            purgeEmptyNetworkGraph()
+
             do {
                 try await nodeService.start(
                     network: .bitcoin,
@@ -152,6 +159,11 @@ class AppState {
                     prevOnchainSats = nodeService.balances()?.totalOnchainBalanceSats ?? 0
                 }
                 startStabilityTimer()
+                // Ensure LSP connection shortly after startup — initial connect may not have completed
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await MainActor.run { ensureLSPConnected() }
+                }
                 // Re-register push token with node_id now that node is running
                 reregisterPushTokenIfNeeded()
                 // Check if NSE flagged a pending payment while app was killed
@@ -307,8 +319,10 @@ class AppState {
         guard case .wallet = phase else { return }
         cancelBackgroundStop()
         if nodeService.isRunning {
-            print("[App] Node still running (grace period), skipping restart")
+            print("[App] Node still running (grace period), reconnecting to LSP")
+            ensureLSPConnected()
             refreshBalances()
+            updateStableBalances()
             return
         }
         print("[App] Restarting node from foreground")
@@ -372,6 +386,39 @@ class AppState {
         }
     }
 
+    /// Delete network_graph from SQLite if it's too small (empty graph with stale timestamp).
+    /// Also deletes scorer data so routing starts fresh.
+    private func purgeEmptyNetworkGraph() {
+        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
+        var db: OpaquePointer?
+        guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        let sql = "SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+
+        let needsPurge: Bool
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let size = sqlite3_column_int64(stmt, 0)
+            needsPurge = size < 500_000
+            if needsPurge {
+                print("[App] network_graph in DB too small (\(size) bytes), purging for fresh RGS sync")
+            }
+        } else {
+            // No network_graph row at all — check if node_metrics has a stale timestamp
+            needsPurge = true
+            print("[App] No network_graph in DB, purging node_metrics for fresh RGS sync")
+        }
+
+        if needsPurge {
+            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
+            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
+            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
+        }
+    }
+
     /// Restore network_graph blob from file back into SQLite.
     private func restoreGossipToDB() {
         let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
@@ -380,6 +427,13 @@ class AppState {
         guard FileManager.default.fileExists(atPath: gossipPath.path) else { return }
 
         guard let data = try? Data(contentsOf: gossipPath) else { return }
+
+        // Skip restoring an empty/corrupt graph — forces fresh full RGS sync
+        if data.count < 1024 {
+            print("[App] network_graph.bin too small (\(data.count) bytes), deleting for fresh sync")
+            try? FileManager.default.removeItem(at: gossipPath)
+            return
+        }
 
         var db: OpaquePointer?
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
@@ -840,6 +894,7 @@ class AppState {
 
         // Refresh balances so lightning drops to 0 immediately
         refreshBalances()
+        isChannelClosing = false
         statusMessage = "Channel closed"
     }
 
@@ -903,12 +958,27 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
+                    // Reconnect to LSP if peer dropped — keeps channel usable
+                    self?.ensureLSPConnected()
+
                     self?.recordCurrentPrice()
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
                 }
             }
         }
+    }
+
+    func ensureLSPConnected() {
+        guard let node = nodeService.node else { return }
+        nodeService.refreshChannels()
+        let allUsable = !nodeService.channels.isEmpty && nodeService.channels.allSatisfy { $0.isUsable }
+        guard !allUsable else { return }
+        try? node.connect(
+            nodeId: Constants.defaultLSPPubkey,
+            address: Constants.defaultLSPAddress,
+            persist: true
+        )
     }
 
     private func runStabilityCheck() {
@@ -921,10 +991,10 @@ class AppState {
         guard stableChannel.expectedUSD.amount > 0,
               !nodeService.channels.isEmpty else { return }
 
-        // Derive backing_sats from channel balance: native_sats is the invariant
-        // that only changes on trades, so this automatically adjusts after stability payments.
-        stableChannel.backingSats = stableChannel.stableReceiverBTC.sats >= stableChannel.nativeSats
-            ? stableChannel.stableReceiverBTC.sats - stableChannel.nativeSats : 0
+        // Derive backing_sats from expectedUSD and price — this is what backing represents.
+        if price > 0 {
+            stableChannel.backingSats = UInt64((stableChannel.expectedUSD.amount / price) * Double(Constants.satsInBTC))
+        }
 
         let result = StabilityService.checkStabilityAction(stableChannel, price: price)
 
@@ -1115,9 +1185,13 @@ class AppState {
         let onchain = balances.totalOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
 
-        totalBalanceSats = onchain + lightning
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
+
+        // Cache for instant display on next launch
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        ud?.set(Int64(bitPattern: lightning), forKey: "cached_lightning_sats")
+        ud?.set(Int64(bitPattern: onchain), forKey: "cached_onchain_sats")
     }
 
     /// Update the StableChannel struct from current LDK channel data + price.
