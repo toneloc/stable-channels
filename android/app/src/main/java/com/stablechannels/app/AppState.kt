@@ -68,6 +68,7 @@ class AppState(private val context: Context) : ViewModel() {
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
     var pendingSplice: PendingSplice? = null
     var isChannelClosing = false
+    var isOpeningChannel = false
 
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
@@ -78,7 +79,8 @@ class AppState(private val context: Context) : ViewModel() {
     /** True when any splice (in or out) is in flight — prevents concurrent splices. */
     val isSpliceInFlight: Boolean get() = isSweeping
     private var sweepOnchainStart: Long = 0
-    private var prevOnchainSats: Long = 0
+    private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+        .getLong("cached_onchain_sats", 0L)
     private var stabilityJob: Job? = null
 
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
@@ -113,7 +115,6 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
-                    prevOnchainSats = nodeService.spendableOnchainSats()
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
@@ -128,7 +129,6 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
-                    prevOnchainSats = nodeService.spendableOnchainSats()
                     reregisterPushTokenIfNeeded()
                     startStabilityTimer()
                     viewModelScope.launch(Dispatchers.IO) {
@@ -150,7 +150,6 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
                 _phase.value = Phase.WALLET
                 refreshBalances()
-                prevOnchainSats = nodeService.spendableOnchainSats()
                 reregisterPushTokenIfNeeded()
                 startStabilityTimer()
             } catch (e: Exception) {
@@ -453,6 +452,33 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /** Sweep all on-chain funds into the Lightning channel (user-initiated splice-in). */
+    fun openChannelWithOnchainFunds() {
+        if (isOpeningChannel) return
+        val spendable = nodeService.spendableOnchainSats()
+        if (spendable < 10_000) {
+            _statusMessage.value = "Not enough on-chain funds"
+            return
+        }
+        isOpeningChannel = true
+        _statusMessage.value = "Opening channel..."
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ensureLSPConnected()
+                val channelSats = spendable - 5_000
+                nodeService.connectAndOpenChannel(
+                    Constants.DEFAULT_LSP_PUBKEY,
+                    Constants.DEFAULT_LSP_ADDRESS,
+                    channelSats
+                )
+                refreshBalances()
+                _statusMessage.value = "Channel opening..."
+            } catch (e: Exception) {
+                _statusMessage.value = "Open channel failed: ${e.message}"
+            }
+            isOpeningChannel = false
+        }
+    }
+
     fun sweepToChannel() {
         if (isSweeping) {
             _statusMessage.value = "Sweep already in progress"
@@ -552,7 +578,11 @@ class AppState(private val context: Context) : ViewModel() {
         val onchain = balances.totalOnchainBalanceSats.toLong()
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
-        _totalBalanceSats.value = if (isChannelClosing) onchain else lightning + onchain
+        _totalBalanceSats.value = when {
+            isChannelClosing -> onchain
+            isOpeningChannel -> if (lightning > 0) lightning else onchain
+            else -> lightning + onchain
+        }
 
         // Cache for instant display on next launch
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()

@@ -318,23 +318,33 @@ struct HomeView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if hasReadyChannel && !appState.isSweeping {
-                Button {
-                    appState.sweepToChannel()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.right.circle.fill")
+            if !appState.isSweeping && !appState.isOpeningChannel {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Move to Trading")
                             .font(.caption2)
-                        Text("Move to Spending & Trading")
-                            .font(.caption)
+                        Text("and Spending Account")
+                            .font(.caption2)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(.blue.opacity(0.1))
-                    .foregroundStyle(.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        if hasReadyChannel {
+                            appState.sweepToChannel()
+                        } else {
+                            appState.openChannelWithOnchainFunds()
+                        }
+                    } label: {
+                        Text("Swap")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(.blue.opacity(0.1))
+                            .foregroundStyle(.blue)
+                            .clipShape(Capsule())
+                    }
                 }
-            } else if appState.isSweeping {
+            } else if appState.isSweeping || appState.isOpeningChannel {
                 HStack(spacing: 4) {
                     ProgressView()
                         .controlSize(.mini)

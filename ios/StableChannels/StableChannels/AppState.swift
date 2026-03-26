@@ -31,6 +31,7 @@ class AppState {
     var statusMessage: String = ""
     var paymentFlash: Bool = false
     var isChannelClosing: Bool = false
+    var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
 
     // Balance (derived) — initialized from cache for instant display
@@ -43,7 +44,9 @@ class AppState {
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
     var totalBalanceSats: UInt64 {
-        isChannelClosing ? onchainBalanceSats : lightningBalanceSats + onchainBalanceSats
+        if isChannelClosing { return onchainBalanceSats }
+        if isOpeningChannel { return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats }
+        return lightningBalanceSats + onchainBalanceSats
     }
     var onchainReceiveAddress: String?
 
@@ -64,7 +67,10 @@ class AppState {
     // Auto-sweep state
     private(set) var isSweeping = false
     private var sweepOnchainStart: UInt64 = 0
-    private var prevOnchainSats: UInt64 = 0
+    private var prevOnchainSats: UInt64 = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+    }()
     private var fundingTxid: String?
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
@@ -155,8 +161,6 @@ class AppState {
                     isSyncing = false
                     refreshBalances()
                     updateStableBalances()
-                    // Use totalOnchainBalanceSats to match detectOnchainDeposit
-                    prevOnchainSats = nodeService.balances()?.totalOnchainBalanceSats ?? 0
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -189,7 +193,6 @@ class AppState {
                     phase = .wallet
                     refreshBalances()
                     updateStableBalances()
-                    prevOnchainSats = nodeService.balances()?.totalOnchainBalanceSats ?? 0
                 }
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
@@ -1088,6 +1091,42 @@ class AppState {
     // MARK: - Sweep to Channel
 
     /// Sweep all on-chain funds into the Lightning channel (user-initiated splice-in).
+    func openChannelWithOnchainFunds() {
+        guard !isOpeningChannel else { return }
+        let spendable = nodeService.spendableOnchainSats()
+        guard spendable > 10_000 else {
+            statusMessage = "Not enough on-chain funds"
+            return
+        }
+
+        isOpeningChannel = true
+        statusMessage = "Opening channel..."
+
+        Task {
+            do {
+                ensureLSPConnected()
+                // Reserve some sats for fees
+                let channelSats = spendable - 5_000
+                try await nodeService.connectAndOpenChannel(
+                    pubkey: Constants.defaultLSPPubkey,
+                    address: Constants.defaultLSPAddress,
+                    amountSats: channelSats
+                )
+                await MainActor.run {
+                    refreshBalances()
+                    statusMessage = "Channel opening..."
+                }
+            } catch {
+                await MainActor.run {
+                    statusMessage = "Open channel failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run {
+                isOpeningChannel = false
+            }
+        }
+    }
+
     func sweepToChannel() {
         guard !isSweeping else {
             statusMessage = "Sweep already in progress"

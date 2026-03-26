@@ -207,18 +207,31 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                                 Text("Moving to channel...", style = MaterialTheme.typography.labelSmall)
                             }
-                        } else if (hasReadyChannel) {
+                        } else if (!appState.isOpeningChannel) {
                             Spacer(Modifier.height(8.dp))
-                            Button(
-                                onClick = {
-                                    scope.launch(Dispatchers.IO) {
-                                        appState.sweepToChannel()
-                                    }
-                                },
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Move to Spending & Trading", fontSize = 13.sp)
+                                Column {
+                                    Text("Move to Trading", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("and Spending Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                FilledTonalButton(
+                                    onClick = {
+                                        scope.launch(Dispatchers.IO) {
+                                            if (hasReadyChannel) {
+                                                appState.sweepToChannel()
+                                            } else {
+                                                appState.openChannelWithOnchainFunds()
+                                            }
+                                        }
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+                                ) {
+                                    Text("Swap", fontSize = 13.sp)
+                                }
                             }
                         }
                     }
