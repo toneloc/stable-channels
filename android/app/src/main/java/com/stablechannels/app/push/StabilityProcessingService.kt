@@ -218,19 +218,14 @@ class StabilityProcessingService : Service() {
             return
         }
 
-        // Derive backing_sats from LDK channel balance using native_sats invariant
-        val userSatsFromLDK = node.listChannels().firstOrNull()?.let { channel ->
-            val unspendable = channel.unspendablePunishmentReserve ?: 0UL
-            (channel.outboundCapacityMsat / 1000UL) + unspendable
-        }?.toLong() ?: channelState.receiverSats
+        // Use backingSats from DB directly — set at trade time, reset after payments
+        val backingSats = channelState.backingSats
 
-        val derivedBacking = maxOf(userSatsFromLDK - channelState.nativeSats, 0)
+        Log.d(TAG, "Channel state: expectedUSD=$expectedUsd, backingSats=$backingSats")
 
-        Log.d(TAG, "Derived backing=$derivedBacking, nativeSats=${channelState.nativeSats}, userSatsLDK=$userSatsFromLDK")
-
-        // Calculate stability check using derived backing
-        val stableUsdValue = if (derivedBacking > 0) {
-            (derivedBacking.toDouble() / Constants.SATS_IN_BTC) * price
+        // Calculate stability check using backing_sats from DB
+        val stableUsdValue = if (backingSats > 0) {
+            (backingSats.toDouble() / Constants.SATS_IN_BTC) * price
         } else {
             0.0
         }
@@ -266,8 +261,10 @@ class StabilityProcessingService : Service() {
                 dbPath, null, "stability", "sent",
                 amountMsat, price
             )
-            // No manual backing_sats reset needed — derived from
-            // receiver_sats - native_sats on each check.
+            // Reset backing_sats to equilibrium after payment
+            val newBacking = ((expectedUsd / price) * Constants.SATS_IN_BTC).toLong()
+            updateBackingSatsInDB(dbPath, newBacking)
+            Log.d(TAG, "Reset backingSats to $newBacking")
         } catch (e: Exception) {
             Log.e(TAG, "Stability keysend failed", e)
             throw e
@@ -278,6 +275,7 @@ class StabilityProcessingService : Service() {
         val expectedUsd: Double,
         val receiverSats: Long,
         val nativeSats: Long,
+        val backingSats: Long,
         val latestPrice: Double
     )
 
@@ -288,7 +286,7 @@ class StabilityProcessingService : Service() {
         return try {
             val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
-                "SELECT expected_usd, receiver_sats, latest_price, native_sats FROM channels LIMIT 1",
+                "SELECT expected_usd, receiver_sats, latest_price, native_sats, stable_sats FROM channels LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -297,6 +295,7 @@ class StabilityProcessingService : Service() {
                         expectedUsd = it.getDouble(0),
                         receiverSats = it.getLong(1),
                         nativeSats = if (it.columnCount > 3) it.getLong(3) else 0,
+                        backingSats = if (it.columnCount > 4) it.getLong(4) else 0,
                         latestPrice = it.getDouble(2)
                     )
                 } else null
@@ -337,6 +336,16 @@ class StabilityProcessingService : Service() {
             (prices[mid - 1] + prices[mid]) / 2.0
         } else {
             prices[mid]
+        }
+    }
+
+    private fun updateBackingSatsInDB(dbPath: String, backingSats: Long) {
+        try {
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+            db.execSQL("UPDATE channels SET stable_sats = ? WHERE id = (SELECT MAX(id) FROM channels)", arrayOf(backingSats))
+            db.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update backingSats in DB", e)
         }
     }
 

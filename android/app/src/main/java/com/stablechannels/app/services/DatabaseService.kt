@@ -254,11 +254,37 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     fun setPendingSpliceTxid(txid: String) {
-        val cv = ContentValues().apply { put("txid", txid) }
         writableDatabase.execSQL(
             "UPDATE payments SET txid = ? WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
             arrayOf(txid)
         )
+    }
+
+    fun getPendingSpliceTxid(): String? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            null
+        )
+        return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
+    }
+
+    fun hasPendingSplice(): Boolean {
+        // Auto-expire pending splices: 10 min if no txid, 1 hour if has txid
+        val noTxidCutoff = System.currentTimeMillis() / 1000 - 600
+        writableDatabase.execSQL(
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ?",
+            arrayOf(noTxidCutoff)
+        )
+        val txidCutoff = System.currentTimeMillis() / 1000 - 3600
+        writableDatabase.execSQL(
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL AND created_at < ?",
+            arrayOf(txidCutoff)
+        )
+        val cursor = readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') LIMIT 1",
+            null
+        )
+        return cursor.use { it.moveToFirst() }
     }
 
     // --- Prices ---

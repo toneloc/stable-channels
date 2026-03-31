@@ -350,16 +350,10 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        // Derive backing_sats from LDK channel balance using native_sats invariant
-        let userSatsFromLDK: UInt64 = node.listChannels().first.map { channel in
-            let unspendable = channel.unspendablePunishmentReserve ?? 0
-            return (channel.outboundCapacityMsat / 1000) + unspendable
-        } ?? channelState.receiverSats
+        // Use backingSats from DB directly — it was set at trade time and reset after payments
+        let backingSats = channelState.backingSats
 
-        let derivedBacking = userSatsFromLDK >= channelState.nativeSats
-            ? userSatsFromLDK - channelState.nativeSats : 0
-
-        nseLog("Channel state: expectedUSD=\(channelState.expectedUSD), derivedBacking=\(derivedBacking), nativeSats=\(channelState.nativeSats), userSatsLDK=\(userSatsFromLDK)")
+        nseLog("Channel state: expectedUSD=\(channelState.expectedUSD), backingSats=\(backingSats)")
 
         guard channelState.expectedUSD >= 0.01 else {
             nseLog("expectedUSD too small, skipping")
@@ -382,8 +376,8 @@ class NotificationService: UNNotificationServiceExtension {
 
         nseLog("Price: $\(String(format: "%.0f", price))")
 
-        // 3. Calculate stability payment using derived backing_sats
-        let stableUSDValue = Double(derivedBacking) / Self.satsInBTC * price
+        // 3. Calculate stability payment using backing_sats from DB
+        let stableUSDValue = Double(backingSats) / Self.satsInBTC * price
         let targetUSD = channelState.expectedUSD
         let dollarsFromPar = stableUSDValue - targetUSD
         let percentFromPar = targetUSD > 0 ? abs(dollarsFromPar / targetUSD) * 100.0 : 0.0
@@ -438,8 +432,10 @@ class NotificationService: UNNotificationServiceExtension {
                 btcPrice: price
             )
 
-            // No manual backing_sats reset needed — derived from
-            // receiver_sats - native_sats on each check.
+            // Reset backing_sats to equilibrium after payment
+            let newBacking = UInt64((channelState.expectedUSD / price) * Self.satsInBTC)
+            updateBackingSatsInDB(dbPath: dbPath, backingSats: newBacking)
+            nseLog("Reset backingSats to \(newBacking)")
 
             content.title = "Stability Payment Sent"
             content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
@@ -518,6 +514,18 @@ class NotificationService: UNNotificationServiceExtension {
         } else {
             nseLog("recordPayment: insert failed")
         }
+    }
+
+    private func updateBackingSatsInDB(dbPath: String, backingSats: UInt64) {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+        let sql = "UPDATE stable_channels SET backing_sats = ? WHERE id = (SELECT MAX(id) FROM stable_channels)"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(backingSats))
+        sqlite3_step(stmt)
     }
 
     // MARK: - Lightweight SQLite Reader

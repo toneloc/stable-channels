@@ -46,6 +46,7 @@ class AppState {
     var totalBalanceSats: UInt64 {
         if isChannelClosing { return onchainBalanceSats }
         if isOpeningChannel { return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats }
+        if isSweeping { return lightningBalanceSats }
         return lightningBalanceSats + onchainBalanceSats
     }
     var onchainReceiveAddress: String?
@@ -66,12 +67,18 @@ class AppState {
 
     // Auto-sweep state
     private(set) var isSweeping = false
+    var spliceTxid: String? = nil
     private var sweepOnchainStart: UInt64 = 0
     private var prevOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
-    private var fundingTxid: String?
+    var fundingTxid: String? {
+        didSet {
+            UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                .set(fundingTxid, forKey: "funding_txid")
+        }
+    }
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
@@ -161,6 +168,14 @@ class AppState {
                     isSyncing = false
                     refreshBalances()
                     updateStableBalances()
+                    // Restore fundingTxid from UserDefaults
+                    fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .string(forKey: "funding_txid")
+                    // Restore pending splice state from DB
+                    if let hasSplice = try? databaseService?.hasPendingSplice(), hasSplice {
+                        isSweeping = true
+                        spliceTxid = (try? databaseService?.getPendingSpliceTxid()) ?? fundingTxid
+                    }
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -466,7 +481,7 @@ class AppState {
               !nodeService.nodeId.isEmpty else { return }
 
         let nodeId = nodeService.nodeId
-        guard let url = URL(string: "https://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9735", with: ":8443"))/api/register-push") else { return }
+        guard let url = URL(string: "https://stablechannels.com/api/register-push") else { return }
 
         Task {
             var request = URLRequest(url: url)
@@ -591,8 +606,11 @@ class AppState {
             refreshBalances()
             updateStableBalances()
 
-            // After splice confirms, reconcile outgoing
+            // After splice confirms, reconcile outgoing and clear sweep state
             if isSplice {
+                isSweeping = false
+                spliceTxid = nil
+                sweepOnchainStart = 0
                 let price = stableChannel.latestPrice
                 if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
                     AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
@@ -640,12 +658,19 @@ class AppState {
                     "reason": reason.map { "\($0)" } ?? "unknown",
                 ])
             } else {
+                // Update payment status in DB
+                if let pid = paymentId {
+                    try? databaseService?.updatePaymentStatus(
+                        paymentId: "\(pid)", status: "failed"
+                    )
+                }
                 AuditService.log("PAYMENT_FAILED", data: [
                     "payment_id": paymentId.map { "\($0)" } ?? "nil",
                     "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
                     "reason": reason.map { "\($0)" } ?? "unknown",
                 ])
-                statusMessage = "Payment failed"
+                let reasonStr = reason.map { "\($0)" } ?? "unknown"
+                statusMessage = "Payment failed: \(reasonStr)"
             }
 
         case .splicePending(let channelId, let userChannelId, _, let newFundingTxo):
@@ -657,6 +682,7 @@ class AppState {
 
         case .spliceFailed(let channelId, let userChannelId, _, _):
             isSweeping = false
+            spliceTxid = nil
             sweepOnchainStart = 0
             pendingSplice = nil
 
@@ -870,16 +896,18 @@ class AppState {
             "balance_sats": "\(balanceSats)",
         ])
 
-        // Record in payment history
+        // Record in payment history — use funding txid as the close tx reference
+        let closeTxid = fundingTxid
         _ = try? databaseService?.recordPayment(
-            paymentId: "close_\(channelId)",
+            paymentId: closeTxid ?? channelId,
             paymentType: "channel_close",
             direction: "received",
             amountMsat: balanceSats * 1000,
             amountUSD: balanceUSD,
             btcPrice: price > 0 ? price : nil,
             counterparty: stableChannel.counterparty.isEmpty ? nil : stableChannel.counterparty,
-            status: "completed"
+            status: "completed",
+            txid: closeTxid
         )
 
         // Clear stable state if this is our channel or no channels remain
@@ -920,6 +948,7 @@ class AppState {
         if let splice = pendingSplice {
             pendingSplice = nil
             let txidStr = "\(newFundingTxo.txid)"
+            spliceTxid = txidStr
             if splice.direction == "in" {
                 // Auto-sweep splice_in was already recorded — update with txid
                 try? databaseService?.setPendingSpliceTxid(txidStr)
@@ -994,10 +1023,8 @@ class AppState {
         guard stableChannel.expectedUSD.amount > 0,
               !nodeService.channels.isEmpty else { return }
 
-        // Derive backing_sats from expectedUSD and price — this is what backing represents.
-        if price > 0 {
-            stableChannel.backingSats = UInt64((stableChannel.expectedUSD.amount / price) * Double(Constants.satsInBTC))
-        }
+        // Do NOT recalculate backingSats here — it's set at trade time and stays fixed.
+        // As price moves, the stability check detects drift and sends payments to rebalance.
 
         let result = StabilityService.checkStabilityAction(stableChannel, price: price)
 
@@ -1019,8 +1046,9 @@ class AppState {
             stableChannel.lastStabilityPayment = now
             stableChannel.paymentMade = true
 
-            // No manual backing_sats reset needed — it's derived from
-            // receiver_sats - native_sats at the start of each check.
+            // Reset backing_sats to equilibrium after payment
+            stableChannel.backingSats = UInt64((stableChannel.expectedUSD.amount / price) * Double(Constants.satsInBTC))
+            StabilityService.recomputeNative(&stableChannel)
             saveChannelToDB()
 
             // Record as pending payment
@@ -1066,8 +1094,7 @@ class AppState {
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
 
-            // Use timestamp-based ID so dedup works
-            let depositId = "onchain_\(Int64(Date().timeIntervalSince1970))_\(depositSats)"
+            let depositId = "\(Int64(Date().timeIntervalSince1970))_\(depositSats)"
             _ = try? databaseService?.recordPayment(
                 paymentId: depositId,
                 paymentType: "onchain",

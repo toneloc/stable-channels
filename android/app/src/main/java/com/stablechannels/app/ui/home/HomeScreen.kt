@@ -1,5 +1,10 @@
 package com.stablechannels.app.ui.home
 
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import android.Manifest
 import android.content.Intent
 import android.os.Build
@@ -175,10 +180,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(16.dp))
             }
 
+            val hasReadyChannel = appState.nodeService.channels.any { it.isChannelReady }
+
             // On-chain section
             if (onchainSats > 0) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                val hasReadyChannel = appState.nodeService.channels.any { it.isChannelReady }
                 val isSweeping = appState.isSpliceInFlight
 
                 Card(
@@ -199,15 +205,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             )
                         }
                         if (isSweeping) {
+                            // 1. Splice-in in progress
                             Spacer(Modifier.height(8.dp))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                Text("Moving to channel...", style = MaterialTheme.typography.labelSmall)
-                            }
-                        } else if (!appState.isOpeningChannel) {
+                            PendingRow("Swap pending...", appState.spliceTxid, context)
+                        } else if (hasReadyChannel && appState.nodeService.spendableOnchainSats() > 0) {
+                            // Has channel + confirmed funds — offer to sweep
                             Spacer(Modifier.height(8.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -221,11 +223,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 FilledTonalButton(
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
-                                            if (hasReadyChannel) {
-                                                appState.sweepToChannel()
-                                            } else {
-                                                appState.openChannelWithOnchainFunds()
-                                            }
+                                            appState.sweepToChannel()
                                         }
                                     },
                                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
@@ -233,10 +231,33 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     Text("Swap", fontSize = 13.sp)
                                 }
                             }
+                        } else if (appState.nodeService.spendableOnchainSats() == 0L) {
+                            // 3. Unconfirmed deposit (with or without channel)
+                            Spacer(Modifier.height(8.dp))
+                            PendingRow("Deposit confirming...", appState.fundingTxid, context)
+                            if (!hasReadyChannel) {
+                                Text("Receive over Lightning to create your Trading and Spending Account",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        } else {
+                            // 4. No channel, confirmed deposit — just needs Lightning
+                            Spacer(Modifier.height(8.dp))
+                            Text("Receive over Lightning to create your Trading and Spending Account",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
                 Spacer(Modifier.height(12.dp))
+            }
+
+            // Hint text when no channel
+            if (!hasReadyChannel) {
+                Text("Receive bitcoin over Lightning to get started",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(4.dp))
             }
 
             // Action buttons
@@ -245,7 +266,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ActionButton("Send", Icons.AutoMirrored.Filled.CallMade, Color(0xFF3B82F6), Modifier.weight(1f)) { showSend = true }
-                ActionButton("Receive", Icons.AutoMirrored.Filled.CallReceived, Color(0xFF10B981), Modifier.weight(1f)) { showReceive = true }
+                ActionButton("Receive", Icons.AutoMirrored.Filled.CallReceived, Color(0xFF10B981), Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -305,17 +326,67 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    FilledTonalButton(
-        onClick = onClick,
-        modifier = modifier.height(56.dp),
-        colors = ButtonDefaults.filledTonalButtonColors(
-            containerColor = color.copy(alpha = 0.1f),
-            contentColor = color
-        )
+fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, pulse: Boolean = false, onClick: () -> Unit) {
+    Box(modifier = modifier.height(56.dp)) {
+        FilledTonalButton(
+            onClick = onClick,
+            modifier = Modifier.fillMaxSize(),
+            colors = ButtonDefaults.filledTonalButtonColors(
+                containerColor = color.copy(alpha = 0.1f),
+                contentColor = color
+            )
+        ) {
+            Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(title)
+        }
+        if (pulse) {
+            key(pulse) {
+                val transition = rememberInfiniteTransition(label = "btnPulse")
+                val alpha by transition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 0.15f,
+                    animationSpec = infiniteRepeatable(animation = tween(800, easing = EaseInOut), repeatMode = RepeatMode.Reverse),
+                    label = "btnAlpha"
+                )
+                val pulseScale by transition.animateFloat(
+                    initialValue = 1f,
+                    targetValue = 1.04f,
+                    animationSpec = infiniteRepeatable(animation = tween(800, easing = EaseInOut), repeatMode = RepeatMode.Reverse),
+                    label = "btnScale"
+                )
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .scale(pulseScale)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(color.copy(alpha = alpha))
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PendingRow(text: String, txid: String?, context: android.content.Context) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp))
+        Text("\u231B", fontSize = 14.sp)
         Spacer(Modifier.width(6.dp))
-        Text(title)
+        Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.weight(1f))
+        txid?.let {
+            TextButton(
+                onClick = {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/$it"))
+                    context.startActivity(intent)
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+            ) {
+                Text("View on explorer", fontSize = 12.sp)
+            }
+        }
     }
 }

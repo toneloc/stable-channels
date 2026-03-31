@@ -125,7 +125,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - LSP Token Registration
 
     private func registerTokenWithLSP(_ token: String) async {
-        guard let url = URL(string: "https://\(Constants.defaultLSPAddress.replacingOccurrences(of: ":9735", with: ":8443"))/api/register-push") else { return }
+        guard let url = URL(string: "https://stablechannels.com/api/register-push") else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

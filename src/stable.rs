@@ -307,11 +307,10 @@ pub fn check_stability(
         return None;
     }
 
-    // Derive backing_sats from expected_usd and price — this is what backing represents.
-    // native_sats is unreliable as it can be stale after sends/receives.
-    if current_price > 0.0 {
-        sc.backing_sats = ((sc.expected_usd.0 / current_price) * 100_000_000.0) as u64;
-    }
+    // Do NOT recalculate backing_sats here.
+    // backing_sats is set at trade time (expected_usd / price * 1e8) and stays fixed.
+    // As BTC price moves, stable_usd_value = backing_sats * new_price will drift
+    // from expected_usd, triggering a stability payment to rebalance.
 
     // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {
@@ -409,8 +408,9 @@ pub fn check_stability(
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // No manual backing_sats reset needed — it's derived from
-            // receiver_sats - native_sats at the start of each check.
+            // Reset backing_sats to equilibrium after payment
+            sc.backing_sats = ((sc.expected_usd.0 / current_price) * 100_000_000.0) as u64;
+            recompute_native(sc);
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();

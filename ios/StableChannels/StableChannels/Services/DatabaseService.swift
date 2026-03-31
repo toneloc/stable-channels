@@ -335,6 +335,31 @@ class DatabaseService {
         )
     }
 
+    func getPendingSpliceTxid() throws -> String? {
+        let rows = try query(
+            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NOT NULL ORDER BY id DESC LIMIT 1"
+        )
+        return rows.first?[0] as? String
+    }
+
+    func hasPendingSplice() throws -> Bool {
+        // Auto-expire pending splices: 10 min if no txid, 1 hour if has txid
+        let noTxidCutoff = Int64(Date().timeIntervalSince1970) - 600
+        try execute(
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NULL AND created_at < ?",
+            params: [.integer(noTxidCutoff)]
+        )
+        let txidCutoff = Int64(Date().timeIntervalSince1970) - 3600
+        try execute(
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NOT NULL AND created_at < ?",
+            params: [.integer(txidCutoff)]
+        )
+        let rows = try query(
+            "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') LIMIT 1"
+        )
+        return !rows.isEmpty
+    }
+
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
         if let fee = feeMsat {
             try execute(

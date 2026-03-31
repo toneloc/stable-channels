@@ -65,6 +65,27 @@ struct SettingsView: View {
                             Spacer()
                             Text(((channel.inboundCapacityMsat) / 1000).satsFormatted)
                         }
+
+                        if let txid = appState.fundingTxid, !txid.isEmpty {
+                            HStack {
+                                Text("Funding Tx")
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text(String(txid.prefix(8)) + "..." + String(txid.suffix(8)))
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let url = URL(string: "https://mempool.space/tx/\(txid)") {
+                                Link(destination: url) {
+                                    HStack(spacing: 4) {
+                                        Text("View on explorer")
+                                        Image(systemName: "arrow.up.right.square")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                                }
+                            }
+                        }
                     }
 
                     Section("Stable Position") {

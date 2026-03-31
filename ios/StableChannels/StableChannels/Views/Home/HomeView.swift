@@ -13,6 +13,8 @@ struct HomeView: View {
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
     @State private var notificationsEnabled = true
+    @State private var receivePulse = false
+    @State private var showReceiveHint = true
 
     var body: some View {
         NavigationStack {
@@ -57,6 +59,14 @@ struct HomeView: View {
                     if appState.btcPrice > 0 {
                         PriceChartView(compact: true)
                             .padding(.bottom, 8)
+                    }
+
+                    // Hint text when no channel
+                    if !hasReadyChannel {
+                        Text("Receive bitcoin over Lightning to get started")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.bottom, 4)
                     }
 
                     // Action Buttons
@@ -318,7 +328,11 @@ struct HomeView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if !appState.isSweeping && !appState.isOpeningChannel {
+            if appState.isSweeping {
+                // 1. Splice-in in progress
+                pendingRow(text: "Swap pending...", txid: appState.spliceTxid)
+            } else if hasReadyChannel && appState.nodeService.spendableOnchainSats() > 0 {
+                // 2. Channel + confirmed funds — offer to sweep
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Move to Trading")
@@ -329,11 +343,7 @@ struct HomeView: View {
                     .foregroundStyle(.secondary)
                     Spacer()
                     Button {
-                        if hasReadyChannel {
-                            appState.sweepToChannel()
-                        } else {
-                            appState.openChannelWithOnchainFunds()
-                        }
+                        appState.sweepToChannel()
                     } label: {
                         Text("Swap")
                             .font(.caption.bold())
@@ -344,30 +354,46 @@ struct HomeView: View {
                             .clipShape(Capsule())
                     }
                 }
-            } else if appState.isSweeping || appState.isOpeningChannel {
-                HStack(spacing: 4) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    Text("Moving to channel...")
+            } else if appState.nodeService.spendableOnchainSats() == 0 {
+                // 3. Unconfirmed deposit (with or without channel)
+                pendingRow(text: "Deposit confirming...", txid: appState.fundingTxid)
+                if !hasReadyChannel {
+                    Text("Receive over Lightning to create your Trading and Spending Account")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-
-                if let addr = appState.onchainReceiveAddress,
-                   let url = URL(string: "https://mempool.space/address/\(addr)") {
-                    Link(destination: url) {
-                        HStack(spacing: 4) {
-                            Text("View on explorer")
-                            Image(systemName: "arrow.up.right.square")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.blue)
-                    }
-                }
+            } else {
+                // 4. No channel, confirmed deposit — just needs a Lightning receive
+                Text("Receive over Lightning to create your Trading and Spending Account")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func pendingRow(text: String, txid: String?) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "hourglass")
+                .font(.caption)
+                .foregroundStyle(.orange)
+            Text(text)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let txid, !txid.isEmpty {
+                Link(destination: URL(string: "https://mempool.space/tx/\(txid)")!) {
+                    HStack(spacing: 2) {
+                        Text("View on explorer")
+                            .font(.caption2)
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.caption2)
+                    }
+                    .foregroundStyle(.blue)
+                }
+            }
+        }
     }
 
     // MARK: - Action Buttons
@@ -378,7 +404,7 @@ struct HomeView: View {
                 ActionButton(title: "Send", icon: "arrow.up.circle.fill", color: .blue) {
                     showSendSheet = true
                 }
-                ActionButton(title: "Receive", icon: "arrow.down.circle.fill", color: .green) {
+                ActionButton(title: "Receive", icon: "arrow.down.circle.fill", color: .green, pulse: !hasReadyChannel) {
                     showReceiveSheet = true
                 }
             }
@@ -413,6 +439,7 @@ struct ActionButton: View {
     let title: String
     let icon: String
     let color: Color
+    var pulse: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -423,9 +450,28 @@ struct ActionButton: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
-            .background(color.opacity(0.1))
             .foregroundStyle(color)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
         }
+        .background(color.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            if pulse {
+                PulseOverlay(color: color)
+            }
+        }
+    }
+}
+
+struct PulseOverlay: View {
+    let color: Color
+    @State private var on = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .fill(color.opacity(on ? 0.15 : 0.0))
+            .scaleEffect(on ? 1.04 : 1.0)
+            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: on)
+            .onAppear { on = true }
+            .allowsHitTesting(false)
     }
 }

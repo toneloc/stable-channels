@@ -6,6 +6,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -108,6 +110,22 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     DetailRow("Status", if (ch.isChannelReady) "Ready" else "Pending")
                     DetailRow("Outbound", (ch.outboundCapacityMsat.toLong() / 1000).satsFormatted())
                     DetailRow("Inbound", (ch.inboundCapacityMsat.toLong() / 1000).satsFormatted())
+
+                    appState.fundingTxid?.let { txid ->
+                        if (txid.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            DetailRow("Funding Tx", "${txid.take(8)}...${txid.takeLast(8)}")
+                            TextButton(onClick = {
+                                val intent = android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse("https://mempool.space/tx/$txid")
+                                )
+                                context.startActivity(intent)
+                            }) {
+                                Text("View on explorer", fontSize = 12.sp)
+                            }
+                        }
+                    }
                 }
             }
         }

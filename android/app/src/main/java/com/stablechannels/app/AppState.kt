@@ -69,6 +69,13 @@ class AppState(private val context: Context) : ViewModel() {
     var pendingSplice: PendingSplice? = null
     var isChannelClosing = false
     var isOpeningChannel = false
+    var spliceTxid: String? = null
+    var fundingTxid: String? = null
+        set(value) {
+            field = value
+            context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                .putString("funding_txid", value).apply()
+        }
 
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
@@ -115,6 +122,14 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
+                    // Restore fundingTxid
+                    fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                        .getString("funding_txid", null)
+                    // Restore pending splice state
+                    if (databaseService?.hasPendingSplice() == true) {
+                        isSweeping = true
+                        spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
+                    }
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
@@ -172,10 +187,12 @@ class AppState(private val context: Context) : ViewModel() {
                     val sc = _stableChannel.value.copy()
                     sc.userChannelId = event.userChannelId
                     _stableChannel.value = sc
+                    fundingTxid = event.fundingTxo.txid
                     refreshBalances()
                     AuditService.log("CHANNEL_PENDING", mapOf(
                         "channel_id" to event.channelId,
-                        "user_channel_id" to event.userChannelId
+                        "user_channel_id" to event.userChannelId,
+                        "funding_txid" to event.fundingTxo.txid
                     ))
                 }
                 is Event.ChannelReady -> {
@@ -184,6 +201,8 @@ class AppState(private val context: Context) : ViewModel() {
                     val isSplice = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
                     sc.channelId = event.channelId
                     if (isSplice) {
+                        isSweeping = false
+                        spliceTxid = null
                         val price = priceService.currentPrice.value
                         val result = StabilityService.reconcileOutgoing(sc, price)
                         _stableChannel.value = result.first
@@ -217,8 +236,16 @@ class AppState(private val context: Context) : ViewModel() {
                         _statusMessage.value = "$verb trade failed"
                         AuditService.log("TRADE_PAYMENT_FAILED", mapOf("payment_id" to pid))
                     } else {
-                        _statusMessage.value = "Payment failed"
-                        AuditService.log("PAYMENT_FAILED", mapOf("payment_hash" to (event.paymentHash ?: "")))
+                        if (pid != null) {
+                            databaseService?.updatePaymentStatus(pid, "failed")
+                        }
+                        val reason = event.reason?.toString() ?: "unknown"
+                        _statusMessage.value = "Payment failed: $reason"
+                        AuditService.log("PAYMENT_FAILED", mapOf(
+                            "payment_id" to (pid ?: ""),
+                            "payment_hash" to (event.paymentHash ?: ""),
+                            "reason" to reason
+                        ))
                     }
                 }
                 is Event.SplicePending -> {
@@ -226,6 +253,7 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 is Event.SpliceFailed -> {
                     isSweeping = false
+                    spliceTxid = null
                     pendingSplice = null
                     AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
                 }
@@ -324,10 +352,13 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handleSplicePending(channelId: String, userChannelId: String, newFundingTxo: String) {
+        val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
+        spliceTxid = txid
+        fundingTxid = txid
         val splice = pendingSplice
         if (splice != null) {
             when (splice.direction) {
-                "in" -> databaseService?.setPendingSpliceTxid(newFundingTxo)
+                "in" -> databaseService?.setPendingSpliceTxid(txid)
                 "out" -> {
                     val price = priceService.currentPrice.value
                     databaseService?.recordPayment(
@@ -357,15 +388,17 @@ class AppState(private val context: Context) : ViewModel() {
             ))
 
             // Record in payment history before clearing state
+            val closeTxid = fundingTxid
             databaseService?.recordPayment(
-                paymentId = "close_$channelId",
+                paymentId = closeTxid ?: channelId,
                 paymentType = "channel_close",
                 direction = "received",
                 amountMsat = balanceSats * 1000,
                 amountUSD = balanceUSD,
                 btcPrice = if (price > 0) price else null,
                 counterparty = sc.counterparty.ifEmpty { null },
-                status = "completed"
+                status = "completed",
+                txid = closeTxid
             )
 
             databaseService?.deleteChannel(sc.userChannelId)
@@ -397,11 +430,8 @@ class AppState(private val context: Context) : ViewModel() {
         val sc = _stableChannel.value
         val price = priceService.currentPrice.value
 
-        // Derive backing_sats from expectedUSD and price before stability check
-        if (price > 0 && sc.expectedUSD.amount > 0) {
-            sc.backingSats = ((sc.expectedUSD.amount / price) * Constants.SATS_IN_BTC).toLong()
-            _stableChannel.value = sc
-        }
+        // Do NOT recalculate backingSats here — it's set at trade time and stays fixed.
+        // As price moves, the stability check detects drift and sends payments to rebalance.
 
         val result = StabilityService.checkStabilityAction(sc, price)
 
@@ -415,6 +445,9 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 val paymentId = nodeService.sendKeysend(amountMsat, sc.counterparty)
                 val updated = sc.copy(lastStabilityPayment = now)
+                // Reset backing_sats to equilibrium after payment
+                updated.backingSats = ((updated.expectedUSD.amount / price) * Constants.SATS_IN_BTC).toLong()
+                StabilityService.recomputeNative(updated)
                 _stableChannel.value = updated
 
                 databaseService?.recordPayment(
@@ -439,7 +472,7 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
             val price = priceService.currentPrice.value
-            val dedupId = "onchain_${System.currentTimeMillis() / 1000}_$depositSats"
+            val dedupId = "${System.currentTimeMillis() / 1000}_$depositSats"
             databaseService?.recordPayment(
                 paymentId = dedupId, paymentType = "onchain", direction = "received",
                 amountMsat = depositSats * 1000,
@@ -581,6 +614,7 @@ class AppState(private val context: Context) : ViewModel() {
         _totalBalanceSats.value = when {
             isChannelClosing -> onchain
             isOpeningChannel -> if (lightning > 0) lightning else onchain
+            isSweeping -> lightning
             else -> lightning + onchain
         }
 
