@@ -68,7 +68,6 @@ class AppState(private val context: Context) : ViewModel() {
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
     var pendingSplice: PendingSplice? = null
     var isChannelClosing = false
-    var isOpeningChannel = false
     var spliceTxid: String? = null
     var fundingTxid: String? = null
         set(value) {
@@ -103,6 +102,7 @@ class AppState(private val context: Context) : ViewModel() {
                 chainUrl = resolveChainUrl()
 
                 databaseService = DatabaseService(context)
+                databaseService?.seedHistoricalPrices()
                 tradeService = TradeService(nodeService)
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
@@ -484,34 +484,6 @@ class AppState(private val context: Context) : ViewModel() {
         prevOnchainSats = currentSats
     }
 
-    /** Sweep all on-chain funds into the Lightning channel (user-initiated splice-in). */
-    fun openChannelWithOnchainFunds() {
-        if (isOpeningChannel) return
-        val spendable = nodeService.spendableOnchainSats()
-        if (spendable < 10_000) {
-            _statusMessage.value = "Not enough on-chain funds"
-            return
-        }
-        isOpeningChannel = true
-        _statusMessage.value = "Opening channel..."
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                ensureLSPConnected()
-                val channelSats = spendable - 5_000
-                nodeService.connectAndOpenChannel(
-                    Constants.DEFAULT_LSP_PUBKEY,
-                    Constants.DEFAULT_LSP_ADDRESS,
-                    channelSats
-                )
-                refreshBalances()
-                _statusMessage.value = "Channel opening..."
-            } catch (e: Exception) {
-                _statusMessage.value = "Open channel failed: ${e.message}"
-            }
-            isOpeningChannel = false
-        }
-    }
-
     fun sweepToChannel() {
         if (isSweeping) {
             _statusMessage.value = "Sweep already in progress"
@@ -613,7 +585,6 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats.value = onchain
         _totalBalanceSats.value = when {
             isChannelClosing -> onchain
-            isOpeningChannel -> if (lightning > 0) lightning else onchain
             isSweeping -> lightning
             else -> lightning + onchain
         }

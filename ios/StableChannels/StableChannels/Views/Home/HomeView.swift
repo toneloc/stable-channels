@@ -399,7 +399,15 @@ struct HomeView: View {
     // MARK: - Action Buttons
 
     private var actionButtons: some View {
-        VStack(spacing: 8) {
+        let noChannel = !hasReadyChannel && appState.totalBalanceSats == 0
+
+        return VStack(spacing: 8) {
+            if noChannel {
+                Text("Receive BTC to get started")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack(spacing: 8) {
                 ActionButton(title: "Send", icon: "arrow.up.circle.fill", color: .blue) {
                     showSendSheet = true

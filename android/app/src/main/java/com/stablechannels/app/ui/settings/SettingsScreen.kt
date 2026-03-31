@@ -179,6 +179,48 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             }
         }
 
+        // Push Notifications
+        Spacer(Modifier.height(16.dp))
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Push Notifications", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(8.dp))
+
+                val notifEnabled = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.POST_NOTIFICATIONS
+                    ) == androidx.core.content.PermissionChecker.PERMISSION_GRANTED
+                } else true
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Notifications")
+                    Text(
+                        if (notifEnabled) "Enabled" else "Disabled",
+                        color = if (notifEnabled) Color(0xFF10B981) else MaterialTheme.colorScheme.error
+                    )
+                }
+
+                if (!notifEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = {
+                        val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        }
+                        context.startActivity(intent)
+                    }) { Text("Enable in Settings") }
+                    Text(
+                        "Notifications are required to receive stability payments while the app is closed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
         // Backup
         Spacer(Modifier.height(16.dp))
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -348,7 +390,10 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
 
     // On-chain send sheet
     if (showOnchainSend) {
-        ModalBottomSheet(onDismissRequest = { showOnchainSend = false }) {
+        ModalBottomSheet(
+            onDismissRequest = { showOnchainSend = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
             OnChainSendScreen(appState) { showOnchainSend = false }
         }
     }

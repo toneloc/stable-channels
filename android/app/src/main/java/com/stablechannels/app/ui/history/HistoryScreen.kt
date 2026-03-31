@@ -7,6 +7,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
+import androidx.compose.material.icons.filled.CompareArrows
+import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material3.*
@@ -14,75 +16,34 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
-import com.stablechannels.app.models.PriceRecord
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
-
-enum class ChartPeriod(val label: String, val hours: Int) {
-    DAY_1("1D", 24),
-    WEEK_1("1W", 168),
-    MONTH_1("1M", 720),
-    YEAR_1("1Y", 8760)
-}
 
 @Composable
 fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     var selectedSegment by remember { mutableIntStateOf(0) }
     var trades by remember { mutableStateOf<List<TradeRecord>>(emptyList()) }
     var payments by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
-    var priceHistory by remember { mutableStateOf<List<PriceRecord>>(emptyList()) }
-    var chartPeriod by remember { mutableStateOf(ChartPeriod.DAY_1) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
     var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
 
     fun loadHistory() {
         trades = appState.databaseService?.getRecentTrades() ?: emptyList()
         payments = appState.databaseService?.getRecentPayments() ?: emptyList()
-        priceHistory = appState.databaseService?.getPriceHistory(chartPeriod.hours) ?: emptyList()
     }
 
-    LaunchedEffect(chartPeriod) { loadHistory() }
+    LaunchedEffect(Unit) { loadHistory() }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Text("History", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
-
-        // Price chart placeholder
-        Card(modifier = Modifier.fillMaxWidth().height(160.dp)) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                if (priceHistory.size >= 2) {
-                    // Simple text showing price range
-                    val minP = priceHistory.minOf { it.price }
-                    val maxP = priceHistory.maxOf { it.price }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("BTC Price", style = MaterialTheme.typography.labelMedium)
-                        Text("${minP.usdFormatted()} - ${maxP.usdFormatted()}", style = MaterialTheme.typography.bodyLarge)
-                        Text("${priceHistory.size} data points", style = MaterialTheme.typography.labelSmall)
-                    }
-                } else {
-                    Text("Not enough price data yet", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-
-        // Period selector
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            ChartPeriod.entries.forEach { period ->
-                FilterChip(
-                    selected = chartPeriod == period,
-                    onClick = { chartPeriod = period },
-                    label = { Text(period.label) }
-                )
-            }
-        }
 
         // Segment tabs
         TabRow(selectedTabIndex = selectedSegment) {
@@ -92,20 +53,28 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
 
         Spacer(Modifier.height(8.dp))
 
-        LazyColumn {
-            if (selectedSegment == 0) {
-                if (trades.isEmpty()) {
-                    item { Text("No trades yet", Modifier.padding(16.dp)) }
-                }
-                items(trades) { trade ->
-                    TradeRow(trade) { selectedTrade = trade }
-                }
-            } else {
-                if (payments.isEmpty()) {
-                    item { Text("No payments yet", Modifier.padding(16.dp)) }
-                }
-                items(payments) { payment ->
-                    PaymentRow(payment) { selectedPayment = payment }
+        if (selectedSegment == 0 && trades.isEmpty()) {
+            EmptyStateView(
+                icon = Icons.Default.CompareArrows,
+                title = "No Trades",
+                description = "Buy or sell BTC to see trades here."
+            )
+        } else if (selectedSegment == 1 && payments.isEmpty()) {
+            EmptyStateView(
+                icon = Icons.Default.ElectricBolt,
+                title = "No Payments",
+                description = "Send or receive payments to see history here."
+            )
+        } else {
+            LazyColumn {
+                if (selectedSegment == 0) {
+                    items(trades) { trade ->
+                        TradeRow(trade) { selectedTrade = trade }
+                    }
+                } else {
+                    items(payments) { payment ->
+                        PaymentRow(payment) { selectedPayment = payment }
+                    }
                 }
             }
         }
@@ -169,7 +138,7 @@ fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
         supportingContent = { Text("$typeLabel  ${payment.date.relativeString()}") },
         trailingContent = {
             Column(horizontalAlignment = Alignment.End) {
-                Text(payment.amountSats.satsFormatted())
+                Text(payment.amountUSD?.usdFormatted() ?: payment.amountSats.satsFormatted())
                 Text(
                     payment.status,
                     style = MaterialTheme.typography.labelSmall,
@@ -182,4 +151,40 @@ fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
             }
         }
     )
+}
+
+@Composable
+private fun EmptyStateView(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    description: String
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 80.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                icon,
+                contentDescription = null,
+                modifier = Modifier.size(48.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
 }

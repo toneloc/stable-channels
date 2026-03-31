@@ -26,8 +26,7 @@ fun PaymentDetailDialog(payment: PaymentRecord, onDismiss: () -> Unit) {
                     else -> "Lightning"
                 }
                 DetailRow("Type", typeLabel)
-                DetailRow("Amount", payment.amountSats.satsFormatted())
-                payment.amountUSD?.let { DetailRow("USD Value", it.usdFormatted()) }
+                DetailRow("Amount", payment.amountUSD?.usdFormatted() ?: payment.amountSats.satsFormatted())
                 payment.btcPrice?.let { DetailRow("BTC Price", it.usdFormatted()) }
                 if (payment.feeMsat > 0) DetailRow("Fee", (payment.feeMsat / 1000).satsFormatted())
                 DetailRow("Status", payment.status)

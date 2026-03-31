@@ -21,9 +21,9 @@ import java.util.Locale
 enum class TradeStep { AMOUNT, CONFIRM, DONE }
 
 @Composable
-fun BuyScreen(appState: AppState, onDismiss: () -> Unit) {
+fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () -> Unit) {
     var step by remember { mutableStateOf(TradeStep.AMOUNT) }
-    var amountText by remember { mutableStateOf("") }
+    var amountText by remember { mutableStateOf(if (prefillAmountUSD > 0) String.format(java.util.Locale.US, "%.2f", prefillAmountUSD) else "") }
     var error by remember { mutableStateOf<String?>(null) }
     var isExecuting by remember { mutableStateOf(false) }
     var pendingPaymentId by remember { mutableStateOf<String?>(null) }

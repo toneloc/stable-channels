@@ -26,7 +26,12 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CurrencyBitcoin
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.Icon
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -205,21 +210,37 @@ fun BalanceBar(
             }
         }
 
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                "${stableUSD.usdFormatted()} stable",
-                style = MaterialTheme.typography.labelSmall,
-                color = stableColor
-            )
-            Text(
-                "${nativeUSD.usdFormatted()} native",
-                style = MaterialTheme.typography.labelSmall,
-                color = nativeColor
-            )
+            // Left: USD label + amount
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Default.Shield, contentDescription = null, tint = stableColor, modifier = Modifier.size(12.dp))
+                    Text("USD", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = stableColor)
+                }
+                val stableSats = if (btcPrice > 0) (stableUSD / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
+                Text(
+                    stableUSD.usdFormatted(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            // Right: BTC label + amount
+            Column(horizontalAlignment = Alignment.End) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("BTC", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = nativeColor)
+                    Icon(Icons.Default.CurrencyBitcoin, contentDescription = null, tint = nativeColor, modifier = Modifier.size(12.dp))
+                }
+                Text(
+                    nativeUSD.usdFormatted(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
         }
     }
 }

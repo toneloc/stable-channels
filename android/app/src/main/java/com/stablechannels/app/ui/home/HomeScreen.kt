@@ -1,15 +1,14 @@
 package com.stablechannels.app.ui.home
 
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.background
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -24,6 +23,8 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -41,6 +42,7 @@ import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
 import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +62,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
     var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
+    var showBTC by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     var notificationsEnabled by remember { mutableStateOf(true) }
@@ -102,6 +105,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Title
+            Text(
+                text = "Stable Channels",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+
             // Notification warning
             if (!notificationsEnabled) {
                 Card(
@@ -140,23 +152,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             Spacer(Modifier.height(24.dp))
 
-            // Balance
-            Text(
-                text = "Total Balance",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = totalUSD.usdFormatted(),
-                fontSize = 36.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = totalSats.satsFormatted(),
-                fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // Balance (tap to toggle USD/BTC)
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable { showBTC = !showBTC }
+            ) {
+                Text(
+                    text = "Total Balance",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(4.dp))
+                if (showBTC) {
+                    Text(
+                        text = totalSats.btcSpacedFormatted(),
+                        fontSize = 32.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                } else {
+                    Text(
+                        text = totalUSD.usdFormatted(),
+                        fontSize = 36.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    text = if (showBTC) totalUSD.usdFormatted() else totalSats.btcSpacedFormatted(),
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
             Spacer(Modifier.height(16.dp))
 
@@ -252,9 +278,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(12.dp))
             }
 
+            // Price chart
+            if (btcPrice > 0) {
+                PriceChart(
+                    databaseService = appState.databaseService,
+                    currentPrice = btcPrice
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+
             // Hint text when no channel
             if (!hasReadyChannel) {
-                Text("Receive bitcoin over Lightning to get started",
+                Text("Receive BTC to get started",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(4.dp))
@@ -278,18 +313,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 ActionButton("Sell BTC", Icons.Default.Sell, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
             }
 
-            Spacer(Modifier.height(24.dp))
-
-            // Price
-            if (btcPrice > 0) {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("BTC Price", style = MaterialTheme.typography.labelMedium)
-                        Text(btcPrice.usdFormatted(), style = MaterialTheme.typography.headlineSmall)
-                    }
-                }
-            }
-
             // Status
             if (statusMessage.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
@@ -304,23 +327,39 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
     // Bottom sheets
     if (showSend) {
-        ModalBottomSheet(onDismissRequest = { showSend = false }) {
+        ModalBottomSheet(
+            onDismissRequest = { showSend = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            modifier = Modifier.fillMaxHeight(0.9f)
+        ) {
             SendScreen(appState) { showSend = false }
         }
     }
     if (showReceive) {
-        ModalBottomSheet(onDismissRequest = { showReceive = false }) {
+        ModalBottomSheet(
+            onDismissRequest = { showReceive = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            modifier = Modifier.fillMaxHeight(0.9f)
+        ) {
             ReceiveScreen(appState) { showReceive = false }
         }
     }
     if (showBuy) {
-        ModalBottomSheet(onDismissRequest = { showBuy = false }) {
-            BuyScreen(appState) { showBuy = false }
+        ModalBottomSheet(
+            onDismissRequest = { showBuy = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            modifier = Modifier.fillMaxHeight(0.9f)
+        ) {
+            BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) { showBuy = false; prefillTradeAmount = 0.0 }
         }
     }
     if (showSell) {
-        ModalBottomSheet(onDismissRequest = { showSell = false }) {
-            SellScreen(appState) { showSell = false }
+        ModalBottomSheet(
+            onDismissRequest = { showSell = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            modifier = Modifier.fillMaxHeight(0.9f)
+        ) {
+            SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }
         }
     }
 }

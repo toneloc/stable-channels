@@ -8,12 +8,26 @@ import java.util.concurrent.TimeUnit
 
 fun Long.satsFormatted(): String {
     val nf = NumberFormat.getNumberInstance(Locale.US)
-    return "${nf.format(this)} sats"
+    return "${nf.format(this)}"
 }
 
 fun Long.btcFormatted(): String {
     val btc = this.toDouble() / Constants.SATS_IN_BTC
     return String.format(Locale.US, "%.8f BTC", btc)
+}
+
+/** Format as BTC with spaced digit groups: "0.00 190 079 BTC" (matches iOS) */
+fun Long.btcSpacedFormatted(): String {
+    val btc = this.toDouble() / Constants.SATS_IN_BTC
+    val raw = String.format(Locale.US, "%.8f", btc)
+    val dotIndex = raw.indexOf('.')
+    if (dotIndex < 0) return "$raw BTC"
+    val whole = raw.substring(0, dotIndex)
+    val decimals = raw.substring(dotIndex + 1)
+    val grouped = decimals.substring(0, 2) +
+            "\u2009" + decimals.substring(2, 5) +
+            "\u2009" + decimals.substring(5, 8)
+    return "$whole.$grouped BTC"
 }
 
 fun Double.usdFormatted(): String {

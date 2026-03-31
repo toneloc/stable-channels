@@ -21,9 +21,9 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 @Composable
-fun SellScreen(appState: AppState, onDismiss: () -> Unit) {
+fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () -> Unit) {
     var step by remember { mutableStateOf(TradeStep.AMOUNT) }
-    var amountText by remember { mutableStateOf("") }
+    var amountText by remember { mutableStateOf(if (prefillAmountUSD > 0) String.format(Locale.US, "%.2f", prefillAmountUSD) else "") }
     var error by remember { mutableStateOf<String?>(null) }
     var isExecuting by remember { mutableStateOf(false) }
     var pendingPaymentId by remember { mutableStateOf<String?>(null) }

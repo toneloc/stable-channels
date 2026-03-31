@@ -137,13 +137,6 @@ class NodeService(private val context: Context) {
         channels = node?.listChannels() ?: emptyList()
     }
 
-    fun connectAndOpenChannel(pubkey: String, address: String, amountSats: Long) {
-        val n = node ?: throw NodeServiceError()
-        n.connect(pubkey, address, true)
-        n.openChannel(pubkey, address, amountSats.toULong(), null, null)
-        refreshChannels()
-    }
-
     fun closeChannel(userChannelId: String, counterpartyNodeId: String) {
         val n = node ?: throw NodeServiceError()
         n.closeChannel(userChannelId, counterpartyNodeId)

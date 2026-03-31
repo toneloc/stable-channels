@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
 
 class DatabaseService(context: Context) : SQLiteOpenHelper(
@@ -208,6 +209,15 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         amountUSD: Double? = null, btcPrice: Double? = null, counterparty: String? = null,
         status: String = "completed", txid: String? = null, address: String? = null
     ): Long {
+        // Dedup: skip if payment_id already exists
+        if (!paymentId.isNullOrEmpty()) {
+            val cursor = readableDatabase.rawQuery(
+                "SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId)
+            )
+            val exists = cursor.use { it.moveToFirst() }
+            if (exists) return -1
+        }
+
         val cv = ContentValues().apply {
             put("payment_id", paymentId)
             put("payment_type", paymentType)
@@ -330,6 +340,33 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 ))
             }
             list
+        }
+    }
+
+    fun seedHistoricalPrices() {
+        val db = writableDatabase
+        // Check if already seeded
+        val cursor = db.rawQuery("SELECT COUNT(*) FROM daily_prices", null)
+        val count = cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+        if (count >= 100) return // already seeded
+
+        db.beginTransaction()
+        try {
+            val stmt = db.compileStatement(
+                "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, source) VALUES (?, ?, ?, ?, ?, 'seed')"
+            )
+            for (p in HistoricalPrices.seedPrices) {
+                stmt.clearBindings()
+                stmt.bindString(1, p.date)
+                stmt.bindDouble(2, p.open)
+                stmt.bindDouble(3, p.high)
+                stmt.bindDouble(4, p.low)
+                stmt.bindDouble(5, p.close)
+                stmt.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 

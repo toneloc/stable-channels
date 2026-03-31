@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -19,7 +20,6 @@ enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
 @Composable
 fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var input by remember { mutableStateOf("") }
-    var amountSats by remember { mutableStateOf("") }
     var amountUSDStr by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
@@ -44,23 +44,21 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
     val isAmountlessBolt11 = inputType == InputType.BOLT11 && parsedBolt11Msat == null && input.isNotBlank()
 
+    val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
     val manualAmountMsat: Long = run {
-        if (btcPrice <= 0) return@run 0L
-        val usd = amountUSDStr.toDoubleOrNull() ?: return@run 0L
-        if (usd <= 0) return@run 0L
-        val btc = usd / btcPrice
-        (btc * Constants.SATS_IN_BTC * 1000).toLong()
+        if (btcPrice <= 0 || enteredUSD <= 0) return@run 0L
+        (enteredUSD / btcPrice * Constants.SATS_IN_BTC * 1000).toLong()
     }
+    val manualAmountSats = manualAmountMsat / 1000
 
     val needsAmount = when {
-        isAmountlessBolt11 -> manualAmountMsat == 0L
-        inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN -> (amountSats.toLongOrNull() ?: 0) == 0L
-        else -> false
+        inputType == InputType.BOLT11 && !isAmountlessBolt11 -> false
+        else -> manualAmountMsat == 0L
     }
 
     val displaySats: Long = when (inputType) {
-        InputType.BOLT11 -> if ((parsedBolt11Msat ?: 0) > 0) (parsedBolt11Msat ?: 0) / 1000 else manualAmountMsat / 1000
-        InputType.BOLT12, InputType.ONCHAIN -> amountSats.toLongOrNull() ?: 0
+        InputType.BOLT11 -> if ((parsedBolt11Msat ?: 0) > 0) (parsedBolt11Msat ?: 0) / 1000 else manualAmountSats
+        InputType.BOLT12, InputType.ONCHAIN -> manualAmountSats
         InputType.UNKNOWN -> 0
     }
 
@@ -99,44 +97,36 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
 
-            // Bolt11 with amount
+            // Bolt11 with amount — show USD and BTC
             if (inputType == InputType.BOLT11 && (parsedBolt11Msat ?: 0) > 0) {
+                Spacer(Modifier.height(8.dp))
                 displayUSD?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text("${it.usdFormatted()}", style = MaterialTheme.typography.labelMedium)
+                    Text(it.usdFormatted(), style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
+                Text(
+                    displaySats.btcSpacedFormatted(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
-            // Amountless bolt11 — USD input
-            if (isAmountlessBolt11) {
+            // Amount input (USD) — for amountless bolt11, bolt12, onchain
+            if (isAmountlessBolt11 || inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN) {
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = amountUSDStr,
-                    onValueChange = { amountUSDStr = it },
+                    onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
                     label = { Text("Amount (USD)") },
+                    prefix = { Text("$") },
                     modifier = Modifier.fillMaxWidth()
                 )
-                if (manualAmountMsat > 0) {
-                    displayUSD?.let {
-                        Spacer(Modifier.height(4.dp))
-                        Text("~ ${it.usdFormatted()}", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-
-            // Bolt12 / onchain — sats input
-            if (inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN) {
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = amountSats,
-                    onValueChange = { amountSats = it.filter { c -> c.isDigit() } },
-                    label = { Text("Amount (sats)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                val sats = amountSats.toLongOrNull() ?: 0
-                if (sats > 0 && btcPrice > 0) {
-                    val usd = (sats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                    Text("~ ${usd.usdFormatted()}", style = MaterialTheme.typography.labelSmall)
+                if (manualAmountSats > 0) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        manualAmountSats.btcSpacedFormatted(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
@@ -175,7 +165,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     result = "Payment sent"
                                 }
                                 InputType.BOLT12 -> {
-                                    val sats = amountSats.toLongOrNull() ?: throw Exception("Enter amount")
+                                    val sats = manualAmountSats
+                                    if (sats <= 0) throw Exception("Enter amount")
                                     val offer = Offer.fromStr(trimmed)
                                     val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
                                     appState.databaseService?.recordPayment(
@@ -185,7 +176,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     result = "Bolt12 payment sent"
                                 }
                                 InputType.ONCHAIN -> {
-                                    val sats = amountSats.toLongOrNull() ?: throw Exception("Enter amount")
+                                    val sats = manualAmountSats
+                                    if (sats <= 0) throw Exception("Enter amount")
                                     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
                                     if (hasChannel) {
                                         if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
