@@ -216,20 +216,7 @@ struct SendView: View {
                         }
                     }
 
-                    if detectedType != .unknown {
-                        Section {
-                            Button {
-                                Task { await send() }
-                            } label: {
-                                if isSending {
-                                    ProgressView().frame(maxWidth: .infinity)
-                                } else {
-                                    Text("Send Payment").frame(maxWidth: .infinity)
-                                }
-                            }
-                            .disabled(isSending || success || needsAmount)
-                        }
-                    }
+                    // Send button is below the form as a sticky bar
                 }
 
                 if success {
@@ -250,6 +237,29 @@ struct SendView: View {
                             }
                         }
                     }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if detectedType != .unknown && !success {
+                    Button {
+                        Task { await send() }
+                    } label: {
+                        if isSending {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                        } else {
+                            Text("Send Payment")
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .disabled(isSending || success || needsAmount)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
                 }
             }
             .navigationTitle("Send")

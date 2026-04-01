@@ -149,8 +149,13 @@ struct PaymentRowView: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                Text(payment.amountSats.satsFormatted)
-                    .fontWeight(.medium)
+                if let usd = payment.amountUSD {
+                    Text(usd.usdFormatted)
+                        .fontWeight(.medium)
+                } else {
+                    Text(payment.amountSats.satsFormatted)
+                        .fontWeight(.medium)
+                }
                 Text(statusLabel)
                     .font(.caption)
                     .foregroundStyle(statusColor)
