@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     var address by remember { mutableStateOf("") }
-    var amountSats by remember { mutableStateOf("") }
+    var amountUSDStr by remember { mutableStateOf("") }
     var sendAll by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
@@ -73,15 +73,16 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             if (!sendAll) {
                 OutlinedTextField(
-                    value = amountSats,
-                    onValueChange = { amountSats = it.filter { c -> c.isDigit() } },
-                    label = { Text("Amount (sats)") },
+                    value = amountUSDStr,
+                    onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("Amount (USD)") },
+                    prefix = { Text("$") },
                     modifier = Modifier.fillMaxWidth()
                 )
-                val sats = amountSats.toLongOrNull() ?: 0
-                if (sats > 0 && btcPrice > 0) {
-                    val usd = (sats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                    Text("~ ${usd.usdFormatted()}", style = MaterialTheme.typography.labelSmall)
+                val usd = amountUSDStr.toDoubleOrNull() ?: 0.0
+                val satsFromUSD = if (btcPrice > 0 && usd > 0) (usd / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
+                if (satsFromUSD > 0) {
+                    Text("~ ${satsFromUSD.satsFormatted()}", style = MaterialTheme.typography.labelSmall)
                 }
             }
 
@@ -111,7 +112,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 )
                                 result = "All funds sent. TXID: $txid"
                             } else {
-                                val sats = amountSats.toLongOrNull() ?: throw Exception("Enter amount")
+                                val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
+                                val sats = if (price > 0) (usd / price * Constants.SATS_IN_BTC).toLong() else throw Exception("No price available")
                                 if (hasChannel) {
                                     if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value

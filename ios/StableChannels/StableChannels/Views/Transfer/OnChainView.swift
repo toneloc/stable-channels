@@ -4,12 +4,17 @@ struct OnChainSendView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
     @State private var address = ""
-    @State private var amountSats = ""
+    @State private var amountUSDStr = ""
     @State private var sendAll = false
     @State private var isSending = false
     @State private var errorMessage: String?
     @State private var txid: String?
     @State private var spliceSuccess = false
+
+    private var amountSats: UInt64? {
+        guard let usd = Double(amountUSDStr), usd > 0, appState.btcPrice > 0 else { return nil }
+        return UInt64(usd / appState.btcPrice * Double(Constants.satsInBTC))
+    }
 
     private var hasReadyChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
@@ -25,13 +30,22 @@ struct OnChainSendView: View {
                         .autocorrectionDisabled()
                 }
 
-                Section("Amount (sats)") {
+                Section("Amount") {
                     if sendAll {
                         Text("All available funds")
                             .foregroundStyle(.secondary)
                     } else {
-                        TextField("0", text: $amountSats)
-                            .keyboardType(.numberPad)
+                        HStack {
+                            Text("$")
+                                .foregroundStyle(.secondary)
+                            TextField("0.00", text: $amountUSDStr)
+                                .keyboardType(.decimalPad)
+                        }
+                        if let sats = amountSats, sats > 0 {
+                            Text("\(sats.btcSpacedFormatted) BTC")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Toggle("Send All", isOn: $sendAll)
                 }
@@ -54,7 +68,7 @@ struct OnChainSendView: View {
                             Text("Send").frame(maxWidth: .infinity)
                         }
                     }
-                    .disabled(address.isEmpty || (!sendAll && amountSats.isEmpty) || isSending)
+                    .disabled(address.isEmpty || (!sendAll && (amountSats ?? 0) == 0) || isSending)
                 }
 
                 if let txid {
@@ -98,7 +112,7 @@ struct OnChainSendView: View {
         errorMessage = nil
         defer { isSending = false }
 
-        let sats = sendAll ? 0 : (UInt64(amountSats) ?? 0)
+        let sats = sendAll ? UInt64(0) : (amountSats ?? 0)
         guard sendAll || sats > 0 else { return }
 
         do {

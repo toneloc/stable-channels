@@ -43,6 +43,12 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
+    // Set cooldown so stability check doesn't immediately re-fire
+    sc.last_stability_payment = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
     Some(usd_to_deduct)
 }
 
@@ -78,8 +84,28 @@ pub fn reconcile_forwarded(
         let btc_amount = new_expected / price;
         sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
     }
-    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+    // After forwarding: user's actual remaining balance is user_sats - total_forwarded_sats
+    let remaining_user_sats = user_sats.saturating_sub(total_forwarded_sats);
+    sc.native_sats = remaining_user_sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
+
+    // Set cooldown so stability check doesn't immediately re-fire on a price micro-tick
+    let cooldown_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    sc.last_stability_payment = cooldown_ts;
+
+    audit_event(
+        "RECONCILE_FORWARDED_COOLDOWN_SET",
+        json!({
+            "user_channel_id": format!("{}", sc.user_channel_id),
+            "last_stability_payment": cooldown_ts,
+            "new_expected_usd": sc.expected_usd.0,
+            "new_backing_sats": sc.backing_sats,
+            "new_native_sats": sc.native_sats,
+        }),
+    );
 
     Some(usd_to_deduct)
 }
@@ -383,11 +409,43 @@ pub fn check_stability(
         return None;
     }
 
+    // Safety check: if the actual channel balance still covers backing + some native,
+    // the "below par" signal is likely from an in-flight HTLC, not a real drift.
+    // Only the LSP side (!is_stable_receiver) can trigger this false positive.
+    if !sc.is_stable_receiver && is_receiver_below_expected {
+        // User appears below par — verify their actual balance still covers backing
+        if sc.stable_receiver_btc.sats >= sc.backing_sats {
+            audit_event(
+                "STABILITY_SKIP_HTLC_SAFETY",
+                json!({
+                    "user_channel_id": format!("{}", sc.user_channel_id),
+                    "receiver_sats": sc.stable_receiver_btc.sats,
+                    "backing_sats": sc.backing_sats,
+                    "reason": "receiver balance still covers backing — likely in-flight HTLC"
+                }),
+            );
+            return None;
+        }
+    }
+
     // Enforce cooldown between stability payments
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
+
+    audit_event(
+        "STABILITY_PAY_COOLDOWN_CHECK",
+        json!({
+            "user_channel_id": format!("{}", sc.user_channel_id),
+            "now": now,
+            "last_stability_payment": sc.last_stability_payment,
+            "seconds_since": now - sc.last_stability_payment,
+            "cooldown_secs": STABILITY_PAYMENT_COOLDOWN_SECS,
+            "will_block": sc.last_stability_payment > 0 && (now - sc.last_stability_payment) < STABILITY_PAYMENT_COOLDOWN_SECS as i64,
+        }),
+    );
+
     if sc.last_stability_payment > 0
         && (now - sc.last_stability_payment) < STABILITY_PAYMENT_COOLDOWN_SECS as i64
     {

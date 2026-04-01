@@ -60,7 +60,8 @@ struct SendView: View {
             }
             return manualAmountMsat / 1000
         case .bolt12, .onchain:
-            return UInt64(amountSats) ?? 0
+            guard let usd = Double(amountSats), usd > 0, appState.btcPrice > 0 else { return 0 }
+            return UInt64(usd / appState.btcPrice * Double(Constants.satsInBTC))
         case .unknown:
             return 0
         }
@@ -144,8 +145,9 @@ struct SendView: View {
                         case .bolt12:
                             Label("Bolt12 Offer", systemImage: "bolt.fill")
                                 .foregroundStyle(.purple)
-                            TextField("Amount (sats)", text: $amountSats)
-                                .keyboardType(.numberPad)
+                            TextField("Amount (USD)", text: $amountSats)
+                                .keyboardType(.decimalPad)
+                                .autocorrectionDisabled()
                             if let usd = displayUSD {
                                 HStack {
                                     Text("Amount")
@@ -171,8 +173,9 @@ struct SendView: View {
                         case .onchain:
                             Label("On-chain Address", systemImage: "link")
                                 .foregroundStyle(.orange)
-                            TextField("Amount (sats)", text: $amountSats)
-                                .keyboardType(.numberPad)
+                            TextField("Amount (USD)", text: $amountSats)
+                                .keyboardType(.decimalPad)
+                                .autocorrectionDisabled()
                             if let usd = displayUSD {
                                 HStack {
                                     Text("Amount")
@@ -264,7 +267,7 @@ struct SendView: View {
         case .bolt11:
             return isAmountlessBolt11 && manualAmountMsat == 0
         case .bolt12, .onchain:
-            return (UInt64(amountSats) ?? 0) == 0
+            return displaySats == 0
         default:
             return false
         }
@@ -309,7 +312,8 @@ struct SendView: View {
                 sentAmountSats = actualMsat / 1000
 
             case .bolt12:
-                guard let sats = UInt64(amountSats), sats > 0 else { return }
+                let sats = displaySats
+                guard sats > 0 else { return }
                 let offer = try Offer.fromStr(offerStr: trimmed)
                 let msat = sats * 1000
                 let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
@@ -327,7 +331,8 @@ struct SendView: View {
                 sentAmountSats = sats
 
             case .onchain:
-                guard let sats = UInt64(amountSats), sats > 0 else { return }
+                let sats = displaySats
+                guard sats > 0 else { return }
                 let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
                 // Route through splice-out if channel exists
                 if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }) {

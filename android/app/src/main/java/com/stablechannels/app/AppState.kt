@@ -205,7 +205,11 @@ class AppState(private val context: Context) : ViewModel() {
                         spliceTxid = null
                         val price = priceService.currentPrice.value
                         val result = StabilityService.reconcileOutgoing(sc, price)
-                        _stableChannel.value = result.first
+                        val reconciled = result.first
+                        if (result.second != null) {
+                            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+                        }
+                        _stableChannel.value = reconciled
                     } else {
                         _stableChannel.value = sc
                     }
@@ -342,7 +346,11 @@ class AppState(private val context: Context) : ViewModel() {
             updateStableBalances()
             val price = priceService.currentPrice.value
             val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-            _stableChannel.value = result.first
+            val reconciled = result.first
+            if (result.second != null) {
+                reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+            }
+            _stableChannel.value = reconciled
             if (paymentId != null) {
                 databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
             }

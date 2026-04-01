@@ -337,7 +337,8 @@ class AppState {
         guard case .wallet = phase else { return }
         cancelBackgroundStop()
         if nodeService.isRunning {
-            print("[App] Node still running (grace period), reconnecting to LSP")
+            print("[App] Node still running (grace period), restoring gossip + reconnecting")
+            restoreGossipToDB()
             ensureLSPConnected()
             refreshBalances()
             updateStableBalances()
@@ -371,36 +372,47 @@ class AppState {
     /// This shrinks the DB from ~8.7MB to ~30KB so the NSE can load it.
     private func extractGossipFromDB() {
         let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
-        let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin").path
+        let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin")
+        let metricsPath = Constants.userDataDir.appendingPathComponent("node_metrics.bin")
 
         var db: OpaquePointer?
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
         defer { sqlite3_close(db) }
 
-        // Read the network_graph blob
+        // Extract network_graph
         var stmt: OpaquePointer?
         let query = "SELECT value FROM ldk_node_data WHERE key = 'network_graph'"
         guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
 
         if sqlite3_step(stmt) == SQLITE_ROW {
             let blobSize = sqlite3_column_bytes(stmt, 0)
-            if blobSize > 0, let blobPtr = sqlite3_column_blob(stmt, 0) {
+            if blobSize > 1024, let blobPtr = sqlite3_column_blob(stmt, 0) {
                 let data = Data(bytes: blobPtr, count: Int(blobSize))
-                do {
-                    try data.write(to: URL(fileURLWithPath: gossipPath))
-                    print("[App] Saved network_graph (\(blobSize) bytes) to file")
+                try? data.write(to: gossipPath)
+                print("[App] Saved network_graph (\(blobSize) bytes) to file")
+            }
+        }
+        sqlite3_finalize(stmt)
 
-                    // Delete from DB and compact
-                    sqlite3_finalize(stmt)
-                    stmt = nil
-                    sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
-                    sqlite3_exec(db, "VACUUM", nil, nil, nil)
-                    print("[App] Stripped network_graph from DB")
-                } catch {
-                    print("[App] Failed to save network_graph: \(error)")
+        // Extract node_metrics (contains RGS timestamp)
+        var metricsStmt: OpaquePointer?
+        let metricsQuery = "SELECT value FROM ldk_node_data WHERE key = 'node_metrics'"
+        if sqlite3_prepare_v2(db, metricsQuery, -1, &metricsStmt, nil) == SQLITE_OK {
+            if sqlite3_step(metricsStmt) == SQLITE_ROW {
+                let size = sqlite3_column_bytes(metricsStmt, 0)
+                if size > 0, let ptr = sqlite3_column_blob(metricsStmt, 0) {
+                    try? Data(bytes: ptr, count: Int(size)).write(to: metricsPath)
                 }
             }
+            sqlite3_finalize(metricsStmt)
+        }
+
+        // Only delete from DB if file was saved successfully
+        if FileManager.default.fileExists(atPath: gossipPath.path) {
+            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
+            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
+            sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
+            print("[App] Stripped gossip data from DB")
         }
     }
 
@@ -437,19 +449,20 @@ class AppState {
         }
     }
 
-    /// Restore network_graph blob from file back into SQLite.
+    /// Restore network_graph and node_metrics from files back into SQLite.
     private func restoreGossipToDB() {
         let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite").path
         let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin")
+        let metricsPath = Constants.userDataDir.appendingPathComponent("node_metrics.bin")
 
         guard FileManager.default.fileExists(atPath: gossipPath.path) else { return }
+        guard let graphData = try? Data(contentsOf: gossipPath) else { return }
 
-        guard let data = try? Data(contentsOf: gossipPath) else { return }
-
-        // Skip restoring an empty/corrupt graph — forces fresh full RGS sync
-        if data.count < 1024 {
-            print("[App] network_graph.bin too small (\(data.count) bytes), deleting for fresh sync")
+        // Skip restoring an empty/corrupt graph
+        if graphData.count < 1024 {
+            print("[App] network_graph.bin too small (\(graphData.count) bytes), deleting for fresh sync")
             try? FileManager.default.removeItem(at: gossipPath)
+            try? FileManager.default.removeItem(at: metricsPath)
             return
         }
 
@@ -457,19 +470,34 @@ class AppState {
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else { return }
         defer { sqlite3_close(db) }
 
+        // Restore network_graph
         let upsert = "INSERT OR REPLACE INTO ldk_node_data (primary_namespace, secondary_namespace, key, value) VALUES ('', '', 'network_graph', ?)"
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, upsert, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-
-        data.withUnsafeBytes { ptr in
-            sqlite3_bind_blob(stmt, 1, ptr.baseAddress, Int32(data.count), nil)
+        if sqlite3_prepare_v2(db, upsert, -1, &stmt, nil) == SQLITE_OK {
+            graphData.withUnsafeBytes { ptr in
+                sqlite3_bind_blob(stmt, 1, ptr.baseAddress, Int32(graphData.count), nil)
+            }
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
         }
-        sqlite3_step(stmt)
 
-        // Clean up the file
+        // Restore node_metrics (contains RGS timestamp — must match the graph)
+        if let metricsData = try? Data(contentsOf: metricsPath), metricsData.count > 0 {
+            let metricsUpsert = "INSERT OR REPLACE INTO ldk_node_data (primary_namespace, secondary_namespace, key, value) VALUES ('', '', 'node_metrics', ?)"
+            var metricsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, metricsUpsert, -1, &metricsStmt, nil) == SQLITE_OK {
+                metricsData.withUnsafeBytes { ptr in
+                    sqlite3_bind_blob(metricsStmt, 1, ptr.baseAddress, Int32(metricsData.count), nil)
+                }
+                sqlite3_step(metricsStmt)
+                sqlite3_finalize(metricsStmt)
+            }
+        }
+
+        // Clean up files
         try? FileManager.default.removeItem(at: gossipPath)
-        print("[App] Restored network_graph (\(data.count) bytes) to DB")
+        try? FileManager.default.removeItem(at: metricsPath)
+        print("[App] Restored network_graph (\(graphData.count) bytes) + node_metrics to DB")
     }
 
     // MARK: - Push Token Re-registration
@@ -848,6 +876,9 @@ class AppState {
         // Reconcile: if outgoing payment exceeded native BTC, deduct from stable
         let oldExpected = stableChannel.expectedUSD.amount
         if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
+            // Set cooldown so stability check doesn't immediately re-fire
+            stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
+            saveChannelToDB()
             AuditService.log("OUTGOING_STABLE_DEDUCTED", data: [
                 "payment_hash": paymentHashStr,
                 "usd_deducted": "\(usdDeducted)",
