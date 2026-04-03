@@ -726,14 +726,12 @@ mod tests {
     // ================================================================
 
     #[test]
-    fn incoming_resets_backing_to_equilibrium() {
-        // $500 at $100k → backing should be 500k
-        // Simulate: backing drifted to 600k for some reason
+    fn incoming_does_not_reset_backing() {
+        // backing_sats stays as-is on incoming — only the sender resets it
         let mut sc = test_sc(500.0, 100_000.0, 1_200_000);
         sc.backing_sats = 600_000; // drifted
         reconcile_incoming(&mut sc);
-        let expected_backing = (500.0 / 100_000.0 * 100_000_000.0) as u64;
-        assert_eq!(sc.backing_sats, expected_backing);
+        assert_eq!(sc.backing_sats, 600_000); // unchanged
     }
 
     #[test]
@@ -862,12 +860,13 @@ mod tests {
 
     #[test]
     fn native_updated_after_reconcile_incoming() {
-        // Simulate stability payment: receiver gained sats, reconcile should fix native
+        // Simulate stability payment: receiver gained sats
+        // backing stays at drifted value, native = receiver - backing
         let mut sc = test_sc(500.0, 100_000.0, 1_200_000);
         sc.backing_sats = 600_000; // drifted
         reconcile_incoming(&mut sc);
-        // After reconcile: backing = 500k at $100k, native = 1.2M - 500k = 700k
-        assert_eq!(sc.native_channel_btc.sats, 1_200_000 - 500_000);
+        // native = 1.2M - 600k (drifted backing) = 600k
+        assert_eq!(sc.native_channel_btc.sats, 1_200_000 - 600_000);
     }
 
     #[test]
