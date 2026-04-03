@@ -150,10 +150,13 @@ pub fn recompute_native(sc: &mut StableChannel) {
 /// Reconcile an incoming payment — derive backing_sats from channel balance.
 ///
 /// After receiving a payment, the user's balance increased but
-/// `native_sats` hasn't changed. Derive `backing_sats` from the
-/// actual balance so the extra sats are attributed correctly.
+/// `native_sats` hasn't changed. Reset `backing_sats` to equilibrium
+/// so the extra sats are attributed correctly.
 pub fn reconcile_incoming(sc: &mut StableChannel) {
-    // backingSats stays the same on incoming — native absorbs the increase.
+    if sc.expected_usd.0 > 0.0 && sc.latest_price > 0.0 {
+        let btc_amount = sc.expected_usd.0 / sc.latest_price;
+        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    }
     recompute_native(sc);
 }
 
@@ -753,14 +756,12 @@ mod tests {
     }
 
     #[test]
-    fn incoming_derives_from_balance_not_price() {
-        // With native_sats model, reconcile_incoming derives backing from balance,
-        // not from price. Even with zero price, it should work correctly.
+    fn incoming_skips_backing_reset_when_price_zero() {
+        // When price is unavailable, backing_sats is left unchanged.
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         sc.latest_price = 0.0; // price unavailable
         let backing_before = sc.backing_sats;
         reconcile_incoming(&mut sc);
-        // backing_sats = receiver_sats - native_sats = 1M - 500k = 500k
         assert_eq!(sc.backing_sats, backing_before);
     }
 
