@@ -276,6 +276,9 @@ impl UserApp {
         println!("Initializing user node...");
 
         let data_dir = get_user_data_dir();
+        
+        std::fs::create_dir_all(&data_dir)
+            .expect("Failed to create data directory");
 
         let lsp_pubkey = DEFAULT_LSP_PUBKEY
             .parse::<PublicKey>()
@@ -451,6 +454,7 @@ impl UserApp {
         // Initialize SQLite database
         let db =
             Database::open(&data_dir).map_err(|e| format!("Failed to open database: {}", e))?;
+
 
         let mut app = Self {
             node: Arc::clone(&node),
