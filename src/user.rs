@@ -276,6 +276,13 @@ impl UserApp {
         println!("Initializing user node...");
 
         let data_dir = get_user_data_dir();
+        std::fs::create_dir_all(&data_dir).map_err(|e| {
+            format!(
+                "Failed to create user data directory {}: {}",
+                data_dir.display(),
+                e
+            )
+        })?;
 
         let lsp_pubkey = DEFAULT_LSP_PUBKEY
             .parse::<PublicKey>()
