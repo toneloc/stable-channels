@@ -432,10 +432,8 @@ class NotificationService: UNNotificationServiceExtension {
                 btcPrice: price
             )
 
-            // Reset backing_sats to equilibrium after payment
-            let newBacking = UInt64((channelState.expectedUSD / price) * Self.satsInBTC)
-            updateBackingSatsInDB(dbPath: dbPath, backingSats: newBacking)
-            nseLog("Reset backingSats to \(newBacking)")
+            // Do NOT reset backingSats — keysend accepted but not confirmed delivered.
+            // Next stability check will detect remaining drift after cooldown.
 
             content.title = "Stability Payment Sent"
             content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)

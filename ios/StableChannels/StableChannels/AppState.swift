@@ -1077,9 +1077,9 @@ class AppState {
             stableChannel.lastStabilityPayment = now
             stableChannel.paymentMade = true
 
-            // Reset backing_sats to equilibrium after payment
-            stableChannel.backingSats = UInt64((stableChannel.expectedUSD.amount / price) * Double(Constants.satsInBTC))
-            StabilityService.recomputeNative(&stableChannel)
+            // Do NOT reset backingSats here — sendKeysend returning Ok only means
+            // LDK accepted the payment, not that it was delivered.
+            // Next stability check (after cooldown) will detect remaining drift.
             saveChannelToDB()
 
             // Record as pending payment

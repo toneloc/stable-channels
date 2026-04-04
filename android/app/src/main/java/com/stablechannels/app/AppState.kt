@@ -453,9 +453,8 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 val paymentId = nodeService.sendKeysend(amountMsat, sc.counterparty)
                 val updated = sc.copy(lastStabilityPayment = now)
-                // Reset backing_sats to equilibrium after payment
-                updated.backingSats = ((updated.expectedUSD.amount / price) * Constants.SATS_IN_BTC).toLong()
-                StabilityService.recomputeNative(updated)
+                // Do NOT reset backingSats here — sendKeysend returning Ok only means
+                // LDK accepted the payment, not delivered. Next check handles remaining drift.
                 _stableChannel.value = updated
 
                 databaseService?.recordPayment(

@@ -466,9 +466,10 @@ pub fn check_stability(
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // Reset backing_sats to equilibrium after payment
-            sc.backing_sats = ((sc.expected_usd.0 / current_price) * 100_000_000.0) as u64;
-            recompute_native(sc);
+            // Do NOT reset backing_sats here — send() returning Ok only means
+            // LDK accepted the payment, not that it was delivered.
+            // The next stability check (after cooldown) will detect any remaining
+            // drift and send a correction if needed.
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
