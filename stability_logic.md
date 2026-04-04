@@ -42,11 +42,11 @@ If drift exceeds threshold → **PAY**:
 - Price went **up** → user pays LSP the excess (user is above par)
 - Price went **down** → LSP pays user the shortfall (user is below par)
 
-### 4. Payment sent
+### 4. Stability payment sent
 
-The paying side sends a keysend for the drift amount. A 120-second cooldown is set to prevent rapid-fire payments. `backing_sats` is NOT reset immediately — LDK's `send()` only means the payment was accepted for sending, not delivered. The next stability check after the cooldown detects any remaining drift and corrects.
+The paying side sends a keysend to its channel counterparty for the drift amount. This is an internal channel rebalancing payment, not a payment to an external destination. A 120-second cooldown is set to prevent rapid-fire payments. `backing_sats` is NOT reset immediately — LDK's `send()` only means the payment was accepted for sending, not delivered. The next stability check after the cooldown detects any remaining drift and corrects.
 
-### 5. Payment received
+### 5. Stability payment received
 
 The receiving side runs `reconcile_incoming`, which only recomputes `native_channel_btc = receiver_sats - backing_sats`. `backing_sats` is not touched on the receiver side — the receiver's stability check won't fire for the same direction (CHECK_ONLY mode).
 
@@ -58,14 +58,36 @@ The receiving side runs `reconcile_incoming`, which only recomputes `native_chan
 | Price went down (user below par) | CHECK_ONLY — waits | **PAY** — sends shortfall to user |
 | Within threshold | STABLE | STABLE |
 
-## Regular Payments (Non-Stability)
+## Regular/External Payments (Non-Stability)
 
-When the user sends a regular Lightning payment:
+### Lightning payments
+
+When the user sends a Lightning payment to an external destination:
+- The payment is routed through the LSP to the recipient
 - If covered by `native_sats` → native decreases, stable position unchanged
 - If it overflows into backing → `expected_usd` is reduced proportionally, `backing_sats` recalculated, cooldown set
+- The LSP's forwarded payment handler detects the overflow and sends a SYNC_V1 message to update the user's `expected_usd`
 
-When the user receives a regular payment:
+When the user receives a Lightning payment from an external sender:
+- The payment is routed through the LSP to the user
 - `native_sats` increases, `backing_sats` unchanged
+- The user can then manually trade native BTC into a stable USD position using the balance bar slider (a "Sell BTC" trade that increases `expected_usd` and moves sats from native to backing)
+- If the user has no channel yet, the LSP opens a JIT channel via LSPS2
+
+### On-chain payments
+
+**Receiving on-chain (deposit):**
+- Funds arrive at the user's BDK on-chain wallet (a separate wallet from the Lightning channel)
+- On-chain balance shows in the app under "On-chain" section
+- Funds must be confirmed before they are spendable
+- To use on-chain funds for Lightning payments or trading, the user must **splice in** — this moves the on-chain sats into the Lightning channel via a splice transaction
+- The app shows a "Swap" button when the channel exists and on-chain funds are confirmed
+- During the splice, the app shows "Swap pending..." with a link to the transaction on mempool.space
+
+**Sending on-chain:**
+- If the user has an active Lightning channel: the send is executed as a **splice out** — sats are removed from the Lightning channel and sent to the destination Bitcoin address in a single on-chain transaction
+- If no channel exists: the send is a standard on-chain transaction from the BDK wallet. This covers the situation where the user wants to completely off-board from the wallet — close the channel (funds return on-chain), then send all on-chain funds to an external address.
+- Splice-out reduces the channel capacity; if the amount exceeds `native_sats`, it overflows into the stable position and `expected_usd` is reduced accordingly
 
 ## Safety Mechanisms
 
@@ -102,3 +124,13 @@ for pos in &mut channel.positions {
 ```
 
 Trades move sats between native and a specific position (`buy_usd`, `sell_eur`), or between positions (`swap USD → EUR`). The settlement logic per position is identical to today's single-asset flow — the only new complexity is price feed management and ensuring `native_sats = total - sum(all backings)` stays consistent.
+
+## Vision: A Global Derivatives Settlement Marketplace
+
+Through this mechanism — continuous, bilateral, self-custodial settlement over Lightning — we can create a global derivatives settlement marketplace built entirely on Bitcoin.
+
+The stability check is, at its core, a perpetual swap settled in real-time. The sats flowing between counterparties are economically equivalent to funding rate payments on perpetual futures contracts: the long side (Stable Provider) and the short side (Stable Receiver) continuously exchange value based on price movement, with no expiry and no centralized exchange.
+
+Adding periodic funding rates — a small fee paid by one side to the other based on demand imbalance — would complete the analogy to perpetual futures. If more users want stability (short BTC exposure) than want leverage (long BTC exposure), the stability seekers pay a funding rate to attract providers. If demand flips, providers pay seekers. This rate could be set by the market, adjusted per-channel, or governed by a simple algorithm based on aggregate demand across the LSP's channel portfolio.
+
+The result: peer-to-peer perpetual swaps on any asset with a price feed, settled continuously over Lightning, with no token, no exchange, no custody, and no counterparty beyond your direct channel partner. Every Lightning channel becomes a potential derivatives contract. Every LSP becomes a decentralized clearing house.
