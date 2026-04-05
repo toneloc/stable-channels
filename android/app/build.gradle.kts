@@ -19,9 +19,17 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("String", "NETWORK", "\"signet\"")
+            buildConfigField("String", "ESPLORA_URL", "\"https://mutinynet.com/api\"")
+            buildConfigField("String", "FALLBACK_ESPLORA_URL", "\"https://mutinynet.com/api\"")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            buildConfigField("String", "NETWORK", "\"bitcoin\"")
+            buildConfigField("String", "ESPLORA_URL", "\"https://blockstream.info/api\"")
+            buildConfigField("String", "FALLBACK_ESPLORA_URL", "\"https://mempool.space/api\"")
         }
     }
 

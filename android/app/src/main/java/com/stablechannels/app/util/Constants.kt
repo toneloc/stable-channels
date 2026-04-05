@@ -2,6 +2,8 @@ package com.stablechannels.app.util
 
 import android.content.Context
 import java.io.File
+import org.lightningdevkit.ldknode.Network
+import com.stablechannels.app.BuildConfig
 
 object Constants {
     const val SATS_IN_BTC: Long = 100_000_000L
@@ -9,7 +11,7 @@ object Constants {
     const val TRADE_MESSAGE_TYPE = "TRADE_V1"
     const val SYNC_MESSAGE_TYPE = "SYNC_V1"
 
-    const val DEFAULT_NETWORK = "bitcoin"
+    val NETWORK = if (BuildConfig.NETWORK == "signet") Network.SIGNET else Network.BITCOIN
     const val DEFAULT_USER_ALIAS = "user"
     const val DEFAULT_USER_PORT = 9736
     const val DEFAULT_LSP_ALIAS = "lsp"
@@ -17,8 +19,8 @@ object Constants {
 
     const val LSP_PUSH_REGISTER_URL = "https://stablechannels.com/api/register-push"
 
-    const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
-    const val FALLBACK_CHAIN_URL = "https://mempool.space/api"
+    val PRIMARY_CHAIN_URL = BuildConfig.ESPLORA_URL
+    val FALLBACK_CHAIN_URL = BuildConfig.FALLBACK_ESPLORA_URL
     const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     const val DEFAULT_LSP_ADDRESS = "34.198.44.89:9735"
     const val DEFAULT_GATEWAY_PUBKEY = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"

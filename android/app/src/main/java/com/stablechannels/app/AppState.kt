@@ -119,7 +119,7 @@ class AppState(private val context: Context) : ViewModel() {
                 if (seedFile.exists() || seedPhraseFile.exists()) {
                     _phase.value = Phase.SYNCING
                     waitForBackgroundService()
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(Constants.NETWORK, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
                     // Restore fundingTxid
@@ -141,7 +141,7 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(Constants.NETWORK, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
                     reregisterPushTokenIfNeeded()
@@ -162,7 +162,7 @@ class AppState(private val context: Context) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+                nodeService.start(Constants.NETWORK, chainUrl, mnemonic)
                 _phase.value = Phase.WALLET
                 refreshBalances()
                 reregisterPushTokenIfNeeded()
