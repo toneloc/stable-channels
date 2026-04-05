@@ -299,7 +299,7 @@ fun PriceChart(
                             val sx = (selectedIndex.toFloat() / (priceHistory.size - 1)) * w
                             val record = priceHistory[selectedIndex]
                             val sy = h - ((record.price - minPrice) / priceRange).toFloat() * h
-                            drawLine(Color.Gray.copy(alpha = 0.5f), Offset(sx, 0f), Offset(sx, h), 1f, PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
+                            drawLine(Color.Gray.copy(alpha = 0.5f), Offset(sx, 0f), Offset(sx, h), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
                             drawCircle(lineColor, 5f, Offset(sx, sy))
                             drawCircle(Color.White, 3f, Offset(sx, sy))
                         }
