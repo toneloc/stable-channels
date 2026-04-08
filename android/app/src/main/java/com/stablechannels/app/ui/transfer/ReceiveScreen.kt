@@ -137,6 +137,11 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
+                Text(
+                    "$${Constants.MAX_CHANNEL_USD.toInt()} Maximum",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(Modifier.height(12.dp))
             }
 
@@ -157,6 +162,15 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                     "${enteredSats.btcSpacedFormatted()}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (!hasChannel && enteredUSD > Constants.MAX_CHANNEL_USD) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Amount exceeds $${Constants.MAX_CHANNEL_USD.toInt()} channel limit",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
 
@@ -188,7 +202,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                         isGenerating = false
                     }
                 },
-                enabled = !isGenerating && enteredSats > 0,
+                enabled = !isGenerating && enteredSats > 0 && (hasChannel || enteredUSD <= Constants.MAX_CHANNEL_USD),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (isGenerating) CircularProgressIndicator(Modifier.size(20.dp))

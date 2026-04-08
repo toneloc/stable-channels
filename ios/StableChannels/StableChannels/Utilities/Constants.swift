@@ -45,6 +45,7 @@ enum Constants {
     static let stabilityThresholdUSD: Double = 0.10
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     static let minDisplayUSD: Double = 2.0
+    static let maxChannelUSD: Double = 100.0
 
 
     // MARK: - Channel

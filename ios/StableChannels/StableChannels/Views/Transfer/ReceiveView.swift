@@ -100,6 +100,16 @@ struct ReceiveView: View {
                     .foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
+
+                Text("$\(Int(Constants.maxChannelUSD)) Maximum")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !hasChannel && enteredUSDValue > Constants.maxChannelUSD {
+                Text("Amount exceeds $\(Int(Constants.maxChannelUSD)) channel limit")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
 
             Button("Generate Invoice") {
@@ -107,7 +117,7 @@ struct ReceiveView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(enteredSats == 0)
+            .disabled(enteredSats == 0 || (!hasChannel && enteredUSDValue > Constants.maxChannelUSD))
 
             if hasChannel {
                 Button("Any Amount") {

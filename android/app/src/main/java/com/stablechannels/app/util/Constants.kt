@@ -40,6 +40,7 @@ object Constants {
     const val STABILITY_THRESHOLD_USD: Double = 0.10
     const val STABILITY_PAYMENT_COOLDOWN_SECS: Long = 120
     const val MIN_DISPLAY_USD: Double = 2.0
+    const val MAX_CHANNEL_USD: Double = 100.0
     const val DEFAULT_CHANNEL_LIFETIME: Int = 2016
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000
