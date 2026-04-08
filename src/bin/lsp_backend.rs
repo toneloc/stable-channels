@@ -73,6 +73,33 @@ use axum::{
     Json, Router,
 };
 
+// ---------------------------------------------------------------------------
+// Runtime-configurable data directory
+// ---------------------------------------------------------------------------
+/// Fallback when neither CLI arg nor env var is provided.
+const DEFAULT_LSP_DATA_DIR: &str = "data-2/lsp";
+
+/// Stores the resolved data directory path for the lifetime of the process.
+static LSP_DATA_DIR_CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Initialise the data-directory from a caller-provided value.
+/// Must be called before `lsp_data_dir()` is first used.
+fn init_lsp_data_dir(path: String) {
+    // Ignore the error: if it was already set we just keep the first value.
+    let _ = LSP_DATA_DIR_CELL.set(path);
+}
+
+/// Return the configured LSP data directory.
+/// Resolution order:
+///   1. Value previously installed via `init_lsp_data_dir()` (set from CLI arg in main())
+///   2. `SC_DATA_DIR` environment variable
+///   3. Compiled-in default (`DEFAULT_LSP_DATA_DIR`)
+fn lsp_data_dir() -> &'static str {
+    LSP_DATA_DIR_CELL.get_or_init(|| {
+        std::env::var("SC_DATA_DIR").unwrap_or_else(|_| DEFAULT_LSP_DATA_DIR.to_owned())
+    })
+}
+
 static APP: Lazy<Mutex<ServerApp>> = Lazy::new(|| Mutex::new(ServerApp::new_with_mode("lsp")));
 
 /// Entry stored in stablechannels.json for persistence
@@ -223,7 +250,7 @@ pub struct StabilityPushTarget {
 
 /// Lazily initialized APNs client (loaded from .p8 key file)
 static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
-    let key_path = format!("{}/{}", LSP_DATA_DIR, APNS_KEY_FILE);
+    let key_path = format!("{}/{}", lsp_data_dir(), APNS_KEY_FILE);
     match std::fs::read(&key_path) {
         Ok(key_data) => {
             match ApnsClient::token(
@@ -257,7 +284,7 @@ static APNS_CLIENT: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
 
 /// Lazily initialized APNs client for production (App Store / TestFlight builds)
 static APNS_CLIENT_PRODUCTION: Lazy<Mutex<Option<ApnsClient>>> = Lazy::new(|| {
-    let key_path = format!("{}/{}", LSP_DATA_DIR, APNS_KEY_FILE);
+    let key_path = format!("{}/{}", lsp_data_dir(), APNS_KEY_FILE);
     match std::fs::read(&key_path) {
         Ok(key_data) => {
             match ApnsClient::token(
@@ -290,7 +317,7 @@ struct FcmCredentials {
 
 /// Lazily loaded FCM credentials from firebase-service-account.json
 static FCM_CREDENTIALS: Lazy<Mutex<Option<FcmCredentials>>> = Lazy::new(|| {
-    let path = format!("{}/{}", LSP_DATA_DIR, FCM_SERVICE_ACCOUNT_FILE);
+    let path = format!("{}/{}", lsp_data_dir(), FCM_SERVICE_ACCOUNT_FILE);
     match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
             Ok(json) => {
@@ -502,6 +529,19 @@ async fn send_fcm_push(device_token: &str, direction: &str, node_id: &str) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // ── Resolve data directory (CLI arg > env var > default) ──────────────
+    // Parse --data-dir <path> ourselves to avoid adding a CLI library.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
+        if let Some(val) = args.get(pos + 1) {
+            init_lsp_data_dir(val.clone());
+        } else {
+            eprintln!("[Error] --data-dir requires a value");
+            std::process::exit(1);
+        }
+    }
+    // lsp_data_dir() falls back to SC_DATA_DIR env var or the compiled-in default.
+    println!("[Init] Data directory: {}", lsp_data_dir());
     // ── periodic upkeep task ───────────────────────────────────────────────
     tokio::spawn(async {
         loop {
@@ -887,7 +927,7 @@ struct LogQuery {
 
 async fn get_audit_log(axum::extract::Query(q): axum::extract::Query<LogQuery>) -> String {
     let max_lines = q.lines.unwrap_or(500);
-    let path = format!("{}/audit_log.txt", LSP_DATA_DIR);
+    let path = format!("{}/audit_log.txt", lsp_data_dir());
     match std::fs::read_to_string(&path) {
         Ok(content) => {
             let all: Vec<&str> = content.lines().collect();
@@ -900,7 +940,7 @@ async fn get_audit_log(axum::extract::Query(q): axum::extract::Query<LogQuery>) 
 
 async fn get_ldk_log(axum::extract::Query(q): axum::extract::Query<LogQuery>) -> String {
     let max_lines = q.lines.unwrap_or(1000);
-    let path = format!("{}/ldk_node.log", LSP_DATA_DIR);
+    let path = format!("{}/ldk_node.log", lsp_data_dir());
     match std::fs::read_to_string(&path) {
         Ok(content) => {
             let all: Vec<&str> = content.lines().collect();
@@ -914,7 +954,7 @@ async fn get_ldk_log(axum::extract::Query(q): axum::extract::Query<LogQuery>) ->
 // ── Push token persistence (SQLite) ──────────────────────────────────────
 
 fn push_tokens_db_path() -> String {
-    format!("{}/push_tokens.db", LSP_DATA_DIR)
+    format!("{}/push_tokens.db", lsp_data_dir())
 }
 
 fn init_push_tokens_table(data_dir: &str) {
@@ -1116,8 +1156,7 @@ fn notify(node_id: &str, direction: &str) {
     });
 }
 
-// Hardcoded data directory
-const LSP_DATA_DIR: &str = "data-2/lsp";
+// LSP_DATA_DIR has been replaced by lsp_data_dir() — see the OnceLock above.
 
 /// Look up the value (in sats) of a specific transaction output via bitcoind RPC.
 ///
@@ -1167,7 +1206,7 @@ impl ServerApp {
     pub fn new_with_mode(mode: &str) -> Self {
         let (data_dir, node_alias, port) = match mode.to_lowercase().as_str() {
             // "lsp" => (get_lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
-            "lsp" => (LSP_DATA_DIR, DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
+            "lsp" => (lsp_data_dir(), DEFAULT_LSP_ALIAS, DEFAULT_LSP_PORT),
             _ => panic!("Invalid mode"),
         };
 
@@ -1197,7 +1236,7 @@ impl ServerApp {
         println!("[Init] Setting storage directory: {}", data_dir);
         builder.set_storage_dir_path(data_dir.to_string());
 
-        let audit_log_path = format!("{}/audit_log.txt", LSP_DATA_DIR);
+        let audit_log_path = format!("{}/audit_log.txt", lsp_data_dir());
         set_audit_log_path(&audit_log_path);
 
         let listen_addr = format!("0.0.0.0:{}", port).parse().unwrap();
@@ -1245,11 +1284,11 @@ impl ServerApp {
         let btc_price = get_cached_price();
         println!("[Init] Initial BTC price: {}", btc_price);
 
-        let db = Database::open(std::path::Path::new(LSP_DATA_DIR))
+        let db = Database::open(std::path::Path::new(lsp_data_dir()))
             .expect("Failed to open LSP database");
 
         // Create push_tokens table for persistent APNs device token storage
-        init_push_tokens_table(LSP_DATA_DIR);
+        init_push_tokens_table(lsp_data_dir());
 
         let mut app = Self {
             node,
@@ -2614,7 +2653,7 @@ impl ServerApp {
                     payment_made: false,
                     timestamp: 0,
                     formatted_datetime: "".to_string(),
-                    sc_dir: LSP_DATA_DIR.to_string(),
+                    sc_dir: lsp_data_dir().to_string(),
                     prices: "".to_string(),
                     onchain_btc: Bitcoin::from_sats(0),
                     onchain_usd: USD(0.0),
@@ -2685,7 +2724,7 @@ impl ServerApp {
 
     pub fn load_stable_channels(&mut self) {
         // Migrate from legacy JSON if it exists
-        let json_path = std::path::Path::new(LSP_DATA_DIR).join("stablechannels.json");
+        let json_path = std::path::Path::new(lsp_data_dir()).join("stablechannels.json");
         if json_path.exists() {
             if let Ok(contents) = fs::read_to_string(&json_path) {
                 if let Ok(entries) = serde_json::from_str::<Vec<StableChannelEntry>>(&contents) {
@@ -2775,7 +2814,7 @@ impl ServerApp {
                         payment_made: false,
                         timestamp: 0,
                         formatted_datetime: "".to_string(),
-                        sc_dir: LSP_DATA_DIR.to_string(),
+                        sc_dir: lsp_data_dir().to_string(),
                         prices: "".to_string(),
                         onchain_btc: Bitcoin::from_sats(0),
                         onchain_usd: USD(0.0),
