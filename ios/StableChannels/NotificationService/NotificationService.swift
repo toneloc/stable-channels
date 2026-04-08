@@ -54,10 +54,21 @@ class NotificationService: UNNotificationServiceExtension {
 
         // Parse direction from push payload
         let userInfo = request.content.userInfo
-        let stability = userInfo["stability"] as? [String: Any]
-        let direction = stability?["direction"] as? String ?? "lsp_to_user"
+        let direction: String
+        if let stability = userInfo["stability"] as? [String: Any],
+           let dir = stability["direction"] as? String {
+            direction = dir
+        } else if let stabilityStr = userInfo["stability"] as? String,
+                  let data = stabilityStr.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dir = json["direction"] as? String {
+            // Server may send stability as a JSON-encoded string
+            direction = dir
+        } else {
+            direction = "lsp_to_user"
+        }
 
-        nseLog("didReceive: direction=\(direction)")
+        nseLog("didReceive: direction=\(direction) userInfo=\(userInfo)")
 
         let shared = UserDefaults(suiteName: Self.appGroup)
         shared?.set(true, forKey: "nse_processing")
@@ -153,9 +164,28 @@ class NotificationService: UNNotificationServiceExtension {
                 config: syncConfig
             )
 
+            // --- Strip gossip from DB so build() doesn't OOM the NSE ---
+            let ldkDbPath = dataDir.appendingPathComponent("ldk_node_data.sqlite")
+            Self.stripGossipFromDB(path: ldkDbPath.path)
+
+            // --- Diagnostics ---
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: ldkDbPath.path),
+               let dbSize = attrs[.size] as? UInt64 {
+                nseLog("DIAG: ldk_node_data.sqlite = \(dbSize) bytes (after strip)")
+            }
+            let memUsage = Self.residentMemoryBytes()
+            nseLog("DIAG: memory before build() = \(memUsage / 1024)KB")
+
             let ldkNode = try builder.build()
+
+            let memAfterBuild = Self.residentMemoryBytes()
+            nseLog("DIAG: memory after build() = \(memAfterBuild / 1024)KB (delta +\((memAfterBuild - memUsage) / 1024)KB)")
+
             try ldkNode.start()
             self.node = ldkNode
+
+            let memAfterStart = Self.residentMemoryBytes()
+            nseLog("DIAG: memory after start() = \(memAfterStart / 1024)KB")
             nseLog("Node started, connecting to LSP")
 
             try? ldkNode.connect(
@@ -640,7 +670,7 @@ class NotificationService: UNNotificationServiceExtension {
             }.resume()
         } else { group.leave() }
 
-        group.wait()
+        _ = group.wait(timeout: .now() + 8)
 
         guard !prices.isEmpty else { return 0 }
         let sorted = prices.sorted()
@@ -654,5 +684,48 @@ class NotificationService: UNNotificationServiceExtension {
         try? node?.stop()
         node = nil
         UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "nse_processing")
+    }
+
+    /// Resident memory in bytes (RSS) via Mach task_info.
+    private static func residentMemoryBytes() -> UInt64 {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.resident_size : 0
+    }
+
+    /// Delete network_graph, scorer, and node_metrics from the LDK SQLite DB.
+    /// The NSE doesn't need gossip (it only routes to the LSP, a direct peer).
+    /// This shrinks the DB from ~10MB to ~30KB and prevents OOM kills.
+    private static func stripGossipFromDB(path: String) {
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+
+        // Check if network_graph exists and is large enough to matter
+        var stmt: OpaquePointer?
+        let sql = "SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        let hasGraph: Bool
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            let size = sqlite3_column_int64(stmt, 0)
+            hasGraph = size > 100_000  // Only strip if >100KB
+        } else {
+            hasGraph = false
+        }
+        sqlite3_finalize(stmt)
+
+        guard hasGraph else { return }
+
+        sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'network_graph'", nil, nil, nil)
+        sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
+        sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
+        sqlite3_exec(db, "VACUUM", nil, nil, nil)
+
+        NSLog("[NSE] Stripped gossip from DB")
     }
 }

@@ -56,7 +56,10 @@ pub fn get_cached_price() -> f64 {
         cache.updating = true;
         drop(cache);
 
-        let agent = Agent::new();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
+            .build();
         if let Ok(new_price) = get_latest_price(&agent) {
             let mut cache = PRICE_CACHE.lock().unwrap();
             cache.price = new_price;

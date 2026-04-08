@@ -261,10 +261,9 @@ class StabilityProcessingService : Service() {
                 dbPath, null, "stability", "sent",
                 amountMsat, price
             )
-            // Reset backing_sats to equilibrium after payment
-            val newBacking = ((expectedUsd / price) * Constants.SATS_IN_BTC).toLong()
-            updateBackingSatsInDB(dbPath, newBacking)
-            Log.d(TAG, "Reset backingSats to $newBacking")
+            // Do NOT reset backingSats — sendKeysend returning Ok only means
+            // LDK accepted the payment, not that it was delivered.
+            // Next stability check will detect remaining drift after cooldown.
         } catch (e: Exception) {
             Log.e(TAG, "Stability keysend failed", e)
             throw e
@@ -317,25 +316,38 @@ class StabilityProcessingService : Service() {
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd" to listOf("bitcoin", "usd")
         )
 
-        val prices = mutableListOf<Double>()
+        val prices = java.util.Collections.synchronizedList(mutableListOf<Double>())
+        val latch = java.util.concurrent.CountDownLatch(feeds.size)
+
         for ((url, path) in feeds) {
-            try {
-                val request = Request.Builder().url(url).build()
-                val response = httpClient.newCall(request).execute()
-                val body = response.body?.string() ?: continue
-                val json = JSONObject(body)
-                val price = extractPrice(json, path)
-                if (price != null && price > 0) prices.add(price)
-            } catch (_: Exception) {}
+            val request = Request.Builder().url(url).build()
+            httpClient.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    latch.countDown()
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    try {
+                        val body = response.body?.string() ?: return
+                        val json = JSONObject(body)
+                        val price = extractPrice(json, path)
+                        if (price != null && price > 0) prices.add(price)
+                    } catch (_: Exception) {
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+            })
         }
 
+        latch.await(8, TimeUnit.SECONDS)
+
         if (prices.isEmpty()) return 0.0
-        prices.sort()
-        val mid = prices.size / 2
-        return if (prices.size % 2 == 0) {
-            (prices[mid - 1] + prices[mid]) / 2.0
+        val sorted = prices.sorted()
+        val mid = sorted.size / 2
+        return if (sorted.size % 2 == 0) {
+            (sorted[mid - 1] + sorted[mid]) / 2.0
         } else {
-            prices[mid]
+            sorted[mid]
         }
     }
 

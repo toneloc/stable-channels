@@ -409,19 +409,22 @@ pub fn check_stability(
         return None;
     }
 
-    // Safety check: if the actual channel balance still covers backing + some native,
-    // the "below par" signal is likely from an in-flight HTLC, not a real drift.
-    // Only the LSP side (!is_stable_receiver) can trigger this false positive.
-    if !sc.is_stable_receiver && is_receiver_below_expected {
-        // User appears below par — verify their actual balance still covers backing
-        if sc.stable_receiver_btc.sats >= sc.backing_sats {
+    // Safety check: if an in-flight HTLC is temporarily inflating the receiver balance
+    // above backing + native, skip — the drift is transient and will resolve when the
+    // HTLC settles. Only relevant on the LSP side (!is_stable_receiver) when the
+    // receiver appears above par (price rose, LSP should be paid).
+    if !sc.is_stable_receiver && !is_receiver_below_expected {
+        let expected_sats = sc.backing_sats + sc.native_sats;
+        if sc.stable_receiver_btc.sats > expected_sats + expected_sats / 100 {
             audit_event(
                 "STABILITY_SKIP_HTLC_SAFETY",
                 json!({
                     "user_channel_id": format!("{}", sc.user_channel_id),
                     "receiver_sats": sc.stable_receiver_btc.sats,
+                    "expected_sats": expected_sats,
                     "backing_sats": sc.backing_sats,
-                    "reason": "receiver balance still covers backing — likely in-flight HTLC"
+                    "native_sats": sc.native_sats,
+                    "reason": "receiver balance >1% above expected — likely in-flight HTLC"
                 }),
             );
             return None;
