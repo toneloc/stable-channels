@@ -53,9 +53,15 @@ import kotlinx.coroutines.launch
 fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val totalSats by appState.totalBalanceSats.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    val priceLastUpdate by appState.priceService.lastUpdate.collectAsState()
     val sc by appState.stableChannel.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
+
+    // Only check staleness if we have a valid last update time
+    val isPriceStale = btcPrice > 0 &&
+        priceLastUpdate.time > 0L &&
+        System.currentTimeMillis() - priceLastUpdate.time > 60_000L
 
     var showSend by remember { mutableStateOf(false) }
     var showReceive by remember { mutableStateOf(false) }
@@ -85,14 +91,25 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val totalUSD = (totalSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val scope = rememberCoroutineScope()
 
+    var isRefreshing by remember { mutableStateOf(false) }
     val pullRefreshState = rememberPullToRefreshState()
 
     PullToRefreshBox(
-        isRefreshing = false,
+        isRefreshing = isRefreshing,
         onRefresh = {
             scope.launch {
+                isRefreshing = true
+                val startTime = System.currentTimeMillis()
                 appState.refreshBalances()
+                appState.priceService.fetchPrice()
                 appState.recordCurrentPrice()
+                
+                // Prevent Compose pull-to-refresh animation glitches on fast fetches
+                val duration = System.currentTimeMillis() - startTime
+                if (duration < 500) {
+                    kotlinx.coroutines.delay(500 - duration)
+                }
+                isRefreshing = false
             }
         },
         state = pullRefreshState,
@@ -145,6 +162,28 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 fontSize = 12.sp
                             )
                         }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // Price staleness warning
+            if (isPriceStale) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF59E0B).copy(alpha = 0.15f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("⚠️", fontSize = 14.sp)
+                        Text(
+                            "Price data may be stale — check your connection",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFB45309)
+                        )
                     }
                 }
                 Spacer(Modifier.height(8.dp))
