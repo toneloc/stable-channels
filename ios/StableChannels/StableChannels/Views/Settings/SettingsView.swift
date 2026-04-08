@@ -380,7 +380,7 @@ struct SettingsView: View {
 
         do {
             try await appState.nodeService.start(
-                network: .bitcoin,
+                network: appState.runtimeNetwork,
                 esploraURL: appState.chainURL,
                 mnemonic: input
             )
