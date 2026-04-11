@@ -70,14 +70,6 @@ path = "src/bin/lsp_backend.rs"
 name = "lsp_frontend"
 path = "src/bin/lsp_frontend.rs"
 
-[[bin]]
-name = "recover"
-path = "src/bin/recover.rs"
-
-[[bin]]
-name = "sweep"
-path = "src/bin/sweep.rs"
-
 [dev-dependencies]
 tempfile = "3"
 electrsd = { version = "0.36.1", features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
