@@ -185,7 +185,14 @@ class DatabaseService {
             sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price, native_sats FROM channels WHERE user_channel_id = ?"
             params = [.text(id)]
         } else {
-            sql = "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, receiver_sats, latest_price, native_sats FROM channels LIMIT 1"
+            /// When multiple rows exist, pick a deterministic latest record (not “active channel” semantics).
+            sql = """
+                SELECT channel_id, expected_usd, note, stable_sats, user_channel_id,
+                       receiver_sats, latest_price, native_sats
+                FROM channels
+                ORDER BY updated_at DESC, channel_id DESC
+                LIMIT 1
+            """
             params = []
         }
         let rows = try query(sql, params: params)
