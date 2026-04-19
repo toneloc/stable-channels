@@ -382,8 +382,8 @@ struct HomeView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Spacer()
-            if let txid, !txid.isEmpty {
-                Link(destination: URL(string: "https://mempool.space/tx/\(txid)")!) {
+            if let txid, !txid.isEmpty, let txURL = Constants.explorerTxURL(txid: txid) {
+                Link(destination: txURL) {
                     HStack(spacing: 2) {
                         Text("View on explorer")
                             .font(.caption2)
