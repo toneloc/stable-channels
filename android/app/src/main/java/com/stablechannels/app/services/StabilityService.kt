@@ -93,6 +93,10 @@ object StabilityService {
         val dollarsFromPar = stableUSDValue - targetUSD
         val percentFromPar = if (targetUSD > 0) abs(dollarsFromPar / targetUSD) * 100.0 else 0.0
 
+        // Update risk level based on current drift before deciding action.
+        // Risk accumulates when far from peg; decays toward 0 when stable.
+        sc.riskLevel = computeRiskLevel(sc.riskLevel, percentFromPar)
+
         val action = when {
             percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT
                 || abs(dollarsFromPar) < Constants.STABILITY_THRESHOLD_USD -> StabilityAction.STABLE
@@ -102,6 +106,22 @@ object StabilityService {
         }
 
         return StabilityCheckResult(action, percentFromPar, stableUSDValue, targetUSD, dollarsFromPar)
+    }
+
+    /** Accumulates risk when drift exceeds 5% from peg; decays when within the stable band. */
+    fun computeRiskLevel(currentRisk: Int, percentFromPar: Double): Int {
+        val HIGH_DRIFT_THRESHOLD = 5.0   // % — above this we accumulate risk
+        val RISK_ACCUMULATE_STEP = 10
+        val RISK_DECAY_STEP = 5
+        val MAX_CLAMP = 200
+
+        return when {
+            percentFromPar > HIGH_DRIFT_THRESHOLD ->
+                min(currentRisk + RISK_ACCUMULATE_STEP, MAX_CLAMP)
+            percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT ->
+                max(currentRisk - RISK_DECAY_STEP, 0)
+            else -> currentRisk  // moderate drift — hold current risk level
+        }
     }
 
     fun updateBalances(
