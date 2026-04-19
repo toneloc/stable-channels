@@ -548,7 +548,19 @@ class NotificationService: UNNotificationServiceExtension {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { return }
         defer { sqlite3_close(db) }
-        let sql = "UPDATE stable_channels SET backing_sats = ? WHERE id = (SELECT MAX(id) FROM stable_channels)"
+        /// Bump updated_at so the row we just wrote remains the deterministic
+        /// fallback for the next read (matches ORDER BY updated_at DESC, channel_id DESC).
+        let sql = """
+        UPDATE channels
+        SET stable_sats = ?,
+            updated_at = strftime('%s', 'now')
+        WHERE channel_id = (
+            SELECT channel_id
+            FROM channels
+            ORDER BY updated_at DESC, channel_id DESC
+            LIMIT 1
+        )
+        """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
