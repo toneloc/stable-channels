@@ -285,7 +285,8 @@ class StabilityProcessingService : Service() {
         return try {
             val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
-                "SELECT expected_usd, receiver_sats, latest_price, native_sats, stable_sats FROM channels LIMIT 1",
+                // Deterministic fallback row when multiple channels exist.
+                "SELECT expected_usd, receiver_sats, latest_price, native_sats, stable_sats FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -354,7 +355,12 @@ class StabilityProcessingService : Service() {
     private fun updateBackingSatsInDB(dbPath: String, backingSats: Long) {
         try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-            db.execSQL("UPDATE channels SET stable_sats = ? WHERE id = (SELECT MAX(id) FROM channels)", arrayOf(backingSats))
+            // Bump updated_at so the row we just wrote remains the deterministic
+            // fallback for the next read (matches ORDER BY updated_at DESC, channel_id DESC).
+            db.execSQL(
+                "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)",
+                arrayOf(backingSats)
+            )
             db.close()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update backingSats in DB", e)
