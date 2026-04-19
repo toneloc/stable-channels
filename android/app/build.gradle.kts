@@ -23,6 +23,9 @@ android {
             buildConfigField("String", "NETWORK", "\"signet\"")
             buildConfigField("String", "ESPLORA_URL", "\"https://mutinynet.com/api\"")
             buildConfigField("String", "FALLBACK_ESPLORA_URL", "\"https://mutinynet.com/api\"")
+            buildConfigField("String", "LSP_PUBKEY", "\"\"") // Signet LSP placeholder
+            buildConfigField("String", "LSP_ADDRESS", "\"\"") // Signet LSP address placeholder
+            buildConfigField("String", "PUSH_REGISTER_URL", "\"https://signet.stablechannels.com/api/register-push\"") // Placeholder
         }
         release {
             isMinifyEnabled = false
@@ -30,6 +33,9 @@ android {
             buildConfigField("String", "NETWORK", "\"bitcoin\"")
             buildConfigField("String", "ESPLORA_URL", "\"https://blockstream.info/api\"")
             buildConfigField("String", "FALLBACK_ESPLORA_URL", "\"https://mempool.space/api\"")
+            buildConfigField("String", "LSP_PUBKEY", "\"0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850\"")
+            buildConfigField("String", "LSP_ADDRESS", "\"34.198.44.89:9735\"")
+            buildConfigField("String", "PUSH_REGISTER_URL", "\"https://stablechannels.com/api/register-push\"")
         }
     }
 

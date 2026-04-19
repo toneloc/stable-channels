@@ -17,12 +17,12 @@ object Constants {
     const val DEFAULT_LSP_ALIAS = "lsp"
     const val DEFAULT_LSP_PORT = 9735
 
-    const val LSP_PUSH_REGISTER_URL = "https://stablechannels.com/api/register-push"
+    val LSP_PUSH_REGISTER_URL = BuildConfig.PUSH_REGISTER_URL
 
     val PRIMARY_CHAIN_URL = BuildConfig.ESPLORA_URL
     val FALLBACK_CHAIN_URL = BuildConfig.FALLBACK_ESPLORA_URL
-    const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
-    const val DEFAULT_LSP_ADDRESS = "34.198.44.89:9735"
+    val DEFAULT_LSP_PUBKEY = BuildConfig.LSP_PUBKEY
+    val DEFAULT_LSP_ADDRESS = BuildConfig.LSP_ADDRESS
     const val DEFAULT_GATEWAY_PUBKEY = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"
     const val DEFAULT_GATEWAY_ADDRESS = "213.174.156.80:9735"
 
