@@ -9,6 +9,10 @@ object Constants {
     const val TRADE_MESSAGE_TYPE = "TRADE_V1"
     const val SYNC_MESSAGE_TYPE = "SYNC_V1"
 
+    /** SharedPreferences key for persisting the user's stable channel role. */
+    const val PREFS_KEY_IS_STABLE_RECEIVER = "is_stable_receiver"
+    const val PREFS_NAME_BALANCE_CACHE = "balance_cache"
+
     const val DEFAULT_NETWORK = "bitcoin"
     const val DEFAULT_USER_ALIAS = "user"
     const val DEFAULT_USER_PORT = 9736

@@ -94,6 +94,38 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 } else {
                     TextButton(onClick = { showNodeId = true }) { Text("Show Node ID") }
                 }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                // Role selector — disabled when an active channel exists to prevent
+                // mid-channel role switching which would invert balance attribution.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Role", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            if (sc.isStableReceiver) "Stable Receiver - holds USD-pegged balance"
+                            else "Stable Provider - absorbs BTC price exposure",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (hasReadyChannel) {
+                            Text(
+                                "Close channel to change role",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = sc.isStableReceiver,
+                        onCheckedChange = { appState.setStableRole(it) },
+                        enabled = !hasReadyChannel
+                    )
+                }
             }
         }
 

@@ -56,12 +56,17 @@ class AppState(private val context: Context) : ViewModel() {
     val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
 
     init {
-        val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(Constants.PREFS_NAME_BALANCE_CACHE, Context.MODE_PRIVATE)
         val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
         val cachedOnchain = prefs.getLong("cached_onchain_sats", 0L)
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
+
+        // Restore the user's stable channel role. Defaults to true (Stable Receiver)
+        // so existing installations are completely unaffected.
+        val isStableReceiver = prefs.getBoolean(Constants.PREFS_KEY_IS_STABLE_RECEIVER, true)
+        _stableChannel.value = StableChannel.DEFAULT.copy(isStableReceiver = isStableReceiver)
     }
 
     private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
@@ -178,6 +183,16 @@ class AppState(private val context: Context) : ViewModel() {
         stabilityJob?.cancel()
         priceService.stopAutoRefresh()
         nodeService.stop()
+    }
+
+    /** Persists and applies the user's stable channel role (Receiver vs Provider). */
+    fun setStableRole(isReceiver: Boolean) {
+        context.getSharedPreferences(Constants.PREFS_NAME_BALANCE_CACHE, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(Constants.PREFS_KEY_IS_STABLE_RECEIVER, isReceiver)
+            .apply()
+        val updated = _stableChannel.value.copy(isStableReceiver = isReceiver)
+        _stableChannel.value = updated
     }
 
     private fun handleEvent(event: Event) {
