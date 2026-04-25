@@ -545,23 +545,46 @@ class AppState {
 
     // MARK: - Pending Push Payment (app was killed)
 
-    /// Check if the NSE flagged a pending payment while the app was killed.
-    /// Reconnect to LSP so the pending stability payment can land.
+    /// Check if NSE flagged a pending payment while app was killed
+    /// Reconnect to LSP so pending stability payment can land
     private func processPendingPushPayment() async {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         guard shared?.bool(forKey: "pending_push_payment") == true else { return }
 
-        shared?.set(false, forKey: "pending_push_payment")
         print("[Push] Processing pending push payment from NSE flag")
 
         // Reconnect to LSP so pending payment can be received
-        try? nodeService.node?.connect(
-            nodeId: Constants.defaultLSPPubkey,
-            address: Constants.defaultLSPAddress,
-            persist: true
-        )
-        refreshBalances()
-        updateStableBalances()
+        do {
+            try nodeService.node?.connect(
+                nodeId: Constants.defaultLSPPubkey,
+                address: Constants.defaultLSPAddress,
+                persist: true
+            )
+
+            Self.updatePendingPushPaymentFlag(shared, reconnectSucceeded: true)
+            refreshBalances()
+            updateStableBalances()
+
+            AuditService.log("PUSH_PENDING_PAYMENT_RECONNECT_OK", data: [
+                "node_running": "\(nodeService.isRunning)",
+            ])
+        } catch {
+            Self.updatePendingPushPaymentFlag(shared, reconnectSucceeded: false)
+            AuditService.log("PUSH_PENDING_PAYMENT_RECONNECT_FAILED", data: [
+                "error": error.localizedDescription,
+                "node_running": "\(nodeService.isRunning)",
+            ])
+        }
+    }
+
+    static func updatePendingPushPaymentFlag(_ shared: UserDefaults?, reconnectSucceeded: Bool) {
+        if reconnectSucceeded {
+            // Clear pending marker only after successful reconnect attempt
+            shared?.set(false, forKey: "pending_push_payment")
+        } else {
+            // Keep marker set so foreground or startup can retry
+            shared?.set(true, forKey: "pending_push_payment")
+        }
     }
 
     // MARK: - Push Notification Handling
