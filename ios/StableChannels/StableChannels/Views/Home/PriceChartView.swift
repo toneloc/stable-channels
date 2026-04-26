@@ -1,6 +1,16 @@
 import SwiftUI
 import Charts
 
+// Separate view so only the price label re-renders on each price tick,
+// not the entire chart body with 700+ data points.
+private struct LivePriceLabel: View {
+    @Environment(AppState.self) private var appState
+    var body: some View {
+        Text(appState.btcPrice.usdFormatted)
+            .font(.title3.bold())
+    }
+}
+
 struct PriceChartView: View {
     @Environment(AppState.self) private var appState
     @State private var priceHistory: [PriceRecord] = []
@@ -82,8 +92,7 @@ struct PriceChartView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Text(appState.btcPrice.usdFormatted)
-                            .font(.title3.bold())
+                        LivePriceLabel()
                     }
                 }
                 Spacer()
@@ -220,17 +229,20 @@ struct PriceChartView: View {
 
     // MARK: - Axis Helpers
 
-    private var chartMin: Double {
-        let prices = priceHistory.map(\.price)
-        let min = prices.min() ?? 0
-        return min * 0.98 // 2% padding below
+    // Single pass over priceHistory — avoids creating two separate arrays on each render
+    private var chartBounds: (min: Double, max: Double) {
+        guard !priceHistory.isEmpty else { return (0, 100) }
+        var lo = Double.infinity
+        var hi = -Double.infinity
+        for r in priceHistory {
+            if r.price < lo { lo = r.price }
+            if r.price > hi { hi = r.price }
+        }
+        return (lo * 0.98, hi * 1.02)
     }
 
-    private var chartMax: Double {
-        let prices = priceHistory.map(\.price)
-        let max = prices.max() ?? 100
-        return max * 1.02 // 2% padding above
-    }
+    private var chartMin: Double { chartBounds.min }
+    private var chartMax: Double { chartBounds.max }
 
     private var xAxisFormat: Date.FormatStyle {
         switch chartPeriod {
@@ -278,11 +290,27 @@ struct PriceChartView: View {
 
     private func filterForPeriod() {
         let cutoff = Date().addingTimeInterval(-Double(chartPeriod.days) * 86400)
+        let raw = chartPeriod.usesHourly
+            ? hourlyPrices.filter { $0.date >= cutoff }
+            : allDailyPrices.filter { $0.date >= cutoff }
+        // Cap at 120 points — Charts does O(n) layout work; 720 points caused UI lag
+        priceHistory = downsample(raw, to: 120)
+    }
 
-        if chartPeriod.usesHourly {
-            priceHistory = hourlyPrices.filter { $0.date >= cutoff }
-        } else {
-            priceHistory = allDailyPrices.filter { $0.date >= cutoff }
+    // Uniform downsample: pick evenly-spaced indices to preserve shape
+    private func downsample(_ records: [PriceRecord], to maxPoints: Int) -> [PriceRecord] {
+        guard records.count > maxPoints else { return records }
+        let step = Double(records.count - 1) / Double(maxPoints - 1)
+        return (0..<maxPoints).map { i in
+            records[Int((Double(i) * step).rounded())]
         }
     }
+}
+
+// Equatable wrapper so HomeView re-renders (price ticks, sheet toggles, etc.)
+// don't propagate into the chart at all. Only the chart's own state can trigger re-renders.
+struct PriceChartCard: View, Equatable {
+    let compact: Bool
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.compact == rhs.compact }
+    var body: some View { PriceChartView(compact: compact) }
 }

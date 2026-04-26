@@ -56,6 +56,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val sc by appState.stableChannel.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
+    val hasReadyChannel by appState.hasReadyChannel.collectAsState()
+    val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var showReceive by remember { mutableStateOf(false) }
@@ -206,8 +208,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(16.dp))
             }
 
-            val hasReadyChannel = appState.nodeService.channels.any { it.isChannelReady }
-
             // On-chain section
             if (onchainSats > 0) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
@@ -234,7 +234,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             // 1. Splice-in in progress
                             Spacer(Modifier.height(8.dp))
                             PendingRow("Swap pending...", appState.spliceTxid, context)
-                        } else if (hasReadyChannel && appState.nodeService.spendableOnchainSats() > 0) {
+                        } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             Spacer(Modifier.height(8.dp))
                             Row(
@@ -257,7 +257,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     Text("Swap", fontSize = 13.sp)
                                 }
                             }
-                        } else if (appState.nodeService.spendableOnchainSats() == 0L) {
+                        } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(8.dp))
                             PendingRow("Deposit confirming...", appState.fundingTxid, context)

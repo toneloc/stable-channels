@@ -38,6 +38,8 @@ Dependencies/
 fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
+ios/StableChannels/screenshots/
+scripts/
 fastlane/test_output
 
 # Code Injection

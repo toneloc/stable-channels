@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -100,8 +100,8 @@
 		8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityServiceTests.swift; sourceTree = "<group>"; };
 		95055FDBC76859CB74803660 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		955C6E8D6DB076A3B20A6F46 /* SellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SellView.swift; sourceTree = "<group>"; };
-		A2BA7D52F62DF17EFF532635 /* NotificationService.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		AAE0551124703F8BAA9C44C0 /* StableChannels.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = StableChannels.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2BA7D52F62DF17EFF532635 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		AAE0551124703F8BAA9C44C0 /* StableChannels.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StableChannels.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AD425F9D6479B95B2258FCAE /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
 		B785A33E02FD999CB62019AD /* StableChannelsApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableChannelsApp.swift; sourceTree = "<group>"; };
 		BE6DE49D25B7A85291504E77 /* PaymentDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailView.swift; sourceTree = "<group>"; };
@@ -359,16 +359,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
-				TargetAttributes = {
-					17FF63C70424B167E9E86115 = {
-						DevelopmentTeam = VJF3VBKXV9;
-						ProvisioningStyle = Automatic;
-					};
-					E7DC40ED895FAA11FDDD5D6C = {
-						DevelopmentTeam = VJF3VBKXV9;
-						ProvisioningStyle = Automatic;
-					};
-				};
 			};
 			buildConfigurationList = 202DDDE22C435788010AAB8F /* Build configuration list for PBXProject "StableChannels" */;
 			compatibilityVersion = "Xcode 14.0";
@@ -385,7 +375,6 @@
 				5C44A4ACEB5EFD7C2E78B8A6 /* XCRemoteSwiftPackageReference "KeychainAccess" */,
 				70EEE76071EE59F64A24FD4F /* XCRemoteSwiftPackageReference "ldk-node" */,
 			);
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -542,7 +531,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.stablechannels.app.tests;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/StableChannels.app/StableChannels";
 			};
 			name = Release;
@@ -621,7 +610,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.stablechannels.app.tests;
 				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/StableChannels.app/StableChannels";
 			};
 			name = Debug;
@@ -630,7 +619,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = NotificationService/NotificationService.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Distribution";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
@@ -642,9 +631,10 @@
 				);
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stablechannels.app.NotificationService;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.9;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1";
 			};
 			name = Release;
 		};
@@ -653,7 +643,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = StableChannels/StableChannels.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Distribution";
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
@@ -664,9 +654,10 @@
 				);
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stablechannels.app;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.9;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1";
 			};
 			name = Release;
 		};
@@ -686,9 +677,10 @@
 				);
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stablechannels.app.NotificationService;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.9;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1";
 			};
 			name = Debug;
 		};
@@ -708,9 +700,10 @@
 				);
 				MARKETING_VERSION = 1.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.stablechannels.app;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.9;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1";
 			};
 			name = Debug;
 		};
