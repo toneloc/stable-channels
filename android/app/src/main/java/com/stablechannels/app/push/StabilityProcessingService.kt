@@ -199,6 +199,15 @@ class StabilityProcessingService : Service() {
     }
 
     private fun handleUserToLsp(node: Node, dbPath: String) {
+        // Cooldown: skip if we sent a stability payment recently
+        val prefs = FCMService.getPrefs(this)
+        val lastSent = prefs.getLong("bg_last_stability_sent", 0)
+        val now = System.currentTimeMillis() / 1000
+        if (lastSent > 0 && (now - lastSent) < 120) {
+            Log.d(TAG, "Cooldown: ${now - lastSent}s since last payment, skipping (120s required)")
+            return
+        }
+
         // Price rose — user owes LSP sats. Read channel state and send keysend.
         val channelState = loadChannelStateFromDB() ?: run {
             Log.w(TAG, "No channel state in DB")
@@ -261,9 +270,13 @@ class StabilityProcessingService : Service() {
                 dbPath, null, "stability", "sent",
                 amountMsat, price
             )
-            // Do NOT reset backingSats — sendKeysend returning Ok only means
-            // LDK accepted the payment, not that it was delivered.
-            // Next stability check will detect remaining drift after cooldown.
+            // Reset backingSats to equilibrium — accounts payment against stable pool.
+            // Server does the same reset, so they stay in sync.
+            val newBacking = ((expectedUsd / price) * Constants.SATS_IN_BTC).toLong()
+            updateBackingSatsInDB(dbPath, newBacking)
+            Log.d(TAG, "Reset backingSats to $newBacking")
+
+            FCMService.getPrefs(this).edit().putLong("bg_last_stability_sent", System.currentTimeMillis() / 1000).apply()
         } catch (e: Exception) {
             Log.e(TAG, "Stability keysend failed", e)
             throw e
@@ -354,7 +367,7 @@ class StabilityProcessingService : Service() {
     private fun updateBackingSatsInDB(dbPath: String, backingSats: Long) {
         try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-            db.execSQL("UPDATE channels SET stable_sats = ? WHERE id = (SELECT MAX(id) FROM channels)", arrayOf(backingSats))
+            db.execSQL("UPDATE channels SET stable_sats = ? WHERE rowid = (SELECT MIN(rowid) FROM channels)", arrayOf(backingSats))
             db.close()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update backingSats in DB", e)

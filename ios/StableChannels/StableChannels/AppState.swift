@@ -33,6 +33,7 @@ class AppState {
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
+    var spendableOnchainSats: UInt64 = 0
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
@@ -43,10 +44,17 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
+    var hasReadyChannel: Bool = false
+
     var totalBalanceSats: UInt64 {
         if isChannelClosing { return onchainBalanceSats }
         if isOpeningChannel { return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats }
         if isSweeping { return lightningBalanceSats }
+        // If no open channels but both balances exist, lightning balance is
+        // pending-close claimable that overlaps with on-chain — avoid double-count.
+        if !hasReadyChannel && lightningBalanceSats > 0 && onchainBalanceSats > 0 {
+            return onchainBalanceSats
+        }
         return lightningBalanceSats + onchainBalanceSats
     }
     var onchainReceiveAddress: String?
@@ -954,9 +962,12 @@ class AppState {
             stableChannel.userChannelId = ""
         }
 
-        // Refresh balances so lightning drops to 0 immediately
+        // Refresh balances — keep isChannelClosing true until lightning balance
+        // fully resolves to avoid double-counting with on-chain balance.
         refreshBalances()
-        isChannelClosing = false
+        if lightningBalanceSats == 0 {
+            isChannelClosing = false
+        }
         statusMessage = "Channel closed"
     }
 
@@ -1016,14 +1027,14 @@ class AppState {
                 try? await Task.sleep(nanoseconds: Constants.stabilityCheckIntervalSecs * 1_000_000_000)
                 guard !Task.isCancelled else { break }
 
+                // Heartbeat — thread-safe, no need to block main thread
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+
+                // ensureLSPConnected can call node.connect() (TCP handshake) — keep off main thread
+                Task.detached { [weak self] in self?.ensureLSPConnected() }
+
                 await MainActor.run { [weak self] in
-                    // Heartbeat so NSE knows main app is active
-                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
-                        .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
-
-                    // Reconnect to LSP if peer dropped — keeps channel usable
-                    self?.ensureLSPConnected()
-
                     self?.recordCurrentPrice()
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
@@ -1077,9 +1088,12 @@ class AppState {
             stableChannel.lastStabilityPayment = now
             stableChannel.paymentMade = true
 
-            // Do NOT reset backingSats here — sendKeysend returning Ok only means
-            // LDK accepted the payment, not that it was delivered.
-            // Next stability check (after cooldown) will detect remaining drift.
+            // Reset backingSats to equilibrium — accounts payment against stable pool.
+            // Don't recompute nativeSats — receiver balance hasn't updated yet (HTLC in flight).
+            // Native will be recomputed on next balance refresh.
+            if price > 0 {
+                stableChannel.backingSats = UInt64(stableChannel.expectedUSD.amount / price * Double(Constants.satsInBTC))
+            }
             saveChannelToDB()
 
             // Record as pending payment
@@ -1110,9 +1124,8 @@ class AppState {
     // MARK: - On-Chain Deposit Detection
 
     private func detectOnchainDeposit() {
-        // Use totalOnchainBalanceSats consistently (not spendable, which excludes unconfirmed)
-        guard let balances = nodeService.balances() else { return }
-        let currentOnchain = balances.totalOnchainBalanceSats
+        // Use already-updated onchainBalanceSats — refreshBalances() was just called before this
+        let currentOnchain = onchainBalanceSats
 
         if currentOnchain > prevOnchainSats && !isSweeping && pendingSplice == nil {
             let depositSats = currentOnchain - prevOnchainSats
@@ -1284,6 +1297,13 @@ class AppState {
 
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
+        hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
+        spendableOnchainSats = balances.spendableOnchainBalanceSats
+
+        // Clear closing flag once lightning balance fully resolves
+        if isChannelClosing && lightning == 0 {
+            isChannelClosing = false
+        }
 
         // Cache for instant display on next launch
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
