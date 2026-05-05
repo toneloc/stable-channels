@@ -184,3 +184,13 @@ Temporary Items
 # Built Visual Studio Code Extensions
 *.vsix
 .cargo/config.toml
+
+# Android
+.gradle/
+.idea/
+build/
+local.properties
+*.apk
+*.aab
+*.iml
+google-services.json
