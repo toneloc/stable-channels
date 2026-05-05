@@ -612,7 +612,14 @@ class NotificationService: UNNotificationServiceExtension {
         defer { sqlite3_close(db) }
 
         var stmt: OpaquePointer?
-        let sql = "SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats FROM channels LIMIT 1"
+        /// Avoid nondeterministic row selection when multiple rows exist.
+        /// Uses latest updated row as a stable fallback (not “active channel” semantics).
+        let sql = """
+            SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats
+            FROM channels
+            ORDER BY updated_at DESC, channel_id DESC
+            LIMIT 1
+        """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             nseLog("SQLite prepare failed")
             return nil
