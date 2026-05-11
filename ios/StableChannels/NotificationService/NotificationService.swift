@@ -368,6 +368,21 @@ class NotificationService: UNNotificationServiceExtension {
     ) {
         nseLog("user_to_lsp: Calculating stability payment")
 
+        // Cooldown: skip if we sent a stability payment recently
+        let shared = UserDefaults(suiteName: Self.appGroup)
+        shared?.synchronize()
+        let lastSent = shared?.double(forKey: "nse_last_stability_sent") ?? 0
+        let secondsSinceLast = Date().timeIntervalSince1970 - lastSent
+        nseLog("Cooldown check: lastSent=\(lastSent), secondsSince=\(Int(secondsSinceLast))")
+        if lastSent > 0 && secondsSinceLast < 120 {
+            nseLog("Cooldown: \(Int(secondsSinceLast))s since last payment, skipping (120s required)")
+            content.title = "Stability Check"
+            content.body = "Position is stable"
+            cleanup()
+            contentHandler(content)
+            return
+        }
+
         // 1. Read channel state from SQLite
         let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
         guard let channelState = readChannelState(dbPath: dbPath) else {
@@ -414,8 +429,8 @@ class NotificationService: UNNotificationServiceExtension {
 
         nseLog("Stability check: stableUSD=\(String(format: "%.2f", stableUSDValue)), target=\(String(format: "%.2f", targetUSD)), pct=\(String(format: "%.3f", percentFromPar))%")
 
-        guard percentFromPar >= Self.stabilityThresholdPercent else {
-            nseLog("Within threshold, no payment needed")
+        guard percentFromPar >= Self.stabilityThresholdPercent && abs(dollarsFromPar) >= 0.25 else {
+            nseLog("Within threshold (pct=\(String(format: "%.3f", percentFromPar))%, drift=$\(String(format: "%.2f", abs(dollarsFromPar)))), no payment needed")
             content.title = "Stability Check"
             content.body = "Position is stable"
             cleanup()
@@ -462,8 +477,15 @@ class NotificationService: UNNotificationServiceExtension {
                 btcPrice: price
             )
 
-            // Do NOT reset backingSats — keysend accepted but not confirmed delivered.
-            // Next stability check will detect remaining drift after cooldown.
+            // Reset backingSats to equilibrium — accounts payment against stable pool.
+            // Server does the same reset, so they stay in sync.
+            let newBacking = UInt64(targetUSD / price * Self.satsInBTC)
+            updateBackingSatsInDB(dbPath: dbPath, backingSats: newBacking)
+
+            let cooldownDefaults = UserDefaults(suiteName: Self.appGroup)
+            cooldownDefaults?.set(Date().timeIntervalSince1970, forKey: "nse_last_stability_sent")
+            cooldownDefaults?.synchronize()
+            nseLog("Cooldown: stamped at \(Date().timeIntervalSince1970)")
 
             content.title = "Stability Payment Sent"
             content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
@@ -546,14 +568,28 @@ class NotificationService: UNNotificationServiceExtension {
 
     private func updateBackingSatsInDB(dbPath: String, backingSats: UInt64) {
         var db: OpaquePointer?
-        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { return }
+        let rc = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil)
+        guard rc == SQLITE_OK else {
+            nseLog("updateBacking: open failed rc=\(rc)")
+            return
+        }
         defer { sqlite3_close(db) }
-        let sql = "UPDATE stable_channels SET backing_sats = ? WHERE id = (SELECT MAX(id) FROM stable_channels)"
+        let sql = "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE rowid = (SELECT MIN(rowid) FROM channels)"
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        let prepRc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepRc == SQLITE_OK else {
+            nseLog("updateBacking: prepare failed rc=\(prepRc)")
+            return
+        }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, Int64(backingSats))
-        sqlite3_step(stmt)
+        let stepRc = sqlite3_step(stmt)
+        if stepRc == SQLITE_DONE {
+            let changes = sqlite3_changes(db)
+            nseLog("Updated backingSats to \(backingSats) (rows=\(changes))")
+        } else {
+            nseLog("updateBacking: step failed rc=\(stepRc)")
+        }
     }
 
     // MARK: - Lightweight SQLite Reader

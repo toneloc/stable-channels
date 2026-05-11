@@ -55,6 +55,12 @@ class AppState(private val context: Context) : ViewModel() {
     private val _totalBalanceSats: MutableStateFlow<Long>
     val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
 
+    private val _hasReadyChannel = MutableStateFlow(false)
+    val hasReadyChannel: StateFlow<Boolean> get() = _hasReadyChannel
+
+    private val _spendableOnchainSats = MutableStateFlow(0L)
+    val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
+
     init {
         val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
@@ -413,9 +419,9 @@ class AppState(private val context: Context) : ViewModel() {
             _stableChannel.value = StableChannel.DEFAULT
         }
 
-        // Refresh balances so lightning drops to 0 immediately
+        // Keep isChannelClosing = true until lightning balance actually drains to 0
+        // to avoid double-counting with on-chain. refreshBalances() clears it when ready.
         refreshBalances()
-        isChannelClosing = false
         _statusMessage.value = "Channel closed"
     }
 
@@ -452,9 +458,10 @@ class AppState(private val context: Context) : ViewModel() {
 
             try {
                 val paymentId = nodeService.sendKeysend(amountMsat, sc.counterparty)
-                val updated = sc.copy(lastStabilityPayment = now)
-                // Do NOT reset backingSats here — sendKeysend returning Ok only means
-                // LDK accepted the payment, not delivered. Next check handles remaining drift.
+                // Reset backingSats to equilibrium — accounts payment against stable pool.
+                // Server does the same reset, so they stay in sync.
+                val newBacking = if (price > 0) (sc.expectedUSD.amount / price * Constants.SATS_IN_BTC).toLong() else sc.backingSats
+                val updated = sc.copy(lastStabilityPayment = now, backingSats = newBacking)
                 _stableChannel.value = updated
 
                 databaseService?.recordPayment(
@@ -471,7 +478,8 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun detectOnchainDeposit() {
-        val currentSats = nodeService.spendableOnchainSats()
+        // Use already-updated value — refreshBalances() was just called before this
+        val currentSats = _onchainBalanceSats.value
         if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
@@ -588,11 +596,21 @@ class AppState(private val context: Context) : ViewModel() {
         val balances = nodeService.balances() ?: return
         val lightning = balances.totalLightningBalanceSats.toLong()
         val onchain = balances.totalOnchainBalanceSats.toLong()
+        val hasReady = nodeService.channels.any { it.isChannelReady }
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
+        _hasReadyChannel.value = hasReady
+        _spendableOnchainSats.value = balances.spendableOnchainBalanceSats.toLong()
+
+        // Clear closing flag once lightning balance fully resolves
+        if (isChannelClosing && lightning == 0L) isChannelClosing = false
+
         _totalBalanceSats.value = when {
             isChannelClosing -> onchain
             isSweeping -> lightning
+            // No open channel but both balances present: lightning is pending-close claimable
+            // that overlaps with on-chain — avoid double-count
+            !hasReady && lightning > 0 && onchain > 0 -> onchain
             else -> lightning + onchain
         }
 

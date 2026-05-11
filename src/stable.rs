@@ -469,10 +469,12 @@ pub fn check_stability(
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // Do NOT reset backing_sats here — send() returning Ok only means
-            // LDK accepted the payment, not that it was delivered.
-            // The next stability check (after cooldown) will detect any remaining
-            // drift and send a correction if needed.
+            // Reset backing_sats to equilibrium at current price.
+            // This accounts the payment against the stable pool, not native BTC.
+            // Don't recompute native_sats here — receiver balance hasn't updated yet
+            // (HTLC still in flight). Native will be recomputed on next balance refresh.
+            let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
+            sc.backing_sats = new_backing;
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
@@ -483,7 +485,7 @@ pub fn check_stability(
                     "payment_id": payment_id_str,
                     "counterparty": counterparty_str,
                     "expected_usd": target_usd,
-                    "new_backing_sats": sc.backing_sats
+                    "new_backing_sats": new_backing
                 }),
             );
             Some(StabilityPaymentInfo {

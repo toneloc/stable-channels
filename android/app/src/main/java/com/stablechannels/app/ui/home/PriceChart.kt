@@ -98,11 +98,13 @@ fun PriceChart(
         selectedPoint = null
         val cutoffMs = System.currentTimeMillis() - chartPeriod.effectiveDays().toLong() * 86400 * 1000
         val cutoffSec = cutoffMs / 1000
-        priceHistory = if (chartPeriod.usesHourly) {
+        val raw = if (chartPeriod.usesHourly) {
             hourlyPrices.filter { it.timestamp >= cutoffSec }
         } else {
             allDailyPrices.filter { it.timestamp >= cutoffSec }
         }
+        // Cap at 120 points — keeps Canvas draw O(n) work proportional
+        priceHistory = downsample(raw, 120)
     }
 
     Card(
@@ -363,4 +365,11 @@ fun PriceChart(
 
 private fun formatYAxis(price: Double): String {
     return if (price >= 1000) "$${(price / 1000).toInt()}K" else "$${price.toInt()}"
+}
+
+// Uniform downsample: pick evenly-spaced indices to preserve shape
+private fun downsample(records: List<PriceRecord>, maxPoints: Int): List<PriceRecord> {
+    if (records.size <= maxPoints) return records
+    val step = (records.size - 1).toDouble() / (maxPoints - 1)
+    return (0 until maxPoints).map { i -> records[(i * step).toInt().coerceAtMost(records.size - 1)] }
 }

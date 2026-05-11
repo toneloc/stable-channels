@@ -11,6 +11,7 @@ use electrum_client::ElectrumApi;
 
 use ldk_node::bitcoin::{Address, Amount, Network};
 use ldk_node::config::{AnchorChannelsConfig, Config, EsploraSyncConfig};
+use ldk_node::entropy::NodeEntropy;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning::routing::gossip::NodeAlias;
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -185,6 +186,15 @@ pub fn random_node_alias(prefix: &str) -> Option<NodeAlias> {
     Some(NodeAlias(bytes))
 }
 
+pub fn random_entropy() -> NodeEntropy {
+    let mut rng = rand::rng();
+    let mut seed = [0u8; 64];
+    for byte in seed.iter_mut() {
+        *byte = rng.random();
+    }
+    NodeEntropy::from_seed_bytes(seed)
+}
+
 // ================================================================
 // Node builders
 // ================================================================
@@ -205,10 +215,11 @@ pub fn setup_node(electrsd: &ElectrsD, alias_prefix: &str, anchor_channels: bool
     let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
     let sync_config = EsploraSyncConfig {
         background_sync_config: None,
+        ..Default::default()
     };
     builder.set_chain_source_esplora(esplora_url, Some(sync_config));
 
-    let node = builder.build().unwrap();
+    let node = builder.build(random_entropy()).unwrap();
     node.start().unwrap();
     println!("[setup] {} node started: {}", alias_prefix, node.node_id());
     node
@@ -226,6 +237,7 @@ pub fn setup_lsp_node(electrsd: &ElectrsD) -> Node {
     let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
     let sync_config = EsploraSyncConfig {
         background_sync_config: None,
+        ..Default::default()
     };
     builder.set_chain_source_esplora(esplora_url, Some(sync_config));
 
@@ -244,7 +256,7 @@ pub fn setup_lsp_node(electrsd: &ElectrsD) -> Node {
     };
     builder.set_liquidity_provider_lsps2(service_config);
 
-    let node = builder.build().unwrap();
+    let node = builder.build(random_entropy()).unwrap();
     node.start().unwrap();
     println!("[setup] LSP node started: {}", node.node_id());
     node
@@ -270,13 +282,14 @@ pub fn setup_user_node(
     let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
     let sync_config = EsploraSyncConfig {
         background_sync_config: None,
+        ..Default::default()
     };
     builder.set_chain_source_esplora(esplora_url, Some(sync_config));
 
     // LSPS2 client
     builder.set_liquidity_source_lsps2(lsp_pubkey, lsp_address, None);
 
-    let node = builder.build().unwrap();
+    let node = builder.build(random_entropy()).unwrap();
     node.start().unwrap();
     println!("[setup] User node started: {}", node.node_id());
     node

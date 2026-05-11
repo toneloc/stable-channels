@@ -94,7 +94,7 @@ pub fn fetch_prices(
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD");
 
-        let response = retry(
+        let response = match retry(
             Fixed::from_millis(PRICE_FETCH_RETRY_DELAY_MS).take(PRICE_FETCH_MAX_RETRIES),
             || match agent.get(&url).call() {
                 Ok(resp) => {
@@ -106,10 +106,21 @@ pub fn fetch_prices(
                 }
                 Err(e) => Err(e.to_string()),
             },
-        )
-        .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::other(e.to_string())) })?;
+        ) {
+            Ok(resp) => resp,
+            Err(e) => {
+                eprintln!("Feed {} unreachable: {}", price_feed.name, e);
+                continue 'feeds;
+            }
+        };
 
-        let json: Value = response.into_json()?;
+        let json: Value = match response.into_json() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Feed {} returned unparseable JSON: {}", price_feed.name, e);
+                continue 'feeds;
+            }
+        };
         let mut data = &json;
 
         for key in &price_feed.json_path {
@@ -349,6 +360,65 @@ mod tests {
         for (name, price) in &prices {
             assert!(*price > 0.0, "{} returned invalid price", name);
         }
+    }
+
+    // Test for verifying one feed failure case: when a single feed is
+    // unreachable, the remaining feeds must still be tried and their
+    // prices returned.
+    #[test]
+    fn test_one_feed_failure_case() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"last":"50000"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let feeds = vec![
+            PriceFeed::new("Unreachable", "http://127.0.0.1:1/", vec!["last"]),
+            PriceFeed::new("Mock", &format!("http://127.0.0.1:{}/", port), vec!["last"]),
+        ];
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
+            .build();
+
+        let result = fetch_prices(&agent, &feeds).expect("should get at least one price");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "Mock");
+        assert!((result[0].1 - 50000.0).abs() < f64::EPSILON);
+    }
+
+    // Pins the contract for the total-outage case: all feeds down must
+    // return Err, not Ok(vec![]).
+    #[test]
+    fn test_fetch_prices_all_unreachable_returns_err() {
+        let feeds = vec![
+            PriceFeed::new("Dead1", "http://127.0.0.1:1/", vec!["last"]),
+            PriceFeed::new("Dead2", "http://127.0.0.1:2/", vec!["last"]),
+        ];
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
+            .build();
+
+        let err = fetch_prices(&agent, &feeds).expect_err("all feeds dead should be Err");
+        assert!(err.to_string().contains("No valid prices"));
     }
 
     #[test]
