@@ -279,7 +279,10 @@ pub struct UserApp {
 /// The peer store blob layout (from peer_store.rs):
 ///   u16 BE  — peer count
 ///   per peer: [33 bytes pubkey] [BigSize TLV len] [TLV: 00 21 <pubkey> 02 07 01 <4-byte IP> <2-byte port>]
-fn fix_lsp_peer_address_in_db(db_path: &std::path::Path, lsp_pubkey: ldk_node::bitcoin::secp256k1::PublicKey) {
+fn fix_lsp_peer_address_in_db(
+    db_path: &std::path::Path,
+    lsp_pubkey: ldk_node::bitcoin::secp256k1::PublicKey,
+) {
     use stable_channels::constants::DEFAULT_LSP_ADDRESS;
 
     let lsp_addr: ldk_node::lightning::ln::msgs::SocketAddress = match DEFAULT_LSP_ADDRESS.parse() {
