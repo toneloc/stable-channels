@@ -469,9 +469,8 @@ struct PulseOverlay: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 12)
-            .fill(color.opacity(on ? 0.15 : 0.0))
-            .scaleEffect(on ? 1.04 : 1.0)
-            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: on)
+            .fill(color.opacity(on ? 0.25 : 0.0))
+            .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: on)
             .onAppear { on = true }
             .allowsHitTesting(false)
     }
