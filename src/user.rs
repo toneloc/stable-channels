@@ -271,6 +271,130 @@ pub struct UserApp {
     saved_mnemonic: Option<String>,
 }
 
+/// Ensures the ldk-node peer store in SQLite contains the LSP at the address given in
+/// DEFAULT_LSP_ADDRESS. This must be called BEFORE builder.build() because ldk-node's
+/// add_peer() is skip-if-exists, and connect() only calls add_peer after a successful TCP
+/// handshake — so a stale stored address can never be corrected at runtime.
+///
+/// The peer store blob layout (from peer_store.rs):
+///   u16 BE  — peer count
+///   per peer: [33 bytes pubkey] [BigSize TLV len] [TLV: 00 21 <pubkey> 02 07 01 <4-byte IP> <2-byte port>]
+fn fix_lsp_peer_address_in_db(db_path: &std::path::Path, lsp_pubkey: ldk_node::bitcoin::secp256k1::PublicKey) {
+    use stable_channels::constants::DEFAULT_LSP_ADDRESS;
+
+    let lsp_addr: ldk_node::lightning::ln::msgs::SocketAddress = match DEFAULT_LSP_ADDRESS.parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let lsp_ip_port = match &lsp_addr {
+        ldk_node::lightning::ln::msgs::SocketAddress::TcpIpV4 { addr, port } => {
+            let mut b = vec![0x01u8];
+            b.extend_from_slice(addr);
+            b.extend_from_slice(&port.to_be_bytes());
+            b
+        }
+        _ => return, // only handle IPv4
+    };
+
+    let lsp_pubkey_bytes = lsp_pubkey.serialize(); // 33 bytes
+
+    // TLV-encoded PeerInfo: tag 0 (node_id) + tag 2 (address)
+    let mut tlv: Vec<u8> = Vec::with_capacity(44);
+    tlv.push(0x00); // tag 0
+    tlv.push(0x21); // len 33
+    tlv.extend_from_slice(&lsp_pubkey_bytes);
+    tlv.push(0x02); // tag 2
+    tlv.push(lsp_ip_port.len() as u8); // len (7 for IPv4)
+    tlv.extend_from_slice(&lsp_ip_port);
+
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let blob: Vec<u8> = match conn.query_row(
+        "SELECT value FROM ldk_node_data WHERE key = 'peers'",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(b) => b,
+        Err(_) => {
+            // No peers entry at all — create one with just the LSP
+            let mut new_blob: Vec<u8> = vec![0x00, 0x01];
+            new_blob.extend_from_slice(&lsp_pubkey_bytes);
+            new_blob.push(tlv.len() as u8); // BigSize (fits in 1 byte for len<=44)
+            new_blob.extend_from_slice(&tlv);
+            let _ = conn.execute(
+                "INSERT INTO ldk_node_data (key, value) VALUES ('peers', ?1)",
+                rusqlite::params![new_blob],
+            );
+            return;
+        }
+    };
+
+    if blob.len() < 2 {
+        return;
+    }
+    let count = u16::from_be_bytes([blob[0], blob[1]]) as usize;
+
+    // Scan for the LSP pubkey and update its address, or note its absence
+    let mut pos = 2usize;
+    let mut lsp_found = false;
+    let mut new_blob = blob[..2].to_vec(); // preserve count
+
+    for _ in 0..count {
+        if pos + 33 > blob.len() {
+            break;
+        }
+        let peer_pubkey = &blob[pos..pos + 33];
+        pos += 33;
+
+        // Read BigSize TLV length (single byte; ldk-node PeerInfo TLV is always < 0xFD bytes)
+        if pos >= blob.len() {
+            break;
+        }
+        let tlv_len = blob[pos] as usize;
+        pos += 1;
+
+        if pos + tlv_len > blob.len() {
+            break;
+        }
+        let existing_tlv = &blob[pos..pos + tlv_len];
+        pos += tlv_len;
+
+        if peer_pubkey == lsp_pubkey_bytes {
+            lsp_found = true;
+            // Replace with the correct TLV
+            new_blob.extend_from_slice(peer_pubkey);
+            new_blob.push(tlv.len() as u8);
+            new_blob.extend_from_slice(&tlv);
+        } else {
+            // Keep this peer unchanged
+            new_blob.extend_from_slice(peer_pubkey);
+            new_blob.push(existing_tlv.len() as u8);
+            new_blob.extend_from_slice(existing_tlv);
+        }
+    }
+
+    if !lsp_found {
+        // Bump the count and append the LSP entry
+        let new_count = (count + 1) as u16;
+        new_blob[0] = (new_count >> 8) as u8;
+        new_blob[1] = (new_count & 0xFF) as u8;
+        new_blob.extend_from_slice(&lsp_pubkey_bytes);
+        new_blob.push(tlv.len() as u8);
+        new_blob.extend_from_slice(&tlv);
+    }
+
+    if new_blob != blob {
+        let _ = conn.execute(
+            "UPDATE ldk_node_data SET value = ?1 WHERE key = 'peers'",
+            rusqlite::params![new_blob],
+        );
+        println!("[Init] Updated LSP peer address to {}", DEFAULT_LSP_ADDRESS);
+    }
+}
+
 impl UserApp {
     pub fn new() -> Result<Self, String> {
         println!("Initializing user node...");
@@ -385,6 +509,12 @@ impl UserApp {
             )
             .expect("Failed to load seed")
         });
+        // Fix stale LSP peer address in the KV store before the node loads it.
+        // ldk-node's add_peer() is skip-if-exists, and connect() only calls add_peer after a
+        // successful TCP handshake — so a wrong stored address can never be corrected at runtime.
+        // Patching the raw bytes here (before build) guarantees the correct address loads.
+        fix_lsp_peer_address_in_db(&data_dir.join("ldk_node_data.sqlite"), lsp_pubkey);
+
         let node = Arc::new(builder.build(entropy).expect("Failed to build node"));
         node.start().expect("Failed to start node");
 
