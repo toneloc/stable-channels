@@ -98,4 +98,3 @@ struct ErrorDisplayView: View {
         }
     }
 }
-

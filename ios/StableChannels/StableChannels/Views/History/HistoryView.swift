@@ -31,10 +31,10 @@ struct HistoryView: View {
                 .overlay {
                     if selectedSegment == 0 && trades.isEmpty {
                         ContentUnavailableView("No Trades", systemImage: "arrow.left.arrow.right",
-                            description: Text("Buy or sell BTC to see trades here."))
+                                               description: Text("Buy or sell BTC to see trades here."))
                     } else if selectedSegment == 1 && payments.isEmpty {
                         ContentUnavailableView("No Payments", systemImage: "bolt.fill",
-                            description: Text("Send or receive payments to see history here."))
+                                               description: Text("Send or receive payments to see history here."))
                     }
                 }
             }
