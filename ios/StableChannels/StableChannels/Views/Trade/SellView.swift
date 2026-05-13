@@ -209,7 +209,7 @@ struct SellView: View {
         appState.ensureLSPConnected()
         let sc = appState.stableChannel
         let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: appState.btcPrice).amount
-        let feeUSD = amountUSD * 0.01  // 1% fee
+        let feeUSD = amountUSD * 0.01 // 1% fee
         let price = appState.btcPrice
         do {
             guard let result = try appState.tradeService?.executeSell(

@@ -205,7 +205,7 @@ struct BuyView: View {
         errorMessage = nil
         appState.ensureLSPConnected()
         let sc = appState.stableChannel
-        let feeUSD = amountUSD * 0.01  // 1% fee
+        let feeUSD = amountUSD * 0.01 // 1% fee
         let price = appState.btcPrice
         do {
             guard let result = try appState.tradeService?.executeBuy(

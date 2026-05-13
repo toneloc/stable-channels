@@ -25,7 +25,8 @@ struct SendView: View {
             return .bolt11
         } else if trimmed.hasPrefix("lno") {
             return .bolt12
-        } else if trimmed.hasPrefix("bc1") || trimmed.hasPrefix("1") || trimmed.hasPrefix("3") || trimmed.hasPrefix("tb1") {
+        } else if trimmed.hasPrefix("bc1") || trimmed.hasPrefix("1") || trimmed.hasPrefix("3") || trimmed
+            .hasPrefix("tb1") {
             return .onchain
         }
         return .unknown
@@ -198,7 +199,7 @@ struct SendView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                            if appState.nodeService.channels.contains(where: { $0.isChannelReady }) {
+                            if appState.nodeService.channels.contains(where: \.isChannelReady) {
                                 Text("Will route via splice-out")
                                     .font(.caption)
                                     .foregroundStyle(.orange)
@@ -308,7 +309,10 @@ struct SendView: View {
                     actualMsat = manualAmountMsat
                     paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: actualMsat)
                 }
-                let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (Double(actualMsat) / 1000.0 / 100_000_000.0) * price : nil
+                let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (
+                    Double(actualMsat) / 1000.0 / 100_000_000.0
+                ) *
+                    price : nil
                 _ = try? appState.databaseService?.recordPayment(
                     paymentId: "\(paymentId)",
                     paymentType: "lightning",
@@ -347,7 +351,11 @@ struct SendView: View {
                 // Route through splice-out if channel exists
                 if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }) {
                     guard !appState.isSweeping else {
-                        throw NSError(domain: "", code: 0, userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"])
+                        throw NSError(
+                            domain: "",
+                            code: 0,
+                            userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
+                        )
                     }
                     try appState.nodeService.spliceOut(
                         userChannelId: channel.userChannelId,
