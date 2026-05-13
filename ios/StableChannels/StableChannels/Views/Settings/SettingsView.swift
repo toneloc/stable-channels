@@ -190,9 +190,11 @@ struct SettingsView: View {
                     }
                     if showSeedWords {
                         if let words = appState.nodeService.savedMnemonic, !words.isEmpty {
-                            Text("Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
+                            Text(
+                                "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
                             ForEach(Array(words.split(separator: " ").enumerated()), id: \.offset) { index, word in
                                 HStack {
                                     Text("\(index + 1).")
@@ -241,9 +243,11 @@ struct SettingsView: View {
                         Text("Self-custodial")
                             .foregroundStyle(.secondary)
                     }
-                    Text("Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text(
+                        "Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Settings")

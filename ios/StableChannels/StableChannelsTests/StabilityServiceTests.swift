@@ -2,7 +2,6 @@ import XCTest
 @testable import StableChannels
 
 final class StabilityServiceTests: XCTestCase {
-
     // MARK: - Helper
 
     private func testSC(expectedUSD: Double, price: Double, receiverSats: UInt64) -> StableChannel {
@@ -31,26 +30,26 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertEqual(sc.expectedUSD.amount, 500.0)
     }
 
-    func testOutgoingEatsIntoStable() {
+    func testOutgoingEatsIntoStable() throws {
         var sc = testSC(expectedUSD: 1000.0, price: 100_000.0, receiverSats: 900_000)
         let deducted = StabilityService.reconcileOutgoing(&sc, price: 100_000.0)
         XCTAssertNotNil(deducted)
-        XCTAssertEqual(deducted!, 100.0, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(deducted), 100.0, accuracy: 0.01)
         XCTAssertEqual(sc.expectedUSD.amount, 900.0, accuracy: 0.01)
         let expectedBacking = UInt64(900.0 / 100_000.0 * 100_000_000.0)
         XCTAssertEqual(sc.backingSats, expectedBacking)
     }
 
-    func testOutgoingPartialStableDeduction() {
+    func testOutgoingPartialStableDeduction() throws {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 300_000)
-        let deducted = StabilityService.reconcileOutgoing(&sc, price: 100_000.0)!
+        let deducted = try XCTUnwrap(StabilityService.reconcileOutgoing(&sc, price: 100_000.0))
         XCTAssertEqual(deducted, 200.0, accuracy: 0.01)
         XCTAssertEqual(sc.expectedUSD.amount, 300.0, accuracy: 0.01)
     }
 
-    func testOutgoingSpendsEntireStable() {
+    func testOutgoingSpendsEntireStable() throws {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 0)
-        let deducted = StabilityService.reconcileOutgoing(&sc, price: 100_000.0)!
+        let deducted = try XCTUnwrap(StabilityService.reconcileOutgoing(&sc, price: 100_000.0))
         XCTAssertEqual(deducted, 500.0, accuracy: 0.01)
         XCTAssertLessThan(sc.expectedUSD.amount, 0.01)
         XCTAssertEqual(sc.backingSats, 0)
@@ -68,12 +67,12 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertNil(StabilityService.reconcileOutgoing(&sc, price: 100_000.0))
     }
 
-    func testOutgoingAtDifferentPrices() {
+    func testOutgoingAtDifferentPrices() throws {
         var sc1 = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 400_000)
-        let d1 = StabilityService.reconcileOutgoing(&sc1, price: 100_000.0)!
+        let d1 = try XCTUnwrap(StabilityService.reconcileOutgoing(&sc1, price: 100_000.0))
 
         var sc2 = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 400_000)
-        let d2 = StabilityService.reconcileOutgoing(&sc2, price: 200_000.0)!
+        let d2 = try XCTUnwrap(StabilityService.reconcileOutgoing(&sc2, price: 200_000.0))
 
         XCTAssertEqual(d1, 100.0, accuracy: 0.01)
         XCTAssertEqual(d2, 200.0, accuracy: 0.01)
@@ -84,32 +83,57 @@ final class StabilityServiceTests: XCTestCase {
     func testForwardedCoveredByNative() {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 1_000_000)
         sc.isStableReceiver = false
-        XCTAssertNil(StabilityService.reconcileForwarded(&sc, userSats: 1_000_000, totalForwardedSats: 200_000, price: 100_000.0))
+        XCTAssertNil(StabilityService.reconcileForwarded(
+            &sc,
+            userSats: 1_000_000,
+            totalForwardedSats: 200_000,
+            price: 100_000.0
+        ))
         XCTAssertEqual(sc.expectedUSD.amount, 500.0)
     }
 
-    func testForwardedEatsIntoStable() {
+    func testForwardedEatsIntoStable() throws {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 1_000_000)
-        let deducted = StabilityService.reconcileForwarded(&sc, userSats: 1_000_000, totalForwardedSats: 700_000, price: 100_000.0)!
+        let deducted = try XCTUnwrap(StabilityService.reconcileForwarded(
+            &sc,
+            userSats: 1_000_000,
+            totalForwardedSats: 700_000,
+            price: 100_000.0
+        ))
         XCTAssertEqual(deducted, 200.0, accuracy: 0.01)
         XCTAssertEqual(sc.expectedUSD.amount, 300.0, accuracy: 0.01)
     }
 
-    func testForwardedAllStableNoNative() {
+    func testForwardedAllStableNoNative() throws {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 500_000)
-        let deducted = StabilityService.reconcileForwarded(&sc, userSats: 500_000, totalForwardedSats: 100_000, price: 100_000.0)!
+        let deducted = try XCTUnwrap(StabilityService.reconcileForwarded(
+            &sc,
+            userSats: 500_000,
+            totalForwardedSats: 100_000,
+            price: 100_000.0
+        ))
         XCTAssertEqual(deducted, 100.0, accuracy: 0.01)
         XCTAssertEqual(sc.expectedUSD.amount, 400.0, accuracy: 0.01)
     }
 
     func testForwardedZeroExpectedUSD() {
         var sc = testSC(expectedUSD: 0.0, price: 100_000.0, receiverSats: 500_000)
-        XCTAssertNil(StabilityService.reconcileForwarded(&sc, userSats: 500_000, totalForwardedSats: 100_000, price: 100_000.0))
+        XCTAssertNil(StabilityService.reconcileForwarded(
+            &sc,
+            userSats: 500_000,
+            totalForwardedSats: 100_000,
+            price: 100_000.0
+        ))
     }
 
     func testForwardedZeroPrice() {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 1_000_000)
-        XCTAssertNil(StabilityService.reconcileForwarded(&sc, userSats: 1_000_000, totalForwardedSats: 700_000, price: 0.0))
+        XCTAssertNil(StabilityService.reconcileForwarded(
+            &sc,
+            userSats: 1_000_000,
+            totalForwardedSats: 700_000,
+            price: 0.0
+        ))
     }
 
     // MARK: - reconcileIncoming
