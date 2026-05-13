@@ -1,5 +1,7 @@
 import SwiftUI
 import LDKNode
+import PhotosUI
+import CoreImage
 
 struct SendView: View {
     @Environment(AppState.self) private var appState
@@ -11,6 +13,11 @@ struct SendView: View {
     @State private var errorMessage: String?
     @State private var success = false
     @State private var sentAmountSats: UInt64 = 0
+    @State private var showScanner = false
+    @State private var showPhotoPicker = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var showQRAlert = false
+    @State private var qrAlertMessage = ""
 
     private enum InputType {
         case bolt11
@@ -269,6 +276,48 @@ struct SendView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(success ? "Done" : "Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    HStack(spacing: 16) {
+                        Button {
+                            showPhotoPicker = true
+                        } label: {
+                            Image(systemName: "photo.on.rectangle")
+                        }
+                        Button {
+                            showScanner = true
+                        } label: {
+                            Image(systemName: "qrcode.viewfinder")
+                        }
+                    }
+                }
+            }
+            .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotoItem, matching: .images)
+            .onChange(of: selectedPhotoItem) { _, newItem in
+                Task {
+                    if let data = try? await newItem?.loadTransferable(type: Data.self),
+                       let image = UIImage(data: data),
+                       let code = extractQRCode(from: image) {
+                        input = code
+                    } else {
+                        qrAlertMessage = "Selected image doesn't contain a Lightning invoice or Bitcoin address QR code."
+                        showQRAlert = true
+                    }
+                    selectedPhotoItem = nil
+                }
+            }
+            .sheet(isPresented: $showScanner) {
+                InvoiceScanView(
+                    onScan: { scanned in
+                        input = scanned
+                        showScanner = false
+                    },
+                    onCancel: { showScanner = false }
+                )
+            }
+            .alert("No QR Code Found", isPresented: $showQRAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(qrAlertMessage)
             }
         }
     }
@@ -392,5 +441,19 @@ struct SendView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func extractQRCode(from image: UIImage) -> String? {
+        guard let ciImage = CIImage(image: image) else { return nil }
+        let detector = CIDetector(
+            ofType: CIDetectorTypeQRCode,
+            context: nil,
+            options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
+        )
+        guard let features = detector?.features(in: ciImage) as? [CIQRCodeFeature],
+              let value = features.first?.messageString,
+              !value.isEmpty
+        else { return nil }
+        return value
     }
 }
