@@ -109,7 +109,7 @@ class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)"
         ]
 
         for sql in statements {
@@ -296,7 +296,7 @@ class DatabaseService {
             counterparty.map { .text($0) } ?? .null,
             .text(status),
             txid.map { .text($0) } ?? .null,
-            address.map { .text($0) } ?? .null,
+            address.map { .text($0) } ?? .null
         ])
         return Int64(sqlite3_last_insert_rowid(db))
     }

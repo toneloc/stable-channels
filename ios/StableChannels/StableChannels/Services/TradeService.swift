@@ -81,7 +81,7 @@ class TradeService {
             "type": Constants.tradeMessageType,
             "channel_id": channelId,
             "user_channel_id": "\(userChannelId)",
-            "expected_usd": expectedUSD,
+            "expected_usd": expectedUSD
         ]
 
         guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
@@ -93,7 +93,7 @@ class TradeService {
 
         let envelope: [String: Any] = [
             "payload": payloadStr,
-            "signature": signature,
+            "signature": signature
         ]
 
         guard let envelopeData = try? JSONSerialization.data(withJSONObject: envelope),
@@ -128,7 +128,7 @@ class TradeService {
     static func parseIncomingTLV(
         data: [UInt8],
         expectedCounterparty: String,
-        verifySignature: (([UInt8], String, String) -> Bool)
+        verifySignature: ([UInt8], String, String) -> Bool
     ) -> (type: String, expectedUSD: Double, userChannelId: String)? {
         guard let envelopeStr = String(bytes: data, encoding: .utf8),
               let envelopeData = envelopeStr.data(using: .utf8),

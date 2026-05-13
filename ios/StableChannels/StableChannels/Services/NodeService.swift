@@ -188,10 +188,19 @@ class NodeService {
 
     func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, amountSats: UInt64) throws {
         guard let node else { throw NodeServiceError.notRunning }
-        try node.spliceIn(userChannelId: userChannelId, counterpartyNodeId: counterpartyNodeId, spliceAmountSats: amountSats)
+        try node.spliceIn(
+            userChannelId: userChannelId,
+            counterpartyNodeId: counterpartyNodeId,
+            spliceAmountSats: amountSats
+        )
     }
 
-    func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: String, amountSats: UInt64) throws {
+    func spliceOut(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        address: String,
+        amountSats: UInt64
+    ) throws {
         guard let node else { throw NodeServiceError.notRunning }
         try node.spliceOut(
             userChannelId: userChannelId,
@@ -213,7 +222,7 @@ class NodeService {
         return try node.bolt11Payment().sendUsingAmount(invoice: invoice, amountMsat: amountMsat, routeParameters: nil)
     }
 
-    func sendBolt12(offer: Offer, amountMsat: UInt64) throws -> PaymentId {
+    func sendBolt12(offer: Offer, amountMsat _: UInt64) throws -> PaymentId {
         guard let node else { throw NodeServiceError.notRunning }
         return try node.bolt12Payment().send(
             offer: offer,
@@ -328,7 +337,7 @@ class NodeService {
             "seed_phrase",
             "ldk_node_data.sqlite",
             "ldk_node_data.sqlite-wal",
-            "ldk_node_data.sqlite-shm",
+            "ldk_node_data.sqlite-shm"
         ]
         for file in filesToDelete {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))

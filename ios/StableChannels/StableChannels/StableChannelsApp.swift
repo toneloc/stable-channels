@@ -14,11 +14,13 @@ struct StableChannelsApp: App {
                 .task {
                     await appState.start()
                 }
-                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
-                    appState.stopNodeForBackground()
+                .onReceive(NotificationCenter.default
+                    .publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+                        appState.stopNodeForBackground()
                 }
-                .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-                    Task { await appState.restartNodeFromForeground() }
+                .onReceive(NotificationCenter.default
+                    .publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                        Task { await appState.restartNodeFromForeground() }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
                     appState.stop()
@@ -30,10 +32,9 @@ struct StableChannelsApp: App {
 // MARK: - AppDelegate for Push Notifications
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-
     func application(
         _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+        didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
 
@@ -59,7 +60,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Token Registration
 
     func application(
-        _ application: UIApplication,
+        _: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         let token = deviceToken.map { String(format: "%02.2hhx", $0) }.joined()
@@ -75,7 +76,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     }
 
     func application(
-        _ application: UIApplication,
+        _: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
         print("[Push] Registration failed: \(error.localizedDescription)")
@@ -84,7 +85,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Background Push (content-available: 1)
 
     func application(
-        _ application: UIApplication,
+        _: UIApplication,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
@@ -102,8 +103,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Foreground Notification Display
 
     func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
+        _: UNUserNotificationCenter,
+        willPresent _: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         // Show banner + sound even when app is in foreground
@@ -113,8 +114,8 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     // MARK: - Notification Tap
 
     func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
+        _: UNUserNotificationCenter,
+        didReceive _: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         // App will be opened/foregrounded — normal startup handles payment processing
@@ -136,16 +137,16 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             .string(forKey: "node_id") ?? ""
 
         #if DEBUG
-        let apnsEnvironment = "sandbox"
+            let apnsEnvironment = "sandbox"
         #else
-        let apnsEnvironment = "production"
+            let apnsEnvironment = "production"
         #endif
 
         let body: [String: String] = [
             "device_token": token,
             "platform": "ios",
             "node_id": nodeId,
-            "environment": apnsEnvironment,
+            "environment": apnsEnvironment
         ]
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }

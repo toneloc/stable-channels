@@ -3,7 +3,6 @@ import LDKNode
 
 /// Pure stability logic — direct port of src/stable.rs
 enum StabilityService {
-
     // MARK: - Reconciliation
 
     /// Reconcile an outgoing payment against the stable position.
@@ -145,7 +144,7 @@ enum StabilityService {
         } else if sc.riskLevel > Constants.maxRiskLevel {
             action = .highRiskNoAction
         } else if (sc.isStableReceiver && isReceiverBelowExpected)
-                    || (!sc.isStableReceiver && !isReceiverBelowExpected) {
+            || (!sc.isStableReceiver && !isReceiverBelowExpected) {
             action = .checkOnly
         } else {
             action = .pay

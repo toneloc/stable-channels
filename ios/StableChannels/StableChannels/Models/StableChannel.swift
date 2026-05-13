@@ -57,10 +57,10 @@ struct USD: Codable, Equatable {
 // MARK: - StableChannel
 
 struct StableChannel: Codable {
-    var channelId: String  // ldk-node ChannelId is a String in Swift bindings
-    var userChannelId: String  // ldk-node UserChannelId is a String in Swift bindings
+    var channelId: String // ldk-node ChannelId is a String in Swift bindings
+    var userChannelId: String // ldk-node UserChannelId is a String in Swift bindings
     var isStableReceiver: Bool
-    var counterparty: String  // hex-encoded pubkey (ldk-node PublicKey = String)
+    var counterparty: String // hex-encoded pubkey (ldk-node PublicKey = String)
     var expectedUSD: USD
     var expectedBTC: Bitcoin
     var stableReceiverBTC: Bitcoin
