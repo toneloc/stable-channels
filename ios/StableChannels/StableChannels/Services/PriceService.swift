@@ -65,7 +65,8 @@ class PriceService {
     /// Returns array of (unix_timestamp, close_price).
     func fetchKrakenOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)] {
         let sinceTs = since ?? (Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600)
-        guard let url = URL(string: "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=\(sinceTs)") else {
+        guard let url = URL(string: "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=\(sinceTs)")
+        else {
             return []
         }
 

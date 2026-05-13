@@ -22,7 +22,7 @@ enum AuditService {
         let logEntry: [String: Any] = [
             "ts": formatter.string(from: Date()),
             "event": event,
-            "data": data,
+            "data": data
         ]
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: logEntry),
