@@ -31,7 +31,10 @@ struct FundWalletView: View {
                             isCopied = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isCopied = false }
                         } label: {
-                            Label(isCopied ? "Copied" : "Copy Address", systemImage: isCopied ? "checkmark" : "doc.on.doc")
+                            Label(
+                                isCopied ? "Copied" : "Copy Address",
+                                systemImage: isCopied ? "checkmark" : "doc.on.doc"
+                            )
                         }
                         .buttonStyle(.borderedProminent)
                     }

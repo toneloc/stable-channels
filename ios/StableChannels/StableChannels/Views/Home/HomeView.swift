@@ -323,8 +323,8 @@ struct HomeView: View {
                     .font(.caption.bold())
                 Spacer()
                 Text(showBTC
-                     ? "\(appState.onchainBalanceSats.btcSpacedFormatted) BTC"
-                     : onchainUSD.usdFormatted)
+                    ? "\(appState.onchainBalanceSats.btcSpacedFormatted) BTC"
+                    : onchainUSD.usdFormatted)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

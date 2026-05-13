@@ -1,8 +1,8 @@
 import SwiftUI
 
 enum TradeDirection {
-    case buy   // drag left: grow BTC
-    case sell  // drag right: grow USD
+    case buy // drag left: grow BTC
+    case sell // drag right: grow USD
 }
 
 struct TradeRequest: Identifiable {
@@ -16,8 +16,8 @@ struct BalanceBarView: View {
     let nativeSats: UInt64
     let totalSats: UInt64
     let btcPrice: Double
-    var onDragStarted: (() -> Void)? = nil
-    var onTradeRequest: ((TradeDirection, Double) -> Void)? = nil
+    var onDragStarted: (() -> Void)?
+    var onTradeRequest: ((TradeDirection, Double) -> Void)?
 
     @State private var dragOffset: CGFloat = 0
     @State private var isPressing = false
@@ -30,6 +30,7 @@ struct BalanceBarView: View {
     private var nativeUSD: Double {
         btcPrice > 0 ? Double(nativeSats) / Double(Constants.satsInBTC) * btcPrice : 0
     }
+
     private var totalUSD: Double { stableUSD + nativeUSD }
     private var stableFraction: Double { totalUSD > 0 ? stableUSD / totalUSD : 0 }
     private var interactive: Bool { onTradeRequest != nil }
