@@ -73,6 +73,21 @@ class AppState {
     private var stabilityTimer: Task<Void, Never>?
     private(set) var chainURL: String = Constants.primaryChainURL
 
+    var runtimeNetwork: Network {
+        guard let btcNetwork = Constants.BitcoinNetwork(networkString: Constants.defaultNetwork) else {
+            assertionFailure("Unsupported defaultNetwork '\(Constants.defaultNetwork)'")
+            return .bitcoin
+        }
+        switch btcNetwork {
+        case .mainnet:
+            return .bitcoin
+        case .testnet:
+            return .testnet
+        case .signet:
+            return .signet
+        }
+    }
+
     // Auto-sweep state
     private(set) var isSweeping = false
     var spliceTxid: String? = nil
@@ -160,7 +175,7 @@ class AppState {
 
             do {
                 try await nodeService.start(
-                    network: .bitcoin,
+                    network: runtimeNetwork,
                     esploraURL: chainURL,
                     mnemonic: ""  // Uses existing seed from data dir
                 )
@@ -203,7 +218,7 @@ class AppState {
             await MainActor.run { phase = .syncing }
             do {
                 try await nodeService.start(
-                    network: .bitcoin,
+                    network: runtimeNetwork,
                     esploraURL: chainURL,
                     mnemonic: ""
                 )
@@ -357,7 +372,7 @@ class AppState {
         restoreGossipToDB()
         do {
             try await nodeService.start(
-                network: .bitcoin,
+                network: runtimeNetwork,
                 esploraURL: chainURL,
                 mnemonic: ""
             )
