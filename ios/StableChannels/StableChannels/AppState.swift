@@ -40,10 +40,12 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_lightning_sats") ?? 0))
     }()
+
     var onchainBalanceSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
+
     var hasReadyChannel: Bool = false
 
     var totalBalanceSats: UInt64 {
@@ -57,6 +59,7 @@ class AppState {
         }
         return lightningBalanceSats + onchainBalanceSats
     }
+
     var onchainReceiveAddress: String?
 
     var totalBalanceUSD: Double {
@@ -75,12 +78,13 @@ class AppState {
 
     // Auto-sweep state
     private(set) var isSweeping = false
-    var spliceTxid: String? = nil
+    var spliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
     private var prevOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
+
     var fundingTxid: String? {
         didSet {
             UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -162,7 +166,7 @@ class AppState {
                 try await nodeService.start(
                     network: .bitcoin,
                     esploraURL: chainURL,
-                    mnemonic: ""  // Uses existing seed from data dir
+                    mnemonic: "" // Uses existing seed from data dir
                 )
                 // Store node_id in shared UserDefaults for NSE and push registration
                 let nodeId = nodeService.nodeId
@@ -251,7 +255,7 @@ class AppState {
 
         AuditService.log("DATA_MIGRATED", data: [
             "from": oldDir.path,
-            "to": newDir.path,
+            "to": newDir.path
         ])
     }
 
@@ -263,9 +267,9 @@ class AppState {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         var waited = 0
         while shared?.bool(forKey: "nse_processing") == true {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             waited += 1
-            if waited >= 10 { break }  // timeout after 10 seconds
+            if waited >= 10 { break } // timeout after 10 seconds
         }
         if waited > 0 {
             AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
@@ -490,7 +494,7 @@ class AppState {
         }
 
         // Restore node_metrics (contains RGS timestamp — must match the graph)
-        if let metricsData = try? Data(contentsOf: metricsPath), metricsData.count > 0 {
+        if let metricsData = try? Data(contentsOf: metricsPath), !metricsData.isEmpty {
             let metricsUpsert = "INSERT OR REPLACE INTO ldk_node_data (primary_namespace, secondary_namespace, key, value) VALUES ('', '', 'node_metrics', ?)"
             var metricsStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, metricsUpsert, -1, &metricsStmt, nil) == SQLITE_OK {
@@ -525,16 +529,16 @@ class AppState {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
             #if DEBUG
-            let apnsEnvironment = "sandbox"
+                let apnsEnvironment = "sandbox"
             #else
-            let apnsEnvironment = "production"
+                let apnsEnvironment = "production"
             #endif
 
             let body: [String: String] = [
                 "device_token": token,
                 "platform": "ios",
                 "node_id": nodeId,
-                "environment": apnsEnvironment,
+                "environment": apnsEnvironment
             ]
 
             guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
@@ -574,13 +578,13 @@ class AppState {
             updateStableBalances()
 
             AuditService.log("PUSH_PENDING_PAYMENT_RECONNECT_OK", data: [
-                "node_running": "\(nodeService.isRunning)",
+                "node_running": "\(nodeService.isRunning)"
             ])
         } catch {
             Self.updatePendingPushPaymentFlag(shared, reconnectSucceeded: false)
             AuditService.log("PUSH_PENDING_PAYMENT_RECONNECT_FAILED", data: [
                 "error": error.localizedDescription,
-                "node_running": "\(nodeService.isRunning)",
+                "node_running": "\(nodeService.isRunning)"
             ])
         }
     }
@@ -619,7 +623,7 @@ class AppState {
             self.updateStableBalances()
 
             AuditService.log("PUSH_WAKE", data: [
-                "node_running": "\(self.nodeService.isRunning)",
+                "node_running": "\(self.nodeService.isRunning)"
             ])
         }
     }
@@ -654,7 +658,7 @@ class AppState {
                 "channel_id": channelId,
                 "user_channel_id": userChannelId,
                 "counterparty": counterpartyNodeId,
-                "funding_txo": "\(fundingTxo)",
+                "funding_txo": "\(fundingTxo)"
             ])
 
         case .channelReady(let channelId, let userChannelId, _, _):
@@ -675,7 +679,7 @@ class AppState {
                     AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
                         "usd_deducted": "\(usdDeducted)",
                         "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
-                        "btc_price": "\(price)",
+                        "btc_price": "\(price)"
                     ])
                 }
             }
@@ -684,7 +688,7 @@ class AppState {
 
             AuditService.log("CHANNEL_READY", data: [
                 "channel_id": channelId,
-                "user_channel_id": userChannelId,
+                "user_channel_id": userChannelId
             ])
             statusMessage = "Channel is ready"
 
@@ -714,7 +718,7 @@ class AppState {
                     "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
                     "action": trade.action,
                     "new_expected_usd": "\(trade.newExpectedUSD)",
-                    "reason": reason.map { "\($0)" } ?? "unknown",
+                    "reason": reason.map { "\($0)" } ?? "unknown"
                 ])
             } else {
                 // Update payment status in DB
@@ -726,7 +730,7 @@ class AppState {
                 AuditService.log("PAYMENT_FAILED", data: [
                     "payment_id": paymentId.map { "\($0)" } ?? "nil",
                     "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
-                    "reason": reason.map { "\($0)" } ?? "unknown",
+                    "reason": reason.map { "\($0)" } ?? "unknown"
                 ])
                 let reasonStr = reason.map { "\($0)" } ?? "unknown"
                 statusMessage = "Payment failed: \(reasonStr)"
@@ -747,7 +751,7 @@ class AppState {
 
             AuditService.log("SPLICE_FAILED", data: [
                 "channel_id": "\(channelId)",
-                "user_channel_id": "\(userChannelId)",
+                "user_channel_id": "\(userChannelId)"
             ])
             statusMessage = "Splice failed"
 
@@ -785,7 +789,7 @@ class AppState {
         AuditService.log("PAYMENT_RECEIVED", data: [
             "amount_msat": "\(amountMsat)",
             "payment_id": paymentIdStr,
-            "payment_hash": paymentHashStr,
+            "payment_hash": paymentHashStr
         ])
 
         // Record in DB (dedup by paymentIdStr)
@@ -849,7 +853,7 @@ class AppState {
                 "old_expected_usd": "\(oldExpected)",
                 "new_expected_usd": "\(parsed.expectedUSD)",
                 "btc_price": "\(price)",
-                "payment_hash": paymentHash,
+                "payment_hash": paymentHash
             ])
             return true
         }
@@ -881,7 +885,7 @@ class AppState {
                 "payment_hash": paymentHashStr,
                 "action": trade.action,
                 "new_expected_usd": "\(trade.newExpectedUSD)",
-                "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil",
+                "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
             ])
 
             refreshBalances()
@@ -915,7 +919,7 @@ class AppState {
                 "usd_deducted": "\(usdDeducted)",
                 "old_expected_usd": "\(oldExpected)",
                 "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
-                "btc_price": "\(price)",
+                "btc_price": "\(price)"
             ])
         }
 
@@ -932,7 +936,7 @@ class AppState {
 
         AuditService.log("PAYMENT_SUCCESSFUL", data: [
             "payment_hash": paymentHashStr,
-            "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil",
+            "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
         ])
         statusMessage = "Payment confirmed"
     }
@@ -955,7 +959,7 @@ class AppState {
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
             "reason": reasonStr,
-            "balance_sats": "\(balanceSats)",
+            "balance_sats": "\(balanceSats)"
         ])
 
         // Record in payment history — use funding txid as the close tx reference
@@ -1006,7 +1010,7 @@ class AppState {
         AuditService.log("SPLICE_PENDING", data: [
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
-            "funding_txo": "\(newFundingTxo)",
+            "funding_txo": "\(newFundingTxo)"
         ])
 
         // Record/update splice payment
@@ -1069,7 +1073,7 @@ class AppState {
     func ensureLSPConnected() {
         guard let node = nodeService.node else { return }
         nodeService.refreshChannels()
-        let allUsable = !nodeService.channels.isEmpty && nodeService.channels.allSatisfy { $0.isUsable }
+        let allUsable = !nodeService.channels.isEmpty && nodeService.channels.allSatisfy(\.isUsable)
         guard !allUsable else { return }
         try? node.connect(
             nodeId: Constants.defaultLSPPubkey,
@@ -1115,7 +1119,8 @@ class AppState {
             // Don't recompute nativeSats — receiver balance hasn't updated yet (HTLC in flight).
             // Native will be recomputed on next balance refresh.
             if price > 0 {
-                stableChannel.backingSats = UInt64(stableChannel.expectedUSD.amount / price * Double(Constants.satsInBTC))
+                stableChannel
+                    .backingSats = UInt64(stableChannel.expectedUSD.amount / price * Double(Constants.satsInBTC))
             }
             saveChannelToDB()
 
@@ -1135,11 +1140,11 @@ class AppState {
                 "amount_msat": "\(amountMsat)",
                 "dollars_from_par": "\(result.dollarsFromPar)",
                 "percent_from_par": "\(result.percentFromPar)",
-                "btc_price": "\(price)",
+                "btc_price": "\(price)"
             ])
         } catch {
             AuditService.log("STABILITY_PAYMENT_FAILED", data: [
-                "error": error.localizedDescription,
+                "error": error.localizedDescription
             ])
         }
     }
@@ -1176,7 +1181,7 @@ class AppState {
             AuditService.log("ONCHAIN_DEPOSIT_DETECTED", data: [
                 "amount_sats": "\(depositSats)",
                 "prev_onchain": "\(prevOnchainSats)",
-                "new_onchain": "\(currentOnchain)",
+                "new_onchain": "\(currentOnchain)"
             ])
         }
         prevOnchainSats = currentOnchain
@@ -1270,12 +1275,12 @@ class AppState {
 
             AuditService.log("SWEEP_TO_CHANNEL", data: [
                 "amount_sats": "\(sweepAmount)",
-                "fee_rate_sat_vb": "\(feeRateSatVb)",
+                "fee_rate_sat_vb": "\(feeRateSatVb)"
             ])
         } catch {
             statusMessage = "Sweep failed: \(error.localizedDescription)"
             AuditService.log("SWEEP_FAILED", data: [
-                "error": error.localizedDescription,
+                "error": error.localizedDescription
             ])
         }
     }
@@ -1305,7 +1310,7 @@ class AppState {
         } catch {}
         AuditService.log("CHAIN_SOURCE_FALLBACK", data: [
             "primary": Constants.primaryChainURL,
-            "using": Constants.fallbackChainURL,
+            "using": Constants.fallbackChainURL
         ])
         return Constants.fallbackChainURL
     }
@@ -1385,7 +1390,10 @@ class AppState {
                 // Restore cached balances so UI shows immediately
                 if record.receiverSats > 0 {
                     stableChannel.stableReceiverBTC = Bitcoin(sats: record.receiverSats)
-                    stableChannel.stableReceiverUSD = USD.fromBitcoin(stableChannel.stableReceiverBTC, price: record.latestPrice)
+                    stableChannel.stableReceiverUSD = USD.fromBitcoin(
+                        stableChannel.stableReceiverBTC,
+                        price: record.latestPrice
+                    )
                     StabilityService.recomputeNative(&stableChannel)
                 }
                 if record.latestPrice > 0 {
