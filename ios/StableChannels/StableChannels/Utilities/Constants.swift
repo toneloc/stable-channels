@@ -1,6 +1,25 @@
 import Foundation
 
 enum Constants {
+    enum BitcoinNetwork: String {
+        case mainnet = "bitcoin"
+        case testnet
+        case signet
+
+        init?(networkString: String) {
+            let normalized = networkString.lowercased()
+            switch normalized {
+            case "mainnet", "bitcoin":
+                self = .mainnet
+            case "testnet":
+                self = .testnet
+            case "signet":
+                self = .signet
+            default:
+                return nil
+            }
+        }
+    }
 
     // MARK: - Network
 
@@ -23,6 +42,46 @@ enum Constants {
     static let defaultLSPAddress = "34.198.44.89:9735"
     static let defaultGatewayPubkey = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"
     static let defaultGatewayAddress = "213.174.156.80:9735"
+
+    private static var currentBitcoinNetwork: BitcoinNetwork {
+        if let network = BitcoinNetwork(networkString: defaultNetwork) {
+            return network
+        }
+        assertionFailure("Unsupported Bitcoin network '\(defaultNetwork)' fallback to mainnet explorer URLs")
+        return .mainnet
+    }
+
+    // mempool.space explorer base URL for a Bitcoin network
+    static func explorerBaseURL(network: BitcoinNetwork = .mainnet) -> String {
+        switch network {
+        case .signet:
+            return "https://mempool.space/signet"
+        case .testnet:
+            return "https://mempool.space/testnet"
+        case .mainnet:
+            return "https://mempool.space"
+        }
+    }
+
+    // Transaction explorer URL for txid and network
+    static func explorerTxURL(txid: String, network: BitcoinNetwork = .mainnet) -> URL? {
+        URL(string: "\(explorerBaseURL(network: network))/tx/\(txid)")
+    }
+
+    // Transaction explorer URL using configured default network
+    static func explorerTxURL(txid: String) -> URL? {
+        explorerTxURL(txid: txid, network: currentBitcoinNetwork)
+    }
+
+    // Address explorer URL for address and network
+    static func explorerAddressURL(address: String, network: BitcoinNetwork = .mainnet) -> URL? {
+        URL(string: "\(explorerBaseURL(network: network))/address/\(address)")
+    }
+
+    // Address explorer URL using configured default network
+    static func explorerAddressURL(address: String) -> URL? {
+        explorerAddressURL(address: address, network: currentBitcoinNetwork)
+    }
 
     // MARK: - Timing
 
