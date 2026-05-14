@@ -259,6 +259,11 @@ pub struct UserApp {
     bar_chart_show_btc: bool,
     bar_chart_anim: f32, // 0.0 = idle, >0 = animating after toggle
 
+    // Balance bar slider: drag to initiate buy/sell trades
+    bar_slider_drag_offset: f32,
+    bar_slider_dragging: bool,
+    bar_slider_release_at: Option<std::time::Instant>,
+
     // History tables display toggle: false = USD, true = BTC
     history_show_btc: bool,
 
@@ -538,6 +543,9 @@ impl UserApp {
             daily_prices_receiver: None,
             bar_chart_show_btc: false,
             bar_chart_anim: 0.0,
+            bar_slider_drag_offset: 0.0,
+            bar_slider_dragging: false,
+            bar_slider_release_at: None,
             history_show_btc: false,
             selected_payment: None,
             selected_trade: None,
@@ -3604,57 +3612,184 @@ impl UserApp {
             let total_btc = total_sats as f64 / 100_000_000.0;
             let total_usd = total_btc * btc_price;
 
-            // Header: "Total Balance"
-            ui.label(
-                RichText::new("Total Balance")
-                    .size(24.0)
-                    .color(Color32::BLACK)
-                    .strong(),
-            );
+            // Header: "Total Balance" — click to toggle big display USD ↔ BTC.
+            let header_resp = ui
+                .add(
+                    egui::Label::new(
+                        RichText::new("Total Balance")
+                            .size(24.0)
+                            .color(Color32::BLACK)
+                            .strong(),
+                    )
+                    .sense(Sense::click()),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand);
+            if header_resp.clicked() {
+                self.bar_chart_show_btc = !self.bar_chart_show_btc;
+                self.bar_chart_anim = 1.0;
+            }
             ui.add_space(4.0);
 
-            // Large total balance (USD)
-            ui.label(
-                RichText::new(Self::format_price(total_usd))
-                    .size(42.0)
-                    .color(Color32::BLACK)
-                    .strong(),
-            );
-            ui.label(
-                RichText::new(format!("{:.8} BTC", total_btc))
-                    .size(14.0)
-                    .color(Color32::DARK_GRAY),
-            );
+            // Large primary display + smaller secondary line. Swaps on header click.
+            if self.bar_chart_show_btc {
+                ui.label(
+                    RichText::new(format!("{:.8} BTC", total_btc))
+                        .size(42.0)
+                        .color(Color32::BLACK)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(Self::format_price(total_usd))
+                        .size(14.0)
+                        .color(Color32::DARK_GRAY),
+                );
+            } else {
+                ui.label(
+                    RichText::new(Self::format_price(total_usd))
+                        .size(42.0)
+                        .color(Color32::BLACK)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(format!("{:.8} BTC", total_btc))
+                        .size(14.0)
+                        .color(Color32::DARK_GRAY),
+                );
+            }
 
             ui.add_space(12.0);
 
-            // Bar chart: | Stable $XX | BTC $XX |
-            let synth_color = Color32::from_rgb(16, 185, 129); // Emerald
-            let btc_color = Color32::from_rgb(245, 158, 11); // Amber
+            // Bar chart: | Stable $XX | BTC $XX |  (iOS systemGreen / systemOrange)
+            let synth_color = Color32::from_rgb(52, 199, 89);
+            let btc_color = Color32::from_rgb(255, 149, 0);
 
             if has_active_channel && total_usd > 0.01 {
                 let native_usd = total_usd - stabilized_usd;
                 let synth_ratio = (stabilized_usd / total_usd).clamp(0.0, 1.0) as f32;
 
-                let bar_height = 36.0;
+                let bar_height = 36.0_f32;
+                let thumb_radius = 22.0_f32;
                 let bar_width = ui.available_width() - 16.0;
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(bar_width, bar_height), Sense::click());
-                if response.clicked() {
+                // Allocate extra vertical space so the thumb (slightly taller than the bar) has room.
+                let row_height = bar_height.max(thumb_radius * 2.0);
+                let (row_rect, response) = ui.allocate_exact_size(
+                    egui::vec2(bar_width, row_height),
+                    Sense::click_and_drag(),
+                );
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(row_rect.min.x, row_rect.center().y - bar_height / 2.0),
+                    egui::vec2(bar_width, bar_height),
+                );
+
+                // Slider geometry: base_x is where the thumb sits at rest (the segment boundary).
+                let base_x_local = rect.width() * synth_ratio;
+                let base_x = rect.min.x + base_x_local;
+                let min_trade_usd = 1.0_f64;
+
+                // Begin drag if the pointer started near the thumb. Otherwise treat as a click.
+                if response.drag_started() {
+                    if let Some(p) = response.interact_pointer_pos() {
+                        if (p.x - base_x).abs() < thumb_radius * 1.8 {
+                            self.bar_slider_dragging = true;
+                            self.bar_slider_drag_offset = 0.0;
+                            self.bar_slider_release_at = None;
+                        }
+                    }
+                }
+
+                if response.dragged() && self.bar_slider_dragging {
+                    self.bar_slider_drag_offset = (self.bar_slider_drag_offset
+                        + response.drag_delta().x)
+                        .clamp(-base_x_local, rect.width() - base_x_local);
+                }
+
+                if response.drag_stopped() && self.bar_slider_dragging {
+                    let fraction = if rect.width() > 0.0 {
+                        (self.bar_slider_drag_offset / rect.width()) as f64
+                    } else {
+                        0.0
+                    };
+                    let trade_usd = fraction.abs() * total_usd;
+                    if trade_usd >= min_trade_usd {
+                        if self.bar_slider_drag_offset > 0.0 {
+                            // Drag right → SELL native BTC, grow USD position.
+                            let clamped = trade_usd.min(native_usd).max(0.0);
+                            if clamped >= min_trade_usd {
+                                self.trade_amount_input = format!("{:.2}", clamped);
+                                self.trade_error.clear();
+                                self.show_sell_modal = true;
+                                self.modal_opened_at = std::time::Instant::now();
+                            }
+                        } else {
+                            // Drag left → BUY BTC, shrink USD position.
+                            let clamped = trade_usd.min(stabilized_usd).max(0.0);
+                            if clamped >= min_trade_usd {
+                                self.trade_amount_input = format!("{:.2}", clamped);
+                                self.trade_error.clear();
+                                self.show_buy_modal = true;
+                                self.modal_opened_at = std::time::Instant::now();
+                            }
+                        }
+                    }
+                    self.bar_slider_dragging = false;
+                    // Hold the thumb in place briefly so the user sees where they released,
+                    // then snap back. Matches the iOS/Android 600ms delay.
+                    self.bar_slider_release_at = Some(std::time::Instant::now());
+                }
+
+                // Snap back after release delay, animating toward 0.
+                if let Some(t) = self.bar_slider_release_at {
+                    let elapsed = t.elapsed().as_secs_f32();
+                    if elapsed > 0.6 {
+                        // Ease back to 0 over ~0.4s.
+                        let decay = (1.0 - (elapsed - 0.6) / 0.4).max(0.0);
+                        self.bar_slider_drag_offset *= decay;
+                        if decay <= 0.0 {
+                            self.bar_slider_drag_offset = 0.0;
+                            self.bar_slider_release_at = None;
+                        } else {
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        ui.ctx().request_repaint();
+                    }
+                }
+
+                // Toggle on click (only fires if we didn't drag).
+                if response.clicked() && !self.bar_slider_dragging {
                     self.bar_chart_show_btc = !self.bar_chart_show_btc;
                     self.bar_chart_anim = 1.0;
                 }
 
-                // Animate: decay from 1.0 → 0.0
+                // Hover cursor hint.
+                if response.hovered() {
+                    let pointer_x = ui.ctx().input(|i| i.pointer.hover_pos().map(|p| p.x));
+                    if let Some(px) = pointer_x {
+                        if (px - base_x).abs() < thumb_radius * 1.8 {
+                            response.clone().on_hover_cursor(if self.bar_slider_dragging {
+                                CursorIcon::Grabbing
+                            } else {
+                                CursorIcon::Grab
+                            });
+                        }
+                    }
+                }
+
+                // Animate: decay from 1.0 → 0.0 (click toggle highlight)
                 if self.bar_chart_anim > 0.0 {
                     self.bar_chart_anim =
                         (self.bar_chart_anim - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
                     ui.ctx().request_repaint();
                 }
-                let painter = ui.painter();
 
-                let synth_w = rect.width() * synth_ratio;
+                // Visible split moves with the drag.
+                let thumb_x_local =
+                    (base_x_local + self.bar_slider_drag_offset).clamp(0.0, rect.width());
+                let thumb_x = rect.min.x + thumb_x_local;
+                let synth_w = thumb_x_local;
                 let btc_w = rect.width() - synth_w;
+
+                let painter = ui.painter();
 
                 // Draw colored bar segments
                 if synth_w > 0.5 {
@@ -3732,6 +3867,83 @@ impl UserApp {
                         btc_label,
                         font,
                         label_color,
+                    );
+                }
+
+                // Draggable thumb. Pulses subtly at rest; scales up while dragging.
+                let pulse = if self.bar_slider_dragging {
+                    1.15
+                } else {
+                    let t = ui.input(|i| i.time);
+                    1.0 + 0.06 * ((t * 2.0).sin() as f32 + 1.0) / 2.0
+                };
+                if !self.bar_slider_dragging {
+                    ui.ctx().request_repaint();
+                }
+                let thumb_center = egui::pos2(thumb_x, rect.center().y);
+                let r = thumb_radius * pulse;
+                // Soft shadow
+                painter.circle_filled(
+                    thumb_center + egui::vec2(0.0, 2.0),
+                    r,
+                    Color32::from_black_alpha(40),
+                );
+                // Thumb body
+                painter.circle(
+                    thumb_center,
+                    r,
+                    Color32::WHITE,
+                    egui::Stroke::new(1.0, Color32::from_rgb(203, 213, 225)),
+                );
+                // Grip dots so it reads as draggable
+                let dot_color = Color32::from_rgb(148, 163, 184);
+                for dx in [-4.0_f32, 0.0, 4.0] {
+                    painter.circle_filled(
+                        thumb_center + egui::vec2(dx, 0.0),
+                        1.5,
+                        dot_color,
+                    );
+                }
+
+                // Tooltip while dragging: "X% USD  Y% BTC"
+                if self.bar_slider_dragging {
+                    let vis_frac = (thumb_x_local / rect.width()).clamp(0.0, 1.0);
+                    let usd_pct = (vis_frac * 100.0).round() as i32;
+                    let btc_pct = 100 - usd_pct;
+                    let label = format!("{}% USD  {}% BTC", usd_pct, btc_pct);
+                    let tooltip_font =
+                        egui::FontId::new(12.0, egui::FontFamily::Proportional);
+                    let galley = painter.layout_no_wrap(
+                        label.clone(),
+                        tooltip_font.clone(),
+                        Color32::BLACK,
+                    );
+                    let pad = egui::vec2(8.0, 4.0);
+                    let bubble_size = galley.size() + pad * 2.0;
+                    let bubble_center = egui::pos2(
+                        thumb_x.clamp(
+                            rect.min.x + bubble_size.x / 2.0,
+                            rect.max.x - bubble_size.x / 2.0,
+                        ),
+                        rect.min.y - bubble_size.y / 2.0 - 6.0,
+                    );
+                    let bubble_rect =
+                        egui::Rect::from_center_size(bubble_center, bubble_size);
+                    painter.rect_filled(
+                        bubble_rect,
+                        egui::CornerRadius::same(10),
+                        Color32::from_rgb(241, 245, 249),
+                    );
+                    painter.rect_stroke(
+                        bubble_rect,
+                        egui::CornerRadius::same(10),
+                        egui::Stroke::new(1.0, Color32::from_rgb(203, 213, 225)),
+                        egui::StrokeKind::Outside,
+                    );
+                    painter.galley(
+                        bubble_rect.center() - galley.size() / 2.0,
+                        galley,
+                        Color32::BLACK,
                     );
                 }
             }
