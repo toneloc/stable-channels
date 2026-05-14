@@ -28,14 +28,14 @@ struct PendingTradePayment {
     let newExpectedUSD: Double
     let price: Double
     let tradeDbId: Int64
-    let action: String  // "buy" or "sell"
+    let action: String // "buy" or "sell"
 }
 
 /// Outgoing splice awaiting confirmation.
 struct PendingSplice {
-    let direction: String  // "in" or "out"
+    let direction: String // "in" or "out"
     let amountSats: UInt64
-    let address: String?  // For splice_out
+    let address: String? // For splice_out
 }
 
 // MARK: - Database Records

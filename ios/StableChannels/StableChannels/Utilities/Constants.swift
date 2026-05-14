@@ -1,7 +1,6 @@
 import Foundation
 
 enum Constants {
-
     // MARK: - Network
 
     static let satsInBTC: UInt64 = 100_000_000
@@ -47,7 +46,6 @@ enum Constants {
     static let minDisplayUSD: Double = 2.0
     static let maxChannelUSD: Double = 100.0
 
-
     // MARK: - Channel
 
     static let defaultChannelLifetime: UInt32 = 2016
@@ -87,7 +85,7 @@ enum Constants {
             name: "Blockchain.com",
             urlFormat: "https://blockchain.info/ticker",
             jsonPath: ["USD", "last"]
-        ),
+        )
     ]
 
     // MARK: - RGS (Rapid Gossip Sync) Servers

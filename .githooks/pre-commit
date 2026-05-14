@@ -1,0 +1,36 @@
+#!/bin/sh
+# Pre-commit hook: run SwiftFormat on staged iOS files
+# Installed via: git config core.hooksPath .githooks
+
+set -e
+
+# Find repo root dynamically
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$REPO_ROOT" ]; then
+    echo "[swiftformat] not in a git repo. Skipping..."
+    exit 0
+fi
+
+SWIFTFORMAT="$(command -v swiftformat 2>/dev/null)"
+if [ -z "$SWIFTFORMAT" ]; then
+    echo "[swiftformat] not found. Install: brew install swiftformat"
+    exit 0
+fi
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.swift$')
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+IOS_FILES=$(echo "$STAGED_FILES" | grep '^ios/')
+if [ -z "$IOS_FILES" ]; then
+    exit 0
+fi
+
+echo "[swiftformat] Running on staged iOS files..."
+echo "$IOS_FILES" | xargs swiftformat --config ios/.swiftformat
+
+# Re-stage formatted files
+echo "$IOS_FILES" | xargs git add
+
+echo "[swiftformat] done"

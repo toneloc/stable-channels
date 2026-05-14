@@ -1,0 +1,37 @@
+# SwiftFormat Configuration
+# Based on Alamofire production config
+--indent 4
+--max-width 120
+--swift-version 5.9
+
+# Wrapping - preserve existing style
+--wraparguments preserve
+--wrapcollections preserve
+--wrapparameters preserve
+
+# Spacing
+--commas inline
+--nospaceoperators ..<, ...
+--operatorfunc no-space
+
+# Rules
+--enable isEmpty
+--disable andOperator
+--disable docComments
+--disable redundantReturn
+--disable redundantSelf
+--disable emptyBraces
+--disable emptyExtensions
+--disable wrapFunctionBodies
+--disable wrapMultilineStatementBraces
+--disable wrapPropertyBodies
+--disable sortImports
+--disable numberFormatting
+--disable hoistPatternLet
+--disable hoistTry
+--disable organizeDeclarations
+--disable redundantEquatable
+--disable spaceAroundParens
+--disable spaceAroundOperators
+--disable conditionalAssignment
+--disable hoistPatternLet

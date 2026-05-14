@@ -9,7 +9,6 @@ import SQLite3
 /// - `lsp_to_user`: LSP owes user sats (price dropped). Start node, wait for incoming payment.
 /// - `user_to_lsp`: User owes LSP sats (price rose). Start node, calculate amount, send keysend.
 class NotificationService: UNNotificationServiceExtension {
-
     private static let appGroup = "group.com.stablechannels.app"
     private static let lspPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     private static let lspAddress = "34.198.44.89:9735"
@@ -122,7 +121,7 @@ class NotificationService: UNNotificationServiceExtension {
         let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
 
         guard FileManager.default.fileExists(atPath: keySeedPath.path)
-           || FileManager.default.fileExists(atPath: seedPhrasePath.path) else {
+            || FileManager.default.fileExists(atPath: seedPhrasePath.path) else {
             nseLog("FAILED: No seed (checked keys_seed and seed_phrase)")
             cleanup()
             contentHandler(content)
@@ -145,7 +144,8 @@ class NotificationService: UNNotificationServiceExtension {
 
             // If wallet uses mnemonic (seed_phrase), set it on the builder
             if FileManager.default.fileExists(atPath: seedPhrasePath.path),
-               let words = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+               let words = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
+               .trimmingCharacters(in: .whitespacesAndNewlines),
                !words.isEmpty {
                 nseLog("Using seed_phrase mnemonic")
                 builder.setEntropyBip39Mnemonic(mnemonic: words, passphrase: nil)
@@ -179,7 +179,9 @@ class NotificationService: UNNotificationServiceExtension {
             let ldkNode = try builder.build()
 
             let memAfterBuild = Self.residentMemoryBytes()
-            nseLog("DIAG: memory after build() = \(memAfterBuild / 1024)KB (delta +\((memAfterBuild - memUsage) / 1024)KB)")
+            nseLog(
+                "DIAG: memory after build() = \(memAfterBuild / 1024)KB (delta +\((memAfterBuild - memUsage) / 1024)KB)"
+            )
 
             try ldkNode.start()
             self.node = ldkNode
@@ -236,7 +238,7 @@ class NotificationService: UNNotificationServiceExtension {
         nseLog("lsp_to_user: Waiting for incoming payment")
 
         let startTime = Date()
-        let timeout: TimeInterval = 22  // Leave ~8s for cleanup + notification delivery
+        let timeout: TimeInterval = 22 // Leave ~8s for cleanup + notification delivery
         var received = false
         var amountMsatTotal: UInt64 = 0
         var paymentIdStr: String?
@@ -317,7 +319,7 @@ class NotificationService: UNNotificationServiceExtension {
                     nseLog("Payment received: \(amountMsat / 1000) sats")
                     try? node.eventHandled()
                     received = true
-                    // Keep polling — there might be more payments
+                // Keep polling — there might be more payments
                 default:
                     try? node.eventHandled()
                 }
@@ -427,10 +429,14 @@ class NotificationService: UNNotificationServiceExtension {
         let dollarsFromPar = stableUSDValue - targetUSD
         let percentFromPar = targetUSD > 0 ? abs(dollarsFromPar / targetUSD) * 100.0 : 0.0
 
-        nseLog("Stability check: stableUSD=\(String(format: "%.2f", stableUSDValue)), target=\(String(format: "%.2f", targetUSD)), pct=\(String(format: "%.3f", percentFromPar))%")
+        nseLog(
+            "Stability check: stableUSD=\(String(format: "%.2f", stableUSDValue)), target=\(String(format: "%.2f", targetUSD)), pct=\(String(format: "%.3f", percentFromPar))%"
+        )
 
         guard percentFromPar >= Self.stabilityThresholdPercent && abs(dollarsFromPar) >= 0.25 else {
-            nseLog("Within threshold (pct=\(String(format: "%.3f", percentFromPar))%, drift=$\(String(format: "%.2f", abs(dollarsFromPar)))), no payment needed")
+            nseLog(
+                "Within threshold (pct=\(String(format: "%.3f", percentFromPar))%, drift=$\(String(format: "%.2f", abs(dollarsFromPar)))), no payment needed"
+            )
             content.title = "Stability Check"
             content.body = "Position is stable"
             cleanup()
@@ -456,7 +462,7 @@ class NotificationService: UNNotificationServiceExtension {
 
         // 5. Send keysend with stability TLV marker
         do {
-            let tlvRecord = CustomTlvRecord(typeNum: Self.stableChannelTLVType, value: [1])  // marker byte
+            let tlvRecord = CustomTlvRecord(typeNum: Self.stableChannelTLVType, value: [1]) // marker byte
             let paymentId = try node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat: amountMsat,
                 nodeId: Self.lspPubkey,
@@ -729,7 +735,7 @@ class NotificationService: UNNotificationServiceExtension {
 
         guard !prices.isEmpty else { return 0 }
         let sorted = prices.sorted()
-        return sorted[sorted.count / 2]  // median
+        return sorted[sorted.count / 2] // median
     }
 
     // MARK: - Cleanup
@@ -768,7 +774,7 @@ class NotificationService: UNNotificationServiceExtension {
         let hasGraph: Bool
         if sqlite3_step(stmt) == SQLITE_ROW {
             let size = sqlite3_column_int64(stmt, 0)
-            hasGraph = size > 100_000  // Only strip if >100KB
+            hasGraph = size > 100_000 // Only strip if >100KB
         } else {
             hasGraph = false
         }
