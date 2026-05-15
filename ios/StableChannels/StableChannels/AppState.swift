@@ -17,6 +17,37 @@ class AppState {
 
     var phase: Phase = .loading
 
+    // MARK: - Authentication
+
+    /// Whether user has passed biometric/passcode auth this session.
+    /// Reset to false on app termination (no persistence = no bypass on restart).
+    var isUnlocked: Bool = false
+
+    /// Prevents double-trigger of auth (onAppear + onChange both firing).
+    var isAuthenticating: Bool = false
+
+    func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
+        guard !isAuthenticating else { return false }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+
+        do {
+            return try await BiometricService.authenticate(reason: reason)
+        } catch let error as BiometricError {
+            switch error {
+            case .cancelled, .failed:
+                return false
+            case .lockout:
+                statusMessage = "Biometrics locked. Use device passcode."
+                return false
+            case .notAvailable, .notEnrolled:
+                return false
+            }
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - Services
 
     let nodeService = NodeService()

@@ -339,6 +339,18 @@ struct SendView: View {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        // Auth gate — biometric/passcode required before any send
+        let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
+        if transactionAuth {
+            let authPassed = await appState.authenticate(
+                reason: "Confirm payment of \(displaySats) sats"
+            )
+            guard authPassed else {
+                errorMessage = "Authentication required to send."
+                return
+            }
+        }
+
         appState.ensureLSPConnected()
         isSending = true
         errorMessage = nil

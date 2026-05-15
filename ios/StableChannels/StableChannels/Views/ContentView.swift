@@ -2,19 +2,51 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        switch appState.phase {
-        case .loading:
-            LoadingView()
-        case .onboarding:
-            SyncingView() // Auto-create handles this; should not stay here
-        case .syncing:
-            SyncingView()
-        case .wallet:
-            MainTabView()
-        case .error(let message):
-            ErrorDisplayView(message: message)
+        ZStack {
+            switch appState.phase {
+            case .loading:
+                LoadingView()
+            case .onboarding:
+                SyncingView() // Auto-create handles this; should not stay here
+            case .syncing:
+                SyncingView()
+            case .wallet:
+                MainTabView()
+            case .error(let message):
+                ErrorDisplayView(message: message)
+            }
+
+            // Tinted overlay — allows background work (price fetch, sync) while waiting for auth
+            if !appState.isUnlocked {
+                Color.black.opacity(0.7)
+                    .ignoresSafeArea()
+                    .onAppear {
+                        let biometricEnabled = UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
+                        if biometricEnabled {
+                            Task {
+                                let success = await appState.authenticate()
+                                if success {
+                                    appState.isUnlocked = true
+                                }
+                            }
+                        } else {
+                            appState.isUnlocked = true
+                        }
+                    }
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active && !appState.isUnlocked {
+                let biometricEnabled = UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
+                if biometricEnabled {
+                    Task { await appState.authenticate() }
+                } else {
+                    appState.isUnlocked = true
+                }
+            }
         }
     }
 }
