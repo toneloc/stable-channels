@@ -109,12 +109,31 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
         label.textAlignment = .center
         label.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(label)
+
+        let settingsButton = UIButton(type: .system)
+        settingsButton.setTitle(String(localized: "Open Settings"), for: .normal)
+        settingsButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        settingsButton.setTitleColor(.white, for: .normal)
+        settingsButton.backgroundColor = UIColor.white.withAlphaComponent(0.15)
+        settingsButton.layer.cornerRadius = 22
+        settingsButton.contentEdgeInsets = UIEdgeInsets(top: 12, left: 24, bottom: 12, right: 24)
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        settingsButton.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
+        view.addSubview(settingsButton)
+
         NSLayoutConstraint.activate([
             label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24)
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            settingsButton.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 20),
+            settingsButton.centerXAnchor.constraint(equalTo: view.centerXAnchor)
         ])
+    }
+
+    @objc private func openSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 
     private func setupCamera() {
