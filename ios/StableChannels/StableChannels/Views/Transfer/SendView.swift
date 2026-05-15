@@ -293,8 +293,9 @@ struct SendView: View {
             }
             .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotoItem, matching: .images)
             .onChange(of: selectedPhotoItem) { _, newItem in
+                guard let item = newItem else { return }
                 Task {
-                    if let data = try? await newItem?.loadTransferable(type: Data.self),
+                    if let data = try? await item.loadTransferable(type: Data.self),
                        let image = UIImage(data: data),
                        let code = extractQRCode(from: image) {
                         input = code
@@ -444,16 +445,29 @@ struct SendView: View {
     }
 
     private func extractQRCode(from image: UIImage) -> String? {
-        guard let ciImage = CIImage(image: image) else { return nil }
+        // Fix orientation before passing to CIDetector — iPhone photos have EXIF rotation
+        guard let fixedImage = fixImageOrientation(image) else { return nil }
+        guard let ciImage = CIImage(image: fixedImage) else { return nil }
+
         let detector = CIDetector(
             ofType: CIDetectorTypeQRCode,
             context: nil,
             options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
         )
+
         guard let features = detector?.features(in: ciImage) as? [CIQRCodeFeature],
               let value = features.first?.messageString,
               !value.isEmpty
         else { return nil }
         return value
+    }
+
+    private func fixImageOrientation(_ image: UIImage) -> UIImage? {
+        guard image.imageOrientation != .up else { return image }
+        UIGraphicsBeginImageContextWithOptions(image.size, false, image.scale)
+        image.draw(in: CGRect(origin: .zero, size: image.size))
+        let normalized = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        return normalized
     }
 }
