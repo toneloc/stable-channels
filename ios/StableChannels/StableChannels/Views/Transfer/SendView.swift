@@ -1,6 +1,7 @@
 import SwiftUI
 import LDKNode
 import PhotosUI
+import Vision
 import CoreImage
 
 struct SendView: View {
@@ -445,29 +446,20 @@ struct SendView: View {
     }
 
     private func extractQRCode(from image: UIImage) -> String? {
-        // Fix orientation before passing to CIDetector — iPhone photos have EXIF rotation
-        guard let fixedImage = fixImageOrientation(image) else { return nil }
-        guard let ciImage = CIImage(image: fixedImage) else { return nil }
+        guard let cgImage = image.cgImage else { return nil }
 
-        let detector = CIDetector(
-            ofType: CIDetectorTypeQRCode,
-            context: nil,
-            options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
-        )
+        let request = VNDetectBarcodesRequest()
+        request.symbologies = [.qr]
 
-        guard let features = detector?.features(in: ciImage) as? [CIQRCodeFeature],
-              let value = features.first?.messageString,
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try? handler.perform([request])
+
+        guard let results = request.results,
+              let qrCode = results.first,
+              let value = qrCode.payloadStringValue,
               !value.isEmpty
         else { return nil }
-        return value
-    }
 
-    private func fixImageOrientation(_ image: UIImage) -> UIImage? {
-        guard image.imageOrientation != .up else { return image }
-        UIGraphicsBeginImageContextWithOptions(image.size, false, image.scale)
-        image.draw(in: CGRect(origin: .zero, size: image.size))
-        let normalized = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return normalized
+        return value
     }
 }
