@@ -47,6 +47,13 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
+            // Re-lock when going to background/inactive
+            if newPhase == .background || newPhase == .inactive {
+                appState.isUnlocked = false
+                authFailed = false
+                hasTriggeredAuth = false
+                return
+            }
             // Re-auth when returning to foreground, unless already failed or in progress
             if newPhase == .active && !appState.isUnlocked && biometricEnabled && !authInProgress && !authFailed {
                 Task { await runAuth() }
@@ -64,6 +71,7 @@ struct ContentView: View {
                 hasTriggeredAuth = false
             }
         }
+        .modifier(PrivacyOverlayModifier())
     }
 
     private var waitingView: some View {
@@ -196,5 +204,21 @@ struct ErrorDisplayView: View {
             .buttonStyle(.bordered)
             .padding(.top, 8)
         }
+    }
+}
+
+// MARK: - Privacy Overlay (App Switcher Protection)
+
+struct PrivacyOverlayModifier: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if scenePhase == .background || scenePhase == .inactive {
+                    Color.black
+                        .ignoresSafeArea()
+                }
+            }
     }
 }
