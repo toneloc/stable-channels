@@ -11,10 +11,10 @@ enum BiometricError: Error {
     case notEnrolled
     case cancelled
     case lockout
-    case failed(String)
 }
 
 enum BiometricService {
+    /// Returns the available biometric type on this device.
     static var biometricType: BiometricType {
         let ctx = LAContext()
         _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
@@ -25,27 +25,28 @@ enum BiometricService {
         }
     }
 
+    /// Checks if biometric authentication is available on this device.
     static var canUseBiometrics: Bool {
         let ctx = LAContext()
         var error: NSError?
         return ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
     }
 
+    /// Checks if device passcode is set (used for fallback).
     static var canUseDevicePasscode: Bool {
         let ctx = LAContext()
         var error: NSError?
         return ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
     }
 
-    /// Authenticate using Face ID/Touch ID first, then auto-fallback to passcode.
-    /// Never shows a "Use Passcode" button — goes straight to passcode on failure.
+    /// Authenticates user with biometrics first, then falls back to device passcode.
+    /// No "Use Passcode" button is shown — fallback is automatic on failure.
     static func authenticate(reason: String) async throws -> Bool {
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
-        // Hide the fallback button — we auto-fallback instead
-        ctx.localizedFallbackTitle = ""
+        ctx.localizedFallbackTitle = "" // Hide button — we auto-fallback instead
 
-        // Try biometrics first
+        // Attempt biometric auth
         if canUseBiometrics {
             do {
                 return try await ctx.evaluatePolicy(

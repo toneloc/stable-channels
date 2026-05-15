@@ -3,6 +3,7 @@ import SwiftUI
 import LDKNode
 import SQLite3
 
+@MainActor
 @Observable
 class AppState {
     // MARK: - App Lifecycle
@@ -35,7 +36,7 @@ class AppState {
             return try await BiometricService.authenticate(reason: reason)
         } catch let error as BiometricError {
             switch error {
-            case .cancelled, .failed:
+            case .cancelled:
                 return false
             case .lockout:
                 statusMessage = "Biometrics locked. Use device passcode."
@@ -1090,7 +1091,9 @@ class AppState {
                     .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
                 // ensureLSPConnected can call node.connect() (TCP handshake) — keep off main thread
-                Task.detached { [weak self] in self?.ensureLSPConnected() }
+                Task.detached { [weak self] in
+                    await MainActor.run { self?.ensureLSPConnected() }
+                }
 
                 await MainActor.run { [weak self] in
                     self?.recordCurrentPrice()

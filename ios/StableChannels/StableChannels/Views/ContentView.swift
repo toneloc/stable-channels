@@ -3,6 +3,13 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.scenePhase) private var scenePhase
+    @State private var authFailed = false
+    @State private var authInProgress = false
+    @State private var hasTriggeredAuth = false
+
+    private var biometricEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
+    }
 
     var body: some View {
         ZStack {
@@ -10,7 +17,7 @@ struct ContentView: View {
             case .loading:
                 LoadingView()
             case .onboarding:
-                SyncingView() // Auto-create handles this; should not stay here
+                SyncingView()
             case .syncing:
                 SyncingView()
             case .wallet:
@@ -19,34 +26,95 @@ struct ContentView: View {
                 ErrorDisplayView(message: message)
             }
 
-            // Tinted overlay — allows background work (price fetch, sync) while waiting for auth
-            if !appState.isUnlocked {
-                Color.black.opacity(0.7)
+            // Auth overlay: shown only when locked and biometric is enabled
+            if !appState.isUnlocked && biometricEnabled {
+                Color.black
                     .ignoresSafeArea()
-                    .onAppear {
-                        let biometricEnabled = UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
-                        if biometricEnabled {
-                            Task {
-                                let success = await appState.authenticate()
-                                if success {
-                                    appState.isUnlocked = true
-                                }
-                            }
+                    .overlay {
+                        if authFailed {
+                            failedView
                         } else {
-                            appState.isUnlocked = true
+                            waitingView
+                        }
+                    }
+                    .onAppear {
+                        // Trigger auth once when overlay first appears
+                        if !hasTriggeredAuth {
+                            hasTriggeredAuth = true
+                            Task { await runAuth() }
                         }
                     }
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active && !appState.isUnlocked {
-                let biometricEnabled = UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
-                if biometricEnabled {
-                    Task { await appState.authenticate() }
-                } else {
-                    appState.isUnlocked = true
-                }
+            // Re-auth when returning to foreground, unless already failed or in progress
+            if newPhase == .active && !appState.isUnlocked && biometricEnabled && !authInProgress && !authFailed {
+                Task { await runAuth() }
             }
+        }
+        .onChange(of: appState.isUnlocked) { _, unlocked in
+            if unlocked {
+                authInProgress = false
+            }
+        }
+        .onChange(of: biometricEnabled) { _, enabled in
+            if !enabled {
+                authInProgress = false
+                authFailed = false
+                hasTriggeredAuth = false
+            }
+        }
+    }
+
+    private var waitingView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "faceid")
+                .font(.system(size: 60))
+                .foregroundStyle(.green.opacity(0.5))
+
+            Text("Authenticate")
+                .font(.headline)
+                .foregroundStyle(.white)
+        }
+    }
+
+    private var failedView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "faceid")
+                .font(.system(size: 60))
+                .foregroundStyle(.green)
+
+            Text("Authentication Failed")
+                .font(.headline)
+                .foregroundStyle(.white)
+
+            Button("Try Again") {
+                Task { await runAuth() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button("Cancel") { }
+                .foregroundStyle(.white.opacity(0.6))
+        }
+    }
+
+    private func runAuth() async {
+        guard !authInProgress else { return }
+        guard !appState.isUnlocked else { return }
+
+        authInProgress = true
+        authFailed = false
+
+        let success = await appState.authenticate()
+
+        if success {
+            appState.isUnlocked = true
+        }
+
+        authInProgress = false
+        if !success {
+            authFailed = true
         }
     }
 }

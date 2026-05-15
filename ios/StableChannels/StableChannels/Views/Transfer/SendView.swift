@@ -339,12 +339,27 @@ struct SendView: View {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // Auth gate — biometric/passcode required before any send
         let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
-        if transactionAuth {
-            let authPassed = await appState.authenticate(
-                reason: "Confirm payment of \(displaySats) sats"
-            )
+
+        // Auth gate — on-chain ALWAYS requires auth (highest risk: drains all funds to external wallet)
+        // Lightning sends only require auth if Payment Confirmation is enabled
+        let requiresAuth: Bool
+        let reason: String
+
+        switch detectedType {
+        case .onchain:
+            requiresAuth = true
+            reason = "Confirm on-chain withdrawal of all funds"
+        case .bolt11, .bolt12:
+            requiresAuth = transactionAuth
+            reason = "Confirm payment of \(displaySats) sats"
+        default:
+            requiresAuth = false
+            reason = ""
+        }
+
+        if requiresAuth {
+            let authPassed = await appState.authenticate(reason: reason)
             guard authPassed else {
                 errorMessage = "Authentication required to send."
                 return

@@ -1,14 +1,35 @@
 import SwiftUI
 
 struct AppAccessSettingsView: View {
-    @AppStorage("biometricAuthEnabled") private var biometricAuthEnabled = true
-    @AppStorage("transactionAuthEnabled") private var transactionAuthEnabled = true
+    @AppStorage("biometricAuthEnabled") private var biometricAuthEnabled = false
+    @AppStorage("transactionAuthEnabled") private var transactionAuthEnabled = false
     @State private var showAuthForToggle = false
-    @State private var authTargetKey: String?
+    @State private var pendingTarget: AuthTarget?
 
-    enum AuthTarget: String {
-        case appUnlock = "biometricAuthEnabled"
-        case transaction = "transactionAuthEnabled"
+    enum AuthTarget: String, CaseIterable {
+        case appUnlock
+        case transaction
+
+        var userDefaultsKey: String {
+            switch self {
+            case .appUnlock: return "biometricAuthEnabled"
+            case .transaction: return "transactionAuthEnabled"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .appUnlock: return "Authenticate to disable App Unlock"
+            case .transaction: return "Authenticate to disable Payment Confirmation"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .appUnlock: return "Verify your identity to turn off App Unlock"
+            case .transaction: return "Verify your identity to turn off Payment Confirmation"
+            }
+        }
     }
 
     var body: some View {
@@ -20,7 +41,7 @@ struct AppAccessSettingsView: View {
                         if newValue {
                             biometricAuthEnabled = true
                         } else {
-                            authTargetKey = AuthTarget.appUnlock.rawValue
+                            pendingTarget = .appUnlock
                             showAuthForToggle = true
                         }
                     }
@@ -40,7 +61,7 @@ struct AppAccessSettingsView: View {
                         if newValue {
                             transactionAuthEnabled = true
                         } else {
-                            authTargetKey = AuthTarget.transaction.rawValue
+                            pendingTarget = .transaction
                             showAuthForToggle = true
                         }
                     }
@@ -60,18 +81,11 @@ struct AppAccessSettingsView: View {
         .sheet(isPresented: $showAuthForToggle) {
             ToggleAuthSheet(
                 isPresented: $showAuthForToggle,
-                authTarget: authTargetKey.flatMap { AuthTarget(rawValue: $0) },
-                onAuthenticated: { confirmed, target in
-                    if confirmed {
-                        switch target {
-                        case .appUnlock:
-                            biometricAuthEnabled = false
-                        case .transaction:
-                            transactionAuthEnabled = false
-                        case .none:
-                            break
-                        }
-                    }
+                authTarget: pendingTarget,
+                onAuthenticated: { confirmed in
+                    guard confirmed, let target = pendingTarget else { return }
+                    UserDefaults.standard.set(false, forKey: target.userDefaultsKey)
+                    pendingTarget = nil
                 }
             )
         }
@@ -81,28 +95,14 @@ struct AppAccessSettingsView: View {
 struct ToggleAuthSheet: View {
     @Binding var isPresented: Bool
     var authTarget: AppAccessSettingsView.AuthTarget?
-    var onAuthenticated: (Bool, AppAccessSettingsView.AuthTarget?) -> Void
+    var onAuthenticated: (Bool) -> Void
 
     private var titleText: String {
-        switch authTarget {
-        case .appUnlock:
-            return "Authenticate to disable App Unlock"
-        case .transaction:
-            return "Authenticate to disable Payment Confirmation"
-        case .none:
-            return "Authenticate"
-        }
+        authTarget?.title ?? "Authenticate"
     }
 
     private var subtitleText: String {
-        switch authTarget {
-        case .appUnlock:
-            return "Verify your identity to turn off App Unlock"
-        case .transaction:
-            return "Verify your identity to turn off Payment Confirmation"
-        case .none:
-            return "Verify your identity to continue"
-        }
+        authTarget?.subtitle ?? "Verify your identity to continue"
     }
 
     var body: some View {
@@ -122,15 +122,13 @@ struct ToggleAuthSheet: View {
 
                 Button("Continue") {
                     Task {
-                        do {
-                            let success = try await BiometricService.authenticate(
-                                reason: titleText
-                            )
-                            onAuthenticated(success, authTarget)
-                        } catch {
-                            onAuthenticated(false, nil)
-                        }
                         isPresented = false
+                        do {
+                            let success = try await BiometricService.authenticate(reason: titleText)
+                            onAuthenticated(success)
+                        } catch {
+                            onAuthenticated(false)
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)
