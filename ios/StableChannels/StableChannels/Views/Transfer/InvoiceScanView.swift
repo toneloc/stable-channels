@@ -102,19 +102,48 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
     }
 
     private func showDenied() {
+        let container = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            container.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            container.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            container.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24)
+        ])
+
         let label = UILabel()
-        label.text = String(localized: "Camera access required. Enable in Settings → Stable Channels.")
+        label.text = String(localized: "Camera access required. Enable in Settings.")
         label.textColor = .white
         label.numberOfLines = 0
         label.textAlignment = .center
+        label.font = .systemFont(ofSize: 17)
         label.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(label)
+        container.addSubview(label)
+
+        let settingsButton = UIButton(type: .system)
+        settingsButton.setTitle(String(localized: "Open Settings"), for: .normal)
+        settingsButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        settingsButton.setTitleColor(.systemBlue, for: .normal)
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        settingsButton.addTarget(self, action: #selector(openSettings), for: .touchUpInside)
+        container.addSubview(settingsButton)
+
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24)
+            label.topAnchor.constraint(equalTo: container.topAnchor),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+
+            settingsButton.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 16),
+            settingsButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            settingsButton.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
+    }
+
+    @objc private func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
     }
 
     private func setupCamera() {
