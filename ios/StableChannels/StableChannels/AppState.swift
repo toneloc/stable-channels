@@ -34,18 +34,8 @@ class AppState {
 
         do {
             return try await BiometricService.authenticate(reason: reason)
-        } catch let error as BiometricError {
-            switch error {
-            case .cancelled:
-                return false
-            case .lockout:
-                statusMessage = "Biometrics locked. Use device passcode."
-                return false
-            case .notAvailable, .notEnrolled:
-                return false
-            }
         } catch {
-            return false
+            return await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
         }
     }
 

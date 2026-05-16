@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct OnChainSendView: View {
     @Environment(AppState.self) private var appState
@@ -108,10 +109,16 @@ struct OnChainSendView: View {
     }
 
     private func send() async {
-        // Always require auth for on-chain sends — highest risk, drains to external wallet
-        let authPassed = await appState.authenticate(
-            reason: sendAll ? "Confirm on-chain withdrawal of all funds" : "Confirm on-chain send"
+        // Dismiss any active keyboard to avoid blocking system auth dialogs
+        UIApplication.shared.sendAction(
+            Selector(("resignFirstResponder")),
+            to: nil,
+            from: nil,
+            for: nil
         )
+        // Always require auth for on-chain sends — highest risk, drains to external wallet
+        let authReason = sendAll ? "Confirm on-chain withdrawal of all funds" : "Confirm on-chain send"
+        let authPassed = await appState.authenticate(reason: authReason)
         guard authPassed else {
             errorMessage = "Authentication required to send."
             return

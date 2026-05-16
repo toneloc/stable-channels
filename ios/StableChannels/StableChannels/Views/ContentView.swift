@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @Environment(AppState.self) private var appState
@@ -38,25 +39,33 @@ struct ContentView: View {
                         }
                     }
                     .onAppear {
-                        // Trigger auth once when overlay first appears
+                        // Auth triggered on .active via onChange — skip here to avoid racing
                         if !hasTriggeredAuth {
                             hasTriggeredAuth = true
-                            Task { await runAuth() }
+                            if scenePhase == .active {
+                                Task { await runAuth() }
+                            }
                         }
                     }
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
-            // Re-lock when going to background/inactive
-            if newPhase == .background || newPhase == .inactive {
+            // Lock only on .background. .inactive fires during app switcher and Face ID prompts.
+            if newPhase == .background {
                 appState.isUnlocked = false
                 authFailed = false
                 hasTriggeredAuth = false
+                authInProgress = false
                 return
             }
-            // Re-auth when returning to foreground, unless already failed or in progress
-            if newPhase == .active && !appState.isUnlocked && biometricEnabled && !authInProgress && !authFailed {
-                Task { await runAuth() }
+            if newPhase == .active {
+                Task { @MainActor in
+                    // 200ms delay lets .inactive from app switcher/Face ID fully settle first
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    if !appState.isUnlocked && biometricEnabled && scenePhase == .active {
+                        await runAuth()
+                    }
+                }
             }
         }
         .onChange(of: appState.isUnlocked) { _, unlocked in
@@ -108,8 +117,16 @@ struct ContentView: View {
     }
 
     private func runAuth() async {
-        guard !authInProgress else { return }
         guard !appState.isUnlocked else { return }
+        guard !authInProgress else { return }
+
+        // Dismiss any active keyboard to avoid blocking system auth dialogs
+        UIApplication.shared.sendAction(
+            Selector(("resignFirstResponder")),
+            to: nil,
+            from: nil,
+            for: nil
+        )
 
         authInProgress = true
         authFailed = false
@@ -127,7 +144,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Loading / Syncing / Error
+// MARK: - Views
 
 struct LoadingView: View {
     @State private var pulse = false
@@ -207,7 +224,7 @@ struct ErrorDisplayView: View {
     }
 }
 
-// MARK: - Privacy Overlay (App Switcher Protection)
+// MARK: - Privacy Overlay
 
 struct PrivacyOverlayModifier: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
@@ -218,6 +235,7 @@ struct PrivacyOverlayModifier: ViewModifier {
                 if scenePhase == .background || scenePhase == .inactive {
                     Color.black
                         .ignoresSafeArea()
+                        .zIndex(999)
                 }
             }
     }

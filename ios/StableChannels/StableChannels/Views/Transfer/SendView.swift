@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import LDKNode
 import PhotosUI
 import Vision
@@ -339,10 +340,18 @@ struct SendView: View {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        // Dismiss any active keyboard to avoid blocking system auth dialogs
+        UIApplication.shared.sendAction(
+            Selector(("resignFirstResponder")),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+
         let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
 
-        // Auth gate — on-chain ALWAYS requires auth (highest risk: drains all funds to external wallet)
-        // Lightning sends only require auth if Payment Confirmation is enabled
+        // Auth gate: on-chain always requires auth. Lightning sends require auth only when Payment Confirmation is
+        // enabled.
         let requiresAuth: Bool
         let reason: String
 

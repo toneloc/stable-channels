@@ -1,21 +1,11 @@
 import SwiftUI
 
 struct AppAccessSettingsView: View {
-    @AppStorage("biometricAuthEnabled") private var biometricAuthEnabled = false
-    @AppStorage("transactionAuthEnabled") private var transactionAuthEnabled = false
-    @State private var showAuthForToggle = false
-    @State private var pendingTarget: AuthTarget?
+    enum AuthTarget: String, Identifiable {
+        case appUnlock = "biometricAuthEnabled"
+        case transaction = "transactionAuthEnabled"
 
-    enum AuthTarget: String, CaseIterable {
-        case appUnlock
-        case transaction
-
-        var userDefaultsKey: String {
-            switch self {
-            case .appUnlock: return "biometricAuthEnabled"
-            case .transaction: return "transactionAuthEnabled"
-            }
-        }
+        var id: String { rawValue }
 
         var title: String {
             switch self {
@@ -32,78 +22,53 @@ struct AppAccessSettingsView: View {
         }
     }
 
+    @State private var authTarget: AuthTarget?
+
+    private func isEnabled(_ target: AuthTarget) -> Bool {
+        UserDefaults.standard.bool(forKey: target.rawValue)
+    }
+
     var body: some View {
         List {
             Section("Wallet Security") {
                 Toggle(isOn: Binding(
-                    get: { biometricAuthEnabled },
-                    set: { newValue in
-                        if newValue {
-                            biometricAuthEnabled = true
-                        } else {
-                            pendingTarget = .appUnlock
-                            showAuthForToggle = true
-                        }
-                    }
+                    get: { isEnabled(.appUnlock) },
+                    set: { if $0 { enable(.appUnlock) } else { requestAuth(for: .appUnlock) } }
                 )) {
-                    Label {
-                        Text("App Unlock")
-                    } icon: {
-                        Image(systemName: "faceid")
-                            .foregroundStyle(.green)
-                    }
+                    Label { Text("App Unlock") }
+                        icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
                 .disabled(!BiometricService.canUseBiometrics)
 
                 Toggle(isOn: Binding(
-                    get: { transactionAuthEnabled },
-                    set: { newValue in
-                        if newValue {
-                            transactionAuthEnabled = true
-                        } else {
-                            pendingTarget = .transaction
-                            showAuthForToggle = true
-                        }
-                    }
+                    get: { isEnabled(.transaction) },
+                    set: { if $0 { enable(.transaction) } else { requestAuth(for: .transaction) } }
                 )) {
-                    Label {
-                        Text("Payment Confirmation")
-                    } icon: {
-                        Image(systemName: "faceid")
-                            .foregroundStyle(.green)
-                    }
+                    Label { Text("Payment Confirmation") }
+                        icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
                 .disabled(!BiometricService.canUseBiometrics)
             }
         }
         .navigationTitle("App Access")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showAuthForToggle) {
-            ToggleAuthSheet(
-                isPresented: $showAuthForToggle,
-                authTarget: pendingTarget,
-                onAuthenticated: { confirmed in
-                    guard confirmed, let target = pendingTarget else { return }
-                    UserDefaults.standard.set(false, forKey: target.userDefaultsKey)
-                    pendingTarget = nil
-                }
-            )
+        .sheet(item: $authTarget) { target in
+            ToggleAuthSheet(target: target)
         }
+    }
+
+    private func enable(_ target: AuthTarget) {
+        UserDefaults.standard.set(true, forKey: target.rawValue)
+    }
+
+    private func requestAuth(for target: AuthTarget) {
+        authTarget = target
     }
 }
 
 struct ToggleAuthSheet: View {
-    @Binding var isPresented: Bool
-    var authTarget: AppAccessSettingsView.AuthTarget?
-    var onAuthenticated: (Bool) -> Void
-
-    private var titleText: String {
-        authTarget?.title ?? "Authenticate"
-    }
-
-    private var subtitleText: String {
-        authTarget?.subtitle ?? "Verify your identity to continue"
-    }
+    let target: AppAccessSettingsView.AuthTarget
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
@@ -112,30 +77,22 @@ struct ToggleAuthSheet: View {
                     .font(.system(size: 60))
                     .foregroundStyle(.green)
 
-                Text(titleText)
+                Text(target.title)
                     .font(.headline)
 
-                Text(subtitleText)
+                Text(target.subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
                 Button("Continue") {
-                    Task {
-                        isPresented = false
-                        do {
-                            let success = try await BiometricService.authenticate(reason: titleText)
-                            onAuthenticated(success)
-                        } catch {
-                            onAuthenticated(false)
-                        }
-                    }
+                    Task { await performAuth() }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
                 Button("Cancel") {
-                    isPresented = false
+                    dismiss()
                 }
                 .foregroundStyle(.secondary)
             }
@@ -144,10 +101,24 @@ struct ToggleAuthSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { isPresented = false }
+                    Button("Cancel") { dismiss() }
                 }
             }
         }
         .presentationDetents([.medium])
+    }
+
+    private func performAuth() async {
+        var success = false
+        do {
+            success = try await BiometricService.authenticate(reason: target.title)
+        } catch {
+            let passcodeSuccess = await (try? BiometricService.authenticateWithPasscode(reason: target.title)) ?? false
+            success = passcodeSuccess
+        }
+        if success {
+            UserDefaults.standard.set(false, forKey: target.rawValue)
+        }
+        dismiss()
     }
 }

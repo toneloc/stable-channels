@@ -1,20 +1,17 @@
 import LocalAuthentication
 
 enum BiometricType {
-    case none
-    case touchID
-    case faceID
+    case none, touchID, faceID
 }
 
 enum BiometricError: Error {
-    case notAvailable
-    case notEnrolled
-    case cancelled
-    case lockout
+    case notAvailable, notEnrolled, cancelled, lockout
 }
 
 enum BiometricService {
-    /// Returns the available biometric type on this device.
+    /// Guards ContentView scenePhase lock during active biometric auth.
+    static var isAuthenticating: Bool = false
+
     static var biometricType: BiometricType {
         let ctx = LAContext()
         _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
@@ -25,58 +22,46 @@ enum BiometricService {
         }
     }
 
-    /// Checks if biometric authentication is available on this device.
     static var canUseBiometrics: Bool {
         let ctx = LAContext()
         var error: NSError?
         return ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
     }
 
-    /// Checks if device passcode is set (used for fallback).
     static var canUseDevicePasscode: Bool {
         let ctx = LAContext()
         var error: NSError?
         return ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
     }
 
-    /// Authenticates user with biometrics first, then falls back to device passcode.
-    /// No "Use Passcode" button is shown — fallback is automatic on failure.
     static func authenticate(reason: String) async throws -> Bool {
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
-        ctx.localizedFallbackTitle = "" // Hide button — we auto-fallback instead
+        ctx.localizedFallbackTitle = ""
 
-        // Attempt biometric auth
-        if canUseBiometrics {
-            do {
-                return try await ctx.evaluatePolicy(
-                    .deviceOwnerAuthenticationWithBiometrics,
-                    localizedReason: reason
-                )
-            } catch let laError as LAError {
-                switch laError.code {
-                case .userCancel, .appCancel:
-                    throw BiometricError.cancelled
-                case .biometryLockout:
-                    // Biometrics locked — fall through to passcode
-                    break
-                default:
-                    // Any biometric failure — fall through to passcode
-                    break
-                }
-            } catch {
-                // Fall through to passcode on any error
-            }
+        guard canUseBiometrics else {
+            throw BiometricError.notAvailable
         }
 
-        // Auto-fallback to device passcode
-        if canUseDevicePasscode {
-            return try await ctx.evaluatePolicy(
-                .deviceOwnerAuthentication,
-                localizedReason: reason
-            )
-        }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
 
-        throw BiometricError.notAvailable
+        return try await ctx.evaluatePolicy(
+            .deviceOwnerAuthenticationWithBiometrics,
+            localizedReason: reason
+        )
+    }
+
+    static func authenticateWithPasscode(reason: String) async throws -> Bool {
+        let ctx = LAContext()
+        ctx.localizedCancelTitle = "Cancel"
+
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+
+        return try await ctx.evaluatePolicy(
+            .deviceOwnerAuthentication,
+            localizedReason: reason
+        )
     }
 }
