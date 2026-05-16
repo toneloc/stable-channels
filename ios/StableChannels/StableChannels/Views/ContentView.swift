@@ -105,6 +105,14 @@ struct ContentView: View {
                 .font(.headline)
                 .foregroundStyle(.white)
 
+            if let error = appState.authError {
+                Text(error)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+
             Button("Try Again") {
                 Task { await runAuth() }
             }
@@ -140,6 +148,8 @@ struct ContentView: View {
         authInProgress = false
         if !success {
             authFailed = true
+        } else {
+            appState.authError = nil
         }
     }
 }
@@ -232,7 +242,7 @@ struct PrivacyOverlayModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay {
-                if scenePhase == .background || scenePhase == .inactive {
+                if scenePhase == .background {
                     Color.black
                         .ignoresSafeArea()
                         .zIndex(999)

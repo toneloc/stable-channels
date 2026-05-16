@@ -4,14 +4,27 @@ enum BiometricType {
     case none, touchID, faceID
 }
 
-enum BiometricError: Error {
-    case notAvailable, notEnrolled, cancelled, lockout
+enum BiometricError: Error, LocalizedError {
+    case notAvailable
+    case notEnrolled
+    case cancelled
+    case lockout
+    case biometryFailed
+    case passcodeFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .notAvailable: return "Biometric authentication is not available on this device."
+        case .notEnrolled: return "No biometrics enrolled. Please set up Face ID or Touch ID in Settings."
+        case .cancelled: return "Authentication was cancelled."
+        case .lockout: return "Biometrics locked. Please use your device passcode."
+        case .biometryFailed: return "Biometric authentication failed. Try again or use your passcode."
+        case .passcodeFailed: return "Authentication failed. Please try again."
+        }
+    }
 }
 
 enum BiometricService {
-    /// Guards ContentView scenePhase lock during active biometric auth.
-    static var isAuthenticating: Bool = false
-
     static var biometricType: BiometricType {
         let ctx = LAContext()
         _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
@@ -34,7 +47,21 @@ enum BiometricService {
         return ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
     }
 
-    static func authenticate(reason: String) async throws -> Bool {
+    /// Classifies LAError code into BiometricError for user-facing feedback.
+    private static func classifyLAError(_ error: Error) -> BiometricError {
+        guard let laError = error as? LAError else {
+            return .biometryFailed
+        }
+        switch laError.code {
+        case .biometryNotAvailable: return .notAvailable
+        case .biometryNotEnrolled: return .notEnrolled
+        case .biometryLockout: return .lockout
+        case .userCancel, .systemCancel, .appCancel: return .cancelled
+        default: return .biometryFailed
+        }
+    }
+
+    @MainActor static func authenticate(reason: String) async throws -> Bool {
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
         ctx.localizedFallbackTitle = ""
@@ -43,25 +70,30 @@ enum BiometricService {
             throw BiometricError.notAvailable
         }
 
-        isAuthenticating = true
-        defer { isAuthenticating = false }
-
-        return try await ctx.evaluatePolicy(
-            .deviceOwnerAuthenticationWithBiometrics,
-            localizedReason: reason
-        )
+        do {
+            return try await ctx.evaluatePolicy(
+                .deviceOwnerAuthenticationWithBiometrics,
+                localizedReason: reason
+            )
+        } catch {
+            throw classifyLAError(error)
+        }
     }
 
-    static func authenticateWithPasscode(reason: String) async throws -> Bool {
+    @MainActor static func authenticateWithPasscode(reason: String) async throws -> Bool {
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
 
-        isAuthenticating = true
-        defer { isAuthenticating = false }
-
-        return try await ctx.evaluatePolicy(
-            .deviceOwnerAuthentication,
-            localizedReason: reason
-        )
+        do {
+            return try await ctx.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: reason
+            )
+        } catch {
+            if let laError = error as? LAError, laError.code == .userCancel {
+                throw BiometricError.cancelled
+            }
+            throw BiometricError.passcodeFailed
+        }
     }
 }

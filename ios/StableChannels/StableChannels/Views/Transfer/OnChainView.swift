@@ -120,7 +120,7 @@ struct OnChainSendView: View {
         let authReason = sendAll ? "Confirm on-chain withdrawal of all funds" : "Confirm on-chain send"
         let authPassed = await appState.authenticate(reason: authReason)
         guard authPassed else {
-            errorMessage = "Authentication required to send."
+            errorMessage = appState.authError ?? "Authentication required to send."
             return
         }
 

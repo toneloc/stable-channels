@@ -1,4 +1,5 @@
 import SwiftUI
+import LocalAuthentication
 
 struct AppAccessSettingsView: View {
     enum AuthTarget: String, Identifiable {
@@ -109,15 +110,14 @@ struct ToggleAuthSheet: View {
     }
 
     private func performAuth() async {
-        var success = false
         do {
-            success = try await BiometricService.authenticate(reason: target.title)
-        } catch {
-            let passcodeSuccess = await (try? BiometricService.authenticateWithPasscode(reason: target.title)) ?? false
-            success = passcodeSuccess
-        }
-        if success {
+            try await BiometricService.authenticate(reason: target.title)
             UserDefaults.standard.set(false, forKey: target.rawValue)
+        } catch {
+            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: target.title)) ?? false
+            if passcodeOk {
+                UserDefaults.standard.set(false, forKey: target.rawValue)
+            }
         }
         dismiss()
     }

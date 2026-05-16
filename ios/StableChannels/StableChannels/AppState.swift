@@ -27,15 +27,34 @@ class AppState {
     /// Prevents double-trigger of auth (onAppear + onChange both firing).
     var isAuthenticating: Bool = false
 
+    /// Last auth error for UI display.
+    var authError: String?
+
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
         guard !isAuthenticating else { return false }
         isAuthenticating = true
         defer { isAuthenticating = false }
+        authError = nil
 
         do {
             return try await BiometricService.authenticate(reason: reason)
+        } catch let error as BiometricError {
+            // Fallback to passcode unless user explicitly cancelled
+            if error == .cancelled {
+                authError = nil
+                return false
+            }
+            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            if !passcodeOk {
+                authError = error.errorDescription
+            }
+            return passcodeOk
         } catch {
-            return await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            if !passcodeOk {
+                authError = "Authentication failed. Please try again."
+            }
+            return passcodeOk
         }
     }
 
