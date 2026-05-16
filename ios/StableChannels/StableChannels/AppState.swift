@@ -1099,9 +1099,9 @@ class AppState {
                 UserDefaults(suiteName: Constants.appGroupIdentifier)?
                     .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
-                // ensureLSPConnected can call node.connect() (TCP handshake) — keep off main thread
+                // ensureLSPConnected touches nodeService on AppState — direct call sufficient
                 Task.detached { [weak self] in
-                    await MainActor.run { self?.ensureLSPConnected() }
+                    await self?.ensureLSPConnected()
                 }
 
                 await MainActor.run { [weak self] in
