@@ -114,7 +114,6 @@
 		B785A33E02FD999CB62019AD /* StableChannelsApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableChannelsApp.swift; sourceTree = "<group>"; };
 		BE6DE49D25B7A85291504E77 /* PaymentDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailView.swift; sourceTree = "<group>"; };
 		CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditService.swift; sourceTree = "<group>"; };
-		AAAA11120000000000000001 /* TransactionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLogger.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D62A82EA774DC10F10A6574A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
@@ -203,7 +202,6 @@
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
-				AAAA11120000000000000001 /* TransactionLogger.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -455,7 +453,6 @@
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,
 				6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */,
-				AAAA11110000000000000001 /* TransactionLogger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
