@@ -1099,10 +1099,8 @@ class AppState {
                 UserDefaults(suiteName: Constants.appGroupIdentifier)?
                     .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
-                // ensureLSPConnected touches nodeService on AppState — direct call sufficient
-                Task.detached { [weak self] in
-                    await self?.ensureLSPConnected()
-                }
+                // ensureLSPConnected dispatches its own blocking work off-main internally.
+                await ensureLSPConnected()
 
                 await MainActor.run { [weak self] in
                     self?.recordCurrentPrice()
@@ -1118,11 +1116,15 @@ class AppState {
         nodeService.refreshChannels()
         let allUsable = !nodeService.channels.isEmpty && nodeService.channels.allSatisfy(\.isUsable)
         guard !allUsable else { return }
-        try? node.connect(
-            nodeId: Constants.defaultLSPPubkey,
-            address: Constants.defaultLSPAddress,
-            persist: true
-        )
+        // node.connect() does a TCP + Noise XK handshake (3 RTTs). On bad networks this
+        // can block for seconds — long enough for the iOS watchdog to kill the app.
+        // Dispatch off the main actor so the UI stays responsive. .utility priority because
+        // this is opportunistic plumbing — no user is actively waiting on it.
+        let lspPubkey = Constants.defaultLSPPubkey
+        let lspAddress = Constants.defaultLSPAddress
+        Task.detached(priority: .utility) {
+            try? node.connect(nodeId: lspPubkey, address: lspAddress, persist: true)
+        }
     }
 
     private func runStabilityCheck() {
