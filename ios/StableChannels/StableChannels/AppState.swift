@@ -3,6 +3,7 @@ import SwiftUI
 import LDKNode
 import SQLite3
 
+@MainActor
 @Observable
 class AppState {
     // MARK: - App Lifecycle
@@ -16,6 +17,46 @@ class AppState {
     }
 
     var phase: Phase = .loading
+
+    // MARK: - Authentication
+
+    /// Whether user has passed biometric/passcode auth this session.
+    /// Reset to false on app termination (no persistence = no bypass on restart).
+    var isUnlocked: Bool = false
+
+    /// Prevents double-trigger of auth (onAppear + onChange both firing).
+    var isAuthenticating: Bool = false
+
+    /// Last auth error for UI display.
+    var authError: String?
+
+    func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
+        guard !isAuthenticating else { return false }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        authError = nil
+
+        do {
+            return try await BiometricService.authenticate(reason: reason)
+        } catch let error as BiometricError {
+            // Fallback to passcode unless user explicitly cancelled
+            if error == .cancelled {
+                authError = nil
+                return false
+            }
+            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            if !passcodeOk {
+                authError = error.errorDescription
+            }
+            return passcodeOk
+        } catch {
+            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            if !passcodeOk {
+                authError = "Authentication failed. Please try again."
+            }
+            return passcodeOk
+        }
+    }
 
     // MARK: - Services
 
@@ -1058,8 +1099,8 @@ class AppState {
                 UserDefaults(suiteName: Constants.appGroupIdentifier)?
                     .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
-                // ensureLSPConnected can call node.connect() (TCP handshake) — keep off main thread
-                Task.detached { [weak self] in self?.ensureLSPConnected() }
+                // ensureLSPConnected dispatches its own blocking work off-main internally.
+                await ensureLSPConnected()
 
                 await MainActor.run { [weak self] in
                     self?.recordCurrentPrice()
@@ -1075,11 +1116,15 @@ class AppState {
         nodeService.refreshChannels()
         let allUsable = !nodeService.channels.isEmpty && nodeService.channels.allSatisfy(\.isUsable)
         guard !allUsable else { return }
-        try? node.connect(
-            nodeId: Constants.defaultLSPPubkey,
-            address: Constants.defaultLSPAddress,
-            persist: true
-        )
+        // node.connect() does a TCP + Noise XK handshake (3 RTTs). On bad networks this
+        // can block for seconds — long enough for the iOS watchdog to kill the app.
+        // Dispatch off the main actor so the UI stays responsive. .utility priority because
+        // this is opportunistic plumbing — no user is actively waiting on it.
+        let lspPubkey = Constants.defaultLSPPubkey
+        let lspAddress = Constants.defaultLSPAddress
+        Task.detached(priority: .utility) {
+            try? node.connect(nodeId: lspPubkey, address: lspAddress, persist: true)
+        }
     }
 
     private func runStabilityCheck() {

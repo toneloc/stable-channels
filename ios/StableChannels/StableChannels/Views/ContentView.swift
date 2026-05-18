@@ -1,25 +1,160 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var authFailed = false
+    @State private var authInProgress = false
+    @State private var hasTriggeredAuth = false
+
+    private var biometricEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
+    }
 
     var body: some View {
-        switch appState.phase {
-        case .loading:
-            LoadingView()
-        case .onboarding:
-            SyncingView() // Auto-create handles this; should not stay here
-        case .syncing:
-            SyncingView()
-        case .wallet:
-            MainTabView()
-        case .error(let message):
-            ErrorDisplayView(message: message)
+        ZStack {
+            switch appState.phase {
+            case .loading:
+                LoadingView()
+            case .onboarding:
+                SyncingView()
+            case .syncing:
+                SyncingView()
+            case .wallet:
+                MainTabView()
+            case .error(let message):
+                ErrorDisplayView(message: message)
+            }
+
+            // Auth overlay: shown only when locked and biometric is enabled
+            if !appState.isUnlocked && biometricEnabled {
+                Color.black
+                    .ignoresSafeArea()
+                    .overlay {
+                        if authFailed {
+                            failedView
+                        } else {
+                            waitingView
+                        }
+                    }
+                    .onAppear {
+                        // Auth triggered on .active via onChange — skip here to avoid racing
+                        if !hasTriggeredAuth {
+                            hasTriggeredAuth = true
+                            if scenePhase == .active {
+                                Task { await runAuth() }
+                            }
+                        }
+                    }
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // Lock only on .background. .inactive fires during app switcher and Face ID prompts.
+            if newPhase == .background {
+                appState.isUnlocked = false
+                authFailed = false
+                hasTriggeredAuth = false
+                authInProgress = false
+                return
+            }
+            if newPhase == .active {
+                Task { @MainActor in
+                    // 200ms delay lets .inactive from app switcher/Face ID fully settle first
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    if !appState.isUnlocked && biometricEnabled && scenePhase == .active {
+                        await runAuth()
+                    }
+                }
+            }
+        }
+        .onChange(of: appState.isUnlocked) { _, unlocked in
+            if unlocked {
+                authInProgress = false
+            }
+        }
+        .onChange(of: biometricEnabled) { _, enabled in
+            if !enabled {
+                authInProgress = false
+                authFailed = false
+                hasTriggeredAuth = false
+            }
+        }
+        .modifier(PrivacyOverlayModifier())
+    }
+
+    private var waitingView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "faceid")
+                .font(.system(size: 60))
+                .foregroundStyle(.green.opacity(0.5))
+
+            Text("Authenticate")
+                .font(.headline)
+                .foregroundStyle(.white)
+        }
+    }
+
+    private var failedView: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "faceid")
+                .font(.system(size: 60))
+                .foregroundStyle(.green)
+
+            Text("Authentication Failed")
+                .font(.headline)
+                .foregroundStyle(.white)
+
+            if let error = appState.authError {
+                Text(error)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+
+            Button("Try Again") {
+                Task { await runAuth() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button("Cancel") { }
+                .foregroundStyle(.white.opacity(0.6))
+        }
+    }
+
+    private func runAuth() async {
+        guard !appState.isUnlocked else { return }
+        guard !authInProgress else { return }
+
+        // Dismiss any active keyboard to avoid blocking system auth dialogs
+        UIApplication.shared.sendAction(
+            Selector(("resignFirstResponder")),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+
+        authInProgress = true
+        authFailed = false
+
+        let success = await appState.authenticate()
+
+        if success {
+            appState.isUnlocked = true
+        }
+
+        authInProgress = false
+        if !success {
+            authFailed = true
+        } else {
+            appState.authError = nil
         }
     }
 }
 
-// MARK: - Loading / Syncing / Error
+// MARK: - Views
 
 struct LoadingView: View {
     @State private var pulse = false
@@ -96,5 +231,22 @@ struct ErrorDisplayView: View {
             .buttonStyle(.bordered)
             .padding(.top, 8)
         }
+    }
+}
+
+// MARK: - Privacy Overlay
+
+struct PrivacyOverlayModifier: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if scenePhase == .background {
+                    Color.black
+                        .ignoresSafeArea()
+                        .zIndex(999)
+                }
+            }
     }
 }

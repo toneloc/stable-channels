@@ -18,6 +18,8 @@
 		3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3940DC5406ABC63AA090441A /* DatabaseService.swift */; };
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
+		49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E12FB6E52E00133509 /* BiometricService.swift */; };
+		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
@@ -88,6 +90,8 @@
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
+		49D9C2E12FB6E52E00133509 /* BiometricService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricService.swift; sourceTree = "<group>"; };
+		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
 		4F10632049E3C904E518EDD2 /* TradeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeDetailView.swift; sourceTree = "<group>"; };
 		4F22F6639A59D4B86A959586 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		61BB0D1D623E0794FC1ED6ED /* NodeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeService.swift; sourceTree = "<group>"; };
@@ -191,6 +195,7 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
@@ -213,6 +218,7 @@
 		9EB6CDA4F614F973AF602691 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */,
 				7DB261201C1C656BAAED5283 /* SettingsView.swift */,
 			);
 			path = Settings;
@@ -432,6 +438,7 @@
 				3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */,
 				8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */,
 				C1911B3A7E4C92444F07A5C6 /* OnChainView.swift in Sources */,
+				49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */,
 				6B789335CAF664AC4DA75B1A /* PaymentDetailView.swift in Sources */,
 				8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */,
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
@@ -441,6 +448,7 @@
 				6FC18A5668E49E3CD5E990A8 /* SettingsView.swift in Sources */,
 				8D7AA44935C2E984E70D42AE /* StabilityService.swift in Sources */,
 				B58FDE639A431D2000E0F86D /* StableChannel.swift in Sources */,
+				49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */,
 				06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */,
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,

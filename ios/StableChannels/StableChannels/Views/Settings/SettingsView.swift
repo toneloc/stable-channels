@@ -37,6 +37,13 @@ struct SettingsView: View {
                     }
                 }
 
+                // Privacy & Security
+                Section("Privacy & Security") {
+                    NavigationLink("App Access") {
+                        AppAccessSettingsView()
+                    }
+                }
+
                 // Channel Info
                 if let channel = appState.nodeService.channels.first {
                     Section("Channel") {
