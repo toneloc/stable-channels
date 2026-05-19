@@ -86,7 +86,7 @@ struct OnChainSendView: View {
                             systemImage: "checkmark.circle.fill"
                         )
                         .foregroundStyle(.green)
-                        Text(String(localized: "label_txid", defaultValue: "TXID: \(txid)"))
+                        Text(String(localized: "label_txid", defaultValue: "TXID") + ": \(txid)")
                             .font(.caption)
                             .textSelection(.enabled)
                     }

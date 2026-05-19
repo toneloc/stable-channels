@@ -10,6 +10,16 @@
     "%lld." : {
 
     },
+    "%lld%% USD  %lld%% BTC" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld%% USD  %2$lld%% BTC"
+          }
+        }
+      }
+    },
     "alert_close_channel_cancel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -185,17 +195,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Authentication Failed"
-          }
-        }
-      }
-    },
-    "auth_try_again" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Try Again"
           }
         }
       }
@@ -482,17 +481,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Swap"
-          }
-        }
-      }
-    },
-    "button_try_again" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Try Again"
           }
         }
       }
@@ -2726,7 +2714,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Try again"
+            "value" : "Try Again"
           }
         }
       }

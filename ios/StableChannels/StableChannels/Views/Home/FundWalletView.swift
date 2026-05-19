@@ -51,7 +51,7 @@ struct FundWalletView: View {
             }
             .padding(32)
         }
-        .navigationTitle(String(localized: "title_fund_wallet", defaultValue: "Fund Wallet"))
+        .navigationTitle(String(localized: "title_on_chain_receive", defaultValue: "On-chain Receive"))
         .navigationBarTitleDisplayMode(.inline)
     }
 

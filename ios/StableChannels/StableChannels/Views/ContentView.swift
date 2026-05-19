@@ -113,7 +113,7 @@ struct ContentView: View {
                     .padding(.horizontal)
             }
 
-            Button(String(localized: "button_try_again", defaultValue: "Try Again")) {
+            Button(String(localized: "try_again", defaultValue: "Try Again")) {
                 Task { await runAuth() }
             }
             .buttonStyle(.borderedProminent)
