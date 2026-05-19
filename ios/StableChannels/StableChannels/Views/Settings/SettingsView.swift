@@ -17,28 +17,35 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 // Node Info
-                Section("Node") {
+                Section(String(localized: "section_node", defaultValue: "Node")) {
                     HStack {
-                        Text("Status")
+                        Text(String(localized: "label_status", defaultValue: "Status"))
                         Spacer()
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(appState.nodeService.isRunning ? .green : .red)
                                 .frame(width: 8, height: 8)
-                            Text(appState.nodeService.isRunning ? "Running" : "Stopped")
+                            Text(appState.nodeService.isRunning
+                                ? String(localized: "status_running", defaultValue: "Running")
+                                : String(localized: "status_stopped", defaultValue: "Stopped"))
                                 .foregroundStyle(appState.nodeService.isRunning ? .green : .red)
                         }
                     }
 
                     if showNodeId {
-                        copyableRow("Node ID", appState.nodeService.nodeId)
+                        copyableRow(
+                            String(localized: "label_node_id", defaultValue: "Node ID"),
+                            appState.nodeService.nodeId
+                        )
                     } else {
-                        Button("Show Node ID") { showNodeId = true }
+                        Button(String(localized: "button_show_node_id", defaultValue: "Show Node ID")) {
+                            showNodeId = true
+                        }
                     }
                 }
 
                 // Privacy & Security
-                Section("Privacy & Security") {
+                Section(String(localized: "section_privacy_security", defaultValue: "Privacy & Security")) {
                     NavigationLink("App Access") {
                         AppAccessSettingsView()
                     }
@@ -46,36 +53,38 @@ struct SettingsView: View {
 
                 // Channel Info
                 if let channel = appState.nodeService.channels.first {
-                    Section("Channel") {
+                    Section(String(localized: "section_channel", defaultValue: "Channel")) {
                         HStack {
-                            Text("Capacity")
+                            Text(String(localized: "label_capacity", defaultValue: "Capacity"))
                             Spacer()
                             Text(channel.channelValueSats.satsFormatted)
                         }
                         HStack {
-                            Text("Status")
+                            Text(String(localized: "label_status", defaultValue: "Status"))
                             Spacer()
                             HStack(spacing: 4) {
                                 Circle()
                                     .fill(channel.isChannelReady ? .green : .orange)
                                     .frame(width: 8, height: 8)
-                                Text(channel.isChannelReady ? "Ready" : "Pending")
+                                Text(channel.isChannelReady
+                                    ? String(localized: "channel_status_ready", defaultValue: "Ready")
+                                    : String(localized: "channel_status_pending", defaultValue: "Pending"))
                             }
                         }
                         HStack {
-                            Text("Outbound")
+                            Text(String(localized: "label_outbound", defaultValue: "Outbound"))
                             Spacer()
                             Text((channel.outboundCapacityMsat / 1000).satsFormatted)
                         }
                         HStack {
-                            Text("Inbound")
+                            Text(String(localized: "label_inbound", defaultValue: "Inbound"))
                             Spacer()
                             Text(((channel.inboundCapacityMsat) / 1000).satsFormatted)
                         }
 
                         if let txid = appState.fundingTxid, !txid.isEmpty {
                             HStack {
-                                Text("Funding Tx")
+                                Text(String(localized: "label_funding_tx", defaultValue: "Funding Tx"))
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Text(String(txid.prefix(8)) + "..." + String(txid.suffix(8)))
@@ -85,7 +94,7 @@ struct SettingsView: View {
                             if let url = URL(string: "https://mempool.space/tx/\(txid)") {
                                 Link(destination: url) {
                                     HStack(spacing: 4) {
-                                        Text("View on explorer")
+                                        Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
                                         Image(systemName: "arrow.up.right.square")
                                     }
                                     .font(.caption)
@@ -95,20 +104,20 @@ struct SettingsView: View {
                         }
                     }
 
-                    Section("Stable Position") {
+                    Section(String(localized: "section_stable_position", defaultValue: "Stable Position")) {
                         HStack {
-                            Text("Expected USD")
+                            Text(String(localized: "label_expected_usd", defaultValue: "Expected USD"))
                             Spacer()
                             Text(appState.stableChannel.expectedUSD.formatted)
                                 .fontWeight(.medium)
                         }
                         HStack {
-                            Text("Backing Sats")
+                            Text(String(localized: "label_backing_sats", defaultValue: "Backing Sats"))
                             Spacer()
                             Text(appState.stableChannel.backingSats.satsFormatted)
                         }
                         HStack {
-                            Text("Native BTC")
+                            Text(String(localized: "label_native_btc", defaultValue: "Native BTC"))
                             Spacer()
                             Text(appState.stableChannel.nativeChannelBTC.sats.satsFormatted)
                         }
@@ -119,14 +128,14 @@ struct SettingsView: View {
                                 appState.stableChannel, price: appState.btcPrice
                             )
                             HStack {
-                                Text("Status")
+                                Text(String(localized: "label_status", defaultValue: "Status"))
                                 Spacer()
                                 Text(result.action.rawValue)
                                     .foregroundStyle(stabilityColor(result.action))
                                     .fontWeight(.medium)
                             }
                             HStack {
-                                Text("Distance from Par")
+                                Text(String(localized: "label_distance_from_par", defaultValue: "Distance from Par"))
                                 Spacer()
                                 Text(String(format: "%.2f%%", result.percentFromPar))
                                     .foregroundStyle(result.percentFromPar < 0.1 ? .green : .orange)
@@ -134,72 +143,84 @@ struct SettingsView: View {
                         }
 
                         if !appState.stableChannel.counterparty.isEmpty {
-                            copyableRow("Counterparty", appState.stableChannel.counterparty)
+                            copyableRow(
+                                String(localized: "label_counterparty", defaultValue: "Counterparty"),
+                                appState.stableChannel.counterparty
+                            )
                         }
                     }
 
                     Section {
-                        Button("Close Channel", role: .destructive) {
+                        Button(
+                            String(localized: "button_close_channel", defaultValue: "Close Channel"),
+                            role: .destructive
+                        ) {
                             showCloseChannelAlert = true
                         }
                     }
                 }
 
                 // On-Chain
-                Section("On-Chain") {
+                Section(String(localized: "section_on_chain", defaultValue: "On-Chain")) {
                     HStack {
-                        Text("Balance")
+                        Text(String(localized: "label_balance", defaultValue: "Balance"))
                         Spacer()
                         Text(appState.onchainBalanceSats.satsFormatted)
                     }
 
                     if appState.onchainBalanceSats > 0 {
-                        NavigationLink("Send On-Chain") {
+                        NavigationLink(String(localized: "link_send_on_chain", defaultValue: "Send On-Chain")) {
                             OnChainSendView()
                         }
                     }
                 }
 
                 // Push Notifications
-                Section("Push Notifications") {
+                Section(String(localized: "section_notifications", defaultValue: "Push Notifications")) {
                     HStack {
-                        Text("Notifications")
+                        Text(String(localized: "label_notifications", defaultValue: "Notifications"))
                         Spacer()
                         if notificationsEnabled {
-                            Text("Enabled")
+                            Text(String(localized: "notifications_enabled", defaultValue: "Enabled"))
                                 .foregroundStyle(.green)
                         } else {
-                            Text("Disabled")
+                            Text(String(localized: "notifications_disabled", defaultValue: "Disabled"))
                                 .foregroundStyle(.red)
                         }
                     }
 
                     if !notificationsEnabled {
-                        Button("Enable in Settings") {
+                        Button(String(localized: "button_enable_settings", defaultValue: "Enable in Settings")) {
                             if let url = URL(string: UIApplication.openSettingsURLString) {
                                 UIApplication.shared.open(url)
                             }
                         }
-                        Text("Notifications are required to receive stability payments while the app is closed.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text(String(
+                            localized: "info_notifications_needed",
+                            defaultValue: "Notifications are required to receive stability payments while the app is closed."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
 
                     if let token = UserDefaults.standard.string(forKey: "apns_device_token") {
-                        copyableRow("Device Token", token)
+                        copyableRow(String(localized: "label_device_token", defaultValue: "Device Token"), token)
                     }
                 }
 
                 // Backup
-                Section("Backup") {
-                    Button(showSeedWords ? "Hide Seed Words" : "Backup Seed Words") {
-                        showSeedWords.toggle()
-                    }
+                Section(String(localized: "section_backup", defaultValue: "Backup")) {
+                    Button(showSeedWords
+                        ? String(localized: "button_hide_seed", defaultValue: "Hide Seed Words")
+                        : String(localized: "button_backup_seed", defaultValue: "Backup Seed Words")) {
+                            showSeedWords.toggle()
+                        }
                     if showSeedWords {
                         if let words = appState.nodeService.savedMnemonic, !words.isEmpty {
-                            Text(
-                                "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds."
-                            )
+                            Text(String(
+                                localized: "warning_seed",
+                                defaultValue: "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds."
+                            ))
                             .font(.caption)
                             .foregroundStyle(.orange)
                             ForEach(Array(words.split(separator: " ").enumerated()), id: \.offset) { index, word in
@@ -217,47 +238,53 @@ struct SettingsView: View {
                             } label: {
                                 HStack {
                                     Image(systemName: copiedField == "Seed Words" ? "checkmark" : "doc.on.doc")
-                                    Text(copiedField == "Seed Words" ? "Copied" : "Copy Seed Words")
+                                    Text(copiedField == "Seed Words"
+                                        ? String(localized: "button_copied", defaultValue: "Copied")
+                                        : String(localized: "button_copy_seed", defaultValue: "Copy Seed Words"))
                                 }
                             }
                         } else {
-                            Text("Seed phrase not available for this wallet.")
-                                .foregroundStyle(.secondary)
+                            Text(String(
+                                localized: "info_seed_unavailable",
+                                defaultValue: "Seed phrase not available for this wallet."
+                            ))
+                            .foregroundStyle(.secondary)
                         }
                     }
-                    Button("Restore from Seed") {
+                    Button(String(localized: "button_restore_seed", defaultValue: "Restore from Seed")) {
                         showRestore = true
                     }
                 }
 
                 // About
-                Section("About") {
+                Section(String(localized: "section_about", defaultValue: "About")) {
                     HStack {
-                        Text("Version")
+                        Text(String(localized: "label_version", defaultValue: "Version"))
                         Spacer()
                         Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                             .foregroundStyle(.secondary)
                     }
                     HStack {
-                        Text("Network")
+                        Text(String(localized: "label_network", defaultValue: "Network"))
                         Spacer()
                         Text(Constants.defaultNetwork)
                             .foregroundStyle(.secondary)
                     }
                     HStack {
-                        Text("Custody")
+                        Text(String(localized: "label_custody", defaultValue: "Custody"))
                         Spacer()
-                        Text("Self-custodial")
+                        Text(String(localized: "custody_self", defaultValue: "Self-custodial"))
                             .foregroundStyle(.secondary)
                     }
-                    Text(
-                        "Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds."
-                    )
+                    Text(String(
+                        localized: "info_self_custody",
+                        defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds."
+                    ))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle(String(localized: "title_settings", defaultValue: "Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 appState.refreshBalances()
@@ -272,19 +299,26 @@ struct SettingsView: View {
             .sheet(isPresented: $showRestore) {
                 NavigationStack {
                     VStack(spacing: 20) {
-                        Text("Enter your 12 or 24-word seed phrase to restore a wallet.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
+                        Text(String(
+                            localized: "instruction_restore",
+                            defaultValue: "Enter your 12 or 24-word seed phrase to restore a wallet."
+                        ))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal)
 
-                        TextField("word1 word2 word3 ...", text: $restoreMnemonic, axis: .vertical)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .lineLimit(3...5)
-                            .font(.system(.body, design: .monospaced))
-                            .padding()
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                            .padding(.horizontal)
+                        TextField(
+                            String(localized: "placeholder_seed", defaultValue: "word1 word2 word3 ..."),
+                            text: $restoreMnemonic,
+                            axis: .vertical
+                        )
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .lineLimit(3...5)
+                        .font(.system(.body, design: .monospaced))
+                        .padding()
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                        .padding(.horizontal)
 
                         if let error = restoreError {
                             Text(error)
@@ -299,7 +333,8 @@ struct SettingsView: View {
                             if isRestoring {
                                 ProgressView().frame(maxWidth: .infinity)
                             } else {
-                                Text("Restore").frame(maxWidth: .infinity)
+                                Text(String(localized: "button_restore", defaultValue: "Restore"))
+                                    .frame(maxWidth: .infinity)
                             }
                         }
                         .buttonStyle(.borderedProminent)
@@ -310,10 +345,10 @@ struct SettingsView: View {
                         Spacer()
                     }
                     .padding(.top)
-                    .navigationTitle("Restore from Seed")
+                    .navigationTitle(String(localized: "title_restore_seed", defaultValue: "Restore from Seed"))
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Cancel") {
+                            Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
                                 showRestore = false
                                 restoreMnemonic = ""
                                 restoreError = nil
@@ -322,13 +357,19 @@ struct SettingsView: View {
                     }
                 }
             }
-            .alert("Close Channel?", isPresented: $showCloseChannelAlert) {
-                Button("Cancel", role: .cancel) { }
-                Button("Close", role: .destructive) {
+            .alert(
+                String(localized: "alert_close_channel_title", defaultValue: "Close Channel?"),
+                isPresented: $showCloseChannelAlert
+            ) {
+                Button(String(localized: "alert_close_channel_cancel", defaultValue: "Cancel"), role: .cancel) { }
+                Button(String(localized: "alert_close_channel_confirm", defaultValue: "Close"), role: .destructive) {
                     closeChannel()
                 }
             } message: {
-                Text("This will cooperatively close the channel and sweep funds on-chain.")
+                Text(String(
+                    localized: "alert_close_channel_message",
+                    defaultValue: "This will cooperatively close the channel and sweep funds on-chain."
+                ))
             }
         }
     }
@@ -344,7 +385,7 @@ struct SettingsView: View {
                     .foregroundStyle(.primary)
                 Spacer()
                 if copiedField == label {
-                    Label("Copied", systemImage: "checkmark")
+                    Label(String(localized: "button_copied", defaultValue: "Copied"), systemImage: "checkmark")
                         .font(.caption)
                         .foregroundStyle(.green)
                 } else {
@@ -382,7 +423,10 @@ struct SettingsView: View {
         let input = restoreMnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
         let wordCount = input.split(separator: " ").count
         guard wordCount == 12 || wordCount == 24 else {
-            restoreError = "Seed phrase must be 12 or 24 words"
+            restoreError = String(
+                localized: "error_seed_word_count",
+                defaultValue: "Seed phrase must be 12 or 24 words"
+            )
             return
         }
 

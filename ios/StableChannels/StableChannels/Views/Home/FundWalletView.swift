@@ -32,7 +32,9 @@ struct FundWalletView: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isCopied = false }
                         } label: {
                             Label(
-                                isCopied ? "Copied" : "Copy Address",
+                                isCopied
+                                    ? String(localized: "button_copied", defaultValue: "Copied")
+                                    : String(localized: "button_copy_address", defaultValue: "Copy Address"),
                                 systemImage: isCopied ? "checkmark" : "doc.on.doc"
                             )
                         }
@@ -49,7 +51,7 @@ struct FundWalletView: View {
             }
             .padding(32)
         }
-        .navigationTitle("On-chain Receive")
+        .navigationTitle(String(localized: "title_fund_wallet", defaultValue: "Fund Wallet"))
         .navigationBarTitleDisplayMode(.inline)
     }
 

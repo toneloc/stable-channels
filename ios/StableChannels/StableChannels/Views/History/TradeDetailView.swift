@@ -7,27 +7,36 @@ struct TradeDetailView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Trade Details") {
-                    row("Action", trade.action == "buy" ? "Buy BTC" : "Sell BTC")
-                    row("Amount (USD)", trade.amountUSD.usdFormatted)
-                    row("Amount (BTC)", String(format: "%.8f", trade.amountBTC))
-                    row("BTC Price", trade.btcPrice.usdFormatted)
-                    row("Fee", trade.feeUSD.usdFormatted)
-                    row("Status", trade.status.capitalized)
+                Section(String(localized: "section_trade_details", defaultValue: "Trade Details")) {
+                    row(String(localized: "label_action", defaultValue: "Action"),
+                        trade.action == "buy"
+                            ? String(localized: "trade_buy_btc", defaultValue: "Buy BTC")
+                            : String(localized: "trade_sell_btc", defaultValue: "Sell BTC"))
+                    row(
+                        String(localized: "label_amount_usd", defaultValue: "Amount (USD)"),
+                        trade.amountUSD.usdFormatted
+                    )
+                    row(
+                        String(localized: "label_amount_btc", defaultValue: "Amount (BTC)"),
+                        String(format: "%.8f", trade.amountBTC)
+                    )
+                    row(String(localized: "label_btc_price", defaultValue: "BTC Price"), trade.btcPrice.usdFormatted)
+                    row(String(localized: "label_fee", defaultValue: "Fee"), trade.feeUSD.usdFormatted)
+                    row(String(localized: "label_status", defaultValue: "Status"), trade.status.capitalized)
                 }
 
-                Section("Metadata") {
-                    row("Date", trade.date.formatted())
+                Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
+                    row(String(localized: "label_date", defaultValue: "Date"), trade.date.formatted())
                     if let paymentId = trade.paymentId {
-                        row("Trade ID", paymentId)
+                        row(String(localized: "label_payment_id", defaultValue: "Trade ID"), paymentId)
                     }
                 }
             }
-            .navigationTitle("Trade Detail")
+            .navigationTitle(String(localized: "title_trade_detail", defaultValue: "Trade Detail"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                    Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
                 }
             }
         }

@@ -13,19 +13,19 @@ struct MainTabView: View {
         TabView(selection: $selectedTab) {
             HomeView()
                 .tabItem {
-                    Label("Home", systemImage: "house.fill")
+                    Label(String(localized: "tab_home", defaultValue: "Home"), systemImage: "house.fill")
                 }
                 .tag(Tab.home)
 
             HistoryView()
                 .tabItem {
-                    Label("History", systemImage: "clock.fill")
+                    Label(String(localized: "tab_history", defaultValue: "History"), systemImage: "clock.fill")
                 }
                 .tag(Tab.history)
 
             SettingsView()
                 .tabItem {
-                    Label("Settings", systemImage: "gearshape.fill")
+                    Label(String(localized: "tab_settings", defaultValue: "Settings"), systemImage: "gearshape.fill")
                 }
                 .tag(Tab.settings)
         }

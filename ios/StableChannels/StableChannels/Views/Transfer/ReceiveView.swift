@@ -43,17 +43,17 @@ struct ReceiveView: View {
 
                 Spacer()
             }
-            .navigationTitle("Receive")
+            .navigationTitle(String(localized: "title_receive", defaultValue: "Receive"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
+                    Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         showOnChain = true
                     } label: {
-                        Label("On-Chain", systemImage: "link")
+                        Label(String(localized: "toolbar_on_chain", defaultValue: "On-Chain"), systemImage: "link")
                     }
                 }
             }
@@ -67,10 +67,10 @@ struct ReceiveView: View {
 
     private var amountInput: some View {
         VStack(spacing: 16) {
-            Text("Amount (USD)")
+            Text(String(localized: "placeholder_amount", defaultValue: "Amount (USD)"))
                 .font(.headline)
 
-            TextField("0.00", text: $amountUSD)
+            TextField(String(localized: "placeholder_amount_usd", defaultValue: "0.00"), text: $amountUSD)
                 .keyboardType(.decimalPad)
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
@@ -80,7 +80,7 @@ struct ReceiveView: View {
                             let textWidth = amountUSD.size(withAttributes: [
                                 .font: UIFont.rounded(ofSize: 32, weight: .bold)
                             ]).width
-                            Text("$")
+                            Text(String(localized: "label_dollar_sign", defaultValue: "$"))
                                 .font(.system(size: 32, weight: .bold, design: .rounded))
                                 .position(x: geo.size.width / 2 - textWidth / 2 - 10,
                                           y: geo.size.height / 2)
@@ -95,24 +95,29 @@ struct ReceiveView: View {
             }
 
             if !hasChannel {
-                Text("First payment — a channel will be opened automatically via LSP")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                Text(String(
+                    localized: "info_first_payment",
+                    defaultValue: "First payment — a channel will be opened automatically via LSP"
+                ))
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
 
-                Text("$\(Int(Constants.maxChannelUSD)) Maximum")
+                Text(String(localized: "max_channel_limit", defaultValue: "Maximum: $") +
+                    "\(Int(Constants.maxChannelUSD))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
 
             if !hasChannel && enteredUSDValue > Constants.maxChannelUSD {
-                Text("Amount exceeds $\(Int(Constants.maxChannelUSD)) channel limit")
+                let limitStr = String(localized: "error_exceeds_limit", defaultValue: "Amount exceeds $") + "\(Int(Constants.maxChannelUSD)) channel limit"
+                Text(limitStr)
                     .font(.caption)
                     .foregroundStyle(.red)
             }
 
-            Button("Generate Invoice") {
+            Button(String(localized: "button_generate_invoice", defaultValue: "Generate Invoice")) {
                 createInvoice()
             }
             .buttonStyle(.borderedProminent)
@@ -120,7 +125,7 @@ struct ReceiveView: View {
             .disabled(enteredSats == 0 || (!hasChannel && enteredUSDValue > Constants.maxChannelUSD))
 
             if hasChannel {
-                Button("Any Amount") {
+                Button(String(localized: "button_any_amount", defaultValue: "Any Amount")) {
                     createVariableInvoice()
                 }
                 .buttonStyle(.bordered)
@@ -147,7 +152,7 @@ struct ReceiveView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text("Any amount")
+                Text(String(localized: "label_any_amount", defaultValue: "Any amount"))
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
@@ -175,7 +180,10 @@ struct ReceiveView: View {
                 isCopied = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isCopied = false }
             } label: {
-                Label(isCopied ? "Copied" : "Copy Invoice", systemImage: isCopied ? "checkmark" : "doc.on.doc")
+                Label(isCopied
+                    ? String(localized: "button_copied", defaultValue: "Copied")
+                    : String(localized: "button_copy_invoice", defaultValue: "Copy Invoice"),
+                    systemImage: isCopied ? "checkmark" : "doc.on.doc")
             }
             .buttonStyle(.borderedProminent)
         }

@@ -84,7 +84,7 @@ struct BalanceBarView: View {
                         .scaleEffect(isPressing ? 1.15 : pulseScale)
                         .overlay(alignment: .top) {
                             if isPressing {
-                                Text("\(usdPct)% USD  \(btcPct)% BTC")
+                                Text(String(localized: "label_balance_pct", defaultValue: "% USD % BTC"))
                                     .font(.caption2.bold())
                                     .fixedSize()
                                     .foregroundStyle(.primary)

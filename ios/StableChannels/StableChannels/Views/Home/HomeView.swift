@@ -21,7 +21,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     HStack {
-                        Text("Stable Channels")
+                        Text(String(localized: "app_name", defaultValue: "Stable Channels"))
                             .font(.headline)
                         Spacer()
                     }
@@ -39,7 +39,7 @@ struct HomeView: View {
                         HStack(spacing: 6) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Syncing...")
+                            Text(String(localized: "home_syncing", defaultValue: "Syncing..."))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -64,10 +64,13 @@ struct HomeView: View {
 
                     // Hint text when no channel
                     if !hasReadyChannel {
-                        Text("Receive bitcoin over Lightning to get started")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.bottom, 4)
+                        Text(String(
+                            localized: "home_hint_receive",
+                            defaultValue: "Receive bitcoin over Lightning to get started"
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 4)
                     }
 
                     // Action Buttons
@@ -147,13 +150,16 @@ struct HomeView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.white)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Notifications Disabled")
+                    Text(String(localized: "notifications_disabled", defaultValue: "Notifications Disabled"))
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .foregroundStyle(.white)
-                    Text("Enable notifications for stability payments")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.9))
+                    Text(String(
+                        localized: "notifications_disabled_subtitle",
+                        defaultValue: "Enable notifications for stability payments"
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.9))
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
@@ -177,16 +183,16 @@ struct HomeView: View {
         let hasBalance = appState.totalBalanceUSD > 0 || displaySats > 0
 
         return VStack(spacing: 4) {
-            Text("Total Balance")
+            Text(String(localized: "label_total_balance", defaultValue: "Total Balance"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             if !hasBalance && appState.isSyncing {
-                Text("—")
+                Text(String(localized: "label_dash", defaultValue: "—"))
                     .font(.system(size: 42, weight: .bold, design: .rounded))
                     .foregroundStyle(.secondary)
 
-                Text("Loading balance...")
+                Text(String(localized: "loading_balance", defaultValue: "Loading balance..."))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else if showBTC {
@@ -196,7 +202,7 @@ struct HomeView: View {
                         .foregroundStyle(appState.paymentFlash ? .green : .primary)
                         .contentTransition(.numericText())
                         .animation(.default, value: displaySats)
-                    Text("BTC")
+                    Text(String(localized: "label_btc", defaultValue: "BTC"))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -212,7 +218,7 @@ struct HomeView: View {
                         .contentTransition(.numericText())
                         .animation(.default, value: appState.totalBalanceUSD)
                         .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
-                    Text("USD")
+                    Text(String(localized: "label_usd", defaultValue: "USD"))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -270,7 +276,7 @@ struct HomeView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "shield.fill")
                             .font(.caption2)
-                        Text("USD")
+                        Text(String(localized: "label_usd", defaultValue: "USD"))
                             .font(.caption.bold())
                     }
                     .foregroundStyle(.green)
@@ -284,7 +290,7 @@ struct HomeView: View {
 
                 VStack(alignment: .trailing, spacing: 1) {
                     HStack(spacing: 4) {
-                        Text("BTC")
+                        Text(String(localized: "label_btc", defaultValue: "BTC"))
                             .font(.caption.bold())
                         Image(systemName: "bitcoinsign.circle.fill")
                             .font(.caption2)
@@ -319,7 +325,7 @@ struct HomeView: View {
     private var savingsSection: some View {
         VStack(spacing: 6) {
             HStack {
-                Text("On-chain")
+                Text(String(localized: "label_on_chain", defaultValue: "On-chain"))
                     .font(.caption.bold())
                 Spacer()
                 Text(showBTC
@@ -331,14 +337,17 @@ struct HomeView: View {
 
             if appState.isSweeping {
                 // 1. Splice-in in progress
-                pendingRow(text: "Swap pending...", txid: appState.spliceTxid)
+                pendingRow(
+                    text: String(localized: "status_sweeping", defaultValue: "Swap pending..."),
+                    txid: appState.spliceTxid
+                )
             } else if hasReadyChannel && appState.spendableOnchainSats > 0 {
                 // 2. Channel + confirmed funds — offer to sweep
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Move to Trading")
+                        Text(String(localized: "move_to_trading", defaultValue: "Move to Trading"))
                             .font(.caption2)
-                        Text("and Spending Account")
+                        Text(String(localized: "and_spending_account", defaultValue: "and Spending Account"))
                             .font(.caption2)
                     }
                     .foregroundStyle(.secondary)
@@ -346,7 +355,7 @@ struct HomeView: View {
                     Button {
                         appState.sweepToChannel()
                     } label: {
-                        Text("Swap")
+                        Text(String(localized: "button_swap", defaultValue: "Swap"))
                             .font(.caption.bold())
                             .padding(.horizontal, 16)
                             .padding(.vertical, 6)
@@ -357,17 +366,26 @@ struct HomeView: View {
                 }
             } else if appState.spendableOnchainSats == 0 {
                 // 3. Unconfirmed deposit (with or without channel)
-                pendingRow(text: "Deposit confirming...", txid: appState.fundingTxid)
+                pendingRow(
+                    text: String(localized: "status_channel_opening", defaultValue: "Deposit confirming..."),
+                    txid: appState.fundingTxid
+                )
                 if !hasReadyChannel {
-                    Text("Receive over Lightning to create your Trading and Spending Account")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Text(String(
+                        localized: "hint_create_account",
+                        defaultValue: "Receive over Lightning to create your Trading and Spending Account"
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 }
             } else {
                 // 4. No channel, confirmed deposit — just needs a Lightning receive
-                Text("Receive over Lightning to create your Trading and Spending Account")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Text(String(
+                    localized: "hint_create_account",
+                    defaultValue: "Receive over Lightning to create your Trading and Spending Account"
+                ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
         .padding(10)
@@ -386,7 +404,7 @@ struct HomeView: View {
             if let txid, !txid.isEmpty {
                 Link(destination: URL(string: "https://mempool.space/tx/\(txid)")!) {
                     HStack(spacing: 2) {
-                        Text("View on explorer")
+                        Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
                             .font(.caption2)
                         Image(systemName: "arrow.up.right.square")
                             .font(.caption2)
@@ -402,19 +420,36 @@ struct HomeView: View {
     private var actionButtons: some View {
         return VStack(spacing: 8) {
             HStack(spacing: 8) {
-                ActionButton(title: "Send", icon: "arrow.up.circle.fill", color: .blue) {
+                ActionButton(
+                    title: String(localized: "button_send", defaultValue: "Send"),
+                    icon: "arrow.up.circle.fill",
+                    color: .blue
+                ) {
                     showSendSheet = true
                 }
-                ActionButton(title: "Receive", icon: "arrow.down.circle.fill", color: .green, pulse: !hasReadyChannel) {
+                ActionButton(
+                    title: String(localized: "button_receive", defaultValue: "Receive"),
+                    icon: "arrow.down.circle.fill",
+                    color: .green,
+                    pulse: !hasReadyChannel
+                ) {
                     showReceiveSheet = true
                 }
             }
 
             HStack(spacing: 8) {
-                ActionButton(title: "Buy BTC", icon: "arrow.up.right.circle.fill", color: .orange) {
+                ActionButton(
+                    title: String(localized: "button_buy_btc", defaultValue: "Buy BTC"),
+                    icon: "arrow.up.right.circle.fill",
+                    color: .orange
+                ) {
                     showBuySheet = true
                 }
-                ActionButton(title: "Sell BTC", icon: "arrow.down.right.circle.fill", color: .purple) {
+                ActionButton(
+                    title: String(localized: "button_sell_btc", defaultValue: "Sell BTC"),
+                    icon: "arrow.down.right.circle.fill",
+                    color: .purple
+                ) {
                     showSellSheet = true
                 }
             }

@@ -89,7 +89,7 @@ struct ContentView: View {
                 .font(.system(size: 60))
                 .foregroundStyle(.green.opacity(0.5))
 
-            Text("Authenticate")
+            Text(String(localized: "label_authenticate", defaultValue: "Authenticate"))
                 .font(.headline)
                 .foregroundStyle(.white)
         }
@@ -101,7 +101,7 @@ struct ContentView: View {
                 .font(.system(size: 60))
                 .foregroundStyle(.green)
 
-            Text("Authentication Failed")
+            Text(String(localized: "label_auth_failed", defaultValue: "Authentication Failed"))
                 .font(.headline)
                 .foregroundStyle(.white)
 
@@ -113,13 +113,13 @@ struct ContentView: View {
                     .padding(.horizontal)
             }
 
-            Button("Try Again") {
+            Button(String(localized: "button_try_again", defaultValue: "Try Again")) {
                 Task { await runAuth() }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Button("Cancel") { }
+            Button(String(localized: "button_cancel", defaultValue: "Cancel")) { }
                 .foregroundStyle(.white.opacity(0.6))
         }
     }
@@ -171,10 +171,10 @@ struct LoadingView: View {
                 .onAppear { pulse = true }
 
             VStack(spacing: 4) {
-                Text("Stable Channels")
+                Text(String(localized: "app_name", defaultValue: "Stable Channels"))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.primary)
-                Text("Self-custodial bitcoin trading")
+                Text(String(localized: "app_subtitle", defaultValue: "Self-custodial bitcoin trading"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -198,9 +198,9 @@ struct SyncingView: View {
 
             VStack(spacing: 12) {
                 ProgressView()
-                Text("Syncing wallet...")
+                Text(String(localized: "status_syncing_wallet", defaultValue: "Syncing wallet..."))
                     .foregroundStyle(.secondary)
-                Text("This may take a moment")
+                Text(String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -217,14 +217,14 @@ struct ErrorDisplayView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.largeTitle)
                 .foregroundStyle(.red)
-            Text("Error")
+            Text(String(localized: "error_title", defaultValue: "Error"))
                 .font(.title2.bold())
             Text(message)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button("Try Again") {
+            Button(String(localized: "try_again", defaultValue: "Try Again")) {
                 appState.phase = .loading
                 Task { await appState.start() }
             }
