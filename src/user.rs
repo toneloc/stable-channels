@@ -30,6 +30,58 @@ use stable_channels::stable;
 use stable_channels::stable::update_balances;
 use stable_channels::types::*;
 
+// ============================================================================
+// UI Theme — semantic palette, radii, spacing. Use these constants everywhere
+// instead of hardcoded Color32::from_rgb / corner_radius literals.
+// ============================================================================
+#[allow(dead_code)]
+mod theme {
+    use egui::Color32;
+
+    // Wrapper so replace_all over `Color32::from_rgb(...)` callsites in the
+    // rest of this file doesn't accidentally rewrite the theme constants
+    // themselves into self-referential definitions.
+    const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
+        Color32::from_rgb(r, g, b)
+    }
+
+    // Surfaces & text
+    pub const SURFACE: Color32 = Color32::WHITE;
+    pub const ON_SURFACE: Color32 = Color32::BLACK;
+    pub const MUTED: Color32 = rgb(100, 116, 139); // slate-500 — secondary text
+    pub const SUBTLE_BG: Color32 = rgb(241, 245, 249); // slate-100 — chip bg
+    pub const SELECTED_BG: Color32 = rgb(226, 232, 240); // slate-200 — selected
+    pub const BORDER: Color32 = rgb(203, 213, 225); // slate-300 — outlines
+    pub const DISABLED_TEXT: Color32 = rgb(148, 163, 184); // slate-400
+
+    // Brand / action colors
+    pub const PRIMARY: Color32 = rgb(30, 41, 59); // slate-800 — primary button
+    pub const PRIMARY_HOVER: Color32 = rgb(15, 23, 42); // slate-900
+    pub const TEXT_ON_PRIMARY: Color32 = Color32::WHITE;
+
+    // Semantic colors
+    pub const SUCCESS: Color32 = rgb(16, 185, 129); // emerald-500
+    pub const SUCCESS_HOVER: Color32 = rgb(5, 150, 105); // emerald-600
+    pub const DANGER: Color32 = rgb(244, 63, 94); // rose-500
+    pub const DANGER_HOVER: Color32 = rgb(225, 29, 72); // rose-600
+    pub const WARNING: Color32 = rgb(217, 119, 6); // amber-600
+    pub const INFO: Color32 = rgb(100, 150, 255); // blue accent
+
+    // iOS-style action colors — vibrant enough to read clearly but not neon.
+    // Tuned to look polished on a flat white egui surface without SwiftUI's
+    // material softening.
+    pub const IOS_BLUE: Color32 = rgb(60, 130, 235); // clear blue — Send
+    pub const IOS_GREEN: Color32 = rgb(70, 190, 110); // clear green — Receive
+    pub const IOS_ORANGE: Color32 = rgb(245, 165, 70); // clear orange — Buy
+    pub const IOS_RED: Color32 = rgb(235, 95, 95); // clear coral red — Sell
+
+    // Corner radii (pick from these — don't sprinkle magic numbers)
+    pub const RADIUS_SM: f32 = 6.0;
+    pub const RADIUS_MD: f32 = 10.0;
+    pub const RADIUS_LG: f32 = 16.0;
+    pub const RADIUS_PILL: f32 = 25.0;
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tab {
     Home,
@@ -274,6 +326,10 @@ pub struct UserApp {
     // Seed phrase backup
     show_seed_words: bool,
     saved_mnemonic: Option<String>,
+
+    // Inline copy feedback: button key → moment the value was copied. The UI
+    // reads back via `is_copied(key)` and renders "✓ Copied" for ~2 seconds.
+    copy_feedback: HashMap<&'static str, std::time::Instant>,
 }
 
 impl UserApp {
@@ -551,6 +607,7 @@ impl UserApp {
             selected_trade: None,
             show_seed_words: false,
             saved_mnemonic: mnemonic_words,
+            copy_feedback: HashMap::new(),
         };
 
         // Seed historical price data if needed
@@ -604,7 +661,6 @@ impl UserApp {
         let db = self.db.clone();
         let sweep_flag = Arc::clone(&self.auto_sweep_in_progress);
         let sweep_onchain_start = Arc::clone(&self.auto_sweep_onchain_at_start);
-        let pending_splice_arc = Arc::clone(&self.pending_splice);
 
         std::thread::spawn(move || {
             fn current_unix_time() -> i64 {
@@ -748,105 +804,10 @@ impl UserApp {
                         }
                     }
 
-                    if !sweep_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        if let Some(ch) = node_arc
-                            .list_channels()
-                            .into_iter()
-                            .find(|c| c.is_channel_ready)
-                        {
-                            let balances = node_arc.list_balances();
-                            println!(
-                                "[sweep] total_onchain={} spendable={} threshold={}",
-                                balances.total_onchain_balance_sats,
-                                balances.spendable_onchain_balance_sats,
-                                AUTO_SWEEP_MIN_SATS
-                            );
-                            if balances.total_onchain_balance_sats > AUTO_SWEEP_MIN_SATS {
-                                // Fetch prevailing fee rate (sat/vB) for 6-block target
-                                let fee_rate_sat_vb: u64 = ureq::Agent::new()
-                                    .get(&format!("{}/fee-estimates", DEFAULT_CHAIN_URL))
-                                    .call()
-                                    .ok()
-                                    .and_then(|r| r.into_json::<serde_json::Value>().ok())
-                                    .and_then(|j| j.get("6").and_then(|v| v.as_f64()))
-                                    .map(|f| f.ceil() as u64)
-                                    .unwrap_or(2); // conservative fallback
-
-                                // Splice tx ~170 vbytes; reserve exactly enough for fees
-                                let fee_reserve = fee_rate_sat_vb * 170;
-                                let sweep_amount = balances
-                                    .spendable_onchain_balance_sats
-                                    .saturating_sub(fee_reserve);
-
-                                println!(
-                                    "[sweep] fee_rate={} sat/vB, reserve={}, sweep_amount={}",
-                                    fee_rate_sat_vb, fee_reserve, sweep_amount
-                                );
-
-                                if sweep_amount > 0 {
-                                    audit_event(
-                                        "AUTO_SWEEP_ATTEMPT",
-                                        json!({
-                                            "onchain_sats": balances.total_onchain_balance_sats,
-                                            "spendable_sats": balances.spendable_onchain_balance_sats,
-                                            "fee_rate_sat_vb": fee_rate_sat_vb,
-                                            "fee_reserve": fee_reserve,
-                                            "sweep_amount": sweep_amount,
-                                        }),
-                                    );
-
-                                    match node_arc.splice_in(
-                                        &ch.user_channel_id,
-                                        ch.counterparty_node_id,
-                                        sweep_amount,
-                                    ) {
-                                        Ok(()) => {
-                                            sweep_flag
-                                                .store(true, std::sync::atomic::Ordering::Relaxed);
-                                            sweep_onchain_start.store(
-                                                balances.total_onchain_balance_sats,
-                                                std::sync::atomic::Ordering::Relaxed,
-                                            );
-                                            *pending_splice_arc.lock().unwrap() =
-                                                Some(PendingSplice {
-                                                    direction: "in".to_string(),
-                                                    amount_sats: sweep_amount,
-                                                    address: None,
-                                                });
-                                            // Record pending deposit in payment history immediately
-                                            let _ = db.record_payment(
-                                                None,
-                                                "splice_in",
-                                                "received",
-                                                sweep_amount * 1000,
-                                                None,
-                                                None,
-                                                None,
-                                                "pending",
-                                                None,
-                                                None,
-                                            );
-                                            audit_event(
-                                                "AUTO_SWEEP_INITIATED",
-                                                json!({
-                                                    "amount_sats": sweep_amount,
-                                                }),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            println!("[sweep] splice_in FAILED: {}", e);
-                                            audit_event(
-                                                "AUTO_SWEEP_FAILED",
-                                                json!({
-                                                    "error": format!("{e}"),
-                                                }),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Auto-sweep trigger removed for iOS parity (2026-05-19): on-chain →
+                    // channel splice is now user-initiated via the Swap button in the home
+                    // tab. The clear-flag-on-balance-drop path above remains so user-initiated
+                    // sweeps still get their in-progress flag cleared when confirmed.
                 }
 
                 std::thread::sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
@@ -1553,6 +1514,112 @@ impl UserApp {
         }
     }
 
+    /// Mark a copy button as recently used. The UI checks `is_copied(key)` and
+    /// renders "✓ Copied" for ~2 seconds before reverting to its normal label.
+    fn copy_with_feedback(&mut self, key: &'static str, value: String, ctx: &egui::Context) {
+        ctx.copy_text(value);
+        self.copy_feedback.insert(key, std::time::Instant::now());
+    }
+
+    fn is_copied(&self, key: &'static str) -> bool {
+        self.copy_feedback
+            .get(key)
+            .map(|t| t.elapsed() < Duration::from_secs(2))
+            .unwrap_or(false)
+    }
+
+    /// User-initiated splice-in: move spendable on-chain BTC into the channel.
+    /// Mirrors iOS `AppState.sweepToChannel` — see decisions/cross-platform-consistency.
+    pub fn sweep_to_channel(&mut self) {
+        if self
+            .auto_sweep_in_progress
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.status_message = "Sweep already in progress".to_string();
+            return;
+        }
+
+        let ch = match self
+            .node
+            .list_channels()
+            .into_iter()
+            .find(|c| c.is_channel_ready)
+        {
+            Some(c) => c,
+            None => {
+                self.status_message = "No ready channel".to_string();
+                return;
+            }
+        };
+
+        let fee_rate_sat_vb: u64 = ureq::Agent::new()
+            .get(&format!("{}/fee-estimates", DEFAULT_CHAIN_URL))
+            .call()
+            .ok()
+            .and_then(|r| r.into_json::<serde_json::Value>().ok())
+            .and_then(|j| j.get("6").and_then(|v| v.as_f64()))
+            .map(|f| f.ceil() as u64)
+            .unwrap_or(2);
+        let fee_reserve = fee_rate_sat_vb * 250;
+
+        let balances = self.node.list_balances();
+        let spendable = balances.spendable_onchain_balance_sats;
+        if spendable <= fee_reserve {
+            self.status_message = "Insufficient on-chain balance".to_string();
+            return;
+        }
+        let sweep_amount = spendable - fee_reserve;
+
+        audit_event(
+            "SWEEP_TO_CHANNEL",
+            json!({
+                "amount_sats": sweep_amount,
+                "fee_rate_sat_vb": fee_rate_sat_vb,
+            }),
+        );
+
+        match self.node.splice_in(
+            &ch.user_channel_id,
+            ch.counterparty_node_id,
+            sweep_amount,
+        ) {
+            Ok(()) => {
+                self.auto_sweep_in_progress
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.auto_sweep_onchain_at_start.store(
+                    balances.total_onchain_balance_sats,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                *self.pending_splice.lock().unwrap() = Some(PendingSplice {
+                    direction: "in".to_string(),
+                    amount_sats: sweep_amount,
+                    address: None,
+                });
+                let _ = self.db.record_payment(
+                    None,
+                    "splice_in",
+                    "received",
+                    sweep_amount * 1000,
+                    None,
+                    None,
+                    None,
+                    "pending",
+                    None,
+                    None,
+                );
+                self.status_message = format!("Moving {} sats to channel...", sweep_amount);
+                self.show_toast("Sweep started", "~");
+            }
+            Err(e) => {
+                audit_event(
+                    "SWEEP_FAILED",
+                    json!({ "error": format!("{e}") }),
+                );
+                self.status_message = format!("Sweep failed: {}", e);
+            }
+        }
+    }
+
     pub fn get_address(&mut self) -> bool {
         match self.node.onchain_payment().new_address() {
             Ok(address) => {
@@ -1951,6 +2018,12 @@ impl UserApp {
                                     }),
                                 );
                             }
+                            // Splice complete: clear sweep flag (bg-thread clear only
+                            // handles splice-in via balance drop; splice-out needs this).
+                            self.auto_sweep_in_progress
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                            self.auto_sweep_onchain_at_start
+                                .store(0, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     self.save_channel_settings();
@@ -2607,6 +2680,67 @@ impl UserApp {
         }
     }
 
+    /// Paint a small hourglass icon (line art). Roughly mirrors iOS's
+    /// `hourglass` SF Symbol — two triangles meeting at a pinch in the middle.
+    fn paint_hourglass(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+        let w = size * 0.55;
+        let h = size;
+        let top = center.y - h / 2.0;
+        let bot = center.y + h / 2.0;
+        let left = center.x - w / 2.0;
+        let right = center.x + w / 2.0;
+        let stroke = egui::Stroke::new(1.2, color);
+        // Top + bottom horizontal caps
+        painter.line_segment([egui::pos2(left, top), egui::pos2(right, top)], stroke);
+        painter.line_segment([egui::pos2(left, bot), egui::pos2(right, bot)], stroke);
+        // X-cross meeting at center
+        painter.line_segment([egui::pos2(left, top), egui::pos2(right, bot)], stroke);
+        painter.line_segment([egui::pos2(right, top), egui::pos2(left, bot)], stroke);
+    }
+
+    /// Paint an "external link" icon — a rounded square with an arrow pointing
+    /// out the top-right corner. Roughly mirrors iOS's `arrow.up.right.square`.
+    fn paint_explorer_arrow(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+        let stroke = egui::Stroke::new(1.2, color);
+        // Square outline (slightly smaller than overall size so the arrow can extend out)
+        let box_size = size * 0.7;
+        let box_rect = egui::Rect::from_center_size(
+            egui::pos2(center.x - size * 0.1, center.y + size * 0.1),
+            egui::vec2(box_size, box_size),
+        );
+        painter.rect_stroke(
+            box_rect,
+            egui::CornerRadius::same(1),
+            stroke,
+            egui::StrokeKind::Outside,
+        );
+        // Arrow shaft from box's interior to upper-right (outside the box)
+        let p1 = egui::pos2(center.x - size * 0.1, center.y + size * 0.1);
+        let p2 = egui::pos2(center.x + size * 0.45, center.y - size * 0.45);
+        painter.line_segment([p1, p2], stroke);
+        // Arrowhead at p2: two short strokes forming a chevron
+        let head = size * 0.25;
+        painter.line_segment([p2, egui::pos2(p2.x - head, p2.y)], stroke);
+        painter.line_segment([p2, egui::pos2(p2.x, p2.y + head)], stroke);
+    }
+
+    /// Format BTC with iOS-style spaced digit groups: "0.00 039 094" (2/3/3
+    /// digits separated by thin spaces). Matches iOS `btcSpacedFormatted`.
+    fn format_btc_spaced(btc: f64) -> String {
+        let raw = format!("{:.8}", btc);
+        if let Some(dot_idx) = raw.find('.') {
+            let whole = &raw[..dot_idx];
+            let decimals: Vec<char> = raw[dot_idx + 1..].chars().collect();
+            if decimals.len() >= 8 {
+                let a: String = decimals[0..2].iter().collect();
+                let b: String = decimals[2..5].iter().collect();
+                let c: String = decimals[5..8].iter().collect();
+                return format!("{}.{}\u{2009}{}\u{2009}{}", whole, a, b, c);
+            }
+        }
+        raw
+    }
+
     /// Format a price with comma separators and 2 decimal places (e.g., 100000.50 -> "$100,000.50")
     fn format_price(price: f64) -> String {
         let price_int = price as i64;
@@ -2941,7 +3075,7 @@ impl UserApp {
                 .show(ctx, |ui| {
                     egui::Frame::NONE
                         .fill(bg_color)
-                        .corner_radius(12.0)
+                        .corner_radius(theme::RADIUS_MD)
                         .inner_margin(egui::Margin::symmetric(16, 12))
                         .shadow(egui::epaint::Shadow {
                             offset: [0, 2],
@@ -3018,7 +3152,7 @@ impl UserApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(Color32::WHITE)
-                    .corner_radius(16.0),
+                    .corner_radius(theme::RADIUS_LG),
             )
             .show(ctx, |ui| {
                 ui.set_min_width(320.0);
@@ -3035,7 +3169,7 @@ impl UserApp {
                     ui.label(
                         egui::RichText::new("Get started for free")
                             .size(14.0)
-                            .color(Color32::from_rgb(16, 185, 129)),
+                            .color(theme::SUCCESS),
                     );
                     ui.add_space(12.0);
 
@@ -3055,11 +3189,11 @@ impl UserApp {
                                 ),
                             )
                             .fill(if lightning_selected {
-                                Color32::from_rgb(30, 41, 59)
+                                theme::PRIMARY
                             } else {
-                                Color32::from_rgb(226, 232, 240)
+                                theme::SELECTED_BG
                             })
-                            .corner_radius(8.0)
+                            .corner_radius(theme::RADIUS_SM)
                             .min_size(egui::vec2(130.0, 34.0));
 
                             if ui.add(lightning_btn).clicked() {
@@ -3078,11 +3212,11 @@ impl UserApp {
                                 ),
                             )
                             .fill(if onchain_selected {
-                                Color32::from_rgb(30, 41, 59)
+                                theme::PRIMARY
                             } else {
-                                Color32::from_rgb(226, 232, 240)
+                                theme::SELECTED_BG
                             })
-                            .corner_radius(8.0)
+                            .corner_radius(theme::RADIUS_SM)
                             .min_size(egui::vec2(130.0, 34.0));
 
                             if ui.add(onchain_btn).clicked() {
@@ -3335,7 +3469,7 @@ impl UserApp {
                     )
                     .min_size(egui::vec2(200.0, 55.0))
                     .fill(egui::Color32::BLACK)
-                    .corner_radius(25.0);
+                    .corner_radius(theme::RADIUS_PILL);
 
                     ui.add_space(50.0);
 
@@ -3363,8 +3497,8 @@ impl UserApp {
                                 .size(14.0),
                         )
                         .min_size(egui::vec2(120.0, 35.0))
-                        .fill(egui::Color32::from_rgb(241, 245, 249))
-                        .corner_radius(8.0);
+                        .fill(theme::SUBTLE_BG)
+                        .corner_radius(theme::RADIUS_SM);
 
                         if ui.add(transfer_btn).clicked() {
                             self.send_input.clear();
@@ -3577,14 +3711,14 @@ impl UserApp {
                     _ => 0, // AwaitingThresholdConfirmations: already in onchain balance
                 })
                 .sum();
-            let pending_sweep_btc = pending_sweep_sats as f64 / 100_000_000.0;
+            // pending_sweep_sats is folded into the on-chain card below.
 
             // NOTE: lightning_balances (claimable) intentionally not displayed —
             // LDK reports stale entries long after sweep confirms and funds are spent.
 
             // Total onchain balance (includes confirmed + AwaitingThresholdConfirmations)
             let total_onchain_sats = balances.total_onchain_balance_sats;
-            let spendable_onchain_btc = total_onchain_sats as f64 / 100_000_000.0;
+            let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
 
             // Get balance info
             let (btc_price, last_update, expected_usd) = {
@@ -3601,10 +3735,24 @@ impl UserApp {
                 0.0
             };
             // Total balance calculation:
-            // With active channel: lightning + onchain (no overlap)
-            // Without active channel: pending_sweep + onchain only
-            //   (lightning_balances overlaps with pending_sweep/onchain after close)
-            let total_sats = if has_active_channel {
+            // - Splice-in pending: lightning already reflects the post-splice
+            //   capacity but on-chain hasn't dropped yet — adding both would
+            //   double-count the splice amount until BDK sees the spent UTXO.
+            //   Show lightning only during this window. Matches iOS
+            //   `if isSweeping { return lightningBalanceSats }` at
+            //   AppState.swift:95.
+            // - Active channel (no pending splice-in): lightning + onchain.
+            // - No channel: pending_sweep + onchain (lightning_balances
+            //   overlaps with pending_sweep/onchain after close).
+            let pending_splice_in = self
+                .pending_splice
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|s| s.direction == "in"))
+                .unwrap_or(false);
+            let total_sats = if pending_splice_in {
+                balances.total_lightning_balance_sats
+            } else if has_active_channel {
                 balances.total_lightning_balance_sats + total_onchain_sats
             } else {
                 pending_sweep_sats + total_onchain_sats
@@ -3612,49 +3760,102 @@ impl UserApp {
             let total_btc = total_sats as f64 / 100_000_000.0;
             let total_usd = total_btc * btc_price;
 
-            // Header: "Total Balance" — click to toggle big display USD ↔ BTC.
-            let header_resp = ui
-                .add(
+            // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
+            ui.horizontal(|ui| {
+                let header_resp = ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new("Total Balance")
+                                .size(24.0)
+                                .color(Color32::BLACK)
+                                .strong(),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                if header_resp.clicked() {
+                    self.bar_chart_show_btc = !self.bar_chart_show_btc;
+                    self.bar_chart_anim = 1.0;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let refresh_btn = egui::Button::new(
+                        RichText::new("↻").size(18.0).color(theme::MUTED),
+                    )
+                    .frame(false);
+                    if ui
+                        .add(refresh_btn)
+                        .on_hover_text("Refresh balances + price")
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        // Force a fresh price fetch in the background, then
+                        // refresh balances from LDK + recompute USD values.
+                        std::thread::spawn(|| {
+                            let _ = stable_channels::price_feeds::get_latest_price(
+                                &ureq::Agent::new(),
+                            );
+                        });
+                        self.update_balances();
+                        self.show_toast("Refreshing…", "~");
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            // Large primary display + smaller secondary line. The whole area is
+            // tappable to toggle USD↔BTC (same as the header click).
+            let mut balance_toggle_clicked = false;
+            if self.bar_chart_show_btc {
+                let primary = ui.add(
                     egui::Label::new(
-                        RichText::new("Total Balance")
-                            .size(24.0)
+                        RichText::new(format!("{} BTC", Self::format_btc_spaced(total_btc)))
+                            .size(38.0)
                             .color(Color32::BLACK)
                             .strong(),
                     )
                     .sense(Sense::click()),
-                )
-                .on_hover_cursor(CursorIcon::PointingHand);
-            if header_resp.clicked() {
+                );
+                let secondary = ui.add(
+                    egui::Label::new(
+                        RichText::new(Self::format_price(total_usd))
+                            .size(14.0)
+                            .color(Color32::DARK_GRAY),
+                    )
+                    .sense(Sense::click()),
+                );
+                if primary.clicked() || secondary.clicked() {
+                    balance_toggle_clicked = true;
+                }
+                primary.on_hover_cursor(CursorIcon::PointingHand);
+                secondary.on_hover_cursor(CursorIcon::PointingHand);
+            } else {
+                let primary = ui.add(
+                    egui::Label::new(
+                        RichText::new(Self::format_price(total_usd))
+                            .size(42.0)
+                            .color(Color32::BLACK)
+                            .strong(),
+                    )
+                    .sense(Sense::click()),
+                );
+                let secondary = ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{} BTC", Self::format_btc_spaced(total_btc)))
+                            .size(14.0)
+                            .color(Color32::DARK_GRAY),
+                    )
+                    .sense(Sense::click()),
+                );
+                if primary.clicked() || secondary.clicked() {
+                    balance_toggle_clicked = true;
+                }
+                primary.on_hover_cursor(CursorIcon::PointingHand);
+                secondary.on_hover_cursor(CursorIcon::PointingHand);
+            }
+
+            if balance_toggle_clicked {
                 self.bar_chart_show_btc = !self.bar_chart_show_btc;
                 self.bar_chart_anim = 1.0;
-            }
-            ui.add_space(4.0);
-
-            // Large primary display + smaller secondary line. Swaps on header click.
-            if self.bar_chart_show_btc {
-                ui.label(
-                    RichText::new(format!("{:.8} BTC", total_btc))
-                        .size(42.0)
-                        .color(Color32::BLACK)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(Self::format_price(total_usd))
-                        .size(14.0)
-                        .color(Color32::DARK_GRAY),
-                );
-            } else {
-                ui.label(
-                    RichText::new(Self::format_price(total_usd))
-                        .size(42.0)
-                        .color(Color32::BLACK)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new(format!("{:.8} BTC", total_btc))
-                        .size(14.0)
-                        .color(Color32::DARK_GRAY),
-                );
             }
 
             ui.add_space(12.0);
@@ -3667,26 +3868,33 @@ impl UserApp {
                 let native_usd = total_usd - stabilized_usd;
                 let synth_ratio = (stabilized_usd / total_usd).clamp(0.0, 1.0) as f32;
 
-                let bar_height = 36.0_f32;
-                let thumb_radius = 22.0_f32;
-                let bar_width = ui.available_width() - 16.0;
-                // Allocate extra vertical space so the thumb (slightly taller than the bar) has room.
+                // Draggable balance slider — drag thumb left to BUY BTC, drag
+                // right to SELL. Releases past the min-trade threshold prefill
+                // the trade amount and open the appropriate modal.
+                let bar_height = 20.0_f32;
+                let thumb_radius = 14.0_f32;
+                // Inset the bar by `thumb_radius` so the thumb at the extremes
+                // doesn't overflow the row.
+                let row_width = ui.available_width() - 16.0;
+                let bar_width = (row_width - thumb_radius * 2.0).max(0.0);
                 let row_height = bar_height.max(thumb_radius * 2.0);
                 let (row_rect, response) = ui.allocate_exact_size(
-                    egui::vec2(bar_width, row_height),
+                    egui::vec2(row_width, row_height),
                     Sense::click_and_drag(),
                 );
                 let rect = egui::Rect::from_min_size(
-                    egui::pos2(row_rect.min.x, row_rect.center().y - bar_height / 2.0),
+                    egui::pos2(
+                        row_rect.min.x + thumb_radius,
+                        row_rect.center().y - bar_height / 2.0,
+                    ),
                     egui::vec2(bar_width, bar_height),
                 );
 
-                // Slider geometry: base_x is where the thumb sits at rest (the segment boundary).
                 let base_x_local = rect.width() * synth_ratio;
                 let base_x = rect.min.x + base_x_local;
                 let min_trade_usd = 1.0_f64;
 
-                // Begin drag if the pointer started near the thumb. Otherwise treat as a click.
+                // Begin drag if pointer started near the thumb.
                 if response.drag_started() {
                     if let Some(p) = response.interact_pointer_pos() {
                         if (p.x - base_x).abs() < thumb_radius * 1.8 {
@@ -3732,16 +3940,13 @@ impl UserApp {
                         }
                     }
                     self.bar_slider_dragging = false;
-                    // Hold the thumb in place briefly so the user sees where they released,
-                    // then snap back. Matches the iOS/Android 600ms delay.
                     self.bar_slider_release_at = Some(std::time::Instant::now());
                 }
 
-                // Snap back after release delay, animating toward 0.
+                // Snap-back animation after release (matches iOS 600ms hold + 400ms ease).
                 if let Some(t) = self.bar_slider_release_at {
                     let elapsed = t.elapsed().as_secs_f32();
                     if elapsed > 0.6 {
-                        // Ease back to 0 over ~0.4s.
                         let decay = (1.0 - (elapsed - 0.6) / 0.4).max(0.0);
                         self.bar_slider_drag_offset *= decay;
                         if decay <= 0.0 {
@@ -3755,13 +3960,7 @@ impl UserApp {
                     }
                 }
 
-                // Toggle on click (only fires if we didn't drag).
-                if response.clicked() && !self.bar_slider_dragging {
-                    self.bar_chart_show_btc = !self.bar_chart_show_btc;
-                    self.bar_chart_anim = 1.0;
-                }
-
-                // Hover cursor hint.
+                // Hover cursor (grab / grabbing) when near thumb.
                 if response.hovered() {
                     let pointer_x = ui.ctx().input(|i| i.pointer.hover_pos().map(|p| p.x));
                     if let Some(px) = pointer_x {
@@ -3775,13 +3974,6 @@ impl UserApp {
                     }
                 }
 
-                // Animate: decay from 1.0 → 0.0 (click toggle highlight)
-                if self.bar_chart_anim > 0.0 {
-                    self.bar_chart_anim =
-                        (self.bar_chart_anim - ui.input(|i| i.unstable_dt) * 3.0).max(0.0);
-                    ui.ctx().request_repaint();
-                }
-
                 // Visible split moves with the drag.
                 let thumb_x_local =
                     (base_x_local + self.bar_slider_drag_offset).clamp(0.0, rect.width());
@@ -3790,20 +3982,13 @@ impl UserApp {
                 let btc_w = rect.width() - synth_w;
 
                 let painter = ui.painter();
-
-                // Draw colored bar segments
                 if synth_w > 0.5 {
                     let synth_rect =
                         egui::Rect::from_min_size(rect.min, egui::vec2(synth_w, bar_height));
                     let rounding = if btc_w < 0.5 {
                         egui::CornerRadius::same(6)
                     } else {
-                        egui::CornerRadius {
-                            nw: 6,
-                            sw: 6,
-                            ne: 0,
-                            se: 0,
-                        }
+                        egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }
                     };
                     painter.rect_filled(synth_rect, rounding, synth_color);
                 }
@@ -3815,95 +4000,32 @@ impl UserApp {
                     let rounding = if synth_w < 0.5 {
                         egui::CornerRadius::same(6)
                     } else {
-                        egui::CornerRadius {
-                            nw: 0,
-                            sw: 0,
-                            ne: 6,
-                            se: 6,
-                        }
+                        egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }
                     };
                     painter.rect_filled(btc_rect, rounding, btc_color);
                 }
 
-                // Text labels embedded inside the bar segments
-                // Dark text on colored backgrounds for maximum contrast
-                let anim_scale = 1.0 + self.bar_chart_anim * 0.15; // 1.0 → 1.15 → 1.0
-                let font_size = 14.0 * anim_scale;
-                let font = egui::FontId::new(font_size, egui::FontFamily::Proportional);
-                let alpha = ((1.0 - self.bar_chart_anim * 0.3) * 255.0) as u8;
-                let label_color = Color32::from_rgba_premultiplied(0, 0, 0, alpha);
-
-                // Default: Stable side = USD, BTC side = BTC
-                // Toggled: Stable side = BTC, BTC side = USD
-                if synth_w > 40.0 {
-                    let synth_label = if self.bar_chart_show_btc {
-                        let synth_btc = stabilized_usd / btc_price;
-                        format!("Stable {:.6} BTC", synth_btc)
-                    } else {
-                        format!("Stable {}", Self::format_price(stabilized_usd))
-                    };
-                    let synth_center = egui::pos2(rect.min.x + synth_w / 2.0, rect.center().y);
-                    painter.text(
-                        synth_center,
-                        egui::Align2::CENTER_CENTER,
-                        synth_label,
-                        font.clone(),
-                        label_color,
-                    );
-                }
-
-                if btc_w > 40.0 {
-                    let btc_label = if self.bar_chart_show_btc {
-                        format!("BTC {}", Self::format_price(native_usd))
-                    } else {
-                        let native_btc = native_usd / btc_price;
-                        format!("BTC {:.6} BTC", native_btc)
-                    };
-                    let btc_center =
-                        egui::pos2(rect.min.x + synth_w + btc_w / 2.0, rect.center().y);
-                    painter.text(
-                        btc_center,
-                        egui::Align2::CENTER_CENTER,
-                        btc_label,
-                        font,
-                        label_color,
-                    );
-                }
-
-                // Draggable thumb. Pulses subtly at rest; scales up while dragging.
-                let pulse = if self.bar_slider_dragging {
-                    1.15
-                } else {
-                    let t = ui.input(|i| i.time);
-                    1.0 + 0.06 * ((t * 2.0).sin() as f32 + 1.0) / 2.0
-                };
-                if !self.bar_slider_dragging {
+                // Draggable thumb — subtle and integrated. White disc with a
+                // hairline border, very soft shadow. Subtle scale-up while
+                // dragging; no grip dots (the bar context makes draggability
+                // obvious enough without them).
+                let pulse = if self.bar_slider_dragging { 1.12 } else { 1.0 };
+                if self.bar_slider_dragging {
                     ui.ctx().request_repaint();
                 }
                 let thumb_center = egui::pos2(thumb_x, rect.center().y);
                 let r = thumb_radius * pulse;
-                // Soft shadow
                 painter.circle_filled(
-                    thumb_center + egui::vec2(0.0, 2.0),
+                    thumb_center + egui::vec2(0.0, 1.0),
                     r,
-                    Color32::from_black_alpha(40),
+                    Color32::from_black_alpha(18),
                 );
-                // Thumb body
                 painter.circle(
                     thumb_center,
                     r,
                     Color32::WHITE,
-                    egui::Stroke::new(1.0, Color32::from_rgb(203, 213, 225)),
+                    egui::Stroke::new(0.75, theme::BORDER),
                 );
-                // Grip dots so it reads as draggable
-                let dot_color = Color32::from_rgb(148, 163, 184);
-                for dx in [-4.0_f32, 0.0, 4.0] {
-                    painter.circle_filled(
-                        thumb_center + egui::vec2(dx, 0.0),
-                        1.5,
-                        dot_color,
-                    );
-                }
 
                 // Tooltip while dragging: "X% USD  Y% BTC"
                 if self.bar_slider_dragging {
@@ -3932,12 +4054,12 @@ impl UserApp {
                     painter.rect_filled(
                         bubble_rect,
                         egui::CornerRadius::same(10),
-                        Color32::from_rgb(241, 245, 249),
+                        theme::SUBTLE_BG,
                     );
                     painter.rect_stroke(
                         bubble_rect,
                         egui::CornerRadius::same(10),
-                        egui::Stroke::new(1.0, Color32::from_rgb(203, 213, 225)),
+                        egui::Stroke::new(1.0, theme::BORDER),
                         egui::StrokeKind::Outside,
                     );
                     painter.galley(
@@ -3946,83 +4068,317 @@ impl UserApp {
                         Color32::BLACK,
                     );
                 }
-            }
 
-            // Bitcoin (pending) - sweep tx broadcast, awaiting confirmation
-            if pending_sweep_btc > 0.000000001 {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Bitcoin (pending)")
-                            .size(14.0)
-                            .color(Color32::from_rgb(217, 119, 6)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{:.8} BTC", pending_sweep_btc))
-                                .size(14.0)
-                                .color(Color32::BLACK)
-                                .strong(),
+                // Label row below the bar — USD chip + amount (left) and BTC chip
+                // + amount (right). Mirrors iOS HomeView balanceBarSection layout.
+                ui.add_space(2.0);
+                let label_row = ui.scope(|ui| {
+                    ui.columns(2, |columns| {
+                        columns[0].vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("USD")
+                                        .size(13.0)
+                                        .color(synth_color)
+                                        .strong(),
+                                );
+                            });
+                            let stable_text = if self.bar_chart_show_btc {
+                                let synth_btc = if btc_price > 0.0 {
+                                    stabilized_usd / btc_price
+                                } else {
+                                    0.0
+                                };
+                                format!("{} BTC", Self::format_btc_spaced(synth_btc))
+                            } else {
+                                Self::format_price(stabilized_usd)
+                            };
+                            ui.label(
+                                RichText::new(stable_text)
+                                    .size(16.0)
+                                    .color(theme::ON_SURFACE)
+                                    .strong(),
+                            );
+                        });
+                        columns[1].with_layout(
+                            egui::Layout::top_down(egui::Align::Max),
+                            |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("BTC")
+                                            .size(13.0)
+                                            .color(btc_color)
+                                            .strong(),
+                                    );
+                                });
+                                let native_text = if self.bar_chart_show_btc {
+                                    let native_btc = if btc_price > 0.0 {
+                                        native_usd / btc_price
+                                    } else {
+                                        0.0
+                                    };
+                                    format!("{} BTC", Self::format_btc_spaced(native_btc))
+                                } else {
+                                    Self::format_price(native_usd)
+                                };
+                                ui.label(
+                                    RichText::new(native_text)
+                                        .size(16.0)
+                                        .color(theme::ON_SURFACE)
+                                        .strong(),
+                                );
+                            },
                         );
                     });
                 });
+                // Tap the label row to toggle USD ↔ BTC display (iOS parity).
+                if label_row.response.interact(Sense::click()).clicked() {
+                    self.bar_chart_show_btc = !self.bar_chart_show_btc;
+                    self.bar_chart_anim = 1.0;
+                }
             }
 
-            // Bitcoin (onchain) - confirmed spendable, only show if > 0
-            if spendable_onchain_btc > 0.000000001 {
+            // On-chain section — single light-grey card covering all states:
+            // confirmed funds, unconfirmed deposits, and pending channel-close
+            // sweeps. Folds in what used to be a separate "Bitcoin (pending)"
+            // section. Matches iOS savingsSection 4-state layout.
+            let has_any_onchain_activity =
+                total_onchain_sats > 0 || pending_sweep_sats > 0;
+            if has_any_onchain_activity {
                 let has_ready_channel =
                     self.node.list_channels().iter().any(|c| c.is_channel_ready);
                 let sweeping = self
                     .auto_sweep_in_progress
                     .load(std::sync::atomic::Ordering::Relaxed);
-                let onchain_sats = self.node.list_balances().total_onchain_balance_sats;
-                let above_threshold = onchain_sats > AUTO_SWEEP_MIN_SATS;
-                let onchain_label = if sweeping {
-                    "Processing deposit..."
-                } else if has_ready_channel && above_threshold {
-                    "Deposit queued"
-                } else if has_ready_channel && onchain_sats > 0 && !above_threshold {
-                    "Below $10 minimum"
-                } else {
-                    "Bitcoin (onchain)"
-                };
+                let total_visible_sats = total_onchain_sats + pending_sweep_sats;
+                let total_visible_btc = total_visible_sats as f64 / 100_000_000.0;
+
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let label_resp = ui.label(
-                        RichText::new(onchain_label)
-                            .size(14.0)
-                            .color(Color32::DARK_GRAY),
-                    );
-                    if sweeping {
-                        label_resp.on_hover_text("Your deposit is being added to your channel");
-                        if ui
-                            .small_button("?")
-                            .on_hover_text("View deposit details")
-                            .clicked()
-                        {
-                            if let Ok(payments) = self.db.get_recent_payments(10) {
-                                if let Some(p) = payments.into_iter().find(|p| {
-                                    p.payment_type == "splice_in" && p.status == "pending"
-                                }) {
-                                    self.selected_payment = Some(p);
-                                    self.modal_opened_at = std::time::Instant::now();
+
+                egui::Frame::default()
+                    .fill(Color32::from_rgb(245, 247, 250))
+                    .stroke(egui::Stroke::new(0.5, theme::BORDER))
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 1],
+                        blur: 3,
+                        spread: 0,
+                        color: Color32::from_black_alpha(10),
+                    })
+                    .inner_margin(egui::Margin::same(10))
+                    .corner_radius(theme::RADIUS_MD)
+                    .show(ui, |ui| {
+                        // Header row: "On-chain" + amount (toggleable USD↔BTC).
+                        // Amount is total = confirmed + unconfirmed + pending sweep.
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("On-chain")
+                                    .size(11.0)
+                                    .color(theme::MUTED)
+                                    .strong(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let amount_text = if self.bar_chart_show_btc {
+                                        format!(
+                                            "{} BTC",
+                                            Self::format_btc_spaced(total_visible_btc)
+                                        )
+                                    } else {
+                                        Self::format_price(total_visible_btc * btc_price)
+                                    };
+                                    ui.label(
+                                        RichText::new(amount_text)
+                                            .size(11.0)
+                                            .color(theme::MUTED),
+                                    );
+                                },
+                            );
+                        });
+
+                        ui.add_space(6.0);
+
+                        // Helper: a "View on explorer ↗" link pulled from the latest
+                        // pending splice_in or onchain inbound payment in the DB.
+                        let open_explorer = |db: &Database, ctx: &egui::Context| {
+                            if let Ok(payments) = db.get_recent_payments(10) {
+                                let pick = payments
+                                    .iter()
+                                    .find(|p| {
+                                        (p.payment_type == "splice_in"
+                                            || p.payment_type == "onchain")
+                                            && p.txid.is_some()
+                                    })
+                                    .cloned();
+                                if let Some(p) = pick {
+                                    if let Some(txid) = p.txid.as_ref() {
+                                        ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                            "https://mempool.space/tx/{}",
+                                            txid
+                                        )));
+                                        return true;
+                                    }
                                 }
                             }
+                            false
+                        };
+
+                        if sweeping {
+                            // State 1: user-initiated splice-in in flight.
+                            ui.horizontal(|ui| {
+                                let (icon_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(13.0, 13.0),
+                                    Sense::hover(),
+                                );
+                                Self::paint_hourglass(
+                                    ui.painter(),
+                                    icon_rect.center(),
+                                    11.0,
+                                    theme::WARNING,
+                                );
+                                ui.label(
+                                    RichText::new("Swap pending...")
+                                        .size(11.0)
+                                        .color(theme::MUTED),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let (arrow_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(13.0, 13.0),
+                                            Sense::hover(),
+                                        );
+                                        Self::paint_explorer_arrow(
+                                            ui.painter(),
+                                            arrow_rect.center(),
+                                            12.0,
+                                            theme::IOS_BLUE,
+                                        );
+                                        if ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new("View on explorer")
+                                                        .size(11.0)
+                                                        .color(theme::IOS_BLUE),
+                                                )
+                                                .sense(Sense::click()),
+                                            )
+                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            let _ = open_explorer(&self.db, ui.ctx());
+                                        }
+                                    },
+                                );
+                            });
+                        } else if has_ready_channel && spendable_onchain_sats > 0 {
+                            // State 2: confirmed funds + channel ready — offer Swap.
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new("Move to Trading")
+                                            .size(11.0)
+                                            .color(theme::MUTED),
+                                    );
+                                    ui.label(
+                                        RichText::new("and Spending Account")
+                                            .size(11.0)
+                                            .color(theme::MUTED),
+                                    );
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        // iOS-style: light blue capsule + blue text
+                                        let swap_btn = egui::Button::new(
+                                            RichText::new("Swap")
+                                                .size(11.0)
+                                                .color(theme::IOS_BLUE)
+                                                .strong(),
+                                        )
+                                        .fill(Color32::from_rgb(229, 242, 255))
+                                        .stroke(egui::Stroke::NONE)
+                                        .corner_radius(theme::RADIUS_PILL)
+                                        .min_size(egui::vec2(64.0, 26.0));
+                                        if ui.add(swap_btn).clicked() {
+                                            self.sweep_to_channel();
+                                        }
+                                    },
+                                );
+                            });
+                        } else if spendable_onchain_sats == 0 {
+                            // State 3: nothing spendable yet — deposit or channel-close
+                            // sweep awaiting confirmation. Show "Deposit confirming…"
+                            // with explorer link, plus the "Receive over Lightning…"
+                            // hint when there's no channel yet.
+                            ui.horizontal(|ui| {
+                                let (icon_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(13.0, 13.0),
+                                    Sense::hover(),
+                                );
+                                Self::paint_hourglass(
+                                    ui.painter(),
+                                    icon_rect.center(),
+                                    11.0,
+                                    theme::WARNING,
+                                );
+                                ui.label(
+                                    RichText::new("Deposit confirming...")
+                                        .size(11.0)
+                                        .color(theme::MUTED),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let (arrow_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(13.0, 13.0),
+                                            Sense::hover(),
+                                        );
+                                        Self::paint_explorer_arrow(
+                                            ui.painter(),
+                                            arrow_rect.center(),
+                                            12.0,
+                                            theme::IOS_BLUE,
+                                        );
+                                        if ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new("View on explorer")
+                                                        .size(11.0)
+                                                        .color(theme::IOS_BLUE),
+                                                )
+                                                .sense(Sense::click()),
+                                            )
+                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            let _ = open_explorer(&self.db, ui.ctx());
+                                        }
+                                    },
+                                );
+                            });
+                            if !has_ready_channel {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Receive over Lightning to create your Trading and Spending Account",
+                                    )
+                                    .size(11.0)
+                                    .color(theme::MUTED),
+                                );
+                            }
+                        } else {
+                            // State 4: confirmed funds but no channel — need a
+                            // Lightning receive to open one.
+                            ui.label(
+                                RichText::new(
+                                    "Receive over Lightning to create your Trading and Spending Account",
+                                )
+                                .size(11.0)
+                                .color(theme::MUTED),
+                            );
                         }
-                    } else if has_ready_channel && above_threshold {
-                        label_resp.on_hover_text("Will be deposited into your channel shortly");
-                    } else if has_ready_channel && onchain_sats > 0 && !above_threshold {
-                        label_resp.on_hover_text("Minimum ~$10 needed to auto-deposit");
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{:.8} BTC", spendable_onchain_btc))
-                                .size(14.0)
-                                .color(Color32::BLACK)
-                                .strong(),
-                        );
                     });
-                });
             }
 
             ui.add_space(12.0);
@@ -4083,7 +4439,7 @@ impl UserApp {
                     ui.label(
                         RichText::new("Please wait while your funds are confirmed on-chain.")
                             .size(14.0)
-                            .color(Color32::from_rgb(217, 119, 6)),
+                            .color(theme::WARNING),
                     );
                     ui.add_space(10.0);
                 }
@@ -4187,7 +4543,7 @@ impl UserApp {
                             ui.label(
                                 RichText::new("Funds recovering from channel closure")
                                     .size(13.0)
-                                    .color(Color32::from_rgb(217, 119, 6)),
+                                    .color(theme::WARNING),
                             );
                         });
                         ui.add_space(4.0);
@@ -4228,8 +4584,8 @@ impl UserApp {
                             .color(Color32::WHITE)
                             .strong(),
                     )
-                    .fill(Color32::from_rgb(16, 185, 129))
-                    .corner_radius(25.0)
+                    .fill(theme::SUCCESS)
+                    .corner_radius(theme::RADIUS_PILL)
                     .min_size(egui::vec2(280.0, 55.0));
                     if ui.add(fund_btn).clicked() {
                         println!("[DEBUG] Fund Your Wallet button clicked");
@@ -4245,8 +4601,8 @@ impl UserApp {
                                 .size(14.0)
                                 .color(Color32::BLACK),
                         )
-                        .fill(Color32::from_rgb(241, 245, 249))
-                        .corner_radius(8.0)
+                        .fill(theme::SUBTLE_BG)
+                        .corner_radius(theme::RADIUS_SM)
                         .min_size(egui::vec2(140.0, 40.0));
                         if ui.add(send_btn).clicked() {
                             self.send_input.clear();
@@ -4574,9 +4930,9 @@ impl UserApp {
                 for period in &periods {
                     let is_selected = *period == self.chart_period;
                     let bg_color = if is_selected {
-                        Color32::from_rgb(226, 232, 240)
+                        theme::SELECTED_BG
                     } else {
-                        Color32::from_rgb(241, 245, 249)
+                        theme::SUBTLE_BG
                     };
                     let btn = egui::Button::new(
                         RichText::new(period.label())
@@ -4584,7 +4940,7 @@ impl UserApp {
                             .color(Color32::BLACK),
                     )
                     .fill(bg_color)
-                    .corner_radius(16.0)
+                    .corner_radius(theme::RADIUS_LG)
                     .min_size(egui::vec2(48.0, 32.0));
                     if ui.add(btn).clicked() {
                         self.chart_period = period.clone();
@@ -4595,60 +4951,60 @@ impl UserApp {
 
             ui.add_space(30.0);
 
-            // Normal action buttons when channel is active
-            ui.horizontal(|ui| {
-                let btn_width = (ui.available_width() - 20.0) / 3.0;
-                let btn_height = 50.0;
-
-                // Buy button
-                let btn_dark = Color32::from_rgb(30, 41, 59);
-                let buy_btn = egui::Button::new(
-                    RichText::new("Buy")
-                        .size(16.0)
-                        .color(Color32::WHITE)
-                        .strong(),
+            // Action buttons — iOS-style 2x2 grid with matching colors:
+            //   Row 1: Send (blue ↑)        | Receive (green ↓)
+            //   Row 2: Buy BTC (orange ↗)   | Sell BTC (red ↘)
+            let btn_height = 50.0_f32;
+            let row_gap = 10.0_f32;
+            let btn_width = (ui.available_width() - row_gap - 16.0) / 2.0;
+            let make_action_btn = |label: &str, fill: Color32| {
+                egui::Button::new(
+                    RichText::new(label).size(16.0).color(Color32::WHITE).strong(),
                 )
-                .fill(btn_dark)
-                .corner_radius(25.0)
-                .min_size(egui::vec2(btn_width, btn_height));
-                if ui.add(buy_btn).clicked() {
+                .fill(fill)
+                .corner_radius(theme::RADIUS_PILL)
+                .min_size(egui::vec2(btn_width, btn_height))
+            };
+
+            // Row 1: Send | Receive
+            ui.horizontal(|ui| {
+                if ui.add(make_action_btn("↑  Send", theme::IOS_BLUE)).clicked() {
+                    self.send_input.clear();
+                    self.send_error.clear();
+                    self.transfer_tab = TransferTab::Send;
+                    self.show_transfer_modal = true;
+                    self.modal_opened_at = std::time::Instant::now();
+                }
+                ui.add_space(row_gap);
+                if ui
+                    .add(make_action_btn("↓  Receive", theme::IOS_GREEN))
+                    .clicked()
+                {
+                    self.send_input.clear();
+                    self.send_error.clear();
+                    self.transfer_tab = TransferTab::Receive;
+                    self.show_transfer_modal = true;
+                    self.modal_opened_at = std::time::Instant::now();
+                }
+            });
+
+            ui.add_space(row_gap);
+
+            // Row 2: Buy BTC | Sell BTC
+            ui.horizontal(|ui| {
+                if ui
+                    .add(make_action_btn("↗  Buy BTC", theme::IOS_ORANGE))
+                    .clicked()
+                {
                     self.show_buy_modal = true;
                     self.modal_opened_at = std::time::Instant::now();
                 }
-
-                ui.add_space(10.0);
-
-                // Sell button
-                let sell_btn = egui::Button::new(
-                    RichText::new("Sell")
-                        .size(16.0)
-                        .color(Color32::WHITE)
-                        .strong(),
-                )
-                .fill(btn_dark)
-                .corner_radius(25.0)
-                .min_size(egui::vec2(btn_width, btn_height));
-                if ui.add(sell_btn).clicked() {
+                ui.add_space(row_gap);
+                if ui
+                    .add(make_action_btn("↘  Sell BTC", theme::IOS_RED))
+                    .clicked()
+                {
                     self.show_sell_modal = true;
-                    self.modal_opened_at = std::time::Instant::now();
-                }
-
-                ui.add_space(10.0);
-
-                // Transfer button
-                let transfer_btn = egui::Button::new(
-                    RichText::new("Transfer")
-                        .size(18.0)
-                        .color(Color32::WHITE)
-                        .strong(),
-                )
-                .fill(btn_dark)
-                .corner_radius(25.0)
-                .min_size(egui::vec2(btn_width, btn_height));
-                if ui.add(transfer_btn).clicked() {
-                    self.send_input.clear();
-                    self.send_error.clear();
-                    self.show_transfer_modal = true;
                     self.modal_opened_at = std::time::Instant::now();
                 }
             });
@@ -4807,12 +5163,12 @@ impl UserApp {
 
                 // Close Wallet
                 ui.group(|ui| {
-                    ui.label(RichText::new("Close Wallet").size(16.0).strong().color(Color32::from_rgb(225, 29, 72)));
+                    ui.label(RichText::new("Close Wallet").size(16.0).strong().color(theme::DANGER_HOVER));
                     ui.add_space(6.0);
-                    ui.label(RichText::new("After you close your wallet, all funds will be sent to an on-chain Bitcoin address you control. Your trade and payment history will be preserved.").size(12.0).color(Color32::from_rgb(100, 116, 139)));
+                    ui.label(RichText::new("After you close your wallet, all funds will be sent to an on-chain Bitcoin address you control. Your trade and payment history will be preserved.").size(12.0).color(theme::MUTED));
                     ui.add_space(8.0);
 
-                    let close_btn = egui::Button::new(RichText::new("Close Wallet").color(Color32::from_rgb(225, 29, 72)))
+                    let close_btn = egui::Button::new(RichText::new("Close Wallet").color(theme::DANGER_HOVER))
                         .fill(Color32::from_rgb(255, 241, 242));
                     if ui.add(close_btn).clicked() {
                         self.confirm_close_popup = true;
@@ -4881,7 +5237,7 @@ impl UserApp {
                     if self.show_seed_words {
                         ui.add_space(10.0);
                         if let Some(ref words) = self.saved_mnemonic {
-                            ui.label(RichText::new("Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.").color(Color32::from_rgb(217, 119, 6)).size(12.0));
+                            ui.label(RichText::new("Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.").color(theme::WARNING).size(12.0));
                             ui.add_space(8.0);
                             for (i, word) in words.split_whitespace().enumerate() {
                                 ui.label(RichText::new(format!("{}. {}", i + 1, word)).size(13.0).color(Color32::BLACK).monospace());
@@ -4898,7 +5254,7 @@ impl UserApp {
                 let balances = self.node.list_balances();
                 if !balances.pending_balances_from_channel_closures.is_empty() {
                     ui.group(|ui| {
-                        ui.label(RichText::new("Pending from Channel Closures").strong().color(Color32::from_rgb(217, 119, 6)));
+                        ui.label(RichText::new("Pending from Channel Closures").strong().color(theme::WARNING));
                         ui.add_space(8.0);
 
                         let mut total_pending: u64 = 0;
@@ -4974,7 +5330,7 @@ impl UserApp {
                                 ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                        ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(Color32::from_rgb(225, 29, 72)));
+                                        ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(theme::DANGER_HOVER));
                                     });
                                 },
                                 _ => {}
@@ -5013,7 +5369,27 @@ impl UserApp {
 
             match self.db.get_recent_trades(100) {
                 Ok(trades) if trades.is_empty() => {
-                    ui.label(RichText::new("No trades yet").color(Color32::GRAY));
+                    ui.add_space(40.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("⇅")
+                                .size(48.0)
+                                .color(theme::BORDER),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("No trades yet")
+                                .size(15.0)
+                                .color(theme::MUTED)
+                                .strong(),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Buy or sell BTC to see them here")
+                                .size(12.0)
+                                .color(theme::DISABLED_TEXT),
+                        );
+                    });
                 }
                 Ok(trades) => {
                     let show_btc = self.history_show_btc;
@@ -5103,9 +5479,9 @@ impl UserApp {
                                     }
 
                                     let (color, label) = if trade.action == "buy" {
-                                        (Color32::from_rgb(16, 185, 129), "Buy")
+                                        (theme::SUCCESS, "Buy")
                                     } else {
-                                        (Color32::from_rgb(244, 63, 94), "Sell")
+                                        (theme::DANGER, "Sell")
                                     };
                                     ui.add_sized(
                                         [30.0, 18.0],
@@ -5128,10 +5504,10 @@ impl UserApp {
 
                                     let (status_label, status_color) = match trade.status.as_str() {
                                         "completed" => {
-                                            ("Confirmed", Color32::from_rgb(16, 185, 129))
+                                            ("Confirmed", theme::SUCCESS)
                                         }
                                         "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                                        "failed" => ("Failed", Color32::from_rgb(225, 29, 72)),
+                                        "failed" => ("Failed", theme::DANGER_HOVER),
                                         _ => (&*trade.status, Color32::DARK_GRAY),
                                     };
                                     ui.add_sized(
@@ -5166,7 +5542,7 @@ impl UserApp {
                 }
                 Err(_) => {
                     ui.label(
-                        RichText::new("Error loading trades").color(Color32::from_rgb(225, 29, 72)),
+                        RichText::new("Error loading trades").color(theme::DANGER_HOVER),
                     );
                 }
             }
@@ -5184,7 +5560,27 @@ impl UserApp {
 
             match self.db.get_recent_payments(100) {
                 Ok(payments) if payments.is_empty() => {
-                    ui.label(RichText::new("No payments yet").color(Color32::GRAY));
+                    ui.add_space(40.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("⚡")
+                                .size(48.0)
+                                .color(theme::BORDER),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("No payments yet")
+                                .size(15.0)
+                                .color(theme::MUTED)
+                                .strong(),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Send or receive to see history here")
+                                .size(12.0)
+                                .color(theme::DISABLED_TEXT),
+                        );
+                    });
                 }
                 Ok(payments) => {
                     let show_btc = self.history_show_btc;
@@ -5283,9 +5679,9 @@ impl UserApp {
                                     }
 
                                     let (color, label) = if payment.direction == "received" {
-                                        (Color32::from_rgb(16, 185, 129), "In")
+                                        (theme::SUCCESS, "In")
                                     } else {
-                                        (Color32::from_rgb(217, 119, 6), "Out")
+                                        (theme::WARNING, "Out")
                                     };
                                     ui.add_sized(
                                         [24.0, 18.0],
@@ -5299,11 +5695,11 @@ impl UserApp {
                                         "stability" => {
                                             ("Settlement", Color32::from_rgb(96, 165, 250))
                                         }
-                                        "splice_in" => ("Deposit", Color32::from_rgb(16, 185, 129)),
+                                        "splice_in" => ("Deposit", theme::SUCCESS),
                                         "splice_out" => {
-                                            ("Withdraw", Color32::from_rgb(217, 119, 6))
+                                            ("Withdraw", theme::WARNING)
                                         }
-                                        "onchain" => ("On-chain", Color32::from_rgb(16, 185, 129)),
+                                        "onchain" => ("On-chain", theme::SUCCESS),
                                         "lightning" => {
                                             ("Lightning", Color32::from_rgb(234, 179, 8))
                                         }
@@ -5337,10 +5733,10 @@ impl UserApp {
                                     let (status_label, status_color) = match payment.status.as_str()
                                     {
                                         "completed" => {
-                                            ("Confirmed", Color32::from_rgb(16, 185, 129))
+                                            ("Confirmed", theme::SUCCESS)
                                         }
                                         "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                                        "failed" => ("Failed", Color32::from_rgb(225, 29, 72)),
+                                        "failed" => ("Failed", theme::DANGER_HOVER),
                                         _ => (&*payment.status, Color32::DARK_GRAY),
                                     };
                                     ui.add_sized(
@@ -5403,7 +5799,7 @@ impl UserApp {
                 Err(_) => {
                     ui.label(
                         RichText::new("Error loading payments")
-                            .color(Color32::from_rgb(225, 29, 72)),
+                            .color(theme::DANGER_HOVER),
                     );
                 }
             }
@@ -5422,7 +5818,7 @@ impl UserApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(Color32::WHITE)
-                    .corner_radius(12.0),
+                    .corner_radius(theme::RADIUS_MD),
             )
             .show(ctx, |ui| {
                 ui.set_min_width(320.0);
@@ -5453,9 +5849,9 @@ impl UserApp {
                 row(ui, "BTC Price", &Self::format_price(trade.btc_price));
 
                 let (status_label, status_color) = match trade.status.as_str() {
-                    "completed" => ("Confirmed", Color32::from_rgb(16, 185, 129)),
+                    "completed" => ("Confirmed", theme::SUCCESS),
                     "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                    "failed" => ("Failed", Color32::from_rgb(225, 29, 72)),
+                    "failed" => ("Failed", theme::DANGER_HOVER),
                     _ => (&*trade.status, Color32::DARK_GRAY),
                 };
                 ui.horizontal(|ui| {
@@ -5487,13 +5883,20 @@ impl UserApp {
                     );
                 }
 
-                ui.add_space(10.0);
+                ui.add_space(14.0);
                 ui.vertical_centered(|ui| {
-                    if ui.button("Close").clicked() {
+                    let cancel_btn = egui::Button::new(
+                        RichText::new("Cancel").size(15.0).color(theme::MUTED).strong(),
+                    )
+                    .fill(theme::SUBTLE_BG)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(theme::RADIUS_PILL)
+                    .min_size(egui::vec2(280.0, 40.0));
+                    if ui.add(cancel_btn).clicked() {
                         self.selected_trade = None;
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(12.0);
             });
     }
 
@@ -5509,7 +5912,7 @@ impl UserApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(Color32::WHITE)
-                    .corner_radius(12.0),
+                    .corner_radius(theme::RADIUS_MD),
             )
             .show(ctx, |ui| {
                 ui.set_min_width(320.0);
@@ -5564,9 +5967,9 @@ impl UserApp {
                 }
 
                 let (status_label, status_color) = match payment.status.as_str() {
-                    "completed" => ("Confirmed", Color32::from_rgb(16, 185, 129)),
+                    "completed" => ("Confirmed", theme::SUCCESS),
                     "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                    "failed" => ("Failed", Color32::from_rgb(225, 29, 72)),
+                    "failed" => ("Failed", theme::DANGER_HOVER),
                     _ => (&*payment.status, Color32::DARK_GRAY),
                 };
                 ui.horizontal(|ui| {
@@ -5651,11 +6054,16 @@ impl UserApp {
         egui::Window::new("Transfer")
             .collapsible(false)
             .resizable(false)
+            .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE))
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(Color32::WHITE)
+                    .corner_radius(theme::RADIUS_LG),
+            )
             .show(ctx, |ui| {
-                ui.set_min_width(320.0);
-                ui.add_space(10.0);
+                ui.set_min_width(420.0);
+                ui.add_space(20.0);
 
                 // Tab bar
                 ui.horizontal(|ui| {
@@ -5672,16 +6080,16 @@ impl UserApp {
                                     .color(Color32::WHITE)
                                     .strong(),
                             )
-                            .fill(Color32::from_rgb(30, 41, 59))
-                            .corner_radius(8.0)
+                            .fill(theme::PRIMARY)
+                            .corner_radius(theme::RADIUS_SM)
                         } else {
                             egui::Button::new(
                                 RichText::new(*label)
                                     .size(15.0)
-                                    .color(Color32::from_rgb(100, 116, 139)),
+                                    .color(theme::MUTED),
                             )
-                            .fill(Color32::from_rgb(241, 245, 249))
-                            .corner_radius(8.0)
+                            .fill(theme::SUBTLE_BG)
+                            .corner_radius(theme::RADIUS_SM)
                         };
                         if ui.add(btn).clicked() {
                             self.transfer_tab = tab.clone();
@@ -5696,10 +6104,17 @@ impl UserApp {
                     TransferTab::Receive => self.show_receive_tab(ui, ctx),
                 }
 
-                ui.add_space(15.0);
+                ui.add_space(22.0);
 
                 ui.vertical_centered(|ui| {
-                    if ui.button("Close").clicked() {
+                    let close_btn = egui::Button::new(
+                        RichText::new("Close").size(15.0).color(theme::MUTED).strong(),
+                    )
+                    .fill(theme::SUBTLE_BG)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(theme::RADIUS_PILL)
+                    .min_size(egui::vec2(280.0, 40.0));
+                    if ui.add(close_btn).clicked() {
                         self.show_transfer_modal = false;
                         self.show_lightning_receive = false;
                         self.lightning_receive_invoice.clear();
@@ -5708,7 +6123,7 @@ impl UserApp {
                     }
                 });
 
-                ui.add_space(10.0);
+                ui.add_space(20.0);
             });
     }
 
@@ -5717,7 +6132,7 @@ impl UserApp {
             RichText::new("Paste an on-chain address, bolt11 invoice, or bolt12 offer")
                 .size(12.0)
                 .italics()
-                .color(Color32::from_rgb(100, 116, 139)),
+                .color(theme::MUTED),
         );
         ui.add_space(10.0);
 
@@ -5756,9 +6171,9 @@ impl UserApp {
                         .color(Color32::DARK_GRAY),
                 );
                 let color = if detected == "Unknown" {
-                    Color32::from_rgb(244, 63, 94)
+                    theme::DANGER
                 } else {
-                    Color32::from_rgb(16, 185, 129)
+                    theme::SUCCESS
                 };
                 ui.label(RichText::new(detected).size(11.0).color(color).strong());
             });
@@ -6003,7 +6418,7 @@ impl UserApp {
             ui.label(
                 RichText::new("Funds are pending on-chain confirmation and can't be sent yet.")
                     .size(12.0)
-                    .color(Color32::from_rgb(217, 119, 6)),
+                    .color(theme::WARNING),
             );
             ui.add_space(8.0);
         }
@@ -6015,8 +6430,8 @@ impl UserApp {
                     .color(Color32::WHITE)
                     .strong(),
             )
-            .fill(Color32::from_rgb(30, 41, 59))
-            .corner_radius(10.0)
+            .fill(theme::PRIMARY)
+            .corner_radius(theme::RADIUS_MD)
             .min_size(egui::vec2(200.0, 38.0));
             if ui.add(send_btn).clicked() && self.send_unified() {
                 self.show_toast("Payment sent!", "OK");
@@ -6029,7 +6444,7 @@ impl UserApp {
             ui.label(
                 RichText::new(&self.send_error)
                     .size(12.0)
-                    .color(Color32::from_rgb(225, 29, 72)),
+                    .color(theme::DANGER_HOVER),
             );
         }
     }
@@ -6057,9 +6472,14 @@ impl UserApp {
                         .size(10.0)
                         .color(Color32::DARK_GRAY),
                 );
-                if ui.small_button("Copy").clicked() {
-                    ui.ctx().copy_text(self.on_chain_address.clone());
-                    self.show_toast("Copied!", "OK");
+                let copy_label = if self.is_copied("onchain_address_receive") {
+                    "✓ Copied"
+                } else {
+                    "Copy"
+                };
+                if ui.small_button(copy_label).clicked() {
+                    let addr = self.on_chain_address.clone();
+                    self.copy_with_feedback("onchain_address_receive", addr, ui.ctx());
                 }
             }
         });
@@ -6093,9 +6513,14 @@ impl UserApp {
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Copy Invoice").clicked() {
-                            ui.ctx().copy_text(self.lightning_receive_invoice.clone());
-                            self.show_toast("Copied!", "OK");
+                        let copy_label = if self.is_copied("lightning_invoice") {
+                            "✓ Copied"
+                        } else {
+                            "Copy Invoice"
+                        };
+                        if ui.button(copy_label).clicked() {
+                            let invoice = self.lightning_receive_invoice.clone();
+                            self.copy_with_feedback("lightning_invoice", invoice, ui.ctx());
                         }
                         if ui.button("Done").clicked() {
                             self.show_lightning_receive = false;
@@ -6172,7 +6597,7 @@ impl UserApp {
                     ui.add_space(5.0);
                     ui.label(
                         RichText::new(&self.lightning_receive_error)
-                            .color(Color32::from_rgb(225, 29, 72)),
+                            .color(theme::DANGER_HOVER),
                     );
                 }
             }
@@ -6198,9 +6623,14 @@ impl UserApp {
                 );
                 ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Copy Offer").clicked() {
-                        ui.ctx().copy_text(self.bolt12_offer.clone());
-                        self.show_toast("Copied!", "OK");
+                    let copy_label = if self.is_copied("bolt12_offer") {
+                        "✓ Copied"
+                    } else {
+                        "Copy Offer"
+                    };
+                    if ui.button(copy_label).clicked() {
+                        let offer = self.bolt12_offer.clone();
+                        self.copy_with_feedback("bolt12_offer", offer, ui.ctx());
                     }
                     if ui.button("Done").clicked() {
                         self.bolt12_offer.clear();
@@ -6215,14 +6645,14 @@ impl UserApp {
                             "Channel not ready — offer creation requires an active channel",
                         )
                         .size(11.0)
-                        .color(Color32::from_rgb(217, 119, 6)),
+                        .color(theme::WARNING),
                     );
                 } else {
                     ui.label(
                         RichText::new("Reusable, no amount required from sender")
                             .size(11.0)
                             .italics()
-                            .color(Color32::from_rgb(100, 116, 139)),
+                            .color(theme::MUTED),
                     );
                     ui.add_space(6.0);
                     if ui.button("Generate Offer").clicked() {
@@ -6255,11 +6685,11 @@ impl UserApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(Color32::WHITE)
-                    .corner_radius(16.0),
+                    .corner_radius(theme::RADIUS_LG),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(300.0);
-                ui.add_space(20.0);
+                ui.set_min_width(420.0);
+                ui.add_space(28.0);
 
                 // Check if we're on confirmation screen
                 if self.show_confirm_trade && self.pending_trade.is_some() {
@@ -6294,106 +6724,60 @@ impl UserApp {
         );
         ui.add_space(20.0);
 
-        // Preset amount buttons in a 2x3 grid
-        let preset_amounts = [20.0, 50.0, 100.0, 150.0, 200.0];
-        let btn_size = egui::vec2(85.0, 55.0);
+        // Centered USD amount input
+        ui.vertical_centered(|ui| {
+            let amount_edit = egui::TextEdit::singleline(&mut self.trade_amount_input)
+                .hint_text("0.00")
+                .font(egui::FontId::proportional(40.0))
+                .horizontal_align(egui::Align::Center)
+                .desired_width(260.0);
+            ui.add(amount_edit);
 
-        // Row 1: $20, $50, $100
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            for &amount in &preset_amounts[0..3] {
-                let selected = self.trade_amount_input == format!("{:.0}", amount);
-                let btn = egui::Button::new(
-                    RichText::new(format!("${:.0}", amount))
-                        .size(18.0)
-                        .color(Color32::BLACK),
-                )
-                .fill(if selected {
-                    Color32::from_rgb(226, 232, 240)
-                } else {
-                    Color32::WHITE
-                })
-                .stroke(egui::Stroke::new(1.5, Color32::from_rgb(203, 213, 225)))
-                .corner_radius(12.0)
-                .min_size(btn_size);
-                if ui.add(btn).clicked() {
-                    self.trade_amount_input = format!("{:.0}", amount);
+            // BTC equivalent below input
+            if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
+                if amount > 0.0 {
+                    let btc_price = get_cached_price_no_fetch();
+                    if btc_price > 0.0 {
+                        let btc = amount / btc_price;
+                        ui.add_space(4.0);
+                        ui.label(
+                            RichText::new(format!("\u{2248} {:.8} BTC", btc))
+                                .size(12.0)
+                                .color(theme::MUTED),
+                        );
+                    }
                 }
             }
         });
-
-        ui.add_space(10.0);
-
-        // Row 2: $150, $200, ...
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            for &amount in &preset_amounts[3..5] {
-                let selected = self.trade_amount_input == format!("{:.0}", amount);
-                let btn = egui::Button::new(
-                    RichText::new(format!("${:.0}", amount))
-                        .size(18.0)
-                        .color(Color32::BLACK),
-                )
-                .fill(if selected {
-                    Color32::from_rgb(226, 232, 240)
-                } else {
-                    Color32::WHITE
-                })
-                .stroke(egui::Stroke::new(1.5, Color32::from_rgb(203, 213, 225)))
-                .corner_radius(12.0)
-                .min_size(btn_size);
-                if ui.add(btn).clicked() {
-                    self.trade_amount_input = format!("{:.0}", amount);
-                }
-            }
-            // Custom amount button (...)
-            let btn = egui::Button::new(RichText::new("...").size(18.0).color(Color32::BLACK))
-                .fill(Color32::WHITE)
-                .stroke(egui::Stroke::new(1.5, Color32::from_rgb(203, 213, 225)))
-                .corner_radius(12.0)
-                .min_size(btn_size);
-            if ui.add(btn).clicked() {
-                self.trade_amount_input.clear();
-            }
-        });
-
-        // Custom input field (shown when ... is selected or input is custom)
-        let is_custom = !preset_amounts
-            .iter()
-            .any(|&a| self.trade_amount_input == format!("{:.0}", a));
-        if is_custom && !self.trade_amount_input.is_empty() || self.trade_amount_input.is_empty() {
-            ui.add_space(15.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Custom:").color(Color32::DARK_GRAY));
-                let amount_edit = egui::TextEdit::singleline(&mut self.trade_amount_input)
-                    .hint_text("Enter amount")
-                    .desired_width(100.0);
-                ui.add(amount_edit);
-            });
-        }
 
         if !self.trade_error.is_empty() {
             ui.add_space(5.0);
             ui.label(
                 RichText::new(&self.trade_error)
-                    .color(Color32::from_rgb(225, 29, 72))
+                    .color(theme::DANGER_HOVER)
                     .size(12.0),
             );
         }
 
         ui.add_space(20.0);
 
-        // Next button (disabled if no amount selected)
-        let has_amount = !self.trade_amount_input.is_empty();
+        // Next button — enabled when amount is a positive number
+        let has_amount = self
+            .trade_amount_input
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| v > 0.0)
+            .unwrap_or(false);
         let btn_color = if has_amount {
-            Color32::from_rgb(30, 41, 59)
+            theme::PRIMARY
         } else {
-            Color32::from_rgb(203, 213, 225)
+            theme::BORDER
         };
         let text_color = if has_amount {
             Color32::WHITE
         } else {
-            Color32::from_rgb(148, 163, 184)
+            theme::DISABLED_TEXT
         };
 
         let mut should_process = false;
@@ -6401,7 +6785,7 @@ impl UserApp {
             let next_btn =
                 egui::Button::new(RichText::new("Next").size(16.0).color(text_color).strong())
                     .fill(btn_color)
-                    .corner_radius(25.0)
+                    .corner_radius(theme::RADIUS_PILL)
                     .min_size(egui::vec2(280.0, 50.0));
             if ui.add(next_btn).clicked() && has_amount {
                 should_process = true;
@@ -6450,14 +6834,18 @@ impl UserApp {
             );
         });
 
-        ui.add_space(8.0);
+        ui.add_space(14.0);
 
-        // Cancel link
+        // Cancel button — secondary pill style, matches Close on Transfer modal.
         ui.vertical_centered(|ui| {
-            if ui
-                .add(egui::Button::new(RichText::new("Cancel").color(Color32::GRAY)).frame(false))
-                .clicked()
-            {
+            let cancel_btn = egui::Button::new(
+                RichText::new("Cancel").size(15.0).color(theme::MUTED).strong(),
+            )
+            .fill(theme::SUBTLE_BG)
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(theme::RADIUS_PILL)
+            .min_size(egui::vec2(280.0, 40.0));
+            if ui.add(cancel_btn).clicked() {
                 self.show_buy_modal = false;
                 self.trade_amount_input.clear();
                 self.trade_error.clear();
@@ -6508,7 +6896,7 @@ impl UserApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("BTC Price").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("${:.2}", btc_price)).color(Color32::BLACK));
+                    ui.label(RichText::new(Self::format_price(btc_price)).color(Color32::BLACK));
                 });
             });
 
@@ -6519,8 +6907,8 @@ impl UserApp {
                 ui.label(RichText::new("Fee (1%)").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new(format!("-${:.2}", fee_usd))
-                            .color(Color32::from_rgb(244, 63, 94)),
+                        RichText::new(format!("-{}", Self::format_price(fee_usd)))
+                            .color(theme::DANGER),
                     );
                 });
             });
@@ -6566,8 +6954,8 @@ impl UserApp {
                     .color(Color32::WHITE)
                     .strong(),
             )
-            .fill(Color32::from_rgb(16, 185, 129))
-            .corner_radius(25.0)
+            .fill(theme::IOS_BLUE)
+            .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
             if ui.add(confirm_btn).clicked() {
                 should_confirm = true;
@@ -6603,11 +6991,11 @@ impl UserApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(Color32::WHITE)
-                    .corner_radius(16.0),
+                    .corner_radius(theme::RADIUS_LG),
             )
             .show(ctx, |ui| {
-                ui.set_min_width(300.0);
-                ui.add_space(20.0);
+                ui.set_min_width(420.0);
+                ui.add_space(28.0);
 
                 // Check if we're on confirmation screen
                 if self.show_confirm_trade && self.pending_trade.is_some() {
@@ -6652,106 +7040,57 @@ impl UserApp {
         );
         ui.add_space(20.0);
 
-        // Preset amount buttons in a 2x3 grid
-        let preset_amounts = [20.0, 50.0, 100.0, 150.0, 200.0];
-        let btn_size = egui::vec2(85.0, 55.0);
+        // Centered USD amount input
+        ui.vertical_centered(|ui| {
+            let amount_edit = egui::TextEdit::singleline(&mut self.trade_amount_input)
+                .hint_text("0.00")
+                .font(egui::FontId::proportional(40.0))
+                .horizontal_align(egui::Align::Center)
+                .desired_width(260.0);
+            ui.add(amount_edit);
 
-        // Row 1: $20, $50, $100
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            for &amount in &preset_amounts[0..3] {
-                let selected = self.trade_amount_input == format!("{:.0}", amount);
-                let btn = egui::Button::new(
-                    RichText::new(format!("${:.0}", amount))
-                        .size(18.0)
-                        .color(Color32::BLACK),
-                )
-                .fill(if selected {
-                    Color32::from_rgb(226, 232, 240)
-                } else {
-                    Color32::WHITE
-                })
-                .stroke(egui::Stroke::new(1.5, Color32::from_rgb(203, 213, 225)))
-                .corner_radius(12.0)
-                .min_size(btn_size);
-                if ui.add(btn).clicked() {
-                    self.trade_amount_input = format!("{:.0}", amount);
+            // BTC equivalent below input
+            if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
+                if amount > 0.0 && btc_price > 0.0 {
+                    let btc = amount / btc_price;
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("\u{2248} {:.8} BTC", btc))
+                            .size(12.0)
+                            .color(theme::MUTED),
+                    );
                 }
             }
         });
-
-        ui.add_space(10.0);
-
-        // Row 2: $150, $200, ...
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            for &amount in &preset_amounts[3..5] {
-                let selected = self.trade_amount_input == format!("{:.0}", amount);
-                let btn = egui::Button::new(
-                    RichText::new(format!("${:.0}", amount))
-                        .size(18.0)
-                        .color(Color32::BLACK),
-                )
-                .fill(if selected {
-                    Color32::from_rgb(226, 232, 240)
-                } else {
-                    Color32::WHITE
-                })
-                .stroke(egui::Stroke::new(1.5, Color32::from_rgb(203, 213, 225)))
-                .corner_radius(12.0)
-                .min_size(btn_size);
-                if ui.add(btn).clicked() {
-                    self.trade_amount_input = format!("{:.0}", amount);
-                }
-            }
-            // Custom amount button (...)
-            let btn = egui::Button::new(RichText::new("...").size(18.0).color(Color32::BLACK))
-                .fill(Color32::WHITE)
-                .stroke(egui::Stroke::new(1.5, Color32::from_rgb(203, 213, 225)))
-                .corner_radius(12.0)
-                .min_size(btn_size);
-            if ui.add(btn).clicked() {
-                self.trade_amount_input.clear();
-            }
-        });
-
-        // Custom input field (shown when ... is selected or input is custom)
-        let is_custom = !preset_amounts
-            .iter()
-            .any(|&a| self.trade_amount_input == format!("{:.0}", a));
-        if is_custom && !self.trade_amount_input.is_empty() || self.trade_amount_input.is_empty() {
-            ui.add_space(15.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Custom:").color(Color32::DARK_GRAY));
-                let amount_edit = egui::TextEdit::singleline(&mut self.trade_amount_input)
-                    .hint_text("Enter amount")
-                    .desired_width(100.0);
-                ui.add(amount_edit);
-            });
-        }
 
         if !self.trade_error.is_empty() {
             ui.add_space(5.0);
             ui.label(
                 RichText::new(&self.trade_error)
-                    .color(Color32::from_rgb(225, 29, 72))
+                    .color(theme::DANGER_HOVER)
                     .size(12.0),
             );
         }
 
         ui.add_space(20.0);
 
-        // Next button (disabled if no amount selected)
-        let has_amount = !self.trade_amount_input.is_empty();
+        // Next button — enabled when amount is a positive number
+        let has_amount = self
+            .trade_amount_input
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| v > 0.0)
+            .unwrap_or(false);
         let btn_color = if has_amount {
-            Color32::from_rgb(30, 41, 59)
+            theme::PRIMARY
         } else {
-            Color32::from_rgb(203, 213, 225)
+            theme::BORDER
         };
         let text_color = if has_amount {
             Color32::WHITE
         } else {
-            Color32::from_rgb(148, 163, 184)
+            theme::DISABLED_TEXT
         };
 
         let mut should_process = false;
@@ -6759,7 +7098,7 @@ impl UserApp {
             let next_btn =
                 egui::Button::new(RichText::new("Next").size(16.0).color(text_color).strong())
                     .fill(btn_color)
-                    .corner_radius(25.0)
+                    .corner_radius(theme::RADIUS_PILL)
                     .min_size(egui::vec2(280.0, 50.0));
             if ui.add(next_btn).clicked() && has_amount {
                 should_process = true;
@@ -6807,14 +7146,18 @@ impl UserApp {
             );
         });
 
-        ui.add_space(8.0);
+        ui.add_space(14.0);
 
-        // Cancel link
+        // Cancel button — secondary pill style, matches Close on Transfer modal.
         ui.vertical_centered(|ui| {
-            if ui
-                .add(egui::Button::new(RichText::new("Cancel").color(Color32::GRAY)).frame(false))
-                .clicked()
-            {
+            let cancel_btn = egui::Button::new(
+                RichText::new("Cancel").size(15.0).color(theme::MUTED).strong(),
+            )
+            .fill(theme::SUBTLE_BG)
+            .stroke(egui::Stroke::NONE)
+            .corner_radius(theme::RADIUS_PILL)
+            .min_size(egui::vec2(280.0, 40.0));
+            if ui.add(cancel_btn).clicked() {
                 self.show_sell_modal = false;
                 self.trade_amount_input.clear();
                 self.trade_error.clear();
@@ -6878,7 +7221,7 @@ impl UserApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("BTC Price").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("${:.2}", btc_price)).color(Color32::BLACK));
+                    ui.label(RichText::new(Self::format_price(btc_price)).color(Color32::BLACK));
                 });
             });
 
@@ -6889,8 +7232,8 @@ impl UserApp {
                 ui.label(RichText::new("Fee (1%)").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new(format!("-${:.2}", fee_usd))
-                            .color(Color32::from_rgb(244, 63, 94)),
+                        RichText::new(format!("-{}", Self::format_price(fee_usd)))
+                            .color(theme::DANGER),
                     );
                 });
             });
@@ -6904,7 +7247,7 @@ impl UserApp {
                 ui.label(RichText::new("You receive").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new(format!("${:.2}", net_amount))
+                        RichText::new(Self::format_price(net_amount))
                             .color(Color32::BLACK)
                             .strong(),
                     );
@@ -6923,8 +7266,8 @@ impl UserApp {
                     .color(Color32::WHITE)
                     .strong(),
             )
-            .fill(Color32::from_rgb(244, 63, 94))
-            .corner_radius(25.0)
+            .fill(theme::IOS_BLUE)
+            .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
             if ui.add(confirm_btn).clicked() {
                 should_confirm = true;
@@ -6964,7 +7307,7 @@ impl UserApp {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE).corner_radius(16.0))
+                .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE).corner_radius(theme::RADIUS_LG))
                 .show(ctx, |ui| {
                     ui.label(RichText::new("Are you sure you want to close your wallet?").size(13.0).color(Color32::BLACK));
                     ui.add_space(5.0);
@@ -6986,13 +7329,13 @@ impl UserApp {
                         Some(rate) => format!("Fee rate: {} sat/vB", rate),
                         None => "Fetching fee rate...".to_string(),
                     };
-                    ui.label(RichText::new(fee_text).size(12.0).color(Color32::from_rgb(100, 116, 139)));
+                    ui.label(RichText::new(fee_text).size(12.0).color(theme::MUTED));
 
                     ui.add_space(15.0);
                     ui.horizontal(|ui| {
                         let yes_btn = egui::Button::new(RichText::new("Close Wallet").color(Color32::WHITE))
-                            .fill(Color32::from_rgb(225, 29, 72))
-                            .corner_radius(8.0);
+                            .fill(theme::DANGER_HOVER)
+                            .corner_radius(theme::RADIUS_SM);
                         if ui.add(yes_btn).clicked() {
                             clicked_yes = true;
                         }
@@ -7416,12 +7759,56 @@ impl App for UserApp {
 
 pub fn run() {
     println!("Starting User Interface...");
-    // Load app icon from embedded PNG
+    // Load app icon from embedded PNG and apply a macOS-style rounded-corner
+    // (squircle-ish) mask so it sits in the dock like Chrome / Telegram /
+    // Android Studio instead of as a hard-cornered square.
     let icon_data = {
         let icon_bytes = include_bytes!("../photos/sc-icon-egui.png");
         let img = image::load_from_memory(icon_bytes).expect("Failed to load icon");
-        let rgba = img.into_rgba8();
+        let mut rgba = img.into_rgba8();
         let (w, h) = rgba.dimensions();
+
+        // macOS dock icon corner radius is roughly 22.5% of the icon edge.
+        let radius = (w.min(h) as f32 * 0.225) as i32;
+        let r2 = (radius as f32) * (radius as f32);
+        let wi = w as i32;
+        let hi = h as i32;
+
+        for y in 0..hi {
+            for x in 0..wi {
+                // Distance from the corresponding rounded-corner center, if
+                // the pixel falls inside one of the four corner regions.
+                let dx_left = (radius - x) as f32;
+                let dx_right = (x - (wi - 1 - radius)) as f32;
+                let dy_top = (radius - y) as f32;
+                let dy_bottom = (y - (hi - 1 - radius)) as f32;
+
+                let in_corner_dist2 = if x < radius && y < radius {
+                    Some(dx_left * dx_left + dy_top * dy_top)
+                } else if x > wi - 1 - radius && y < radius {
+                    Some(dx_right * dx_right + dy_top * dy_top)
+                } else if x < radius && y > hi - 1 - radius {
+                    Some(dx_left * dx_left + dy_bottom * dy_bottom)
+                } else if x > wi - 1 - radius && y > hi - 1 - radius {
+                    Some(dx_right * dx_right + dy_bottom * dy_bottom)
+                } else {
+                    None
+                };
+
+                if let Some(d2) = in_corner_dist2 {
+                    let dist = d2.sqrt();
+                    // 1-pixel anti-aliased edge: full alpha inside the radius,
+                    // fades to 0 at the boundary.
+                    let edge_factor = (radius as f32 + 0.5 - dist).clamp(0.0, 1.0);
+                    let px = rgba.get_pixel_mut(x as u32, y as u32);
+                    px[3] = (px[3] as f32 * edge_factor) as u8;
+                }
+                // Silence the unused-variable warning for r2 (we keep it as a
+                // documentation aid for the corner-radius check geometry).
+                let _ = r2;
+            }
+        }
+
         egui::IconData {
             rgba: rgba.into_raw(),
             width: w,
@@ -7431,7 +7818,10 @@ pub fn run() {
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([460.0, 700.0])
+            // Slightly wider than a phone, short enough that the whole home
+            // tab fits comfortably on a typical laptop screen.
+            .with_inner_size([500.0, 820.0])
+            .with_min_inner_size([460.0, 600.0])
             .with_decorations(true)
             .with_transparent(false)
             .with_icon(std::sync::Arc::new(icon_data)),
@@ -7445,11 +7835,43 @@ pub fn run() {
                 "Stable Channels Wallet",
                 native_options,
                 Box::new(|cc| {
-                    // Set light theme with white background
+                    // Custom font: load Inter from assets/fonts/Inter-Regular.ttf if
+                    // present. Falls back to egui defaults if the file isn't there —
+                    // drop the TTF in to get the upgrade without code changes.
+                    if let Ok(font_data) = std::fs::read("assets/fonts/Inter-Regular.ttf") {
+                        let mut fonts = egui::FontDefinitions::default();
+                        fonts.font_data.insert(
+                            "inter".to_owned(),
+                            std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                        );
+                        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                            prop.insert(0, "inter".to_owned());
+                        }
+                        cc.egui_ctx.set_fonts(fonts);
+                    }
+
+                    // Visuals: light theme with themed surfaces + subtle hover/active
+                    // backgrounds. Filled-button color overrides still win; this just
+                    // makes default-styled controls look more polished.
                     let mut visuals = egui::Visuals::light();
-                    visuals.window_fill = egui::Color32::WHITE;
-                    visuals.panel_fill = egui::Color32::WHITE;
+                    visuals.window_fill = theme::SURFACE;
+                    visuals.panel_fill = theme::SURFACE;
+                    visuals.widgets.noninteractive.bg_fill = theme::SURFACE;
+                    visuals.widgets.inactive.bg_fill = theme::SUBTLE_BG;
+                    visuals.widgets.inactive.weak_bg_fill = theme::SUBTLE_BG;
+                    visuals.widgets.hovered.bg_fill = theme::SELECTED_BG;
+                    visuals.widgets.hovered.weak_bg_fill = theme::SELECTED_BG;
+                    visuals.widgets.active.bg_fill = theme::BORDER;
+                    visuals.widgets.active.weak_bg_fill = theme::BORDER;
+                    visuals.selection.bg_fill = theme::PRIMARY;
+                    visuals.selection.stroke.color = theme::TEXT_ON_PRIMARY;
                     cc.egui_ctx.set_visuals(visuals);
+
+                    // Tighten the default spacing for a more refined feel.
+                    let mut style = (*cc.egui_ctx.style()).clone();
+                    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+                    style.spacing.button_padding = egui::vec2(10.0, 6.0);
+                    cc.egui_ctx.set_style(style);
 
                     Ok(Box::new(app))
                 }),
