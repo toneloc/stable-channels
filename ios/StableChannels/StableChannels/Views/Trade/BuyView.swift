@@ -36,6 +36,10 @@ struct BuyView: View {
         return amountUSD / appState.btcPrice
     }
 
+    private var btcAmountFinal: Double {
+        btcAmount * 0.99
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 24) {
@@ -49,11 +53,11 @@ struct BuyView: View {
                 }
             }
             .padding()
-            .navigationTitle("Buy BTC")
+            .navigationTitle(String(localized: "title_buy_btc", defaultValue: "Buy BTC"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
                 }
             }
         }
@@ -61,10 +65,10 @@ struct BuyView: View {
 
     private var amountScreen: some View {
         VStack(spacing: 20) {
-            Text("How much USD to convert to BTC?")
+            Text(String(localized: "headline_how_much_usd", defaultValue: "How much USD to convert to BTC?"))
                 .font(.headline)
 
-            TextField("0.00", text: $amountStr)
+            TextField(String(localized: "placeholder_amount_usd", defaultValue: "0.00"), text: $amountStr)
                 .keyboardType(.decimalPad)
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
@@ -75,7 +79,7 @@ struct BuyView: View {
                             let textWidth = amountStr.size(withAttributes: [
                                 .font: UIFont.rounded(ofSize: 36, weight: .bold)
                             ]).width
-                            Text("$")
+                            Text(String(localized: "label_dollar_sign", defaultValue: "$"))
                                 .font(.system(size: 36, weight: .bold, design: .rounded))
                                 .position(x: geo.size.width / 2 - textWidth / 2 - 10,
                                           y: geo.size.height / 2)
@@ -88,18 +92,20 @@ struct BuyView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Available: \(maxBuyUSD.usdFormatted)")
+            let availableStr = String(localized: "available_balance", defaultValue: "Available: ") + maxBuyUSD
+                .usdFormatted
+            Text(availableStr)
                 .foregroundStyle(.secondary)
 
             if amountUSD > maxBuyUSD && amountUSD > 0 {
-                Text("Exceeds available stable balance")
+                Text(String(localized: "error_exceeds_balance", defaultValue: "Exceeds available stable balance"))
                     .font(.caption)
                     .foregroundStyle(.red)
             }
 
             Spacer()
 
-            Button("Continue") { step = .confirm }
+            Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(amountUSD <= 0 || amountUSD > maxBuyUSD)
@@ -108,15 +114,28 @@ struct BuyView: View {
 
     private var confirmScreen: some View {
         VStack(spacing: 20) {
-            Text("Confirm Buy")
+            Text(String(localized: "title_confirm_buy", defaultValue: "Confirm Buy"))
                 .font(.title2.bold())
 
             VStack(spacing: 12) {
-                confirmRow("Amount", String(format: "$%.2f", amountUSD))
-                confirmRow("Fee (1%)", String(format: "$%.2f", amountUSD * 0.01))
-                confirmRow("BTC Price", appState.btcPrice.usdFormatted)
+                confirmRow(
+                    String(localized: "label_amount", defaultValue: "Amount"),
+                    String(format: "$%.2f", amountUSD)
+                )
+                confirmRow(
+                    String(localized: "label_fee_percent", defaultValue: "Fee (1%)"),
+                    String(format: "$%.2f", amountUSD * 0.01)
+                )
+                confirmRow(
+                    String(localized: "label_btc_price", defaultValue: "BTC Price"),
+                    appState.btcPrice.usdFormatted
+                )
                 Divider()
-                confirmRow("You receive", String(format: "%.8f BTC", btcAmount * 0.99), bold: true)
+                confirmRow(
+                    String(localized: "label_you_receive", defaultValue: "You receive"),
+                    String(format: "%.8f BTC", btcAmount * 0.99),
+                    bold: true
+                )
             }
             .padding()
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -137,7 +156,7 @@ struct BuyView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                 } else {
-                    Text("Buy BTC")
+                    Text(String(localized: "title_buy_btc", defaultValue: "Buy BTC"))
                         .frame(maxWidth: .infinity)
                 }
             }
@@ -159,10 +178,13 @@ struct BuyView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.green)
 
-                Text("Trade Confirmed")
+                Text(String(localized: "status_trade_confirmed", defaultValue: "Trade Confirmed"))
                     .font(.title2.bold())
 
-                Text(String(format: "Bought %.8f BTC for %@", btcAmount * 0.99, amountUSD.usdFormatted))
+                Text(String(localized: "trade_bought_btc_for", defaultValue: "Bought ") + String(
+                    format: "%.8f",
+                    btcAmountFinal
+                ) + " BTC for " + amountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -170,22 +192,25 @@ struct BuyView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.orange)
 
-                Text("Trade Pending")
+                Text(String(localized: "status_waiting_lsp", defaultValue: "Trade Pending"))
                     .font(.title2.bold())
 
-                Text(String(format: "Buying %.8f BTC for %@", btcAmount * 0.99, amountUSD.usdFormatted))
+                Text(String(localized: "trade_buying_btc_for", defaultValue: "Buying ") + String(
+                    format: "%.8f",
+                    btcAmountFinal
+                ) + " BTC for " + amountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
                 ProgressView()
                     .padding(.top, 4)
 
-                Text("Waiting for LSP confirmation...")
+                Text(String(localized: "status_waiting_lsp", defaultValue: "Waiting for LSP confirmation..."))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
 
-            Button("Done") { dismiss() }
+            Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
@@ -214,7 +239,10 @@ struct BuyView: View {
                 feeUSD: feeUSD,
                 price: price
             ) else {
-                errorMessage = "Trade failed — check amount and try again"
+                errorMessage = String(
+                    localized: "error_trade_failed",
+                    defaultValue: "Trade failed — check amount and try again"
+                )
                 isExecuting = false
                 return
             }

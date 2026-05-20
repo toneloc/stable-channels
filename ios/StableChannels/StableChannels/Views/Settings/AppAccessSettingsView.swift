@@ -31,12 +31,12 @@ struct AppAccessSettingsView: View {
 
     var body: some View {
         List {
-            Section("Wallet Security") {
+            Section(String(localized: "section_wallet_security", defaultValue: "Wallet Security")) {
                 Toggle(isOn: Binding(
                     get: { isEnabled(.appUnlock) },
                     set: { if $0 { enable(.appUnlock) } else { requestAuth(for: .appUnlock) } }
                 )) {
-                    Label { Text("App Unlock") }
+                    Label { Text(String(localized: "label_app_unlock", defaultValue: "App Unlock")) }
                         icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
                 .disabled(!BiometricService.canUseBiometrics)
@@ -45,13 +45,15 @@ struct AppAccessSettingsView: View {
                     get: { isEnabled(.transaction) },
                     set: { if $0 { enable(.transaction) } else { requestAuth(for: .transaction) } }
                 )) {
-                    Label { Text("Payment Confirmation") }
-                        icon: { Image(systemName: "faceid").foregroundStyle(.green) }
+                    Label {
+                        Text(String(localized: "label_payment_confirmation", defaultValue: "Payment Confirmation"))
+                    }
+                    icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
                 .disabled(!BiometricService.canUseBiometrics)
             }
         }
-        .navigationTitle("App Access")
+        .navigationTitle(String(localized: "title_app_access", defaultValue: "App Access"))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $authTarget) { target in
             ToggleAuthSheet(target: target)
@@ -86,23 +88,23 @@ struct ToggleAuthSheet: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
-                Button("Continue") {
+                Button(String(localized: "button_continue", defaultValue: "Continue")) {
                     Task { await performAuth() }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
-                Button("Cancel") {
+                Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
                     dismiss()
                 }
                 .foregroundStyle(.secondary)
             }
             .padding()
-            .navigationTitle("Security")
+            .navigationTitle(String(localized: "title_security", defaultValue: "Security"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
                 }
             }
         }

@@ -86,24 +86,32 @@ struct SendView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Invoice, Offer, or Address") {
-                    TextField("Paste invoice, bolt12 offer, or address...", text: $input, axis: .vertical)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(3...6)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                Section(String(localized: "header_invoice_address", defaultValue: "Invoice, Offer, or Address")) {
+                    TextField(
+                        String(localized: "placeholder_invoice",
+                               defaultValue: "Paste invoice, bolt12 offer, or address..."),
+                        text: $input,
+                        axis: .vertical
+                    )
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(3...6)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
                 }
 
                 if !input.trimmingCharacters(in: .whitespaces).isEmpty {
                     Section {
                         switch detectedType {
                         case .bolt11:
-                            Label("Bolt11 Invoice", systemImage: "bolt.fill")
-                                .foregroundStyle(.blue)
+                            Label(
+                                String(localized: "label_bolt11", defaultValue: "Bolt11 Invoice"),
+                                systemImage: "bolt.fill"
+                            )
+                            .foregroundStyle(.blue)
                             if let msat = parsedBolt11Msat, msat > 0 {
                                 let sats = msat / 1000
                                 HStack {
-                                    Text("Amount")
+                                    Text(String(localized: "label_amount_row", defaultValue: "Amount"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 2) {
@@ -117,19 +125,22 @@ struct SendView: View {
                                     }
                                 }
                                 HStack {
-                                    Text("Fee")
+                                    Text(String(localized: "label_fee_row", defaultValue: "Fee"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("< 1%")
+                                    Text(String(localized: "info_fee_approx", defaultValue: "< 1%"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             } else if isAmountlessBolt11 {
-                                TextField("Amount (USD)", text: $amountUSDStr)
-                                    .keyboardType(.decimalPad)
+                                TextField(
+                                    String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
+                                    text: $amountUSDStr
+                                )
+                                .keyboardType(.decimalPad)
                                 if manualAmountMsat > 0 {
                                     HStack {
-                                        Text("Amount")
+                                        Text(String(localized: "label_amount_row", defaultValue: "Amount"))
                                             .foregroundStyle(.secondary)
                                         Spacer()
                                         VStack(alignment: .trailing, spacing: 2) {
@@ -143,24 +154,30 @@ struct SendView: View {
                                         }
                                     }
                                     HStack {
-                                        Text("Fee")
+                                        Text(String(localized: "label_fee_row", defaultValue: "Fee"))
                                             .foregroundStyle(.secondary)
                                         Spacer()
-                                        Text("< 1%")
+                                        Text(String(localized: "info_fee_approx", defaultValue: "< 1%"))
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
                                 }
                             }
                         case .bolt12:
-                            Label("Bolt12 Offer", systemImage: "bolt.fill")
-                                .foregroundStyle(.purple)
-                            TextField("Amount (USD)", text: $amountSats)
-                                .keyboardType(.decimalPad)
-                                .autocorrectionDisabled()
+                            Label(
+                                String(localized: "label_bolt12_offer", defaultValue: "Bolt12 Offer"),
+                                systemImage: "bolt.fill"
+                            )
+                            .foregroundStyle(.purple)
+                            TextField(
+                                String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
+                                text: $amountSats
+                            )
+                            .keyboardType(.decimalPad)
+                            .autocorrectionDisabled()
                             if let usd = displayUSD {
                                 HStack {
-                                    Text("Amount")
+                                    Text(String(localized: "label_amount", defaultValue: "Amount"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 2) {
@@ -172,23 +189,29 @@ struct SendView: View {
                                     }
                                 }
                                 HStack {
-                                    Text("Fee")
+                                    Text(String(localized: "label_fee", defaultValue: "Fee"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("< 1%")
+                                    Text(String(localized: "info_fee_approx", defaultValue: "< 1%"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             }
                         case .onchain:
-                            Label("On-chain Address", systemImage: "link")
-                                .foregroundStyle(.orange)
-                            TextField("Amount (USD)", text: $amountSats)
-                                .keyboardType(.decimalPad)
-                                .autocorrectionDisabled()
+                            Label(
+                                String(localized: "label_on_chain_address", defaultValue: "On-chain Address"),
+                                systemImage: "link"
+                            )
+                            .foregroundStyle(.orange)
+                            TextField(
+                                String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
+                                text: $amountSats
+                            )
+                            .keyboardType(.decimalPad)
+                            .autocorrectionDisabled()
                             if let usd = displayUSD {
                                 HStack {
-                                    Text("Amount")
+                                    Text(String(localized: "label_amount", defaultValue: "Amount"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
                                     VStack(alignment: .trailing, spacing: 2) {
@@ -200,22 +223,25 @@ struct SendView: View {
                                     }
                                 }
                                 HStack {
-                                    Text("Fee")
+                                    Text(String(localized: "label_network_fee", defaultValue: "Network fee"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("Network fee")
+                                    Text(String(localized: "label_network_fee", defaultValue: "Network fee"))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             }
                             if appState.nodeService.channels.contains(where: \.isChannelReady) {
-                                Text("Will route via splice-out")
+                                Text(String(localized: "info_splice_out", defaultValue: "Will route via splice-out"))
                                     .font(.caption)
                                     .foregroundStyle(.orange)
                             }
                         case .unknown:
-                            Label("Unrecognized format", systemImage: "questionmark.circle")
-                                .foregroundStyle(.secondary)
+                            Label(
+                                String(localized: "label_unrecognized_format", defaultValue: "Unrecognized format"),
+                                systemImage: "questionmark.circle"
+                            )
+                            .foregroundStyle(.secondary)
                         }
                     }
 
@@ -232,8 +258,11 @@ struct SendView: View {
                 if success {
                     Section {
                         VStack(spacing: 4) {
-                            Label("Payment sent!", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
+                            Label(
+                                String(localized: "success_sent", defaultValue: "Payment sent!"),
+                                systemImage: "checkmark.circle.fill"
+                            )
+                            .foregroundStyle(.green)
                             if sentAmountSats > 0 {
                                 let price = appState.btcPrice
                                 if price > 0 {
@@ -259,7 +288,7 @@ struct SendView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
                         } else {
-                            Text("Send Payment")
+                            Text(String(localized: "button_send_payment", defaultValue: "Send Payment"))
                                 .fontWeight(.semibold)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
@@ -272,11 +301,14 @@ struct SendView: View {
                     .padding(.bottom, 8)
                 }
             }
-            .navigationTitle("Send")
+            .navigationTitle(String(localized: "button_send", defaultValue: "Send"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(success ? "Done" : "Cancel") { dismiss() }
+                    Button(success ? String(localized: "button_done", defaultValue: "Done") : String(
+                        localized: "button_cancel",
+                        defaultValue: "Cancel"
+                    )) { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: 16) {
@@ -302,7 +334,10 @@ struct SendView: View {
                        let code = extractQRCode(from: image) {
                         input = code
                     } else {
-                        qrAlertMessage = "Selected image doesn't contain a Lightning invoice or Bitcoin address QR code."
+                        qrAlertMessage = String(
+                            localized: "alert_qr_error",
+                            defaultValue: "Selected image doesn't contain a Lightning invoice or Bitcoin address QR code."
+                        )
                         showQRAlert = true
                     }
                     selectedPhotoItem = nil
@@ -317,8 +352,8 @@ struct SendView: View {
                     onCancel: { showScanner = false }
                 )
             }
-            .alert("No QR Code Found", isPresented: $showQRAlert) {
-                Button("OK", role: .cancel) {}
+            .alert(String(localized: "alert_no_qr", defaultValue: "No QR Code Found"), isPresented: $showQRAlert) {
+                Button(String(localized: "button_ok", defaultValue: "OK"), role: .cancel) {}
             } message: {
                 Text(qrAlertMessage)
             }
@@ -469,7 +504,10 @@ struct SendView: View {
                 sentAmountSats = sats
 
             case .unknown:
-                errorMessage = "Unrecognized payment format"
+                errorMessage = String(
+                    localized: "error_unrecognized_format",
+                    defaultValue: "Unrecognized payment format"
+                )
                 return
             }
 

@@ -12,9 +12,9 @@ struct HistoryView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 // Segment picker
-                Picker("History", selection: $selectedSegment) {
-                    Text("Trades").tag(0)
-                    Text("Payments").tag(1)
+                Picker(String(localized: "picker_history", defaultValue: "History"), selection: $selectedSegment) {
+                    Text(String(localized: "segment_trades", defaultValue: "Trades")).tag(0)
+                    Text(String(localized: "segment_payments", defaultValue: "Payments")).tag(1)
                 }
                 .pickerStyle(.segmented)
                 .padding()
@@ -30,15 +30,27 @@ struct HistoryView: View {
                 .listStyle(.plain)
                 .overlay {
                     if selectedSegment == 0 && trades.isEmpty {
-                        ContentUnavailableView("No Trades", systemImage: "arrow.left.arrow.right",
-                                               description: Text("Buy or sell BTC to see trades here."))
+                        ContentUnavailableView(
+                            String(localized: "empty_trades_title", defaultValue: "No Trades"),
+                            systemImage: "arrow.left.arrow.right",
+                            description: Text(String(
+                                localized: "empty_trades_desc",
+                                defaultValue: "Buy or sell BTC to see trades here."
+                            ))
+                        )
                     } else if selectedSegment == 1 && payments.isEmpty {
-                        ContentUnavailableView("No Payments", systemImage: "bolt.fill",
-                                               description: Text("Send or receive payments to see history here."))
+                        ContentUnavailableView(
+                            String(localized: "empty_payments_title", defaultValue: "No Payments"),
+                            systemImage: "bolt.fill",
+                            description: Text(String(
+                                localized: "empty_payments_desc",
+                                defaultValue: "Send or receive payments to see history here."
+                            ))
+                        )
                     }
                 }
             }
-            .navigationTitle("History")
+            .navigationTitle(String(localized: "title_history", defaultValue: "History"))
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 loadHistory()
@@ -98,7 +110,9 @@ struct TradeRowView: View {
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(isBuy ? "Buy BTC" : "Sell BTC")
+                Text(isBuy
+                    ? String(localized: "trade_buy_btc", defaultValue: "Buy BTC")
+                    : String(localized: "trade_sell_btc", defaultValue: "Sell BTC"))
                     .fontWeight(.medium)
                 Text(trade.date, style: .relative)
                     .font(.caption)
@@ -139,7 +153,9 @@ struct PaymentRowView: View {
                 .font(.title3)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(payment.isIncoming ? "Received" : "Sent")
+                Text(payment.isIncoming
+                    ? String(localized: "payment_received", defaultValue: "Received")
+                    : String(localized: "payment_sent", defaultValue: "Sent"))
                     .fontWeight(.medium)
                 Text(paymentTypeLabel)
                     .font(.caption)

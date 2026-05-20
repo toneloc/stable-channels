@@ -88,7 +88,7 @@ struct PriceChartView: View {
                             .font(.title3.bold())
                     } else {
                         if !compact {
-                            Text("BTC Price")
+                            Text(String(localized: "label_btc_price", defaultValue: "BTC Price"))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -209,7 +209,7 @@ struct PriceChartView: View {
                     .fill(.quaternary)
                     .frame(height: compact ? 220 : 150)
                     .overlay {
-                        Text("Collecting price data...")
+                        Text(String(localized: "status_collecting_data", defaultValue: "Collecting price data..."))
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }

@@ -24,23 +24,26 @@ struct OnChainSendView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Destination Address") {
-                    TextField("bc1...", text: $address)
+                Section(String(localized: "header_destination_address", defaultValue: "Destination Address")) {
+                    TextField(String(localized: "placeholder_address", defaultValue: "bc1..."), text: $address)
                         .font(.system(.body, design: .monospaced))
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
 
-                Section("Amount") {
+                Section(String(localized: "header_amount", defaultValue: "Amount")) {
                     if sendAll {
-                        Text("All available funds")
+                        Text(String(localized: "label_all_available_funds", defaultValue: "All available funds"))
                             .foregroundStyle(.secondary)
                     } else {
                         HStack {
-                            Text("$")
+                            Text(String(localized: "label_dollar_sign", defaultValue: "$"))
                                 .foregroundStyle(.secondary)
-                            TextField("0.00", text: $amountUSDStr)
-                                .keyboardType(.decimalPad)
+                            TextField(
+                                String(localized: "placeholder_amount_usd", defaultValue: "0.00"),
+                                text: $amountUSDStr
+                            )
+                            .keyboardType(.decimalPad)
                         }
                         if let sats = amountSats, sats > 0 {
                             Text("\(sats.btcSpacedFormatted) BTC")
@@ -48,14 +51,17 @@ struct OnChainSendView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    Toggle("Send All", isOn: $sendAll)
+                    Toggle(String(localized: "toggle_send_all", defaultValue: "Send All"), isOn: $sendAll)
                 }
 
                 if hasReadyChannel {
                     Section {
-                        Text("Funds will be sent via splice-out from your Lightning channel.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text(String(
+                            localized: "info_splice_out_funds",
+                            defaultValue: "Funds will be sent via splice-out from your Lightning channel."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
 
@@ -66,7 +72,8 @@ struct OnChainSendView: View {
                         if isSending {
                             ProgressView().frame(maxWidth: .infinity)
                         } else {
-                            Text("Send").frame(maxWidth: .infinity)
+                            Text(String(localized: "button_send_payment", defaultValue: "Send"))
+                                .frame(maxWidth: .infinity)
                         }
                     }
                     .disabled(address.isEmpty || (!sendAll && (amountSats ?? 0) == 0) || isSending)
@@ -74,9 +81,12 @@ struct OnChainSendView: View {
 
                 if let txid {
                     Section {
-                        Label("Sent!", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("TXID: \(txid)")
+                        Label(
+                            String(localized: "success_sent", defaultValue: "Sent!"),
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .foregroundStyle(.green)
+                        Text(String(localized: "label_txid", defaultValue: "TXID") + ": \(txid)")
                             .font(.caption)
                             .textSelection(.enabled)
                     }
@@ -84,11 +94,17 @@ struct OnChainSendView: View {
 
                 if spliceSuccess {
                     Section {
-                        Label("Splice-out initiated!", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Funds will arrive on-chain after confirmation.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Label(
+                            String(localized: "success_splice_out", defaultValue: "Splice-out initiated!"),
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .foregroundStyle(.green)
+                        Text(String(
+                            localized: "info_funds_arrive_onchain",
+                            defaultValue: "Funds will arrive on-chain after confirmation."
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
 
@@ -98,11 +114,11 @@ struct OnChainSendView: View {
                     }
                 }
             }
-            .navigationTitle("Send On-Chain")
+            .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send On-Chain"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
                 }
             }
         }
@@ -138,7 +154,10 @@ struct OnChainSendView: View {
                     throw NSError(
                         domain: "",
                         code: 0,
-                        userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
+                        userInfo: [NSLocalizedDescriptionKey: String(
+                            localized: "error_splice_in_progress",
+                            defaultValue: "A splice is already in progress — try again shortly"
+                        )]
                     )
                 }
                 try appState.nodeService.spliceOut(
