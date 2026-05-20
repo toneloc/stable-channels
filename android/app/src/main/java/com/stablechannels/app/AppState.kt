@@ -511,7 +511,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val feeRate = fetchFeeRate() ?: 2L
-        val feeReserve = feeRate * 170  // ~170 vbytes for splice tx
+        val feeReserve = feeRate * 250  // ~250 vbytes for splice tx (170 was too tight at low fees)
         val spendable = nodeService.spendableOnchainSats()
         if (spendable <= feeReserve) {
             _statusMessage.value = "Insufficient on-chain balance"

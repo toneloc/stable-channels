@@ -1288,7 +1288,7 @@ class AppState {
         }
 
         let feeRateSatVb = fetchFeeRate() ?? 2
-        let feeReserve = feeRateSatVb * 170
+        let feeReserve = feeRateSatVb * 250  // ~250 vbytes for splice tx (170 was too tight at low fees)
         let spendable = balances.spendableOnchainBalanceSats
         guard spendable > feeReserve else {
             statusMessage = "Insufficient on-chain balance"
