@@ -253,6 +253,7 @@ pub fn setup_lsp_node(electrsd: &ElectrsD) -> Node {
         min_payment_size_msat: 0,
         max_payment_size_msat: 100_000_000_000,
         client_trusts_lsp: true,
+        disable_client_reserve: false,
     };
     builder.set_liquidity_provider_lsps2(service_config);
 

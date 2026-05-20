@@ -1219,6 +1219,7 @@ impl ServerApp {
                 min_payment_size_msat: MIN_PAYMENT_SIZE_MSAT,
                 max_payment_size_msat: MAX_PAYMENT_SIZE_MSAT,
                 client_trusts_lsp: true,
+                disable_client_reserve: false,
             };
             builder.set_liquidity_provider_lsps2(service_config);
         }
