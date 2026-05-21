@@ -14,7 +14,11 @@ class StableChannelsApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        FirebaseApp.initializeApp(this)
+        try {
+            FirebaseApp.initializeApp(this)
+        } catch (_: Exception) {
+            // google-services.json missing — push notifications disabled
+        }
         createNotificationChannel()
     }
 

@@ -61,6 +61,9 @@ class AppState(private val context: Context) : ViewModel() {
     private val _spendableOnchainSats = MutableStateFlow(0L)
     val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
 
+    private val _nativeSats: MutableStateFlow<Long>
+    val nativeSats: StateFlow<Long> get() = _nativeSats
+
     init {
         val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
@@ -68,6 +71,19 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
+        _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
+
+        // Restore cached channel state so UI shows correct slider position immediately
+        val cachedChannelId = prefs.getString("cached_channel_id", null)
+        val cachedUserChannelId = prefs.getString("cached_user_channel_id", null)
+        val cachedExpectedUsd = prefs.getFloat("cached_expected_usd", 0f)
+        if (cachedUserChannelId != null) {
+            _stableChannel.value = StableChannel.DEFAULT.copy(
+                channelId = cachedChannelId ?: "",
+                userChannelId = cachedUserChannelId,
+                expectedUSD = USD(cachedExpectedUsd.toDouble())
+            )
+        }
     }
 
     private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
@@ -104,11 +120,14 @@ class AppState(private val context: Context) : ViewModel() {
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Resolve best esplora endpoint
-                chainUrl = resolveChainUrl()
+                // Use cached chain URL, resolve in background if stale
+                val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                chainUrl = prefs.getString("cached_chain_url", null) ?: resolveChainUrl().also {
+                    prefs.edit().putString("cached_chain_url", it).apply()
+                }
 
                 databaseService = DatabaseService(context)
-                databaseService?.seedHistoricalPrices()
+                launch { databaseService?.seedHistoricalPrices() }
                 tradeService = TradeService(nodeService)
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
@@ -417,6 +436,12 @@ class AppState(private val context: Context) : ViewModel() {
 
             databaseService?.deleteChannel(sc.userChannelId)
             _stableChannel.value = StableChannel.DEFAULT
+            // Clear cached channel state
+            context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                .remove("cached_channel_id")
+                .remove("cached_user_channel_id")
+                .remove("cached_expected_usd")
+                .apply()
         }
 
         // Keep isChannelClosing = true until lightning balance actually drains to 0
@@ -614,10 +639,18 @@ class AppState(private val context: Context) : ViewModel() {
             else -> lightning + onchain
         }
 
+        // Calculate native sats (total minus stable portion) for slider position
+        val sc = _stableChannel.value
+        val btcPrice = priceService.currentPrice.value
+        val stableSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
+        val native = (_totalBalanceSats.value - stableSats).coerceAtLeast(0L)
+        _nativeSats.value = native
+
         // Cache for instant display on next launch
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putLong("cached_lightning_sats", lightning)
             .putLong("cached_onchain_sats", onchain)
+            .putLong("cached_native_sats", native)
             .apply()
     }
 
@@ -638,6 +671,12 @@ class AppState(private val context: Context) : ViewModel() {
             receiverSats = sc.stableReceiverBTC.sats,
             latestPrice = sc.latestPrice
         )
+        // Cache in SharedPreferences so UI has correct state on next launch
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+            .putString("cached_channel_id", sc.channelId)
+            .putString("cached_user_channel_id", sc.userChannelId)
+            .putFloat("cached_expected_usd", sc.expectedUSD.amount.toFloat())
+            .apply()
     }
 
     private fun loadChannelFromDB() {

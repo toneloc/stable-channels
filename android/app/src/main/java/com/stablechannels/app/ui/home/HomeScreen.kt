@@ -54,6 +54,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val totalSats by appState.totalBalanceSats.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val sc by appState.stableChannel.collectAsState()
+    val nativeSatsCached by appState.nativeSats.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
@@ -192,10 +193,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             if (totalSats > 0) {
                 BalanceBar(
                     stableUSD = sc.expectedUSD.amount,
-                    nativeSats = run {
-                        val stblSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
-                        if (totalSats > stblSats) totalSats - stblSats else 0L
-                    },
+                    nativeSats = nativeSatsCached,
                     totalSats = totalSats,
                     btcPrice = btcPrice,
                     modifier = Modifier.padding(horizontal = 24.dp),
@@ -366,7 +364,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
 @Composable
 fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, pulse: Boolean = false, onClick: () -> Unit) {
-    Box(modifier = modifier.height(56.dp)) {
+    Box(modifier = modifier.height(56.dp).clip(RoundedCornerShape(12.dp))) {
         FilledTonalButton(
             onClick = onClick,
             modifier = Modifier.fillMaxSize(),
