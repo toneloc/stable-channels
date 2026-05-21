@@ -3,6 +3,7 @@ import UserNotifications
 
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
+    @AppStorage("user_theme") private var themeSelection: String = "system"
     @State private var showCloseChannelAlert = false
     @State private var showNodeId = false
     @State private var copiedField: String?
@@ -13,9 +14,28 @@ struct SettingsView: View {
     @State private var isRestoring = false
     @State private var restoreError: String?
 
+    private func themeButton(_ tag: String, _ label: String) -> some View {
+        Button {
+            themeSelection = tag
+        } label: {
+            Text(label)
+                .font(.caption.bold())
+        }
+    }
+
     var body: some View {
         NavigationStack {
             List {
+                // Appearance
+                Section(String(localized: "section_appearance", defaultValue: "Appearance")) {
+                    Picker(String(localized: "label_theme", defaultValue: "Theme"), selection: $themeSelection) {
+                        Text(String(localized: "theme_system", defaultValue: "System")).tag("system")
+                        Text(String(localized: "theme_light", defaultValue: "Light")).tag("light")
+                        Text(String(localized: "theme_dark", defaultValue: "Dark")).tag("dark")
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 // Node Info
                 Section(String(localized: "section_node", defaultValue: "Node")) {
                     HStack {

@@ -8,6 +8,16 @@ struct ContentView: View {
     @State private var authInProgress = false
     @State private var hasTriggeredAuth = false
 
+    @AppStorage("user_theme") private var themeSelection: String = "system"
+
+    private var colorScheme: ColorScheme? {
+        switch themeSelection {
+        case "light": return .light
+        case "dark": return .dark
+        default: return nil
+        }
+    }
+
     private var biometricEnabled: Bool {
         UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
     }
@@ -49,6 +59,7 @@ struct ContentView: View {
                     }
             }
         }
+        .preferredColorScheme(colorScheme)
         .onChange(of: scenePhase) { _, newPhase in
             // Lock only on .background. .inactive fires during app switcher and Face ID prompts.
             if newPhase == .background {
