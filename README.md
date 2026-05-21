@@ -78,6 +78,16 @@ cargo run --bin lsp_frontend
 
 More instructions on running the LSP backend are forthcoming.
 
+### Contributing
+
+After cloning, install the git hooks (one-time):
+
+```bash
+./.githooks/install.sh
+```
+
+This points git at `.githooks/` so the pre-commit checks (secret scanning, `cargo fmt`, `cargo clippy`, large-file guard) run automatically on every commit.
+
 ### Stable Channels Process
 
 Every 30 seconds, the price of bitcoin:

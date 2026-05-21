@@ -1,36 +1,152 @@
-#!/bin/sh
-# Pre-commit hook: run SwiftFormat on staged iOS files
+#!/bin/bash
+#
+# Pre-commit hooks for Stable Channels
 # Installed via: git config core.hooksPath .githooks
+#
 
-set -e
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
 
-# Find repo root dynamically
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
-if [ -z "$REPO_ROOT" ]; then
-    echo "[swiftformat] not in a git repo. Skipping..."
-    exit 0
+FAIL=0
+PASS=0
+
+pass() { echo -e "  ${GREEN}✓${NC} $1"; ((PASS++)); }
+fail() { echo -e "  ${RED}✗${NC} $1"; ((FAIL++)); }
+skip() { echo -e "  ${GREEN}-${NC} $1"; }
+
+echo "Running pre-commit checks..."
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+
+# ─── 1. Secrets Scanner ─────────────────────────────────────────────
+
+# Block .p8 key files
+if echo "$STAGED" | grep -qE '\.p8$'; then
+    fail "No .p8 key files (APNs keys should not be committed)"
+else
+    pass "No .p8 key files"
 fi
 
-SWIFTFORMAT="$(command -v swiftformat 2>/dev/null)"
-if [ -z "$SWIFTFORMAT" ]; then
-    echo "[swiftformat] not found. Install: brew install swiftformat"
-    exit 0
+# Block seed files
+if echo "$STAGED" | grep -qiE 'keys_seed|seed\.bin'; then
+    fail "No seed files"
+else
+    pass "No seed files"
 fi
 
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.swift$')
-if [ -z "$STAGED_FILES" ]; then
-    exit 0
+# Scan staged diffs for hardcoded secrets
+SECRETS_FOUND=false
+for file in $STAGED; do
+    [ -f "$file" ] || continue
+    # Skip the hooks themselves — their patterns would match their own grep strings
+    case "$file" in .githooks/*) continue ;; esac
+    file "$file" | grep -q "text" || continue
+
+    DIFF=$(git diff --cached -- "$file")
+
+    # APNs device tokens (64 hex chars)
+    if echo "$DIFF" | grep -qE '^\+.*DEVICE_TOKEN.*=.*"[0-9a-f]{64}"'; then
+        echo "    Found device token in: $file"
+        SECRETS_FOUND=true
+    fi
+
+    # Private keys
+    if echo "$DIFF" | grep -qiE '^\+.*(BEGIN PRIVATE KEY|BEGIN EC PRIVATE KEY)'; then
+        echo "    Found private key in: $file"
+        SECRETS_FOUND=true
+    fi
+done
+
+if $SECRETS_FOUND; then
+    fail "No hardcoded secrets in diffs"
+else
+    pass "No hardcoded secrets in diffs"
 fi
 
-IOS_FILES=$(echo "$STAGED_FILES" | grep '^ios/')
-if [ -z "$IOS_FILES" ]; then
-    exit 0
+# ─── 2. Gitignore Verification ──────────────────────────────────────
+
+GITIGNORE_OK=true
+for pattern in "AuthKey*.p8" "send_push.sh" "*.apns"; do
+    if ! grep -qF "$pattern" .gitignore 2>/dev/null; then
+        echo "    Missing from .gitignore: $pattern"
+        GITIGNORE_OK=false
+    fi
+done
+
+if $GITIGNORE_OK; then
+    pass "Gitignore has sensitive patterns"
+else
+    fail "Gitignore has sensitive patterns"
 fi
 
-echo "[swiftformat] Running on staged iOS files..."
-echo "$IOS_FILES" | xargs swiftformat --config ios/.swiftformat
+# ─── 3. Large File Guard ────────────────────────────────────────────
 
-# Re-stage formatted files
-echo "$IOS_FILES" | xargs git add
+LARGE_FILES=false
+for file in $STAGED; do
+    if [ -f "$file" ]; then
+        SIZE=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
+        if [ "$SIZE" -gt 1048576 ]; then
+            echo "    Large file: $file ($(( SIZE / 1024 ))KB)"
+            LARGE_FILES=true
+        fi
+    fi
+done
 
-echo "[swiftformat] done"
+if $LARGE_FILES; then
+    fail "No large files (>1MB)"
+else
+    pass "No large files (>1MB)"
+fi
+
+# ─── 4. Cargo fmt ───────────────────────────────────────────────────
+
+if echo "$STAGED" | grep -qE '\.rs$'; then
+    if cargo fmt --check --quiet 2>/dev/null; then
+        pass "Cargo fmt"
+    else
+        fail "Cargo fmt (run 'cargo fmt' to fix)"
+    fi
+else
+    skip "Cargo fmt (no .rs changes)"
+fi
+
+# ─── 5. Cargo clippy ────────────────────────────────────────────────
+
+if echo "$STAGED" | grep -qE '\.rs$'; then
+    if cargo clippy --quiet -- -D warnings 2>/dev/null; then
+        pass "Cargo clippy"
+    else
+        fail "Cargo clippy"
+    fi
+else
+    skip "Cargo clippy (no .rs changes)"
+fi
+
+# ─── 6. SwiftFormat (iOS) ───────────────────────────────────────────
+
+IOS_STAGED=$(echo "$STAGED" | grep '^ios/.*\.swift$')
+if [ -z "$IOS_STAGED" ]; then
+    skip "SwiftFormat (no iOS .swift changes)"
+else
+    SWIFTFORMAT="$(command -v swiftformat 2>/dev/null)"
+    if [ -z "$SWIFTFORMAT" ]; then
+        skip "SwiftFormat (not installed — brew install swiftformat)"
+    else
+        echo "$IOS_STAGED" | xargs swiftformat --config ios/.swiftformat 2>/dev/null
+        # Re-stage any files SwiftFormat rewrote
+        echo "$IOS_STAGED" | xargs git add
+        pass "SwiftFormat"
+    fi
+fi
+
+# ─── Result ──────────────────────────────────────────────────────────
+
+echo ""
+if [ $FAIL -gt 0 ]; then
+    echo -e "${RED}$FAIL check(s) failed.${NC} Fix issues before committing."
+    exit 1
+else
+    echo -e "${GREEN}All $PASS checks passed.${NC}"
+    exit 0
+fi
