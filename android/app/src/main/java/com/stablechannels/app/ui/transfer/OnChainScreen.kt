@@ -5,6 +5,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingSplice
@@ -77,6 +79,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
                     label = { Text("Amount (USD)") },
                     prefix = { Text("$") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth()
                 )
                 val usd = amountUSDStr.toDoubleOrNull() ?: 0.0

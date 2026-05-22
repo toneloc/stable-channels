@@ -1,7 +1,9 @@
 package com.stablechannels.app.ui.transfer
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -118,6 +120,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
                     label = { Text("Amount (USD)") },
                     prefix = { Text("$") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth()
                 )
                 if (manualAmountSats > 0) {

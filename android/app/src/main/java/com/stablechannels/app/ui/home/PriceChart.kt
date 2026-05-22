@@ -26,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PriceRecord
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.util.usdFormatted
@@ -62,6 +63,7 @@ enum class ChartPeriod(val label: String, val days: Int, val usesHourly: Boolean
 
 @Composable
 fun PriceChart(
+    appState: AppState,
     databaseService: DatabaseService?,
     currentPrice: Double,
     modifier: Modifier = Modifier
@@ -70,24 +72,32 @@ fun PriceChart(
     var priceHistory by remember { mutableStateOf(emptyList<PriceRecord>()) }
     var selectedPoint by remember { mutableStateOf<PriceRecord?>(null) }
 
-    // Cached data — loaded once
-    var allDailyPrices by remember { mutableStateOf(emptyList<PriceRecord>()) }
-    var hourlyPrices by remember { mutableStateOf(emptyList<PriceRecord>()) }
-    var dataLoaded by remember { mutableStateOf(false) }
+    // Local refs — initialized from AppState cache (survives tab switches)
+    var allDailyPrices by remember { mutableStateOf(appState.cachedChartDaily) }
+    var hourlyPrices by remember { mutableStateOf(appState.cachedChartHourly) }
+    var dataLoaded by remember { mutableStateOf(appState.chartDataLoaded) }
 
-    // Load all data once
+    // Load all data once per app lifecycle (cache in AppState)
     LaunchedEffect(Unit) {
         if (dataLoaded) return@LaunchedEffect
         withContext(Dispatchers.IO) {
-            hourlyPrices = databaseService?.getPriceHistory(24 * 30) ?: emptyList()
-
+            val hourly = databaseService?.getPriceHistory(24 * 30) ?: emptyList()
             val dailyPrices = databaseService?.getDailyPrices(99999) ?: emptyList()
             val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-            allDailyPrices = dailyPrices.mapNotNull { daily ->
+            val daily = dailyPrices.mapNotNull { daily ->
                 val date = fmt.parse(daily.date) ?: return@mapNotNull null
                 val ts = date.time / 1000
                 PriceRecord(id = ts, price = daily.close, source = "daily", timestamp = ts)
             }.sortedBy { it.timestamp }
+
+            // Write to local state
+            hourlyPrices = hourly
+            allDailyPrices = daily
+
+            // Persist in AppState cache for next tab switch
+            appState.cachedChartHourly = hourly
+            appState.cachedChartDaily = daily
+            appState.chartDataLoaded = true
         }
         dataLoaded = true
     }

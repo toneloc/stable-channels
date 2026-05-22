@@ -221,11 +221,10 @@ fun BalanceBar(
                     Icon(Icons.Default.Shield, contentDescription = null, tint = stableColor, modifier = Modifier.size(12.dp))
                     Text("USD", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = stableColor)
                 }
-                val stableSats = if (btcPrice > 0) (stableUSD / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
                 Text(
                     stableUSD.usdFormatted(),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = if (btcPrice > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
@@ -236,9 +235,9 @@ fun BalanceBar(
                     Icon(Icons.Default.CurrencyBitcoin, contentDescription = null, tint = nativeColor, modifier = Modifier.size(12.dp))
                 }
                 Text(
-                    nativeUSD.usdFormatted(),
+                    if (btcPrice > 0) nativeUSD.usdFormatted() else "...",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = if (btcPrice > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

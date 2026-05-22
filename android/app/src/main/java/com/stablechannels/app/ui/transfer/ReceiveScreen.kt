@@ -2,7 +2,9 @@ package com.stablechannels.app.ui.transfer
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -153,6 +155,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 onValueChange = { amountUSD = it.filter { c -> c.isDigit() || c == '.' } },
                 placeholder = { Text("0.00") },
                 prefix = { Text("$") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
 

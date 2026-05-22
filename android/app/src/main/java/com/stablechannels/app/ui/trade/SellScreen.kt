@@ -1,7 +1,9 @@
 package com.stablechannels.app.ui.trade
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -57,6 +59,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     onValueChange = { amountText = it },
                     label = { Text("Amount (USD)") },
                     prefix = if (amountText.isNotEmpty()) {{ Text("$", fontSize = 16.sp, fontWeight = FontWeight.Medium) }} else null,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier.fillMaxWidth()
                 )
 
