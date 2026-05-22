@@ -115,6 +115,11 @@ class AppState(private val context: Context) : ViewModel() {
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
         private set
 
+    /** Cached chart data — survives tab switches since AppState is a ViewModel. */
+    var cachedChartHourly: List<com.stablechannels.app.models.PriceRecord> = emptyList()
+    var cachedChartDaily: List<com.stablechannels.app.models.PriceRecord> = emptyList()
+    var chartDataLoaded = false
+
     private val httpClient = OkHttpClient()
 
     fun start() {
@@ -133,8 +138,14 @@ class AppState(private val context: Context) : ViewModel() {
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
                 AuditService.setLogPath(auditPath)
 
+                // Load cached channel state so UI has correct slider/values immediately
                 loadChannelFromDB()
                 priceService.startAutoRefresh()
+
+                // Resolve best esplora endpoint in parallel
+                launch {
+                    chainUrl = resolveChainUrl()
+                }
 
                 // Subscribe to LDK events
                 launch { nodeService.events.collect { handleEvent(it) } }
@@ -729,11 +740,15 @@ class AppState(private val context: Context) : ViewModel() {
 
         FCMService.saveNodeId(context, nodeId)
 
-        FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-            FCMService.saveToken(context, token)
-            viewModelScope.launch(Dispatchers.IO) {
-                FCMService.registerTokenWithLSP(token, nodeId)
+        try {
+            FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+                FCMService.saveToken(context, token)
+                viewModelScope.launch(Dispatchers.IO) {
+                    FCMService.registerTokenWithLSP(token, nodeId)
+                }
             }
+        } catch (_: Exception) {
+            // Firebase not configured — push notifications disabled
         }
     }
 

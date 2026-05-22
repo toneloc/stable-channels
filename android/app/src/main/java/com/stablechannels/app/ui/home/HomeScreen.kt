@@ -28,7 +28,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,14 +76,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 notificationsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PermissionChecker.PERMISSION_GRANTED
                 } else true
-                appState.ensureLSPConnected()
+                // Run blocking LDK calls off main thread
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    appState.ensureLSPConnected()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-
-    LaunchedEffect(Unit) { appState.ensureLSPConnected() }
 
     val totalUSD = (totalSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val scope = rememberCoroutineScope()
@@ -174,14 +175,31 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
                     )
                 } else {
-                    Text(
-                        text = totalUSD.usdFormatted(),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    if (btcPrice > 0) {
+                        Text(
+                            text = totalUSD.usdFormatted(),
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else if (totalSats > 0) {
+                        Text(
+                            text = "Fetching price...",
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        Text(
+                            text = "$0.00",
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
                 Text(
-                    text = if (showBTC) totalUSD.usdFormatted() else totalSats.btcSpacedFormatted(),
+                    text = if (showBTC) {
+                        if (btcPrice > 0) totalUSD.usdFormatted() else "—"
+                    } else totalSats.btcSpacedFormatted(),
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -279,6 +297,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // Price chart
             if (btcPrice > 0) {
                 PriceChart(
+                    appState = appState,
                     databaseService = appState.databaseService,
                     currentPrice = btcPrice
                 )
@@ -382,21 +401,14 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
                 val transition = rememberInfiniteTransition(label = "btnPulse")
                 val alpha by transition.animateFloat(
                     initialValue = 0f,
-                    targetValue = 0.15f,
+                    targetValue = 0.2f,
                     animationSpec = infiniteRepeatable(animation = tween(800, easing = EaseInOut), repeatMode = RepeatMode.Reverse),
                     label = "btnAlpha"
-                )
-                val pulseScale by transition.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 1.04f,
-                    animationSpec = infiniteRepeatable(animation = tween(800, easing = EaseInOut), repeatMode = RepeatMode.Reverse),
-                    label = "btnScale"
                 )
                 Box(
                     Modifier
                         .matchParentSize()
-                        .scale(pulseScale)
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(ButtonDefaults.shape)
                         .background(color.copy(alpha = alpha))
                 )
             }
