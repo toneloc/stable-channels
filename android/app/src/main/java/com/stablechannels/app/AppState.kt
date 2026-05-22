@@ -110,6 +110,7 @@ class AppState(private val context: Context) : ViewModel() {
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
     private var stabilityJob: Job? = null
+    private var pendingDepositJob: Job? = null
 
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
@@ -158,6 +159,7 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
+                    detectOnchainDeposit()
                     // Restore fundingTxid
                     fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
                         .getString("funding_txid", null)
@@ -212,6 +214,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun stop() {
         stabilityJob?.cancel()
+        pendingDepositJob?.cancel()
         priceService.stopAutoRefresh()
         nodeService.stop()
     }
@@ -513,7 +516,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun detectOnchainDeposit() {
+    internal fun detectOnchainDeposit() {
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
         if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
@@ -531,8 +534,21 @@ class AppState(private val context: Context) : ViewModel() {
                 btcPrice = price
             )
             AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf("sats" to depositSats))
+            // Start faster polling until deposit confirms
+            startPendingDepositPolling()
         }
         prevOnchainSats = currentSats
+    }
+
+    /** Poll every 10s until spendable on-chain balance updates (deposit confirmed). */
+    private fun startPendingDepositPolling() {
+        pendingDepositJob?.cancel()
+        pendingDepositJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive && _spendableOnchainSats.value == 0L && _onchainBalanceSats.value > 0) {
+                delay(10_000)
+                refreshBalances()
+            }
+        }
     }
 
     fun sweepToChannel() {
@@ -655,11 +671,12 @@ class AppState(private val context: Context) : ViewModel() {
             else -> lightning + onchain
         }
 
-        // Calculate native sats (total minus stable portion) for slider position
+        // Calculate native sats (lightning minus stable portion) for slider position
+        // On-chain funds excluded — they're not in the channel yet
         val sc = _stableChannel.value
         val btcPrice = priceService.currentPrice.value
         val stableSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
-        val native = (_totalBalanceSats.value - stableSats).coerceAtLeast(0L)
+        val native = (lightning - stableSats).coerceAtLeast(0L)
         _nativeSats.value = native
 
         // Cache for instant display on next launch

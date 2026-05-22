@@ -265,7 +265,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     fun setPendingSpliceTxid(txid: String) {
         writableDatabase.execSQL(
-            "UPDATE payments SET txid = ? WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY created_at DESC LIMIT 1)",
             arrayOf(txid)
         )
     }
