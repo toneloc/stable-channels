@@ -20,6 +20,9 @@
         }
       }
     },
+    "Active" : {
+
+    },
     "alert_close_channel_cancel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -96,9 +99,6 @@
           }
         }
       }
-    },
-    "App Access" : {
-
     },
     "app_name" : {
       "extractionState" : "manual",
@@ -309,6 +309,17 @@
         }
       }
     },
+    "button_copy_anyway" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Copy Anyway"
+          }
+        }
+      }
+    },
     "button_copy_invoice" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -338,6 +349,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Done"
+          }
+        }
+      }
+    },
+    "button_enable_in_settings" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enable in Settings"
           }
         }
       }
@@ -481,6 +503,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Swap"
+          }
+        }
+      }
+    },
+    "button_view_seed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "View Seed Words"
           }
         }
       }
@@ -738,6 +771,17 @@
         }
       }
     },
+    "error_restore_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore failed: "
+          }
+        }
+      }
+    },
     "error_seed_word_count" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -936,6 +980,31 @@
         }
       }
     },
+    "Inactive" : {
+
+    },
+    "info_backup_seed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Write these words down and store them safely. Anyone with these words can access your funds."
+          }
+        }
+      }
+    },
+    "info_device_token" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Used to deliver push notifications to this device."
+          }
+        }
+      }
+    },
     "info_fee_approx" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -969,6 +1038,28 @@
         }
       }
     },
+    "info_no_channel" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No channel open yet."
+          }
+        }
+      }
+    },
+    "info_node_id" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your node's public key. Share this to receive Lightning payments."
+          }
+        }
+      }
+    },
     "info_notifications_needed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -987,6 +1078,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Trade pending — check back soon"
+          }
+        }
+      }
+    },
+    "info_push_connectivity" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your device maintains a persistent connection to receive incoming payments and stability updates."
+          }
+        }
+      }
+    },
+    "info_push_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Background payments and stability updates"
+          }
+        }
+      }
+    },
+    "info_restore" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore will stop your current node and start fresh."
           }
         }
       }
@@ -1053,6 +1177,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Note: Funds require on-chain confirmation after splice completes."
+          }
+        }
+      }
+    },
+    "info_theme_setting" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System uses your device's appearance setting."
           }
         }
       }
@@ -1200,6 +1335,17 @@
         }
       }
     },
+    "label_background_service" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Background Service"
+          }
+        }
+      }
+    },
     "label_backing_sats" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1288,6 +1434,17 @@
         }
       }
     },
+    "label_build" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Build"
+          }
+        }
+      }
+    },
     "label_camera_denied" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1310,6 +1467,17 @@
         }
       }
     },
+    "label_channel_info" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Channel Info"
+          }
+        }
+      }
+    },
     "label_confirmations" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1317,6 +1485,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Confirmations"
+          }
+        }
+      }
+    },
+    "label_connection" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Connection"
           }
         }
       }
@@ -1416,6 +1595,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Expected USD"
+          }
+        }
+      }
+    },
+    "label_explorer" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Explorer"
           }
         }
       }
@@ -1541,6 +1731,39 @@
         }
       }
     },
+    "label_node_identity" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node Identity"
+          }
+        }
+      }
+    },
+    "label_node_status" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node Status"
+          }
+        }
+      }
+    },
+    "label_none" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "None"
+          }
+        }
+      }
+    },
     "label_notifications" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1607,6 +1830,17 @@
         }
       }
     },
+    "label_push_token" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Push Token"
+          }
+        }
+      }
+    },
     "label_sats_btc" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1625,6 +1859,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Status"
+          }
+        }
+      }
+    },
+    "label_theme" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Theme"
           }
         }
       }
@@ -1717,6 +1962,94 @@
         }
       }
     },
+    "link_about" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "About"
+          }
+        }
+      }
+    },
+    "link_app_access" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "App Access"
+          }
+        }
+      }
+    },
+    "link_appearance" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Appearance"
+          }
+        }
+      }
+    },
+    "link_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup"
+          }
+        }
+      }
+    },
+    "link_channel" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Channel"
+          }
+        }
+      }
+    },
+    "link_node" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node"
+          }
+        }
+      }
+    },
+    "link_notifications" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Notifications"
+          }
+        }
+      }
+    },
+    "link_push_connectivity" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Push Connectivity"
+          }
+        }
+      }
+    },
     "link_send_on_chain" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1724,6 +2057,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Send On-Chain"
+          }
+        }
+      }
+    },
+    "link_stable_position" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Position"
           }
         }
       }
@@ -1935,7 +2279,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "0.00"
+            "value" : "Amount (USD)"
           }
         }
       }
@@ -1998,6 +2342,17 @@
         }
       }
     },
+    "section_app_info" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "App Info"
+          }
+        }
+      }
+    },
     "section_appearance" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2020,6 +2375,17 @@
         }
       }
     },
+    "section_backup_seed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup"
+          }
+        }
+      }
+    },
     "section_channel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2027,6 +2393,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Channel"
+          }
+        }
+      }
+    },
+    "section_custody" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Custody Model"
           }
         }
       }
@@ -2042,6 +2419,17 @@
         }
       }
     },
+    "section_network" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Network"
+          }
+        }
+      }
+    },
     "section_node" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2049,6 +2437,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Node"
+          }
+        }
+      }
+    },
+    "section_node_network" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node & Network"
           }
         }
       }
@@ -2086,6 +2485,17 @@
         }
       }
     },
+    "section_preferences" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Preferences"
+          }
+        }
+      }
+    },
     "section_privacy_security" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2093,6 +2503,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Privacy & Security"
+          }
+        }
+      }
+    },
+    "section_restore" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore"
+          }
+        }
+      }
+    },
+    "section_seed_phrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Seed Phrase"
           }
         }
       }
@@ -2115,6 +2547,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Trade Details"
+          }
+        }
+      }
+    },
+    "section_wallet" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wallet"
           }
         }
       }
@@ -2441,8 +2884,52 @@
         }
       }
     },
+    "theme_dark" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Dark"
+          }
+        }
+      }
+    },
+    "theme_light" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Light"
+          }
+        }
+      }
+    },
+    "theme_system" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        }
+      }
+    },
     "Time" : {
 
+    },
+    "title_about" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "About"
+          }
+        }
+      }
     },
     "title_app_access" : {
       "extractionState" : "manual",
@@ -2451,6 +2938,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "App Access"
+          }
+        }
+      }
+    },
+    "title_appearance" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Appearance"
+          }
+        }
+      }
+    },
+    "title_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup"
           }
         }
       }
@@ -2473,6 +2982,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Cancel"
+          }
+        }
+      }
+    },
+    "title_channel" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Channel"
           }
         }
       }
@@ -2532,6 +3052,28 @@
         }
       }
     },
+    "title_node" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node"
+          }
+        }
+      }
+    },
+    "title_notifications" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Notifications"
+          }
+        }
+      }
+    },
     "title_on_chain_receive" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2550,6 +3092,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Payment Detail"
+          }
+        }
+      }
+    },
+    "title_push_connectivity" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Push Connectivity"
           }
         }
       }
@@ -2609,50 +3162,6 @@
         }
       }
     },
-    "label_theme" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Theme"
-          }
-        }
-      }
-    },
-    "theme_system" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "System"
-          }
-        }
-      }
-    },
-    "theme_light" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Light"
-          }
-        }
-      }
-    },
-    "theme_dark" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Dark"
-          }
-        }
-      }
-    },
     "title_settings" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2660,6 +3169,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Settings"
+          }
+        }
+      }
+    },
+    "title_stable_position" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Position"
           }
         }
       }
@@ -2781,6 +3301,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "View on Explorer"
+          }
+        }
+      }
+    },
+    "warning_copy_seed_message" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Clipboard is shared with other apps. Consider writing down your seed instead."
+          }
+        }
+      }
+    },
+    "warning_copy_seed_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Copy Seed Words?"
           }
         }
       }
