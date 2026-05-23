@@ -577,21 +577,21 @@ class AppState(private val context: Context) : ViewModel() {
             sweepOnchainStart = spendable
             pendingSplice = PendingSplice("in", sweepAmount)
             _statusMessage.value = "Moving $sweepAmount sats to channel..."
+            databaseService?.recordPayment(
+                paymentId = null, paymentType = "splice_in", direction = "received",
+                amountMsat = sweepAmount * 1000,
+                amountUSD = null, btcPrice = null, status = "pending"
+            )
+            AuditService.log("SWEEP_TO_CHANNEL", mapOf(
+                "amount_sats" to sweepAmount,
+                "fee_rate_sat_vb" to feeRate
+            ))
         } catch (e: Exception) {
             isSweeping = false
             _statusMessage.value = "Sweep failed: ${e.message}"
             AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
             return
         }
-        databaseService?.recordPayment(
-            paymentId = null, paymentType = "splice_in", direction = "received",
-            amountMsat = sweepAmount * 1000,
-            amountUSD = null, btcPrice = null, status = "pending"
-        )
-        AuditService.log("SWEEP_TO_CHANNEL", mapOf(
-            "amount_sats" to sweepAmount,
-            "fee_rate_sat_vb" to feeRate
-        ))
     }
 
     private fun fetchFeeRate(): Long? {
@@ -780,7 +780,10 @@ class AppState(private val context: Context) : ViewModel() {
         FCMService.clearPendingPayment(context)
         try {
             nodeService.node?.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.w("AppState", "LSP connect failed in processPendingPushPayment: ${e.message}")
+            AuditService.log("LSP_CONNECT_FAILED", mapOf("error" to (e.message ?: "")))
+        }
         refreshBalances()
         updateStableBalances()
     }
