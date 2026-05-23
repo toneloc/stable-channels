@@ -61,6 +61,7 @@ class PriceService {
                     async { fetchSingleFeed(feed) }
                 }.mapNotNull { it.await() }
             }
+            if (prices.size < 3) return  // need at least 3 of 5 feeds
             val med = median(prices)
             if (med > 0) {
                 _currentPrice.value = med

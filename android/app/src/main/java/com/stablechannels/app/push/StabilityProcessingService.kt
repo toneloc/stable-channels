@@ -24,7 +24,6 @@ class StabilityProcessingService : Service() {
     companion object {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
-        private const val STABILITY_THRESHOLD_PERCENT = 0.1
 
         @Volatile
         var isRunning = false
@@ -242,7 +241,8 @@ class StabilityProcessingService : Service() {
         val dollarsFromPar = stableUsdValue - expectedUsd
         val percentFromPar = if (expectedUsd > 0) abs(dollarsFromPar / expectedUsd) * 100.0 else 0.0
 
-        if (percentFromPar < STABILITY_THRESHOLD_PERCENT) {
+        if (percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT
+            || abs(dollarsFromPar) < Constants.STABILITY_THRESHOLD_USD) {
             Log.d(TAG, "Within threshold (${percentFromPar}%), skipping")
             return
         }
@@ -252,7 +252,7 @@ class StabilityProcessingService : Service() {
             return
         }
 
-        val amountMsat = (dollarsFromPar / price * Constants.SATS_IN_BTC * 1000).roundToLong()
+        val amountMsat = Math.floor(dollarsFromPar / price * Constants.SATS_IN_BTC * 1000).toLong()
         if (amountMsat <= 0) return
 
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
@@ -355,7 +355,7 @@ class StabilityProcessingService : Service() {
 
         latch.await(8, TimeUnit.SECONDS)
 
-        if (prices.isEmpty()) return 0.0
+        if (prices.size < 3) return 0.0  // need at least 3 of 5 feeds
         val sorted = prices.sorted()
         val mid = sorted.size / 2
         return if (sorted.size % 2 == 0) {

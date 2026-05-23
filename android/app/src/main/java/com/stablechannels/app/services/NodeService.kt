@@ -1,6 +1,7 @@
 package com.stablechannels.app.services
 
 import android.content.Context
+import android.util.Log
 import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -107,8 +108,16 @@ class NodeService(private val context: Context) {
         nodeId = ldkNode.nodeId()
 
         // Connect to gateway and LSP
-        try { ldkNode.connect(Constants.DEFAULT_GATEWAY_PUBKEY, Constants.DEFAULT_GATEWAY_ADDRESS, true) } catch (_: Exception) {}
-        try { ldkNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true) } catch (_: Exception) {}
+        try {
+            ldkNode.connect(Constants.DEFAULT_GATEWAY_PUBKEY, Constants.DEFAULT_GATEWAY_ADDRESS, true)
+        } catch (e: Exception) {
+            Log.w("NodeService", "Gateway connect failed: ${e.message}")
+        }
+        try {
+            ldkNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+        } catch (e: Exception) {
+            Log.w("NodeService", "LSP connect failed: ${e.message}")
+        }
 
         refreshChannels()
         startEventLoop()
