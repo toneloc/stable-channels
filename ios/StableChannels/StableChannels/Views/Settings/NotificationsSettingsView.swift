@@ -45,35 +45,6 @@ struct NotificationsSettingsView: View {
                     ))
                 }
             }
-
-            if let token = UserDefaults.standard.string(forKey: "apns_device_token") {
-                Section {
-                    Button {
-                        UIPasteboard.general.string = token
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(String(localized: "label_device_token", defaultValue: "Device Token"))
-                                    .font(.subheadline)
-                                Text(String(token.prefix(16)) + "...")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "doc.on.doc")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } header: {
-                    Text(String(localized: "label_push_token", defaultValue: "Push Token"))
-                } footer: {
-                    Text(String(
-                        localized: "info_device_token",
-                        defaultValue: "Used to deliver push notifications to this device."
-                    ))
-                }
-            }
         }
         .navigationTitle(String(localized: "title_notifications", defaultValue: "Notifications"))
         .navigationBarTitleDisplayMode(.inline)
