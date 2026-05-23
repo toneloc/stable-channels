@@ -52,6 +52,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val totalSats by appState.totalBalanceSats.collectAsState()
+    val lightningSats by appState.lightningBalanceSats.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val sc by appState.stableChannel.collectAsState()
     val nativeSatsCached by appState.nativeSats.collectAsState()
@@ -78,6 +79,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 } else true
                 // Run blocking LDK calls off main thread
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    appState.refreshBalances()
+                    appState.detectOnchainDeposit()
                     appState.ensureLSPConnected()
                 }
             }
@@ -208,11 +211,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(16.dp))
 
             // Balance bar
-            if (totalSats > 0) {
+            if (lightningSats > 0) {
                 BalanceBar(
                     stableUSD = sc.expectedUSD.amount,
                     nativeSats = nativeSatsCached,
-                    totalSats = totalSats,
+                    totalSats = lightningSats,
                     btcPrice = btcPrice,
                     modifier = Modifier.padding(horizontal = 24.dp),
                     onDragStarted = { appState.ensureLSPConnected() },

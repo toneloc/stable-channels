@@ -3,7 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
-    id("com.google.gms.google-services")
+}
+
+// Only apply google-services plugin if config file exists (gitignored, not in repo)
+if (file("../google-services.json").exists() || file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
 }
 
 android {
