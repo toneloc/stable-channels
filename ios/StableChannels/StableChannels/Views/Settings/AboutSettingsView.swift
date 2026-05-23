@@ -46,7 +46,7 @@ struct AboutSettingsView: View {
 
                 Text(String(
                     localized: "info_self_custody",
-                    defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds."
+                    defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
                 ))
                 .font(.caption)
                 .foregroundStyle(.secondary)
