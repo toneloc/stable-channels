@@ -108,11 +108,9 @@ fun PriceChart(
         selectedPoint = null
         val cutoffMs = System.currentTimeMillis() - chartPeriod.effectiveDays().toLong() * 86400 * 1000
         val cutoffSec = cutoffMs / 1000
-        val raw = if (chartPeriod.usesHourly) {
-            hourlyPrices.filter { it.timestamp >= cutoffSec }
-        } else {
-            allDailyPrices.filter { it.timestamp >= cutoffSec }
-        }
+        val hourly = hourlyPrices.filter { it.timestamp >= cutoffSec }
+        val daily = allDailyPrices.filter { it.timestamp >= cutoffSec }
+        val raw = if (chartPeriod.usesHourly && hourly.size >= 2) hourly else daily
         // Cap at 120 points — keeps Canvas draw O(n) work proportional
         priceHistory = downsample(raw, 120)
     }

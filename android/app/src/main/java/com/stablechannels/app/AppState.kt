@@ -134,6 +134,7 @@ class AppState(private val context: Context) : ViewModel() {
 
                 databaseService = DatabaseService(context)
                 launch { databaseService?.seedHistoricalPrices() }
+                launch { backfillHourlyPrices() }
                 tradeService = TradeService(nodeService)
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
@@ -741,6 +742,20 @@ class AppState(private val context: Context) : ViewModel() {
         val price = priceService.currentPrice.value
         if (price > 0) {
             databaseService?.recordPrice(price, "median")
+        }
+    }
+
+    private suspend fun backfillHourlyPrices() {
+        val db = databaseService ?: return
+        val thirtyDaysAgo = System.currentTimeMillis() / 1000 - 30 * 24 * 3600
+        val since = db.getOldestPriceHistoryTimestamp()?.let { oldest ->
+            if (oldest < thirtyDaysAgo) null else thirtyDaysAgo
+        } ?: thirtyDaysAgo
+        val candles = priceService.fetchKrakenOHLC(since)
+        if (candles.isEmpty()) return
+        val count = db.backfillHourlyPrices(candles)
+        if (count > 0) {
+            AuditService.log("CHART_BACKFILL", mapOf("points" to count))
         }
     }
 

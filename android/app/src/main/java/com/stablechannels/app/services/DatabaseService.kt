@@ -370,6 +370,35 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    fun getOldestPriceHistoryTimestamp(): Long? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT MIN(timestamp) FROM price_history", null
+        )
+        return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
+    }
+
+    fun backfillHourlyPrices(candles: List<Pair<Long, Double>>): Int {
+        val db = writableDatabase
+        var count = 0
+        db.beginTransaction()
+        try {
+            val stmt = db.compileStatement(
+                "INSERT OR IGNORE INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)"
+            )
+            for ((ts, price) in candles) {
+                stmt.clearBindings()
+                stmt.bindDouble(1, price)
+                stmt.bindLong(2, ts)
+                stmt.executeInsert()
+                count++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return count
+    }
+
     fun recordDailyPrice(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?, source: String?) {
         val cv = ContentValues().apply {
             put("date", date)
