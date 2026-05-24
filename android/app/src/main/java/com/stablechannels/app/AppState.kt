@@ -762,9 +762,9 @@ class AppState(private val context: Context) : ViewModel() {
     private suspend fun backfillHourlyPrices() {
         val db = databaseService ?: return
         val thirtyDaysAgo = System.currentTimeMillis() / 1000 - 30 * 24 * 3600
-        val since = db.getOldestPriceHistoryTimestamp()?.let { oldest ->
-            if (oldest < thirtyDaysAgo) null else thirtyDaysAgo
-        } ?: thirtyDaysAgo
+        val oldest = db.getOldestPriceHistoryTimestamp()
+        if (oldest != null && oldest < thirtyDaysAgo) return
+        val since = oldest ?: thirtyDaysAgo
         val candles = priceService.fetchKrakenOHLC(since)
         if (candles.isEmpty()) return
         val count = db.backfillHourlyPrices(candles)
