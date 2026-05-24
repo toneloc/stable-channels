@@ -92,14 +92,22 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val totalUSD = (totalSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val scope = rememberCoroutineScope()
 
+    var isRefreshing by remember { mutableStateOf(false) }
     val pullRefreshState = rememberPullToRefreshState()
 
     PullToRefreshBox(
-        isRefreshing = false,
+        isRefreshing = isRefreshing,
         onRefresh = {
             scope.launch {
+                isRefreshing = true
+                val startTime = System.currentTimeMillis()
                 appState.refreshBalances()
+                appState.priceService.fetchPrice()
                 appState.recordCurrentPrice()
+                // Prevent spinner from flashing on instant fetches
+                val elapsed = System.currentTimeMillis() - startTime
+                if (elapsed < 500) kotlinx.coroutines.delay(500 - elapsed)
+                isRefreshing = false
             }
         },
         state = pullRefreshState,
