@@ -25,6 +25,12 @@ class PriceService {
     private val _lastUpdate = MutableStateFlow(Date(0))
     val lastUpdate: StateFlow<Date> = _lastUpdate
 
+    /** Returns true if the price was last updated more than [maxAgeSecs] seconds ago. */
+    fun isPriceStale(maxAgeSecs: Long = 60): Boolean {
+        val ageMs = System.currentTimeMillis() - _lastUpdate.value.time
+        return ageMs > maxAgeSecs * 1000
+    }
+
     private var refreshJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 

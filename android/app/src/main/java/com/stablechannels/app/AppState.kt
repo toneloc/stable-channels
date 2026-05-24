@@ -484,6 +484,11 @@ class AppState(private val context: Context) : ViewModel() {
         val sc = _stableChannel.value
         val price = priceService.currentPrice.value
 
+        if (priceService.isPriceStale()) {
+            AuditService.log("STABILITY_SKIP", mapOf("reason" to "stale_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
+            return
+        }
+
         // Do NOT recalculate backingSats here — it's set at trade time and stays fixed.
         // As price moves, the stability check detects drift and sends payments to rebalance.
 
@@ -801,5 +806,6 @@ class AppState(private val context: Context) : ViewModel() {
         }
         refreshBalances()
         updateStableBalances()
+        runStabilityCheck()
     }
 }
