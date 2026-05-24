@@ -1,6 +1,7 @@
 package com.stablechannels.app.ui.history
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -15,6 +16,7 @@ fun TradeDetailDialog(trade: TradeRecord, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text("Trade Details") },
         text = {
+            SelectionContainer {
             Column {
                 DetailRow("Action", if (trade.action == "buy") "Buy BTC" else "Sell BTC")
                 DetailRow("Amount", trade.amountUSD.usdFormatted())
@@ -24,6 +26,7 @@ fun TradeDetailDialog(trade: TradeRecord, onDismiss: () -> Unit) {
                 DetailRow("Status", trade.status)
                 DetailRow("Date", trade.date.toString())
                 trade.paymentId?.let { DetailRow("Payment ID", it) }
+            }
             }
         },
         confirmButton = {

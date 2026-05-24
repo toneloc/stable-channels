@@ -60,6 +60,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
+    val isSyncing by appState.isSyncing.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var showReceive by remember { mutableStateOf(false) }
@@ -225,6 +226,28 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     }
                 )
                 Spacer(Modifier.height(16.dp))
+            }
+
+            // Syncing indicator
+            if (isSyncing) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Syncing...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
             }
 
             // On-chain section

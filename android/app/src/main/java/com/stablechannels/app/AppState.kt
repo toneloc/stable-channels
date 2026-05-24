@@ -37,6 +37,9 @@ class AppState(private val context: Context) : ViewModel() {
     private val _phase = MutableStateFlow(Phase.LOADING)
     val phase: StateFlow<Phase> = _phase
 
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing
+
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
 
@@ -154,10 +157,16 @@ class AppState(private val context: Context) : ViewModel() {
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
                 val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
                 if (seedFile.exists() || seedPhraseFile.exists()) {
-                    _phase.value = Phase.SYNCING
+                    val hasCachedChannel = _stableChannel.value.userChannelId.isNotEmpty()
+                    if (hasCachedChannel) {
+                        _phase.value = Phase.WALLET
+                        _isSyncing.value = true
+                    } else {
+                        _phase.value = Phase.SYNCING
+                    }
                     waitForBackgroundService()
                     nodeService.start(Network.BITCOIN, chainUrl, null)
-                    _phase.value = Phase.WALLET
+                    _isSyncing.value = false
                     refreshBalances()
                     detectOnchainDeposit()
                     // Restore fundingTxid
