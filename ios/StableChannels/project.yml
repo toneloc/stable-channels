@@ -60,7 +60,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-UIBackgroundModes:
+        UIBackgroundModes:
           - fetch
           - processing
           - remote-notification
