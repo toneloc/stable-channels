@@ -1,6 +1,7 @@
 package com.stablechannels.app.ui.history
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -15,6 +16,7 @@ fun PaymentDetailDialog(payment: PaymentRecord, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         title = { Text("Payment Details") },
         text = {
+            SelectionContainer {
             Column {
                 DetailRow("Direction", if (payment.isIncoming) "Received" else "Sent")
                 val typeLabel = when (payment.paymentType) {
@@ -35,6 +37,7 @@ fun PaymentDetailDialog(payment: PaymentRecord, onDismiss: () -> Unit) {
                 payment.txid?.let { DetailRow("TXID", it) }
                 payment.address?.let { DetailRow("Address", it) }
                 if (payment.confirmations > 0) DetailRow("Confirmations", payment.confirmations.toString())
+            }
             }
         },
         confirmButton = {

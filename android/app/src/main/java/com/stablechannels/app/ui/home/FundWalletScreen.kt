@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.home
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -49,12 +50,14 @@ fun FundWalletScreen(appState: AppState) {
                 )
             }
             Spacer(Modifier.height(16.dp))
-            Text(
-                text = addr,
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center
-            )
+            SelectionContainer {
+                Text(
+                    text = addr,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center
+                )
+            }
             Spacer(Modifier.height(12.dp))
             Button(onClick = {
                 clipboardManager.setText(AnnotatedString(addr))
