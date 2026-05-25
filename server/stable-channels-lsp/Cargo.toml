@@ -1,0 +1,42 @@
+[package]
+name = "stable-channels-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Workspace crates
+stable-channels   = { path = "../.." }
+sc-protos         = { path = "../sc-protos" }
+ldk-server-client = { path = "../../../ldk-server-upstream/ldk-server-client", features = ["serde"], default-features = false }
+
+# HTTP/REST stack
+axum             = "0.8"
+axum-server      = { version = "0.7", features = ["tls-rustls"] }
+tokio            = { version = "1", features = ["full"] }
+tower-http       = { version = "0.6", features = ["trace"] }
+
+# Protobuf wire format
+prost            = "0.11"
+bytes            = "1"
+
+# HMAC + TLS
+bitcoin_hashes   = "0.14"
+# NOTE: ldk-server-client pulls in rustls 0.21; we only declare tokio-rustls
+# here (which bundles rustls 0.23 via the post-0.26 API) and rely on Cargo
+# to unify. Do NOT add a direct `rustls` dep to avoid the 0.21/0.23 split.
+tokio-rustls     = { version = "0.26", features = ["ring"] }
+ring             = "0.17"
+base64           = "0.22"
+
+# Config + logging
+serde            = { version = "1", features = ["derive"] }
+toml             = "0.8"
+clap             = { version = "4", features = ["derive"] }
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+anyhow           = "1"
+thiserror        = "1"
+
+[dev-dependencies]
+getrandom        = "0.2"

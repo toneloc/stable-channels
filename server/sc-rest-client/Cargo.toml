@@ -1,0 +1,22 @@
+[package]
+name = "sc-rest-client"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["native"]
+native = []
+serde = ["sc-protos/serde"]
+
+[dependencies]
+sc-protos = { path = "../sc-protos" }
+ldk-server-client = { path = "../../../ldk-server-upstream/ldk-server-client", features = ["serde"], default-features = false }
+prost = { version = "0.11.6", default-features = false, features = ["std", "prost-derive"] }
+bitcoin_hashes = "0.14"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { version = "0.12", default-features = false }
+js-sys = "0.3"

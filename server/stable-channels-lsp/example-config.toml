@@ -1,0 +1,28 @@
+# Stable Channels LSP daemon example config
+#
+# Run: cargo run -p stable-channels-lsp -- /path/to/this/file
+
+[node]
+# Where the SC daemon's REST API listens. Clients (GUI, iOS, Android) hit this.
+rest_service_address = "127.0.0.1:3002"
+
+# Network. Must match the network LDK Server is running on.
+network = "regtest"
+
+[storage.disk]
+# SC daemon's data directory. Will hold:
+#   - tls.crt + tls.key (auto-generated on first start)
+#   - <network>/api_key (auto-generated)
+#   - audit_log.txt (append-only)
+#   - stable_channels.db (sqlite)
+dir_path = "./data/stable-channels-lsp"
+
+[ldk_server]
+# Path to LDK Server's own config.toml. The SC daemon uses LDK Server's config
+# helpers to find its TLS cert and api_key.
+config_path = "../ldk-server-upstream/ldk-server-config.toml"
+
+# Optional explicit overrides. Each takes priority over what config_path resolves.
+# grpc_address = "127.0.0.1:3536"
+# cert_path    = "/path/to/ldk-server/tls.crt"
+# api_key_path = "/path/to/ldk-server/regtest/api_key"

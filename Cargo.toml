@@ -76,3 +76,11 @@ electrsd = { version = "0.36.1", features = ["legacy", "esplora_a33e97e1", "core
 electrum-client = "0.24.0"
 rand = "0.9"
 
+[workspace]
+members = [
+    "server/sc-protos",
+    "server/sc-rest-client",
+    "server/lsp-server-gui",
+    "server/stable-channels-lsp",
+]
+
