@@ -12,7 +12,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.history.HistoryScreen
 import com.stablechannels.app.ui.home.HomeScreen
-import com.stablechannels.app.ui.settings.SettingsScreen
+import com.stablechannels.app.ui.settings.SettingsNavHost
 
 enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
@@ -41,7 +41,7 @@ fun MainTabView(appState: AppState) {
         when (selectedTab) {
             Tab.HOME -> HomeScreen(appState, Modifier.padding(padding))
             Tab.HISTORY -> HistoryScreen(appState, Modifier.padding(padding))
-            Tab.SETTINGS -> SettingsScreen(appState, Modifier.padding(padding))
+            Tab.SETTINGS -> SettingsNavHost(appState, Modifier.padding(padding))
         }
     }
 }
