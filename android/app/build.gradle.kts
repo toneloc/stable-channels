@@ -92,6 +92,10 @@ dependencies {
     // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
+
+    // Biometric authentication
+    implementation("androidx.biometric:biometric:1.2.0-alpha05")
 
     // CameraX
     implementation("androidx.camera:camera-camera2:1.4.1")
