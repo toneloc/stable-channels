@@ -4,10 +4,12 @@ import android.app.Service
 import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
+import com.stablechannels.app.services.ServiceLogger
 import com.stablechannels.app.util.Constants
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -16,6 +18,7 @@ import org.json.JSONObject
 import org.lightningdevkit.ldknode.*
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
@@ -30,6 +33,8 @@ class StabilityProcessingService : Service() {
             private set
     }
 
+    private val isProcessing = AtomicBoolean(false)
+
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -38,6 +43,13 @@ class StabilityProcessingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Single-instance guard: skip if already processing
+        if (!isProcessing.compareAndSet(false, true)) {
+            Log.d(TAG, "Already processing, skipping duplicate invocation")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         val direction = intent?.getStringExtra("direction") ?: "lsp_to_user"
 
         val notification = NotificationCompat.Builder(this, StableChannelsApp.STABILITY_CHANNEL_ID)
@@ -48,19 +60,32 @@ class StabilityProcessingService : Service() {
             .build()
         startForeground(StableChannelsApp.STABILITY_NOTIFICATION_ID, notification)
 
+        // Acquire WakeLock with 60-second timeout
+        val wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "StableChannels::StabilityPayment")
+            .apply { acquire(60_000L) }
+
+        ServiceLogger.log(this, "START", "direction=$direction")
+        ServiceLogger.log(this, "WAKELOCK_ACQUIRED")
+
         isRunning = true
 
         Thread {
             try {
                 processStability(direction)
                 FCMService.clearPendingPayment(this)
+                ServiceLogger.log(this, "PROCESSING_SUCCESS", "direction=$direction")
             } catch (e: Exception) {
                 Log.e(TAG, "Stability processing failed", e)
                 FCMService.flagPendingPayment(this)
+                ServiceLogger.log(this, "PROCESSING_FAILED", e.message)
             } finally {
+                if (wakeLock.isHeld) wakeLock.release()
+                isProcessing.set(false)
                 isRunning = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                ServiceLogger.log(this, "STOP")
             }
         }.start()
 
@@ -121,6 +146,11 @@ class StabilityProcessingService : Service() {
         }
         // No RGS gossip (saves ~5s startup + ~8MB RAM)
         // No LSPS2 (not needed for stability payments)
+
+        // Strip gossip data files to reduce memory usage
+        listOf("network_graph", "scorer", "node_metrics").forEach { filename ->
+            File(dataDir, filename).delete()
+        }
 
         val node = builder.build(nodeEntropy)
         node.start()

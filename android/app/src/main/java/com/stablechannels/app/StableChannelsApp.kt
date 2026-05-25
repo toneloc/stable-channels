@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.google.firebase.FirebaseApp
+import com.stablechannels.app.push.StabilityWorkScheduler
 
 class StableChannelsApp : Application() {
 
@@ -20,6 +21,7 @@ class StableChannelsApp : Application() {
             // google-services.json missing — push notifications disabled
         }
         createNotificationChannel()
+        StabilityWorkScheduler.schedule(this)
     }
 
     private fun createNotificationChannel() {
