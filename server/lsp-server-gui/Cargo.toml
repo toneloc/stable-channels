@@ -1,0 +1,38 @@
+[package]
+name = "lsp-server-gui"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["native"]
+native = ["tokio", "rfd"]
+web = ["wasm-bindgen-futures", "wasm-bindgen", "web-sys", "log"]
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.29"
+sc-rest-client = { path = "../sc-rest-client", default-features = false }
+sc-protos = { path = "../sc-protos" }
+futures-util = "0.3"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+hex = { package = "hex-conservative", version = "0.2", default-features = false, features = ["std"] }
+bytes = "1.4.0"
+
+# Native-only dependencies
+tokio = { version = "1.38.0", features = ["rt-multi-thread", "sync"], optional = true }
+rfd = { version = "0.15", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Web-only dependencies
+wasm-bindgen-futures = { version = "0.4", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement"], optional = true }
+log = { version = "0.4", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }

@@ -54,7 +54,7 @@ send_push.sh
 *.apns
 
 # Rust
-/target/
+target/
 /data/
 Cargo.lock
 **/*.rs.bk
@@ -206,3 +206,13 @@ local.properties
 *.aab
 *.iml
 google-services.json
+
+# WASM build output from lsp-server-gui
+server/lsp-server-gui/dist/
+
+# macOS noise
+**/.DS_Store
+
+# SC daemon runtime data (when run from repo root)
+server/stable-channels-lsp/data/
+sc-config.toml
