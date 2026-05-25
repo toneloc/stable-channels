@@ -11,7 +11,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -27,6 +26,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.ClipboardUtils
 import org.lightningdevkit.ldknode.Network
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -46,6 +46,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showRestore by remember { mutableStateOf(false) }
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
+    var showClipboardWarning by remember { mutableStateOf(false) }
+    var seedCopied by remember { mutableStateOf(false) }
 
     val channels = appState.nodeService.channels
     val hasReadyChannel = channels.any { it.isChannelReady }
@@ -249,14 +251,12 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             )
                         }
                         Spacer(Modifier.height(8.dp))
-                        var copied by remember { mutableStateOf(false) }
                         OutlinedButton(
                             onClick = {
-                                clipboardManager.setText(AnnotatedString(words))
-                                copied = true
+                                showClipboardWarning = true
                             },
                             modifier = Modifier.fillMaxWidth()
-                        ) { Text(if (copied) "Copied" else "Copy Seed Words") }
+                        ) { Text(if (seedCopied) "Copied" else "Copy Seed Words") }
                     } else {
                         Spacer(Modifier.height(8.dp))
                         Text("Seed phrase not available for this wallet.",
@@ -384,6 +384,28 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     restoreMnemonic = ""
                     restoreError = null
                 }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Clipboard security confirmation dialog
+    if (showClipboardWarning) {
+        val words = appState.nodeService.savedMnemonic
+        AlertDialog(
+            onDismissRequest = { showClipboardWarning = false },
+            title = { Text("Copy Seed Phrase?") },
+            text = { Text("Clipboard contents may be readable by other apps. Are you sure you want to copy your seed phrase?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClipboardWarning = false
+                    if (!words.isNullOrEmpty()) {
+                        ClipboardUtils.copySensitive(context, "Seed Phrase", words)
+                        seedCopied = true
+                    }
+                }) { Text("Copy") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClipboardWarning = false }) { Text("Cancel") }
             }
         )
     }
