@@ -551,6 +551,28 @@
         }
       }
     },
+    "disclaimer_custody_body" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
+          }
+        }
+      }
+    },
+    "disclaimer_custody_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your keys, your coins."
+          }
+        }
+      }
+    },
     "empty_payments_desc" : {
       "extractionState" : "manual",
       "localizations" : {

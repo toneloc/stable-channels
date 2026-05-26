@@ -9,6 +9,10 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                // MARK: - Custody Disclaimer
+
+                disclaimerBanner
+
                 // MARK: - Wallet
 
                 Section {
@@ -176,5 +180,52 @@ struct SettingsView: View {
                 .foregroundStyle(.primary)
         }
         .padding(.vertical, 2)
+    }
+
+    private var disclaimerBanner: some View {
+        HStack(spacing: 14) {
+            iconBadge
+            textContent
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(.green, lineWidth: 1)
+                )
+        )
+    }
+
+    private var iconBadge: some View {
+        ZStack {
+            Circle()
+                .fill(.green)
+                .frame(width: 44, height: 44)
+                .shadow(color: .green.opacity(0.3), radius: 8, x: 0, y: 4)
+            Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private var textContent: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(String(localized: "disclaimer_custody_title", defaultValue: "Your keys, your coins."))
+                .font(.system(.subheadline, design: .rounded))
+                .fontWeight(.bold)
+                .foregroundStyle(.primary)
+            Text(String(
+                localized: "disclaimer_custody_body",
+                defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
+            ))
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineSpacing(1)
+        }
     }
 }
