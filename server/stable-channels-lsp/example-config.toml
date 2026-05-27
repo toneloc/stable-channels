@@ -20,7 +20,7 @@ dir_path = "./data/stable-channels-lsp"
 [ldk_server]
 # Path to LDK Server's own config.toml. The SC daemon uses LDK Server's config
 # helpers to find its TLS cert and api_key.
-config_path = "../ldk-server-upstream/ldk-server-config.toml"
+config_path = "/path/to/ldk-server-config.toml"
 
 # Optional explicit overrides. Each takes priority over what config_path resolves.
 # grpc_address = "127.0.0.1:3536"
