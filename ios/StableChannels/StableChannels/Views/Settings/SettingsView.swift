@@ -216,16 +216,15 @@ struct SettingsView: View {
     private var textContent: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(String(localized: "disclaimer_custody_title", defaultValue: "Your keys, your coins."))
-                .font(.system(.subheadline, design: .rounded))
+                .font(.subheadline)
                 .fontWeight(.bold)
                 .foregroundStyle(.primary)
             Text(String(
                 localized: "disclaimer_custody_body",
                 defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
             ))
-            .font(.system(.caption2, design: .monospaced))
-            .foregroundStyle(.secondary)
-            .lineSpacing(1)
+            .font(.caption)
+            .foregroundStyle(Color(uiColor: .label).opacity(0.7))
         }
     }
 }
