@@ -1,0 +1,112 @@
+import Foundation
+import CryptoKit
+import CommonCrypto
+
+enum CryptoError: Error, LocalizedError {
+    case keyDerivationFailed
+    case encryptionFailed
+    case decryptionFailed
+    case invalidChecksum
+    case invalidFormat
+
+    var errorDescription: String? {
+        switch self {
+        case .keyDerivationFailed: return "Failed to derive encryption key"
+        case .encryptionFailed: return "Encryption failed"
+        case .decryptionFailed: return "Decryption failed"
+        case .invalidChecksum: return "Checksum mismatch"
+        case .invalidFormat: return "Invalid backup format"
+        }
+    }
+}
+
+enum CryptoService {
+    static let magicBytes = "SBCKP001"
+    static let currentVersion: UInt16 = 1
+
+    static func deriveKey(passphrase: String, salt: Data) throws -> SymmetricKey {
+        guard let passphraseData = passphrase.data(using: .utf8) else {
+            throw CryptoError.keyDerivationFailed
+        }
+
+        var derivedKey = Data(count: 32)
+        let derivationResult = passphraseData.withUnsafeBytes { passphraseBytes -> Int32 in
+            salt.withUnsafeBytes { saltBytes -> Int32 in
+                derivedKey.withUnsafeMutableBytes { derivedKeyBytes -> Int32 in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passphraseBytes.baseAddress,
+                        passphraseData.count,
+                        saltBytes.baseAddress,
+                        salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                        310_000,
+                        derivedKeyBytes.baseAddress,
+                        32
+                    )
+                }
+            }
+        }
+
+        guard derivationResult == kCCSuccess else {
+            throw CryptoError.keyDerivationFailed
+        }
+
+        return SymmetricKey(data: derivedKey)
+    }
+
+    static func encrypt(mnemonic: String, passphrase: String) throws -> Data {
+        let salt = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+        let key = try deriveKey(passphrase: passphrase, salt: salt)
+
+        let payload = EncryptedBackup(version: 1, mnemonic: mnemonic, createdAt: Date())
+        let payloadData = try JSONEncoder().encode(payload)
+
+        let sealedBox = try AES.GCM.seal(payloadData, using: key)
+
+        // Format: salt(32) + combined(nonce+ciphertext+tag)
+        var result = Data()
+        result.append(salt)
+        result.append(sealedBox.combined!)
+
+        return result
+    }
+
+    static func decrypt(data: Data, passphrase: String) throws -> EncryptedBackup {
+        guard data.count > 32 + 12 + 16 else {
+            throw CryptoError.invalidFormat
+        }
+
+        let salt = data.prefix(32)
+        let combined = data.dropFirst(32)
+
+        let key = try deriveKey(passphrase: passphrase, salt: Data(salt))
+
+        let sealedBox = try AES.GCM.SealedBox(combined: combined)
+        let decryptedData = try AES.GCM.open(sealedBox, using: key)
+
+        return try JSONDecoder().decode(EncryptedBackup.self, from: decryptedData)
+    }
+
+    static func checksum(of data: Data) -> String {
+        SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Key-based encryption (for iCloud - key from Keychain)
+
+    static func encrypt(mnemonic: String, key: SymmetricKey) throws -> Data {
+        let payload = EncryptedBackup(version: 1, mnemonic: mnemonic, createdAt: Date())
+        let payloadData = try JSONEncoder().encode(payload)
+        let sealedBox = try AES.GCM.seal(payloadData, using: key)
+        guard let combined = sealedBox.combined else {
+            throw CryptoError.encryptionFailed
+        }
+        return combined
+    }
+
+    static func decrypt(data: Data, key: SymmetricKey) throws -> EncryptedBackup {
+        let sealedBox = try AES.GCM.SealedBox(combined: data)
+        let decryptedData = try AES.GCM.open(sealedBox, using: key)
+        return try JSONDecoder().decode(EncryptedBackup.self, from: decryptedData)
+    }
+}
