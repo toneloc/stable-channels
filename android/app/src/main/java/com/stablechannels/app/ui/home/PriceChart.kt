@@ -37,6 +37,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.max
 
 enum class ChartPeriod(val label: String, val days: Int, val usesHourly: Boolean) {
     DAY_1("1D", 1, true),
@@ -111,8 +112,13 @@ fun PriceChart(
         val hourly = hourlyPrices.filter { it.timestamp >= cutoffSec }
         val daily = allDailyPrices.filter { it.timestamp >= cutoffSec }
         val raw = if (chartPeriod.usesHourly && hourly.size >= 2) hourly else daily
-        // Cap at 120 points — keeps Canvas draw O(n) work proportional
-        priceHistory = downsample(raw, 120)
+        // Cap at 200 points — keeps Canvas draw smooth while preserving detail
+        priceHistory = downsample(raw, 200)
+    }
+
+    // Isolate live price label via derivedStateOf so price ticks only update text, not Canvas
+    val livePriceText by remember(currentPrice) {
+        derivedStateOf { currentPrice.usdFormatted() }
     }
 
     Card(
@@ -148,7 +154,7 @@ fun PriceChart(
                     } else {
                         Text("BTC Price", style = MaterialTheme.typography.labelMedium)
                         Text(
-                            currentPrice.usdFormatted(),
+                            livePriceText,
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -223,95 +229,122 @@ fun PriceChart(
 
                 // Chart with Y-axis labels
                 Row(Modifier.fillMaxWidth()) {
-                    // Chart canvas
-                    Canvas(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(160.dp)
-                            .pointerInput(priceHistory) {
-                                detectDragGestures(
-                                    onDragEnd = { selectedPoint = null },
-                                    onDragCancel = { selectedPoint = null },
-                                    onDrag = { change, _ ->
-                                        change.consume()
-                                        val x = change.position.x
-                                        val w = size.width.toFloat()
-                                        val index = ((x / w) * (priceHistory.size - 1))
-                                            .toInt()
-                                            .coerceIn(0, priceHistory.size - 1)
-                                        selectedPoint = priceHistory[index]
-                                    }
+                    // Chart canvas — wrapped in key(priceHistory) to skip recomposition on parent state changes
+                    key(priceHistory) {
+                        Canvas(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(160.dp)
+                                .pointerInput(priceHistory) {
+                                    detectDragGestures(
+                                        onDragEnd = { selectedPoint = null },
+                                        onDragCancel = { selectedPoint = null },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            val x = change.position.x
+                                            val w = size.width.toFloat()
+                                            val index = ((x / w) * (priceHistory.size - 1))
+                                                .toInt()
+                                                .coerceIn(0, priceHistory.size - 1)
+                                            selectedPoint = priceHistory[index]
+                                        }
+                                    )
+                                }
+                                .pointerInput(priceHistory) {
+                                    detectTapGestures(
+                                        onPress = {
+                                            val x = it.x
+                                            val w = size.width.toFloat()
+                                            val index = ((x / w) * (priceHistory.size - 1))
+                                                .toInt()
+                                                .coerceIn(0, priceHistory.size - 1)
+                                            selectedPoint = priceHistory[index]
+                                            tryAwaitRelease()
+                                            selectedPoint = null
+                                        }
+                                    )
+                                }
+                        ) {
+                            val w = size.width
+                            val h = size.height
+
+                            if (priceRange < 0.01) {
+                                drawLine(color = lineColor, start = Offset(0f, h / 2), end = Offset(w, h / 2), strokeWidth = 2f)
+                                return@Canvas
+                            }
+
+                            // Grid lines
+                            for (i in 1..3) {
+                                val gy = h * i / 4
+                                drawLine(
+                                    color = Color.Gray.copy(alpha = 0.15f),
+                                    start = Offset(0f, gy),
+                                    end = Offset(w, gy),
+                                    strokeWidth = 0.5f,
+                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
                                 )
                             }
-                            .pointerInput(priceHistory) {
-                                detectTapGestures(
-                                    onPress = {
-                                        val x = it.x
-                                        val w = size.width.toFloat()
-                                        val index = ((x / w) * (priceHistory.size - 1))
-                                            .toInt()
-                                            .coerceIn(0, priceHistory.size - 1)
-                                        selectedPoint = priceHistory[index]
-                                        tryAwaitRelease()
-                                        selectedPoint = null
-                                    }
-                                )
+
+                            // Build line path — Catmull-Rom spline for ≥4 points, straight lines for 2-3
+                            val linePath = Path()
+                            val points = priceHistory.mapIndexed { i, record ->
+                                val px = (i.toFloat() / (priceHistory.size - 1)) * w
+                                val py = h - ((record.price - minPrice) / priceRange).toFloat() * h
+                                Offset(px, py)
                             }
-                    ) {
-                        val w = size.width
-                        val h = size.height
 
-                        if (priceRange < 0.01) {
-                            drawLine(color = lineColor, start = Offset(0f, h / 2), end = Offset(w, h / 2), strokeWidth = 2f)
-                            return@Canvas
-                        }
+                            linePath.moveTo(points[0].x, points[0].y)
 
-                        // Grid lines
-                        for (i in 1..3) {
-                            val gy = h * i / 4
-                            drawLine(
-                                color = Color.Gray.copy(alpha = 0.15f),
-                                start = Offset(0f, gy),
-                                end = Offset(w, gy),
-                                strokeWidth = 0.5f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
+                            if (points.size >= 4) {
+                                // Catmull-Rom spline converted to cubic Bezier control points
+                                for (i in 0 until points.size - 1) {
+                                    val p0 = points[max(i - 1, 0)]
+                                    val p1 = points[i]
+                                    val p2 = points[(i + 1).coerceAtMost(points.size - 1)]
+                                    val p3 = points[(i + 2).coerceAtMost(points.size - 1)]
+
+                                    // Catmull-Rom to cubic Bezier conversion (tension = 0.3 for smoother curves)
+                                    val cp1x = p1.x + (p2.x - p0.x) / 4f
+                                    val cp1y = p1.y + (p2.y - p0.y) / 4f
+                                    val cp2x = p2.x - (p3.x - p1.x) / 4f
+                                    val cp2y = p2.y - (p3.y - p1.y) / 4f
+
+                                    linePath.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y)
+                                }
+                            } else {
+                                // 2-3 points: straight lines
+                                for (i in 1 until points.size) {
+                                    linePath.lineTo(points[i].x, points[i].y)
+                                }
+                            }
+
+                            // Area fill
+                            val areaPath = Path().apply {
+                                addPath(linePath)
+                                lineTo(w, h)
+                                lineTo(0f, h)
+                                close()
+                            }
+                            drawPath(
+                                path = areaPath,
+                                brush = Brush.verticalGradient(
+                                    colors = listOf(lineColor.copy(alpha = 0.15f), lineColor.copy(alpha = 0.02f))
+                                ),
+                                style = Fill
                             )
-                        }
 
-                        // Line path
-                        val linePath = Path()
-                        priceHistory.forEachIndexed { i, record ->
-                            val px = (i.toFloat() / (priceHistory.size - 1)) * w
-                            val py = h - ((record.price - minPrice) / priceRange).toFloat() * h
-                            if (i == 0) linePath.moveTo(px, py) else linePath.lineTo(px, py)
-                        }
+                            // Line
+                            drawPath(path = linePath, color = lineColor, style = Stroke(width = if (selectedIndex != null) 1.5f else 2f))
 
-                        // Area fill
-                        val areaPath = Path().apply {
-                            addPath(linePath)
-                            lineTo(w, h)
-                            lineTo(0f, h)
-                            close()
-                        }
-                        drawPath(
-                            path = areaPath,
-                            brush = Brush.verticalGradient(
-                                colors = listOf(lineColor.copy(alpha = 0.15f), lineColor.copy(alpha = 0.02f))
-                            ),
-                            style = Fill
-                        )
-
-                        // Line
-                        drawPath(path = linePath, color = lineColor, style = Stroke(width = if (selectedIndex != null) 1.5f else 2f))
-
-                        // Selected indicator
-                        if (selectedIndex != null) {
-                            val sx = (selectedIndex.toFloat() / (priceHistory.size - 1)) * w
-                            val record = priceHistory[selectedIndex]
-                            val sy = h - ((record.price - minPrice) / priceRange).toFloat() * h
-                            drawLine(Color.Gray.copy(alpha = 0.5f), Offset(sx, 0f), Offset(sx, h), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
-                            drawCircle(lineColor, 5f, Offset(sx, sy))
-                            drawCircle(Color.White, 3f, Offset(sx, sy))
+                            // Selected indicator
+                            if (selectedIndex != null) {
+                                val sx = (selectedIndex.toFloat() / (priceHistory.size - 1)) * w
+                                val record = priceHistory[selectedIndex]
+                                val sy = h - ((record.price - minPrice) / priceRange).toFloat() * h
+                                drawLine(Color.Gray.copy(alpha = 0.5f), Offset(sx, 0f), Offset(sx, h), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
+                                drawCircle(lineColor, 5f, Offset(sx, sy))
+                                drawCircle(Color.White, 3f, Offset(sx, sy))
+                            }
                         }
                     }
 

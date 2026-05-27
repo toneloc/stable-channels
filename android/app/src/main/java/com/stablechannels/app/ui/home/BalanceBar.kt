@@ -23,9 +23,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.view.HapticFeedbackConstants
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.Shield
@@ -33,7 +35,6 @@ import androidx.compose.material3.Icon
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
@@ -63,10 +64,15 @@ fun BalanceBar(
     val minTradeUSD = 1.0
 
     var barWidthPx by remember { mutableFloatStateOf(0f) }
-    var dragOffsetPx by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
+    var hasTriggeredHaptic by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val view = LocalView.current
+
+    // Use Animatable for smooth snap-back animation
+    val dragOffset = remember { Animatable(0f) }
+    val dragOffsetPx = dragOffset.value
 
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
 
@@ -106,44 +112,71 @@ fun BalanceBar(
                                 onDragStart = { offset ->
                                     if (abs(offset.x - baseXPx) < thumbDiameterPx * 1.5f) {
                                         isDragging = true
-                                        dragOffsetPx = 0f
+                                        hasTriggeredHaptic = false
+                                        scope.launch { dragOffset.snapTo(0f) }
                                         onDragStarted?.invoke()
                                     }
                                 },
                                 onDrag = { change, dragAmount ->
                                     if (isDragging) {
                                         change.consume()
-                                        dragOffsetPx = (dragOffsetPx + dragAmount.x)
+                                        val newOffset = (dragOffset.value + dragAmount.x)
                                             .coerceIn(-baseXPx, barWidthPx - baseXPx)
+                                        scope.launch { dragOffset.snapTo(newOffset) }
+
+                                        // Haptic tick when drag first crosses $1.00 threshold
+                                        if (!hasTriggeredHaptic && barWidthPx > 0) {
+                                            val fraction = abs(newOffset) / barWidthPx
+                                            val tradeUSD = fraction * totalUSD
+                                            if (tradeUSD >= minTradeUSD) {
+                                                hasTriggeredHaptic = true
+                                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                                            }
+                                        }
                                     }
                                 },
                                 onDragEnd = {
                                     if (!isDragging) {
-                                        dragOffsetPx = 0f
+                                        scope.launch { dragOffset.snapTo(0f) }
                                         return@detectDragGestures
                                     }
                                     isDragging = false
-                                    val fraction = if (barWidthPx > 0) dragOffsetPx / barWidthPx else 0f
+                                    val currentOffset = dragOffset.value
+                                    val fraction = if (barWidthPx > 0) currentOffset / barWidthPx else 0f
                                     val tradeUSD = abs(fraction) * totalUSD
                                     if (tradeUSD < minTradeUSD) {
-                                        dragOffsetPx = 0f
+                                        // Below threshold: animate snap-back (400ms ease-out)
+                                        scope.launch {
+                                            dragOffset.animateTo(
+                                                targetValue = 0f,
+                                                animationSpec = tween(400, easing = androidx.compose.animation.core.EaseOut)
+                                            )
+                                        }
                                         return@detectDragGestures
                                     }
-                                    val direction = if (dragOffsetPx > 0) TradeDirection.SELL else TradeDirection.BUY
+                                    val direction = if (currentOffset > 0) TradeDirection.SELL else TradeDirection.BUY
                                     val clamped = if (direction == TradeDirection.BUY)
                                         min(tradeUSD, stableUSD)
                                     else
                                         min(tradeUSD, nativeUSD)
                                     onTradeRequest?.invoke(direction, clamped)
-                                    // Hold position, then snap back after sheet appears
+                                    // Hold position, then animate back (400ms ease-out)
                                     scope.launch {
-                                        delay(600)
-                                        dragOffsetPx = 0f
+                                        kotlinx.coroutines.delay(600)
+                                        dragOffset.animateTo(
+                                            targetValue = 0f,
+                                            animationSpec = tween(400, easing = androidx.compose.animation.core.EaseOut)
+                                        )
                                     }
                                 },
                                 onDragCancel = {
                                     isDragging = false
-                                    dragOffsetPx = 0f
+                                    scope.launch {
+                                        dragOffset.animateTo(
+                                            targetValue = 0f,
+                                            animationSpec = tween(400, easing = androidx.compose.animation.core.EaseOut)
+                                        )
+                                    }
                                 }
                             )
                         }
