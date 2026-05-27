@@ -15,6 +15,15 @@ use clap::Parser;
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::config as ldk_config;
 use sc_protos::stable::{AUDIT_LOG_PATH, GET_PRICE_PATH, LIST_STABLE_CHANNELS_PATH};
+use ldk_server_client::ldk_server_grpc::endpoints::{
+    BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
+    CLOSE_CHANNEL_PATH, CONNECT_PEER_PATH, DISCONNECT_PEER_PATH, EXPORT_PATHFINDING_SCORES_PATH,
+    FORCE_CLOSE_CHANNEL_PATH, GET_PAYMENT_DETAILS_PATH, GRAPH_GET_CHANNEL_PATH,
+    GRAPH_GET_NODE_PATH, GRAPH_LIST_CHANNELS_PATH, GRAPH_LIST_NODES_PATH,
+    LIST_FORWARDED_PAYMENTS_PATH, LIST_PAYMENTS_PATH, LIST_PEERS_PATH, ONCHAIN_RECEIVE_PATH,
+    ONCHAIN_SEND_PATH, OPEN_CHANNEL_PATH, SIGN_MESSAGE_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
+    SPONTANEOUS_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH, VERIFY_SIGNATURE_PATH,
+};
 use stable_channels::audit::set_audit_log_path;
 use stable_channels::db::Database;
 use tower_http::trace::TraceLayer;
@@ -92,6 +101,40 @@ async fn main() -> Result<()> {
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))
         .route("/GetBalances", post(handlers::proxy::get_balances))
         .route("/ListChannels", post(handlers::proxy::list_channels))
+        // peers
+        .route(&format!("/{}", LIST_PEERS_PATH), post(handlers::peers::list_peers))
+        .route(&format!("/{}", CONNECT_PEER_PATH), post(handlers::peers::connect_peer))
+        .route(&format!("/{}", DISCONNECT_PEER_PATH), post(handlers::peers::disconnect_peer))
+        // payments
+        .route(&format!("/{}", LIST_PAYMENTS_PATH), post(handlers::payments::list_payments))
+        .route(&format!("/{}", GET_PAYMENT_DETAILS_PATH), post(handlers::payments::get_payment_details))
+        .route(&format!("/{}", LIST_FORWARDED_PAYMENTS_PATH), post(handlers::payments::list_forwarded_payments))
+        // lightning
+        .route(&format!("/{}", BOLT11_RECEIVE_PATH), post(handlers::lightning::bolt11_receive))
+        .route(&format!("/{}", BOLT11_SEND_PATH), post(handlers::lightning::bolt11_send))
+        .route(&format!("/{}", BOLT12_RECEIVE_PATH), post(handlers::lightning::bolt12_receive))
+        .route(&format!("/{}", BOLT12_SEND_PATH), post(handlers::lightning::bolt12_send))
+        .route(&format!("/{}", SPONTANEOUS_SEND_PATH), post(handlers::lightning::spontaneous_send))
+        // onchain
+        .route(&format!("/{}", ONCHAIN_RECEIVE_PATH), post(handlers::onchain::onchain_receive))
+        .route(&format!("/{}", ONCHAIN_SEND_PATH), post(handlers::onchain::onchain_send))
+        // channels
+        .route(&format!("/{}", OPEN_CHANNEL_PATH), post(handlers::channels::open_channel))
+        .route(&format!("/{}", CLOSE_CHANNEL_PATH), post(handlers::channels::close_channel))
+        .route(&format!("/{}", FORCE_CLOSE_CHANNEL_PATH), post(handlers::channels::force_close_channel))
+        .route(&format!("/{}", SPLICE_IN_PATH), post(handlers::channels::splice_in))
+        .route(&format!("/{}", SPLICE_OUT_PATH), post(handlers::channels::splice_out))
+        .route(&format!("/{}", UPDATE_CHANNEL_CONFIG_PATH), post(handlers::channels::update_channel_config))
+        // graph
+        .route(&format!("/{}", GRAPH_LIST_CHANNELS_PATH), post(handlers::graph::graph_list_channels))
+        .route(&format!("/{}", GRAPH_GET_CHANNEL_PATH), post(handlers::graph::graph_get_channel))
+        .route(&format!("/{}", GRAPH_LIST_NODES_PATH), post(handlers::graph::graph_list_nodes))
+        .route(&format!("/{}", GRAPH_GET_NODE_PATH), post(handlers::graph::graph_get_node))
+        // tools
+        .route(&format!("/{}", SIGN_MESSAGE_PATH), post(handlers::tools::sign_message))
+        .route(&format!("/{}", VERIFY_SIGNATURE_PATH), post(handlers::tools::verify_signature))
+        .route(&format!("/{}", EXPORT_PATHFINDING_SCORES_PATH), post(handlers::tools::export_pathfinding_scores))
+        // SC-specific
         .route(
             &format!("/{}", GET_PRICE_PATH),
             post(handlers::price::get_price),
