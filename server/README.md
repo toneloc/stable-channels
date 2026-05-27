@@ -26,31 +26,22 @@ Clients (lsp-server-gui, iOS wallet, Android wallet)
 | `sc-protos/` | local | Hand written `prost` types for SC specific REST endpoints, plus route path constants. |
 | `sc-rest-client/` | local | REST client library, linked into the GUI and consumed by mobile wallet apps. WASM compatible. |
 | `lsp-server-gui/` | local | Native + WASM egui GUI. Talks to `stable-channels-lsp` over REST. |
-| `ldk-server-client` | LDK Server (`lightningdevkit/ldk-server`) | gRPC client used by `stable-channels-lsp` to dial LDK Server. Path dep on a sibling clone. |
-| `ldk-server-grpc` | LDK Server (`lightningdevkit/ldk-server`) | Wire types for LDK Server's gRPC surface (`GetNodeInfoRequest`, `Channel`, etc.). Re exported via `sc-rest-client`. |
+| `ldk-server-client` | LDK Server (`lightningdevkit/ldk-server`) | gRPC client used by `stable-channels-lsp` to dial LDK Server. Pinned to upstream via cargo git rev. |
+| `ldk-server-grpc` | LDK Server (`lightningdevkit/ldk-server`) | Wire types for LDK Server's gRPC surface (`GetNodeInfoRequest`, `Channel`, etc.). Pulled in transitively via `ldk-server-client`. |
 | `stable-channels` (root crate) | local | Shared utility lib (`db`, `audit`, `price_feeds`, `constants`). Path dep'd by the daemon. |
 
 ## Build & run
 
 The setup is **three terminals**: LDK Server, the SC daemon, and the GUI. All steps assume `bash`/`zsh`.
 
-### Step 1: Clone both repos as siblings
+### Step 1: Clone the repos
 
 ```bash
-cd /some/parent/path
 git clone https://github.com/toneloc/stable-channels.git
-git clone https://github.com/lightningdevkit/ldk-server.git ldk-server-upstream
+git clone https://github.com/lightningdevkit/ldk-server.git
 ```
 
-Resulting layout:
-
-```
-parent/
-├── stable-channels/
-└── ldk-server-upstream/
-```
-
-(The SC daemon's `Cargo.toml` has a path dep at `../../../ldk-server-upstream/ldk-server-client`, so this exact sibling layout is required.)
+The two clones can live anywhere on disk, in any layout. Cargo pulls `ldk-server-client` directly from upstream at a pinned rev, so no sibling-directory layout is required.
 
 ### Step 2: Build everything
 
@@ -58,13 +49,13 @@ parent/
 cd stable-channels
 cargo build --workspace --release
 
-cd ../ldk-server-upstream
+cd /path/to/ldk-server
 cargo build --release -p ldk-server
 ```
 
 ### Step 3: Configure LDK Server
 
-Edit `ldk-server-upstream/contrib/ldk-server-config.toml`:
+Edit LDK Server's `contrib/ldk-server-config.toml`:
 
 - **`[node]`**: set `network = "regtest"` (or `"signet"` / `"bitcoin"` to match your chosen chain backend).
 - **Chain source**: leave exactly one of `[bitcoind]` / `[electrum]` / `[esplora]` active and comment the others out. If you don't have a local Bitcoin Core or Electrum server, the easiest path is:
@@ -76,7 +67,7 @@ Edit `ldk-server-upstream/contrib/ldk-server-config.toml`:
 ### Step 4: Run LDK Server (Terminal 1)
 
 ```bash
-cd ldk-server-upstream
+cd /path/to/ldk-server
 ./target/release/ldk-server ./contrib/ldk-server-config.toml
 ```
 
@@ -95,7 +86,7 @@ Edit `sc-config.toml`:
 - **`[ldk_server] config_path`**: absolute path to LDK Server's config file, e.g.:
 
   ```toml
-  config_path = "/some/parent/path/ldk-server-upstream/contrib/ldk-server-config.toml"
+  config_path = "/path/to/ldk-server/contrib/ldk-server-config.toml"
   ```
 
   (The SC daemon reads this to resolve LDK Server's TLS cert path and api_key file.)
@@ -104,18 +95,6 @@ Edit `sc-config.toml`:
 
 ```bash
 ./target/release/stable-channels-lsp ./sc-config.toml
-```
-
-Expected log lines:
-
-```
-loaded config from ./sc-config.toml
-generated new SC api_key at ./data/stable-channels-lsp/<network>/api_key   # first run only
-SC daemon api_key located at ./data/stable-channels-lsp/<network>/api_key
-LDK Server gRPC endpoint: 127.0.0.1:3536
-loaded 0 stable channel records from sqlite
-listening on https://127.0.0.1:3002
-initial BTC/USD price = $<live price>
 ```
 
 The daemon auto generates its own `tls.crt`, `tls.key`, and `<network>/api_key` under `./data/stable-channels-lsp/`.

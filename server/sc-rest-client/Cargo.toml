@@ -10,7 +10,7 @@ serde = ["sc-protos/serde"]
 
 [dependencies]
 sc-protos = { path = "../sc-protos" }
-ldk-server-client = { path = "../../../ldk-server-upstream/ldk-server-client", features = ["serde"], default-features = false }
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "3f98b857abfa9bcf660fd14db35be17cf79e03c6", features = ["serde"], default-features = false }
 prost = { version = "0.11.6", default-features = false, features = ["std", "prost-derive"] }
 bitcoin_hashes = "0.14"
 
