@@ -1,9 +1,16 @@
 //! REST handler infrastructure: error mapping, response encoding.
 
 pub mod audit_log;
+pub mod channels;
+pub mod graph;
+pub mod lightning;
+pub mod onchain;
+pub mod payments;
+pub mod peers;
 pub mod price;
 pub mod proxy;
 pub mod stable_channels;
+pub mod tools;
 
 use axum::body::Bytes;
 use axum::http::{header, StatusCode};
