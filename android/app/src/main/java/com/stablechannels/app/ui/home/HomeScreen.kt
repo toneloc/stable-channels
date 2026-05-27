@@ -14,9 +14,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallReceived
-import androidx.compose.material.icons.filled.ShoppingCart
-import androidx.compose.material.icons.filled.Sell
+import androidx.compose.material.icons.filled.ArrowCircleUp
+import androidx.compose.material.icons.filled.ArrowCircleDown
+import androidx.compose.material.icons.filled.TrendingUp
+import androidx.compose.material.icons.filled.TrendingDown
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
@@ -38,6 +41,7 @@ import androidx.core.content.PermissionChecker
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
@@ -62,6 +66,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val isSyncing by appState.isSyncing.collectAsState()
+    val isFlashing by appState.paymentFlash.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var showReceive by remember { mutableStateOf(false) }
@@ -149,7 +154,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         }
                         context.startActivity(intent)
                     },
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFDC2626)),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -157,20 +162,26 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = Color.White)
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onError)
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 "Notifications Disabled",
-                                color = Color.White,
+                                color = MaterialTheme.colorScheme.onError,
                                 fontWeight = FontWeight.SemiBold,
                                 fontSize = 14.sp
                             )
                             Text(
                                 "Enable notifications for stability payments",
-                                color = Color.White.copy(alpha = 0.9f),
+                                color = MaterialTheme.colorScheme.onError.copy(alpha = 0.9f),
                                 fontSize = 12.sp
                             )
                         }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onError.copy(alpha = 0.7f),
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -181,7 +192,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // Balance (tap to toggle USD/BTC)
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.clickable { showBTC = !showBTC }
+                modifier = Modifier
+                    .clickable { showBTC = !showBTC }
+                    .paymentFlash(isFlashing)
             ) {
                 Text(
                     text = "Total Balance",
@@ -275,7 +288,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                 ) {
                     Column(Modifier.padding(12.dp)) {
                         Row(
@@ -361,8 +374,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("Send", Icons.AutoMirrored.Filled.CallMade, Color(0xFF3B82F6), Modifier.weight(1f)) { showSend = true }
-                ActionButton("Receive", Icons.AutoMirrored.Filled.CallReceived, Color(0xFF10B981), Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
+                ActionButton("Send", Icons.Default.ArrowCircleUp, Color(0xFF3B82F6), Modifier.weight(1f)) { showSend = true }
+                ActionButton("Receive", Icons.Default.ArrowCircleDown, Color(0xFF10B981), Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -370,17 +383,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("Buy BTC", Icons.Default.ShoppingCart, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
-                ActionButton("Sell BTC", Icons.Default.Sell, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
+                ActionButton("Buy BTC", Icons.Default.TrendingUp, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
+                ActionButton("Sell BTC", Icons.Default.TrendingDown, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
             }
 
-            // Status
+            // Status capsule
             if (statusMessage.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
-                Text(
-                    text = statusMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                StatusCapsule(
+                    message = statusMessage
                 )
             }
         }
