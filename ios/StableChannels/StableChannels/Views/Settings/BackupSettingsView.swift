@@ -27,18 +27,14 @@ struct BackupSettingsView: View {
     // MARK: - Computed Properties
 
     private var detectedWordCount: Int {
-        let words = restoreMnemonic.split(separator: " ").map(String.init).filter { !$0.isEmpty }
-        let count = words.count
-        return (count == SeedConstants.wordCount12 || count == SeedConstants.wordCount24)
-            ? count
-            : SeedConstants.defaultWordCount
+        MnemonicUtils.detectWordCount(restoreMnemonic)
     }
 
     private var restoreValid: Bool {
         let filledCount = wordFields.filter { !$0.isEmpty }.count
         let validCount = (filledCount == SeedConstants.wordCount12 || filledCount == SeedConstants.wordCount24)
         guard validCount else { return false }
-        return validateMnemonic(restoreMnemonic)
+        return MnemonicUtils.hasValidCharacterFormat(restoreMnemonic)
     }
 
     // MARK: - Actions
@@ -54,12 +50,7 @@ struct BackupSettingsView: View {
     private func importMnemonic(_ mnemonic: String) {
         isImportingSeed = true
         restoreMnemonic = ""
-        var newFields = Array(repeating: "", count: SeedConstants.maxWordCount)
-        let words = mnemonic.split(separator: " ").map(String.init)
-        for (index, word) in words.enumerated() where index < SeedConstants.maxWordCount {
-            newFields[index] = word
-        }
-        wordFields = newFields
+        wordFields = MnemonicUtils.wordsToFields(MnemonicUtils.parseMnemonic(mnemonic))
         isWordFieldsReadOnly = true
         restoreMnemonic = mnemonic
         showRestore = true
@@ -100,23 +91,6 @@ struct BackupSettingsView: View {
             try await backupService.deleteBackup()
         } catch {
             print("Delete backup failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func validateMnemonic(_ mnemonic: String) -> Bool {
-        let words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: " ")
-            .map(String.init)
-            .filter { !$0.isEmpty }
-        let count = words.count
-        guard count == SeedConstants.wordCount12 || count == SeedConstants.wordCount24 else {
-            return false
-        }
-        // Basic validation: all words should be alphabetic and lowercase
-        let validWordPattern = "^[a-z]+$"
-        let pattern = try? NSRegularExpression(pattern: validWordPattern, options: .caseInsensitive)
-        return words.allSatisfy { word in
-            pattern?.firstMatch(in: word, options: [], range: NSRange(word.startIndex..., in: word)) != nil
         }
     }
 

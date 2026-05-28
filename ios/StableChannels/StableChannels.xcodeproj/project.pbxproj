@@ -40,6 +40,7 @@
 		49FD8C332FC85BAC0079DDA3 /* RestoreBackupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */; };
 		49FD8C422FC893F60079DDA3 /* RestoreSeedSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C402FC893F60079DDA3 /* RestoreSeedSheet.swift */; };
 		49FD8C432FC893F60079DDA3 /* SeedWordGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C412FC893F60079DDA3 /* SeedWordGridView.swift */; };
+		49FD8C452FC8AD0C0079DDA3 /* MnemonicUtils.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C442FC8AD0C0079DDA3 /* MnemonicUtils.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
@@ -132,6 +133,7 @@
 		49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreBackupSheet.swift; sourceTree = "<group>"; };
 		49FD8C402FC893F60079DDA3 /* RestoreSeedSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreSeedSheet.swift; sourceTree = "<group>"; };
 		49FD8C412FC893F60079DDA3 /* SeedWordGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedWordGridView.swift; sourceTree = "<group>"; };
+		49FD8C442FC8AD0C0079DDA3 /* MnemonicUtils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicUtils.swift; sourceTree = "<group>"; };
 		4F10632049E3C904E518EDD2 /* TradeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeDetailView.swift; sourceTree = "<group>"; };
 		4F22F6639A59D4B86A959586 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		61BB0D1D623E0794FC1ED6ED /* NodeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeService.swift; sourceTree = "<group>"; };
@@ -287,6 +289,7 @@
 		AD3E779FC98D09AA36FFCAE9 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				49FD8C442FC8AD0C0079DDA3 /* MnemonicUtils.swift */,
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
 				3B46630309755AE15EF291D4 /* HistoricalPrices.swift */,
@@ -528,6 +531,7 @@
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
 				49FD8C312FC85BAC0079DDA3 /* ExportImportSheet.swift in Sources */,
+				49FD8C452FC8AD0C0079DDA3 /* MnemonicUtils.swift in Sources */,
 				49FD8C322FC85BAC0079DDA3 /* BackupPromptView.swift in Sources */,
 				49FD8C332FC85BAC0079DDA3 /* RestoreBackupSheet.swift in Sources */,
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,

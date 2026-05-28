@@ -111,12 +111,7 @@ struct RestoreSeedSheet: View {
     }
 
     private func syncWordFields(from text: String) {
-        var newFields = Array(repeating: "", count: SeedConstants.maxWordCount)
-        let words = text.split(separator: " ").map(String.init)
-        for (index, word) in words.enumerated() where index < SeedConstants.maxWordCount {
-            newFields[index] = word
-        }
-        wordFields = newFields
+        wordFields = MnemonicUtils.wordsToFields(MnemonicUtils.parseMnemonic(text))
         isWordFieldsReadOnly = true
     }
 
@@ -130,11 +125,16 @@ struct RestoreSeedSheet: View {
         restoreError = nil
 
         let input = restoreMnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
-        let wordCount = input.split(separator: " ").count
 
-        guard wordCount == SeedConstants.wordCount12 || wordCount == SeedConstants.wordCount24 else {
+        guard MnemonicUtils.isValidWordCount(input) else {
             isRestoring = false
             restoreError = String(localized: "error_seed_word_count")
+            return
+        }
+
+        guard MnemonicUtils.hasValidCharacterFormat(input) else {
+            isRestoring = false
+            restoreError = String(localized: "error_invalid_seed")
             return
         }
 
