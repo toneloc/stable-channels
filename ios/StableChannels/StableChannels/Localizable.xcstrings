@@ -1,6 +1,9 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+
+    },
     "%@" : {
 
     },
@@ -224,6 +227,17 @@
     "Backup enabled!" : {
 
     },
+    "backup_now" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup Now"
+          }
+        }
+      }
+    },
     "button_any_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -356,6 +370,17 @@
         }
       }
     },
+    "button_enable_icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup to iCloud"
+          }
+        }
+      }
+    },
     "button_enable_in_settings" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -374,6 +399,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Enable Settings"
+          }
+        }
+      }
+    },
+    "button_export_import" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export / Import Backup"
           }
         }
       }
@@ -440,6 +476,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Restore"
+          }
+        }
+      }
+    },
+    "button_restore_icloud" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from iCloud"
           }
         }
       }
@@ -579,6 +626,23 @@
         }
       }
     },
+    "Delete" : {
+
+    },
+    "Delete Backup?" : {
+
+    },
+    "delete_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Delete Backup"
+          }
+        }
+      }
+    },
     "disclaimer_custody_body" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -652,6 +716,17 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Enable iCloud Backup"
+          }
+        }
+      }
+    },
+    "enabled" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enabled"
           }
         }
       }
@@ -998,11 +1073,11 @@
       }
     },
     "export" : {
-      "extractionState" : "extracted_with_value",
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
-            "state" : "new",
+            "state" : "translated",
             "value" : "Export"
           }
         }
@@ -1037,6 +1112,17 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Export Your Backup"
+          }
+        }
+      }
+    },
+    "export_to_files" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export to Files"
           }
         }
       }
@@ -1162,6 +1248,17 @@
         }
       }
     },
+    "icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iCloud Backup"
+          }
+        }
+      }
+    },
     "icloud_backup_description" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -1185,11 +1282,11 @@
       }
     },
     "import" : {
-      "extractionState" : "extracted_with_value",
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
-            "state" : "new",
+            "state" : "translated",
             "value" : "Import"
           }
         }
@@ -2188,6 +2285,17 @@
         }
       }
     },
+    "last_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Last backup"
+          }
+        }
+      }
+    },
     "link_about" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -2321,7 +2429,7 @@
       }
     },
     "maybe_later" : {
-      "extractionState" : "extracted_with_value",
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -2379,11 +2487,11 @@
       }
     },
     "passphrase" : {
-      "extractionState" : "extracted_with_value",
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
-            "state" : "new",
+            "state" : "translated",
             "value" : "Passphrase"
           }
         }
@@ -2612,6 +2720,17 @@
         }
       }
     },
+    "restore_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore Backup"
+          }
+        }
+      }
+    },
     "restore_description" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -2641,6 +2760,17 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Restore from iCloud"
+          }
+        }
+      }
+    },
+    "restoring" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restoring..."
           }
         }
       }
@@ -2718,6 +2848,17 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Custody Model"
+          }
+        }
+      }
+    },
+    "section_icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iCloud"
           }
         }
       }
@@ -3676,6 +3817,9 @@
           }
         }
       }
+    },
+    "You'll need your seed phrase to restore. This cannot be undone." : {
+
     }
   },
   "version" : "1.2"
