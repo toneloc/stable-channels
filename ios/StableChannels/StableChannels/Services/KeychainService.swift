@@ -86,7 +86,7 @@ final class KeychainService {
 
         var addAttrs: [String: Any] = baseQuery
         addAttrs[kSecValueData as String] = keyData
-        addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         let addStatus = SecItemAdd(addAttrs as CFDictionary, nil)
         if addStatus != errSecSuccess {
             throw BackupError.keychainUnavailable

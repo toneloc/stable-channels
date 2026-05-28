@@ -369,7 +369,7 @@ struct ExportImportSheet: View {
                 errorMessage = String(localized: "error_no_seed", defaultValue: "No seed available")
                 return
             }
-            let encryptedData = try CryptoService.encrypt(mnemonic: mnemonic, passphrase: passphrase)
+            let encryptedData = try CryptoService.encrypt(mnemonic: mnemonic, passphrase: passphrase).data
 
             let filename = "stablechannels-backup-\(Date().ISO8601Format()).stablebackup"
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)

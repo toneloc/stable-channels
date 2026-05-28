@@ -20,6 +20,12 @@ enum CryptoError: Error, LocalizedError {
     }
 }
 
+private struct EncryptedPayload: Codable {
+    let version: UInt16
+    let mnemonic: String
+    let createdAt: Date
+}
+
 enum CryptoService {
     static let magicBytes = "SBCKP001"
     static let currentVersion: UInt16 = 1
@@ -55,24 +61,29 @@ enum CryptoService {
         return SymmetricKey(data: derivedKey)
     }
 
-    static func encrypt(mnemonic: String, passphrase: String) throws -> Data {
-        let salt = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+    static func encrypt(mnemonic: String, passphrase: String) throws -> (data: Data, checksum: String) {
+        var salt = Data(count: 32)
+        let rngStatus = salt.withUnsafeMutableBytes { saltBytes in
+            SecRandomCopyBytes(kSecRandomDefault, 32, saltBytes.baseAddress!)
+        }
+        guard rngStatus == errSecSuccess else {
+            throw CryptoError.encryptionFailed
+        }
         let key = try deriveKey(passphrase: passphrase, salt: salt)
 
-        let payload = EncryptedBackup(version: 1, mnemonic: mnemonic, createdAt: Date())
+        let payload = EncryptedPayload(version: 1, mnemonic: mnemonic, createdAt: Date())
         let payloadData = try JSONEncoder().encode(payload)
 
         let sealedBox = try AES.GCM.seal(payloadData, using: key)
 
-        // Format: salt(32) + combined(nonce+ciphertext+tag)
         var result = Data()
         result.append(salt)
         result.append(sealedBox.combined!)
 
-        return result
+        return (result, checksum(of: result))
     }
 
-    static func decrypt(data: Data, passphrase: String) throws -> EncryptedBackup {
+    static func decrypt(data: Data, passphrase: String) throws -> BackupFile {
         guard data.count > 32 + 12 + 16 else {
             throw CryptoError.invalidFormat
         }
@@ -85,7 +96,13 @@ enum CryptoService {
         let sealedBox = try AES.GCM.SealedBox(combined: combined)
         let decryptedData = try AES.GCM.open(sealedBox, using: key)
 
-        return try JSONDecoder().decode(EncryptedBackup.self, from: decryptedData)
+        let payload = try JSONDecoder().decode(EncryptedPayload.self, from: decryptedData)
+        return BackupFile(
+            metadata: BackupMetadata(version: payload.version, checksum: "", timestamp: payload.createdAt,
+                                     network: .bitcoin, cipher: .aes256gcm),
+            mnemonic: payload.mnemonic,
+            createdAt: payload.createdAt
+        )
     }
 
     static func checksum(of data: Data) -> String {
@@ -94,19 +111,25 @@ enum CryptoService {
 
     // MARK: - Key-based encryption (for iCloud - key from Keychain)
 
-    static func encrypt(mnemonic: String, key: SymmetricKey) throws -> Data {
-        let payload = EncryptedBackup(version: 1, mnemonic: mnemonic, createdAt: Date())
+    static func encrypt(mnemonic: String, key: SymmetricKey) throws -> (data: Data, checksum: String) {
+        let payload = EncryptedPayload(version: 1, mnemonic: mnemonic, createdAt: Date())
         let payloadData = try JSONEncoder().encode(payload)
         let sealedBox = try AES.GCM.seal(payloadData, using: key)
         guard let combined = sealedBox.combined else {
             throw CryptoError.encryptionFailed
         }
-        return combined
+        return (combined, checksum(of: combined))
     }
 
-    static func decrypt(data: Data, key: SymmetricKey) throws -> EncryptedBackup {
+    static func decrypt(data: Data, key: SymmetricKey) throws -> BackupFile {
         let sealedBox = try AES.GCM.SealedBox(combined: data)
         let decryptedData = try AES.GCM.open(sealedBox, using: key)
-        return try JSONDecoder().decode(EncryptedBackup.self, from: decryptedData)
+        let payload = try JSONDecoder().decode(EncryptedPayload.self, from: decryptedData)
+        return BackupFile(
+            metadata: BackupMetadata(version: payload.version, checksum: "", timestamp: payload.createdAt,
+                                     network: .bitcoin, cipher: .aes256gcm),
+            mnemonic: payload.mnemonic,
+            createdAt: payload.createdAt
+        )
     }
 }
