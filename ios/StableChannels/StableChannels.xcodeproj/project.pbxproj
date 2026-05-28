@@ -30,6 +30,14 @@
 		49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */; };
 		49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */; };
 		49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */; };
+		49FD8C252FC85B5B0079DDA3 /* BackupModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C242FC85B5B0079DDA3 /* BackupModels.swift */; };
+		49FD8C2A2FC85B6F0079DDA3 /* CloudBackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C262FC85B6F0079DDA3 /* CloudBackupService.swift */; };
+		49FD8C2B2FC85B6F0079DDA3 /* RateLimitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C292FC85B6F0079DDA3 /* RateLimitService.swift */; };
+		49FD8C2C2FC85B6F0079DDA3 /* CryptoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C272FC85B6F0079DDA3 /* CryptoService.swift */; };
+		49FD8C2D2FC85B6F0079DDA3 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C282FC85B6F0079DDA3 /* KeychainService.swift */; };
+		49FD8C312FC85BAC0079DDA3 /* ExportImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C2F2FC85BAC0079DDA3 /* ExportImportSheet.swift */; };
+		49FD8C322FC85BAC0079DDA3 /* BackupPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C2E2FC85BAC0079DDA3 /* BackupPromptView.swift */; };
+		49FD8C332FC85BAC0079DDA3 /* RestoreBackupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
@@ -112,6 +120,14 @@
 		49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsSettingsView.swift; sourceTree = "<group>"; };
 		49F0B0DC2FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushConnectivitySettingsView.swift; sourceTree = "<group>"; };
 		49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StablePositionView.swift; sourceTree = "<group>"; };
+		49FD8C242FC85B5B0079DDA3 /* BackupModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupModels.swift; sourceTree = "<group>"; };
+		49FD8C262FC85B6F0079DDA3 /* CloudBackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBackupService.swift; sourceTree = "<group>"; };
+		49FD8C272FC85B6F0079DDA3 /* CryptoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoService.swift; sourceTree = "<group>"; };
+		49FD8C282FC85B6F0079DDA3 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		49FD8C292FC85B6F0079DDA3 /* RateLimitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimitService.swift; sourceTree = "<group>"; };
+		49FD8C2E2FC85BAC0079DDA3 /* BackupPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupPromptView.swift; sourceTree = "<group>"; };
+		49FD8C2F2FC85BAC0079DDA3 /* ExportImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportImportSheet.swift; sourceTree = "<group>"; };
+		49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreBackupSheet.swift; sourceTree = "<group>"; };
 		4F10632049E3C904E518EDD2 /* TradeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeDetailView.swift; sourceTree = "<group>"; };
 		4F22F6639A59D4B86A959586 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		61BB0D1D623E0794FC1ED6ED /* NodeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeService.swift; sourceTree = "<group>"; };
@@ -180,6 +196,7 @@
 		2788439C4BA338889A92627F /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				49FD8C242FC85B5B0079DDA3 /* BackupModels.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
 			);
@@ -216,6 +233,10 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				49FD8C262FC85B6F0079DDA3 /* CloudBackupService.swift */,
+				49FD8C272FC85B6F0079DDA3 /* CryptoService.swift */,
+				49FD8C282FC85B6F0079DDA3 /* KeychainService.swift */,
+				49FD8C292FC85B6F0079DDA3 /* RateLimitService.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
@@ -239,6 +260,9 @@
 		9EB6CDA4F614F973AF602691 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				49FD8C2E2FC85BAC0079DDA3 /* BackupPromptView.swift */,
+				49FD8C2F2FC85BAC0079DDA3 /* ExportImportSheet.swift */,
+				49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */,
 				49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */,
 				49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */,
 				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
@@ -458,6 +482,10 @@
 				581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */,
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
+				49FD8C2A2FC85B6F0079DDA3 /* CloudBackupService.swift in Sources */,
+				49FD8C2B2FC85B6F0079DDA3 /* RateLimitService.swift in Sources */,
+				49FD8C2C2FC85B6F0079DDA3 /* CryptoService.swift in Sources */,
+				49FD8C2D2FC85B6F0079DDA3 /* KeychainService.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
@@ -488,8 +516,12 @@
 				49F0B0E22FC0EF3A003A3B89 /* Colors.swift in Sources */,
 				49F0B0E32FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift in Sources */,
 				49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */,
+				49FD8C252FC85B5B0079DDA3 /* BackupModels.swift in Sources */,
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
+				49FD8C312FC85BAC0079DDA3 /* ExportImportSheet.swift in Sources */,
+				49FD8C322FC85BAC0079DDA3 /* BackupPromptView.swift in Sources */,
+				49FD8C332FC85BAC0079DDA3 /* RestoreBackupSheet.swift in Sources */,
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,
 				6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */,
