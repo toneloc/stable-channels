@@ -42,7 +42,13 @@ pub fn validate_auth(
     let expected = Hmac::<sha256::Hash>::from_engine(eng);
     let expected_hex = format!("{:x}", expected);
 
-    if expected_hex == hex_str {
+    // Constant-time comparison to avoid timing-leak HMAC recovery.
+    if ring::constant_time::verify_slices_are_equal(
+        expected_hex.as_bytes(),
+        hex_str.as_bytes(),
+    )
+    .is_ok()
+    {
         Ok(())
     } else {
         Err(AuthError::HmacMismatch)
