@@ -221,6 +221,9 @@ pub struct UserApp {
 
     // UI fields
     pub invoice_amount: String,
+    pub jit_amount_input: String,
+    pub jit_choice_open: bool,
+    pub jit_fixed_mode: bool,
     pub invoice_result: String,
     pub invoice_to_pay: String,
     pub on_chain_address: String,
@@ -534,6 +537,9 @@ impl UserApp {
             background_started: false,
             btc_price,
             invoice_amount: "0".to_string(),
+            jit_amount_input: String::new(),
+            jit_choice_open: false,
+            jit_fixed_mode: false,
             invoice_to_pay: String::new(),
             on_chain_address: String::new(),
             on_chain_amount: "0".to_string(),
@@ -817,8 +823,8 @@ impl UserApp {
         self.background_started = true;
     }
 
-    fn get_jit_invoice(&mut self, ctx: &egui::Context) {
-        println!("[DEBUG] get_jit_invoice called");
+    fn get_jit_invoice(&mut self, ctx: &egui::Context, amount_sats: Option<u64>) {
+        println!("[DEBUG] get_jit_invoice called (amount_sats={:?})", amount_sats);
         let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
             ldk_node::lightning_invoice::Description::new(
                 "Stable Channel Wallet onboarding".to_string(),
@@ -826,23 +832,34 @@ impl UserApp {
             .unwrap(),
         );
 
-        // Variable amount invoice - user pays any amount they want
-        println!("[DEBUG] Calling receive_variable_amount_via_jit_channel");
-        let result = self
-            .node
-            .bolt11_payment()
-            .receive_variable_amount_via_jit_channel(
-                &description,
-                INVOICE_EXPIRY_SECS,
-                Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT),
-            );
+        let result = match amount_sats {
+            Some(sats) => {
+                let amount_msat = sats * 1000;
+                let max_lsp_fee_msat = (amount_msat * 80 / 100).max(20_000_000);
+                self.node.bolt11_payment().receive_via_jit_channel(
+                    amount_msat,
+                    &description,
+                    INVOICE_EXPIRY_SECS,
+                    Some(max_lsp_fee_msat),
+                )
+            }
+            None => self
+                .node
+                .bolt11_payment()
+                .receive_variable_amount_via_jit_channel(
+                    &description,
+                    INVOICE_EXPIRY_SECS,
+                    Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT),
+                ),
+        };
         println!("[DEBUG] JIT invoice result: {:?}", result.is_ok());
 
         audit_event(
             "JIT_INVOICE_ATTEMPT",
-            json!({
-                "type": "variable_amount"
-            }),
+            match amount_sats {
+                Some(s) => json!({"type": "fixed_amount", "amount_sats": s}),
+                None => json!({"type": "variable_amount"}),
+            },
         );
 
         match result {
@@ -3461,21 +3478,135 @@ impl UserApp {
 
                     ui.add_space(40.0);
 
-                    let btn = egui::Button::new(
-                        egui::RichText::new("Add Bitcoin")
-                            .color(egui::Color32::WHITE)
-                            .strong()
-                            .size(18.0),
-                    )
-                    .min_size(egui::vec2(200.0, 55.0))
-                    .fill(egui::Color32::BLACK)
-                    .corner_radius(theme::RADIUS_PILL);
-
                     ui.add_space(50.0);
 
-                    if ui.add(btn).clicked() {
-                        self.status_message = "Creating your wallet...".to_string();
-                        self.get_jit_invoice(ctx);
+                    if !self.jit_choice_open {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Add Bitcoin")
+                                .color(egui::Color32::WHITE)
+                                .strong()
+                                .size(18.0),
+                        )
+                        .min_size(egui::vec2(200.0, 55.0))
+                        .fill(egui::Color32::BLACK)
+                        .corner_radius(theme::RADIUS_PILL);
+                        if ui.add(btn).clicked() {
+                            self.jit_choice_open = true;
+                            self.jit_fixed_mode = false;
+                            self.jit_amount_input.clear();
+                        }
+                    } else if !self.jit_fixed_mode {
+                        ui.label(
+                            egui::RichText::new("Choose how to receive:")
+                                .size(15.0)
+                                .color(egui::Color32::BLACK),
+                        );
+                        ui.add_space(14.0);
+
+                        let var_btn = egui::Button::new(
+                            egui::RichText::new("Variable amount")
+                                .color(egui::Color32::WHITE)
+                                .strong()
+                                .size(16.0),
+                        )
+                        .min_size(egui::vec2(220.0, 48.0))
+                        .fill(egui::Color32::BLACK)
+                        .corner_radius(theme::RADIUS_PILL);
+                        if ui.add(var_btn).clicked() {
+                            self.status_message = "Creating your wallet...".to_string();
+                            self.get_jit_invoice(ctx, None);
+                            self.jit_choice_open = false;
+                            self.jit_fixed_mode = false;
+                        }
+
+                        ui.add_space(10.0);
+
+                        let fixed_btn = egui::Button::new(
+                            egui::RichText::new("Fixed amount")
+                                .color(egui::Color32::BLACK)
+                                .strong()
+                                .size(16.0),
+                        )
+                        .min_size(egui::vec2(220.0, 48.0))
+                        .fill(theme::SUBTLE_BG)
+                        .corner_radius(theme::RADIUS_PILL);
+                        if ui.add(fixed_btn).clicked() {
+                            self.jit_fixed_mode = true;
+                        }
+
+                        ui.add_space(12.0);
+                        if ui
+                            .link(
+                                egui::RichText::new("Cancel")
+                                    .size(13.0)
+                                    .color(egui::Color32::DARK_GRAY),
+                            )
+                            .clicked()
+                        {
+                            self.jit_choice_open = false;
+                        }
+                    } else {
+                        const JIT_MIN_SATS: u64 = 1_000;
+                        ui.label(
+                            egui::RichText::new("Enter amount (sats):")
+                                .size(15.0)
+                                .color(egui::Color32::BLACK),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!("Minimum {} sats", JIT_MIN_SATS))
+                                .size(12.0)
+                                .color(egui::Color32::DARK_GRAY),
+                        );
+                        ui.add_space(8.0);
+                        let amt_edit =
+                            egui::TextEdit::singleline(&mut self.jit_amount_input)
+                                .hint_text("e.g. 25000")
+                                .desired_width(200.0);
+                        ui.add(amt_edit);
+                        ui.add_space(12.0);
+                        let gen_btn = egui::Button::new(
+                            egui::RichText::new("Receive")
+                                .color(egui::Color32::WHITE)
+                                .strong()
+                                .size(15.0),
+                        )
+                        .min_size(egui::vec2(200.0, 40.0))
+                        .fill(egui::Color32::BLACK)
+                        .corner_radius(theme::RADIUS_PILL);
+                        if ui.add(gen_btn).clicked() {
+                            match self.jit_amount_input.trim().parse::<u64>() {
+                                Ok(sats) if sats >= JIT_MIN_SATS => {
+                                    self.status_message =
+                                        format!("Creating invoice for {} sats...", sats);
+                                    self.get_jit_invoice(ctx, Some(sats));
+                                    self.jit_choice_open = false;
+                                    self.jit_fixed_mode = false;
+                                }
+                                Ok(_) => {
+                                    self.status_message = format!(
+                                        "Amount must be at least {} sats",
+                                        JIT_MIN_SATS
+                                    );
+                                }
+                                Err(_) => {
+                                    self.status_message =
+                                        "Enter a positive number of sats".to_string();
+                                }
+                            }
+                        }
+
+                        ui.add_space(12.0);
+                        if ui
+                            .link(
+                                egui::RichText::new("Back")
+                                    .size(13.0)
+                                    .color(egui::Color32::DARK_GRAY),
+                            )
+                            .clicked()
+                        {
+                            self.jit_fixed_mode = false;
+                        }
                     }
 
                     // Show transfer option if user has onchain funds
@@ -7689,7 +7820,7 @@ impl App for UserApp {
                 // No channel — JIT invoice to open one
                 println!("[DEBUG] Fund wallet triggered, calling get_jit_invoice");
                 self.status_message = "Getting JIT channel invoice...".to_string();
-                self.get_jit_invoice(ctx);
+                self.get_jit_invoice(ctx, None);
             }
         }
 
