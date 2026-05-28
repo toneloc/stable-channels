@@ -403,17 +403,6 @@
         }
       }
     },
-    "button_export_import" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Export / Import Backup"
-          }
-        }
-      }
-    },
     "button_generate_invoice" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -432,6 +421,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Hide Seed"
+          }
+        }
+      }
+    },
+    "button_import_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Import from File"
           }
         }
       }
@@ -974,15 +974,7 @@
       }
     },
     "error_restore_failed" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Restore failed: "
-          }
-        }
-      }
+
     },
     "error_seed_word_count" : {
       "extractionState" : "manual",
@@ -2973,17 +2965,6 @@
         }
       }
     },
-    "section_seed_phrase" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Seed Phrase"
-          }
-        }
-      }
-    },
     "section_stable_position" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -3791,7 +3772,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Clipboard is shared with other apps. Consider writing down your seed instead."
+            "value" : "Clipboard is shared with other apps."
           }
         }
       }

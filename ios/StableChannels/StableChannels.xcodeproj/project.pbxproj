@@ -38,6 +38,8 @@
 		49FD8C312FC85BAC0079DDA3 /* ExportImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C2F2FC85BAC0079DDA3 /* ExportImportSheet.swift */; };
 		49FD8C322FC85BAC0079DDA3 /* BackupPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C2E2FC85BAC0079DDA3 /* BackupPromptView.swift */; };
 		49FD8C332FC85BAC0079DDA3 /* RestoreBackupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */; };
+		49FD8C422FC893F60079DDA3 /* RestoreSeedSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C402FC893F60079DDA3 /* RestoreSeedSheet.swift */; };
+		49FD8C432FC893F60079DDA3 /* SeedWordGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FD8C412FC893F60079DDA3 /* SeedWordGridView.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
@@ -128,6 +130,8 @@
 		49FD8C2E2FC85BAC0079DDA3 /* BackupPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupPromptView.swift; sourceTree = "<group>"; };
 		49FD8C2F2FC85BAC0079DDA3 /* ExportImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportImportSheet.swift; sourceTree = "<group>"; };
 		49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreBackupSheet.swift; sourceTree = "<group>"; };
+		49FD8C402FC893F60079DDA3 /* RestoreSeedSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreSeedSheet.swift; sourceTree = "<group>"; };
+		49FD8C412FC893F60079DDA3 /* SeedWordGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedWordGridView.swift; sourceTree = "<group>"; };
 		4F10632049E3C904E518EDD2 /* TradeDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeDetailView.swift; sourceTree = "<group>"; };
 		4F22F6639A59D4B86A959586 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		61BB0D1D623E0794FC1ED6ED /* NodeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeService.swift; sourceTree = "<group>"; };
@@ -260,6 +264,8 @@
 		9EB6CDA4F614F973AF602691 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
+				49FD8C402FC893F60079DDA3 /* RestoreSeedSheet.swift */,
+				49FD8C412FC893F60079DDA3 /* SeedWordGridView.swift */,
 				49FD8C2E2FC85BAC0079DDA3 /* BackupPromptView.swift */,
 				49FD8C2F2FC85BAC0079DDA3 /* ExportImportSheet.swift */,
 				49FD8C302FC85BAC0079DDA3 /* RestoreBackupSheet.swift */,
@@ -489,6 +495,8 @@
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
+				49FD8C422FC893F60079DDA3 /* RestoreSeedSheet.swift in Sources */,
+				49FD8C432FC893F60079DDA3 /* SeedWordGridView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
 				E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */,
