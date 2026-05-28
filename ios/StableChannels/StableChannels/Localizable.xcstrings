@@ -221,6 +221,9 @@
         }
       }
     },
+    "Backup enabled!" : {
+
+    },
     "button_any_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -518,6 +521,9 @@
         }
       }
     },
+    "Cancel" : {
+
+    },
     "channel_status_pending" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -536,6 +542,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ready"
+          }
+        }
+      }
+    },
+    "confirm_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirm Passphrase"
+          }
+        }
+      }
+    },
+    "confirm_passphrase_hint" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirm your passphrase"
           }
         }
       }
@@ -613,6 +641,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "No Trades"
+          }
+        }
+      }
+    },
+    "enable_icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enable iCloud Backup"
+          }
+        }
+      }
+    },
+    "enter_backup_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enter backup passphrase"
+          }
+        }
+      }
+    },
+    "enter_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enter passphrase"
           }
         }
       }
@@ -716,6 +777,28 @@
         }
       }
     },
+    "error_export_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export failed"
+          }
+        }
+      }
+    },
+    "error_import_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Decryption failed. Check passphrase."
+          }
+        }
+      }
+    },
     "error_insufficient_balance" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -727,6 +810,17 @@
         }
       }
     },
+    "error_no_file" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No file selected"
+          }
+        }
+      }
+    },
     "error_no_ready_channel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -734,6 +828,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "No ready channel"
+          }
+        }
+      }
+    },
+    "error_no_seed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No seed available"
           }
         }
       }
@@ -892,6 +997,61 @@
         }
       }
     },
+    "export" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export"
+          }
+        }
+      }
+    },
+    "export_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export Backup"
+          }
+        }
+      }
+    },
+    "export_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Add a passphrase to protect your exported backup. You'll need this to restore."
+          }
+        }
+      }
+    },
+    "export_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export Your Backup"
+          }
+        }
+      }
+    },
+    "file_ready" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "File ready to restore"
+          }
+        }
+      }
+    },
     "header_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -998,6 +1158,72 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Syncing..."
+          }
+        }
+      }
+    },
+    "icloud_backup_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Protect your wallet with encrypted cloud backup."
+          }
+        }
+      }
+    },
+    "icloud_backup_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iCloud Seed Backup"
+          }
+        }
+      }
+    },
+    "import" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Import"
+          }
+        }
+      }
+    },
+    "import_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Import Backup"
+          }
+        }
+      }
+    },
+    "import_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Select your .stablebackup file and enter the passphrase used when creating it."
+          }
+        }
+      }
+    },
+    "import_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from Backup"
           }
         }
       }
@@ -2094,6 +2320,17 @@
         }
       }
     },
+    "maybe_later" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Maybe Later"
+          }
+        }
+      }
+    },
     "Min" : {
 
     },
@@ -2137,6 +2374,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Notifications Enabled"
+          }
+        }
+      }
+    },
+    "passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Passphrase"
+          }
+        }
+      }
+    },
+    "passphrase_min_length" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "At least 12 characters required"
+          }
+        }
+      }
+    },
+    "passphrase_mismatch" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Passphrases don't match"
           }
         }
       }
@@ -2330,6 +2600,50 @@
     },
     "Price" : {
 
+    },
+    "restore_action" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore Wallet"
+          }
+        }
+      }
+    },
+    "restore_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore your wallet from backup."
+          }
+        }
+      }
+    },
+    "restore_from_file" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from File"
+          }
+        }
+      }
+    },
+    "restore_from_icloud" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from iCloud"
+          }
+        }
+      }
     },
     "section_about" : {
       "extractionState" : "manual",
@@ -2591,6 +2905,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Trades"
+          }
+        }
+      }
+    },
+    "select_backup_file" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Select .stablebackup File"
           }
         }
       }
@@ -2880,6 +3205,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Settings"
+          }
+        }
+      }
+    },
+    "tap_to_select" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Tap to browse your files"
           }
         }
       }
@@ -3304,6 +3640,9 @@
           }
         }
       }
+    },
+    "Wallet restored!" : {
+
     },
     "warning_copy_seed_message" : {
       "extractionState" : "extracted_with_value",
