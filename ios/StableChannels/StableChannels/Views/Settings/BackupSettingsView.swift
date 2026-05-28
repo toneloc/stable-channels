@@ -127,7 +127,7 @@ struct BackupSettingsView: View {
             }
         }
         .sheet(isPresented: $showingRestoreSheet) {
-            RestoreBackupSheet(mode: .iCloud, importedFileURL: nil) { mnemonic in
+            RestoreBackupSheet { mnemonic in
                 importMnemonic(mnemonic)
             }
         }

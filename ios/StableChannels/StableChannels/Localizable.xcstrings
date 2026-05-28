@@ -885,6 +885,9 @@
         }
       }
     },
+    "error_invalid_seed" : {
+
+    },
     "error_no_file" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -2730,17 +2733,6 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Restore your wallet from backup."
-          }
-        }
-      }
-    },
-    "restore_from_file" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Restore from File"
           }
         }
       }

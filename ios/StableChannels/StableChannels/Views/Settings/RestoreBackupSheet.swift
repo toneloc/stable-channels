@@ -1,13 +1,6 @@
 import SwiftUI
 
 struct RestoreBackupSheet: View {
-    enum Mode {
-        case iCloud
-        case fileImport
-    }
-
-    let mode: Mode
-    let importedFileURL: URL?
     let onRestore: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -20,14 +13,12 @@ struct RestoreBackupSheet: View {
             VStack(spacing: 32) {
                 Spacer()
 
-                Image(systemName: mode == .iCloud ? "icloud.and.arrow.down" : "doc.fill")
+                Image(systemName: "icloud.and.arrow.down")
                     .font(.system(size: 80))
                     .foregroundStyle(.blue)
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 8)
 
-                Text(mode == .iCloud
-                    ? String(localized: "restore_from_icloud", defaultValue: "Restore from iCloud")
-                    : String(localized: "restore_from_file", defaultValue: "Restore from File"))
+                Text(String(localized: "restore_from_icloud", defaultValue: "Restore from iCloud"))
                     .font(.title.bold())
 
                 Text(String(
@@ -39,7 +30,6 @@ struct RestoreBackupSheet: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
-                // Feature list
                 VStack(alignment: .leading, spacing: 16) {
                     featureRow(icon: "key.fill", text: "AES-256 encrypted backup")
                     featureRow(icon: "arrow.clockwise", text: "Sync latest version")
@@ -100,7 +90,7 @@ struct RestoreBackupSheet: View {
     private var restoreButton: some View {
         if #available(iOS 26.0, *) {
             Button {
-                Task { await performRestoreAction() }
+                Task { await performRestore() }
             } label: {
                 HStack(spacing: 8) {
                     if isRestoring {
@@ -118,7 +108,7 @@ struct RestoreBackupSheet: View {
             .disabled(isRestoring)
         } else {
             Button {
-                Task { await performRestoreAction() }
+                Task { await performRestore() }
             } label: {
                 HStack(spacing: 8) {
                     if isRestoring {
@@ -139,36 +129,19 @@ struct RestoreBackupSheet: View {
         }
     }
 
-    private func performRestoreAction() async {
+    private func performRestore() async {
         isRestoring = true
         errorMessage = nil
 
         do {
-            let backupFile: BackupFile
-
-            switch mode {
-            case .iCloud:
-                backupFile = try await CloudBackupService.shared.restoreFromCloud()
-            case .fileImport:
-                guard let url = importedFileURL else {
-                    errorMessage = "No file selected"
-                    isRestoring = false
-                    return
-                }
-                backupFile = try await restoreFromFile(url: url)
-            }
-
-            onRestore(backupFile.mnemonic)
+            let backup = try await CloudBackupService.shared.restoreFromCloud()
+            onRestore(backup.mnemonic)
             showSuccess = true
-            try await Task.sleep(nanoseconds: 1_500_000_000)
+            try await Task.sleep(for: .seconds(1.5))
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
             isRestoring = false
         }
-    }
-
-    private func restoreFromFile(url _: URL) async throws -> BackupFile {
-        throw BackupError.importFailed("Use Export/Import to restore from file")
     }
 }

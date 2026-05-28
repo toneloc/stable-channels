@@ -1,6 +1,6 @@
 import Foundation
 
-/// Mnemonic word parsing and validation utilities
+/// Mnemonic word parsing utilities - full BIP39 validation handled by LDKNode
 enum MnemonicUtils {
     /// Regex pattern for validating mnemonic word format (alphabetic only)
     private static let wordPattern: NSRegularExpression? = try? NSRegularExpression(
@@ -10,10 +10,11 @@ enum MnemonicUtils {
 
     // MARK: - Word Parsing
 
-    /// Parse mnemonic string into array of words, trimmed and filtered
+    /// Parse mnemonic string into array of words, trimmed, lowercased and filtered
     static func parseMnemonic(_ input: String) -> [String] {
         input
             .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
             .split(separator: " ")
             .map(String.init)
             .filter { !$0.isEmpty }
@@ -46,7 +47,7 @@ enum MnemonicUtils {
     }
 
     /// Check if all words contain only alphabetic characters (basic format check)
-    /// Note: This does NOT validate against BIP39 wordlist or checksum
+    /// Note: Full BIP39 validation (wordlist + checksum) is handled by LDKNode
     static func hasValidCharacterFormat(_ mnemonic: String) -> Bool {
         let words = parseMnemonic(mnemonic)
         guard !words.isEmpty else { return false }
