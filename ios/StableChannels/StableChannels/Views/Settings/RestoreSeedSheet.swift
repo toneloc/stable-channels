@@ -21,6 +21,14 @@ struct RestoreSeedSheet: View {
                     headerSection
 
                     seedTextField
+                        .onTapGesture {
+                            UIApplication.shared.sendAction(
+                                #selector(UIResponder.resignFirstResponder),
+                                to: nil,
+                                from: nil,
+                                for: nil
+                            )
+                        }
 
                     SeedWordGridView(
                         wordFields: wordFields,

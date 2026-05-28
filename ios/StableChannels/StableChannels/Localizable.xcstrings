@@ -885,9 +885,6 @@
         }
       }
     },
-    "error_invalid_seed" : {
-
-    },
     "error_no_file" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
