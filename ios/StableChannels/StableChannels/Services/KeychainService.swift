@@ -12,7 +12,7 @@ final class KeychainService {
     // MARK: - CRUD
 
     func generateAndStoreKey() throws {
-        let keyData = generateRandomBytes(count: 32)
+        let keyData = try generateRandomBytes(count: 32)
         try storeKey(keyData)
     }
 
@@ -36,11 +36,13 @@ final class KeychainService {
     }
 
     func deleteKey() {
-        SecItemDelete([
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: account
-        ] as CFDictionary)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: true
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 
     func hasKey() -> Bool {
@@ -57,9 +59,12 @@ final class KeychainService {
 
     // MARK: - Private
 
-    private func generateRandomBytes(count: Int) -> Data {
+    private func generateRandomBytes(count: Int) throws -> Data {
         var bytes = [UInt8](repeating: 0, count: count)
-        _ = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
+        guard status == errSecSuccess else {
+            throw BackupError.keychainUnavailable
+        }
         return Data(bytes)
     }
 

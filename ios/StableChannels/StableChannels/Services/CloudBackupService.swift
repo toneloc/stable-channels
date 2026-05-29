@@ -73,15 +73,7 @@ final class CloudBackupService {
         let keyData = try keychain.loadKey()
         let key = SymmetricKey(data: keyData)
 
-        let payload = EncryptedBackup(version: 1, mnemonic: mnemonic, createdAt: Date())
-        let payloadData = try JSONEncoder().encode(payload)
-        let sealedBox = try AES.GCM.seal(payloadData, using: key)
-        guard let encryptedData = sealedBox.combined else {
-            syncStatus = .error("Encryption failed")
-            throw BackupError.exportFailed("AES.GCM seal produced no output")
-        }
-
-        let checksum = SHA256.hash(data: encryptedData).compactMap { String(format: "%02x", $0) }.joined()
+        let (encryptedData, checksum) = try CryptoService.encrypt(mnemonic: mnemonic, key: key)
 
         let container = CKContainer.default()
         let db = container.privateCloudDatabase
@@ -140,22 +132,20 @@ final class CloudBackupService {
             throw BackupError.checksumMismatch
         }
 
-        let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
-        let decryptedData = try AES.GCM.open(sealedBox, using: key)
-        let decrypted = try JSONDecoder().decode(EncryptedBackup.self, from: decryptedData)
-
+        let backup = try CryptoService.decrypt(data: encryptedData, key: key)
+        backupExists = true
         syncStatus = .synced
 
         return BackupFile(
             metadata: BackupMetadata(
-                version: 1,
+                version: backup.metadata.version,
                 checksum: checksum,
                 timestamp: timestamp,
                 network: .bitcoin,
                 cipher: .aes256gcm
             ),
-            mnemonic: decrypted.mnemonic,
-            createdAt: decrypted.createdAt
+            mnemonic: backup.mnemonic,
+            createdAt: backup.createdAt
         )
     }
 

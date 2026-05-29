@@ -365,7 +365,7 @@ struct ExportImportSheet: View {
         errorMessage = nil
 
         do {
-            guard let mnemonic = NodeService().savedMnemonic else {
+            guard let mnemonic = NodeService.shared.savedMnemonic else {
                 errorMessage = String(localized: "error_no_seed", defaultValue: "No seed available")
                 return
             }
