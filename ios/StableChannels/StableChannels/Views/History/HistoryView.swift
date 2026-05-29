@@ -13,7 +13,7 @@ struct HistoryView: View {
             VStack(spacing: 0) {
                 // Segment picker
                 Picker(String(localized: "picker_history", defaultValue: "History"), selection: $selectedSegment) {
-                    Text(String(localized: "segment_trades", defaultValue: "Trades")).tag(0)
+                    Text(String(localized: "segment_trades", defaultValue: "Orders")).tag(0)
                     Text(String(localized: "segment_payments", defaultValue: "Payments")).tag(1)
                 }
                 .pickerStyle(.segmented)

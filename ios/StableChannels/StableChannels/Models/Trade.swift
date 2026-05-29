@@ -6,8 +6,8 @@ enum TradeAction: String, Codable {
 
     var displayName: String {
         switch self {
-        case .buyBTC: return "Buy BTC"
-        case .sellBTC: return "Sell BTC"
+        case .buyBTC: return "USD → BTC"
+        case .sellBTC: return "BTC → USD"
         }
     }
 }

@@ -95,7 +95,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "and spending account"
+            "value" : "to Stable"
           }
         }
       }
@@ -117,7 +117,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Self-custodial bitcoin trading"
+            "value" : "Self-custody Lightning wallet"
           }
         }
       }
@@ -249,7 +249,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Buy BTC"
+            "value" : "USD → BTC"
           }
         }
       }
@@ -458,7 +458,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sell BTC"
+            "value" : "BTC → USD"
           }
         }
       }
@@ -601,7 +601,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No trades yet"
+            "value" : "Your orders will appear here"
           }
         }
       }
@@ -612,7 +612,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "No Trades"
+            "value" : "No Orders"
           }
         }
       }
@@ -953,7 +953,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Create your account to get started"
+            "value" : "Receive over Lightning to create your Stable Account"
           }
         }
       }
@@ -2039,6 +2039,17 @@
         }
       }
     },
+    "link_privacy_policy" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Privacy Policy"
+          }
+        }
+      }
+    },
     "link_push_connectivity" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -2103,7 +2114,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Move to Trading"
+            "value" : "Move to Stable"
           }
         }
       }
@@ -2546,7 +2557,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Trade Details"
+            "value" : "Order Details"
           }
         }
       }
@@ -2590,7 +2601,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Trades"
+            "value" : "Orders"
           }
         }
       }
@@ -2780,7 +2791,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Trade Confirmed"
+            "value" : "Order Confirmed"
           }
         }
       }
@@ -2791,7 +2802,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Trade Failed"
+            "value" : "Order Failed"
           }
         }
       }
@@ -2825,6 +2836,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Require auth before sending Lightning payments"
+          }
+        }
+      }
+    },
+    "subtitle_manage_exposure" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Manage your BTC exposure"
           }
         }
       }
@@ -2970,7 +2992,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Buy BTC"
+            "value" : "USD → BTC"
           }
         }
       }
@@ -3146,7 +3168,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sell BTC"
+            "value" : "BTC → USD"
           }
         }
       }
@@ -3190,7 +3212,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Trade Detail"
+            "value" : "Order Detail"
           }
         }
       }
@@ -3234,7 +3256,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Buy BTC"
+            "value" : "USD → BTC"
           }
         }
       }
@@ -3256,7 +3278,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sell BTC"
+            "value" : "BTC → USD"
           }
         }
       }
