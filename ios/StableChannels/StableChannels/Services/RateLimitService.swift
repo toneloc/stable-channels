@@ -69,7 +69,7 @@ final class RateLimitService {
 enum BackupError: Error, LocalizedError {
     case iCloudNotSignedIn
     case keychainUnavailable
-    case biometricFailed
+    case keyNotFound
     case exportFailed(String)
     case importFailed(String)
     case invalidFormat
@@ -84,7 +84,7 @@ enum BackupError: Error, LocalizedError {
         switch self {
         case .iCloudNotSignedIn: return "Sign in to iCloud to enable backup"
         case .keychainUnavailable: return "iCloud Keychain unavailable"
-        case .biometricFailed: return "Biometric authentication failed"
+        case .keyNotFound: return "Backup encryption key not found"
         case .exportFailed(let msg): return "Export failed: \(msg)"
         case .importFailed(let msg): return "Import failed: \(msg)"
         case .invalidFormat: return "Invalid backup file format"

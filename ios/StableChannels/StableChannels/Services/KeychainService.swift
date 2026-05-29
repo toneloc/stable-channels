@@ -1,6 +1,5 @@
 import Foundation
 import Security
-import LocalAuthentication
 
 @MainActor
 @Observable
@@ -18,25 +17,20 @@ final class KeychainService {
     }
 
     func loadKey() throws -> Data {
-        let context = LAContext()
-        context.localizedReason = "Authenticate to access backup encryption key"
-        context.localizedFallbackTitle = ""
-
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrSynchronizable as String: true,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseAuthenticationContext as String: context
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
         guard status == errSecSuccess, let keyData = result as? Data else {
-            throw BackupError.biometricFailed
+            throw BackupError.keyNotFound
         }
         return keyData
     }
