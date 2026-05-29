@@ -144,6 +144,17 @@ struct SettingsView: View {
                             text: String(localized: "link_about", defaultValue: "About")
                         )
                     }
+                    Button {
+                        if let url = URL(string: "https://stablechannels.com/privacy.html") {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        rowLabel(
+                            icon: "hand.raised.fill",
+                            color: .secondary,
+                            text: String(localized: "link_privacy_policy", defaultValue: "Privacy Policy")
+                        )
+                    }
                 } header: {
                     Text(String(localized: "section_about", defaultValue: "About"))
                         .font(.headline)

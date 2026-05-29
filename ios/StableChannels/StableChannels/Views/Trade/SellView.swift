@@ -119,6 +119,9 @@ struct SellView: View {
         VStack(spacing: 20) {
             Text(String(localized: "title_confirm_sell", defaultValue: "Confirm Sell"))
                 .font(.title2.bold())
+            Text(String(localized: "subtitle_manage_exposure", defaultValue: "Manage your BTC exposure"))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
 
             VStack(spacing: 12) {
                 confirmRow(
@@ -181,7 +184,7 @@ struct SellView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.green)
 
-                Text(String(localized: "status_trade_confirmed", defaultValue: "Trade Confirmed"))
+                Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
                     .font(.title2.bold())
 
                 Text(String(localized: "trade_sold_btc_for", defaultValue: "Sold ") + String(
@@ -195,7 +198,7 @@ struct SellView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.orange)
 
-                Text(String(localized: "status_waiting_lsp", defaultValue: "Trade Pending"))
+                Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
                 Text(String(localized: "trade_selling_btc_for", defaultValue: "Selling ") + String(
@@ -246,7 +249,7 @@ struct SellView: View {
             ) else {
                 errorMessage = String(
                     localized: "error_trade_failed",
-                    defaultValue: "Trade failed — check amount and try again"
+                    defaultValue: "Order failed — check amount and try again"
                 )
                 isExecuting = false
                 return

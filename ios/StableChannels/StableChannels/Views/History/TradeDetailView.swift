@@ -7,7 +7,7 @@ struct TradeDetailView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section(String(localized: "section_trade_details", defaultValue: "Trade Details")) {
+                Section(String(localized: "section_trade_details", defaultValue: "Order Details")) {
                     row(String(localized: "label_action", defaultValue: "Action"),
                         trade.action == "buy"
                             ? String(localized: "trade_buy_btc", defaultValue: "Buy BTC")
@@ -28,11 +28,11 @@ struct TradeDetailView: View {
                 Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
                     row(String(localized: "label_date", defaultValue: "Date"), trade.date.formatted())
                     if let paymentId = trade.paymentId {
-                        row(String(localized: "label_payment_id", defaultValue: "Trade ID"), paymentId)
+                        row(String(localized: "label_payment_id", defaultValue: "Order ID"), paymentId)
                     }
                 }
             }
-            .navigationTitle(String(localized: "title_trade_detail", defaultValue: "Trade Detail"))
+            .navigationTitle(String(localized: "title_trade_detail", defaultValue: "Order Detail"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
