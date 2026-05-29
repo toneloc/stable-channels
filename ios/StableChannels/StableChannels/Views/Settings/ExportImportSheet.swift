@@ -32,6 +32,8 @@ struct ExportImportSheet: View {
     @State private var selectedFileURL: URL?
     @State private var selectedFileName: String?
     @State private var animateFileSelection = false
+    @State private var isRateLimited = false
+    @State private var lockoutSeconds = 0
 
     var body: some View {
         NavigationStack {
@@ -387,6 +389,14 @@ struct ExportImportSheet: View {
             return
         }
 
+        // Check rate limit before attempting decryption
+        if RateLimitService.shared.isLocked {
+            lockoutSeconds = RateLimitService.shared.lockoutRemainingSeconds
+            isRateLimited = true
+            errorMessage = "\(String(localized: "error_rate_limited", defaultValue: "Too many attempts. Try again in")) \(lockoutSeconds)s"
+            return
+        }
+
         isProcessing = true
         defer { isProcessing = false }
         errorMessage = nil
@@ -401,9 +411,32 @@ struct ExportImportSheet: View {
 
             let encryptedData = try Data(contentsOf: fileURL)
             let backup = try CryptoService.decrypt(data: encryptedData, passphrase: passphrase)
+
+            // Success - reset rate limit
+            RateLimitService.shared.recordSuccessfulAttempt()
             onRestore?(backup.mnemonic)
             dismiss()
+        } catch let error as CryptoError {
+            RateLimitService.shared.recordFailedAttempt()
+
+            if case .invalidMagicBytes = error {
+                errorMessage = String(localized: "error_invalid_backup", defaultValue: "Invalid backup file")
+            } else if case .unsupportedVersion = error {
+                errorMessage = String(localized: "error_old_backup", defaultValue: "Backup version not supported")
+            } else {
+                // Wrong passphrase or decryption failed - show rate limit info
+                let remaining = RateLimitService.shared.attemptsRemaining
+                if RateLimitService.shared.isLocked {
+                    lockoutSeconds = RateLimitService.shared.lockoutRemainingSeconds
+                    errorMessage = "\(String(localized: "error_wrong_passphrase", defaultValue: "Wrong passphrase. \(remaining) attempts remaining")) "
+                        + "\(String(localized: "error_locked_for", defaultValue: "Locked for")) \(lockoutSeconds)s"
+                } else {
+                    errorMessage = "\(String(localized: "error_import_failed", defaultValue: "Decryption failed. Check passphrase.")) "
+                        + "(\(remaining) \(String(localized: "label_attempts_left", defaultValue: "attempts left")))"
+                }
+            }
         } catch {
+            RateLimitService.shared.recordFailedAttempt()
             errorMessage = String(
                 localized: "error_import_failed",
                 defaultValue: "Decryption failed. Check passphrase."
