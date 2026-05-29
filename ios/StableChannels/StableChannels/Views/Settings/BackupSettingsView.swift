@@ -101,6 +101,7 @@ struct BackupSettingsView: View {
             seedSection
             restoreSection
             icloudSection
+            supportBannerSection
         }
         .listStyle(.insetGrouped)
         .navigationTitle(String(localized: "title_backup", defaultValue: "Backup"))
@@ -318,6 +319,62 @@ struct BackupSettingsView: View {
             }
         } header: {
             Text(String(localized: "section_icloud_backup", defaultValue: "iCloud"))
+        }
+    }
+
+    private var supportBannerSection: some View {
+        Section {
+            HStack(spacing: 14) {
+                supportIconBadge
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "recovery_banner_title", defaultValue: "Need Help?"))
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.primary)
+
+                    HStack(spacing: 4) {
+                        Text(String(
+                            localized: "recovery_banner_text_prefix",
+                            defaultValue: "Can't access your backup? Email"
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(Color(uiColor: .label).opacity(0.7))
+                        Link(
+                            "support@stablechannels.com",
+                            destination: URL(string: "mailto:support@stablechannels.com")!
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                        Text(String(localized: "recovery_banner_text_suffix", defaultValue: "for recovery."))
+                            .font(.caption)
+                            .foregroundStyle(Color(uiColor: .label).opacity(0.7))
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(.orange, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private var supportIconBadge: some View {
+        ZStack {
+            Circle()
+                .fill(.orange)
+                .frame(width: 44, height: 44)
+                .shadow(color: .orange.opacity(0.3), radius: 8, x: 0, y: 4)
+            Image(systemName: "questionmark.circle.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
         }
     }
 

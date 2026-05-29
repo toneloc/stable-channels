@@ -885,6 +885,28 @@
         }
       }
     },
+    "error_invalid_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Invalid backup file"
+          }
+        }
+      }
+    },
+    "error_locked_for" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Locked for"
+          }
+        }
+      }
+    },
     "error_no_file" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -940,6 +962,17 @@
         }
       }
     },
+    "error_old_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup version not supported"
+          }
+        }
+      }
+    },
     "error_open_channel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -958,6 +991,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Passcode failed"
+          }
+        }
+      }
+    },
+    "error_rate_limited" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Too many attempts. Try again in"
           }
         }
       }
@@ -1060,6 +1104,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Failed to create wallet"
+          }
+        }
+      }
+    },
+    "error_wrong_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wrong passphrase. %lld attempts remaining"
           }
         }
       }
@@ -1635,6 +1690,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "App Unlock"
+          }
+        }
+      }
+    },
+    "label_attempts_left" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "attempts left"
           }
         }
       }
@@ -2700,6 +2766,39 @@
     },
     "Price" : {
 
+    },
+    "recovery_banner_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Need Help?"
+          }
+        }
+      }
+    },
+    "recovery_banner_text_prefix" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't access your backup? Email"
+          }
+        }
+      }
+    },
+    "recovery_banner_text_suffix" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "for recovery."
+          }
+        }
+      }
     },
     "restore_action" : {
       "extractionState" : "extracted_with_value",
