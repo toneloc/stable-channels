@@ -136,6 +136,7 @@ final class CloudBackupService {
         backupExists = true
         syncStatus = .synced
 
+        // Return with CloudKit-specific data merged
         return BackupFile(
             metadata: BackupMetadata(
                 version: backup.metadata.version,
