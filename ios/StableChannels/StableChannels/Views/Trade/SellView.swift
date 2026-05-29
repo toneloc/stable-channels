@@ -57,7 +57,7 @@ struct SellView: View {
                 }
             }
             .padding()
-            .navigationTitle(String(localized: "title_sell_btc", defaultValue: "Sell BTC"))
+            .navigationTitle(String(localized: "title_sell_btc", defaultValue: "BTC → USD"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -162,7 +162,7 @@ struct SellView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                 } else {
-                    Text(String(localized: "title_sell_btc", defaultValue: "Sell BTC"))
+                    Text(String(localized: "title_sell_btc", defaultValue: "BTC → USD"))
                         .frame(maxWidth: .infinity)
                 }
             }
@@ -187,7 +187,7 @@ struct SellView: View {
                 Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_sold_btc_for", defaultValue: "Sold ") + String(
+                Text(String(localized: "trade_sold_btc_for", defaultValue: "Converted ") + String(
                     format: "%.8f",
                     btcAmountFinal
                 ) + " BTC for " + (amountUSD * 0.99).usdFormatted)
@@ -201,7 +201,7 @@ struct SellView: View {
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_selling_btc_for", defaultValue: "Selling ") + String(
+                Text(String(localized: "trade_selling_btc_for", defaultValue: "Converting ") + String(
                     format: "%.8f",
                     btcAmountFinal
                 ) + " BTC for " + (amountUSD * 0.99).usdFormatted)

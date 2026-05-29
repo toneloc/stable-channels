@@ -601,7 +601,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Your orders will appear here"
+            "value" : "Convert BTC to see orders here"
           }
         }
       }
@@ -3036,7 +3036,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Confirm Buy"
+            "value" : "Confirm USD → BTC"
           }
         }
       }
@@ -3047,7 +3047,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Confirm Sell"
+            "value" : "Confirm BTC → USD"
           }
         }
       }
@@ -3245,7 +3245,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bought "
+            "value" : "Converted "
           }
         }
       }
@@ -3267,7 +3267,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Buying "
+            "value" : "Converting "
           }
         }
       }
@@ -3289,7 +3289,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Selling "
+            "value" : "Converting "
           }
         }
       }
@@ -3300,7 +3300,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sold "
+            "value" : "Converted "
           }
         }
       }

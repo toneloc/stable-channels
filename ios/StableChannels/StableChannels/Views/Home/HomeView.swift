@@ -439,14 +439,14 @@ struct HomeView: View {
 
             HStack(spacing: 8) {
                 ActionButton(
-                    title: String(localized: "button_buy_btc", defaultValue: "Buy BTC"),
+                    title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
                     icon: "arrow.up.right.circle.fill",
                     color: .orange
                 ) {
                     showBuySheet = true
                 }
                 ActionButton(
-                    title: String(localized: "button_sell_btc", defaultValue: "Sell BTC"),
+                    title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
                     icon: "arrow.down.right.circle.fill",
                     color: .purple
                 ) {

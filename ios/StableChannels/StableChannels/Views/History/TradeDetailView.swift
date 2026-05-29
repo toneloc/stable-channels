@@ -10,8 +10,8 @@ struct TradeDetailView: View {
                 Section(String(localized: "section_trade_details", defaultValue: "Order Details")) {
                     row(String(localized: "label_action", defaultValue: "Action"),
                         trade.action == "buy"
-                            ? String(localized: "trade_buy_btc", defaultValue: "Buy BTC")
-                            : String(localized: "trade_sell_btc", defaultValue: "Sell BTC"))
+                            ? String(localized: "trade_buy_btc", defaultValue: "USD → BTC")
+                            : String(localized: "trade_sell_btc", defaultValue: "BTC → USD"))
                     row(
                         String(localized: "label_amount_usd", defaultValue: "Amount (USD)"),
                         trade.amountUSD.usdFormatted

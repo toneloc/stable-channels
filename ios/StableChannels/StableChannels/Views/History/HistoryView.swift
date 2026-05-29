@@ -35,7 +35,7 @@ struct HistoryView: View {
                             systemImage: "arrow.left.arrow.right",
                             description: Text(String(
                                 localized: "empty_trades_desc",
-                                defaultValue: "Buy or sell BTC to see trades here."
+                                defaultValue: "Convert BTC to see orders here."
                             ))
                         )
                     } else if selectedSegment == 1 && payments.isEmpty {
@@ -111,8 +111,8 @@ struct TradeRowView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(isBuy
-                    ? String(localized: "trade_buy_btc", defaultValue: "Buy BTC")
-                    : String(localized: "trade_sell_btc", defaultValue: "Sell BTC"))
+                    ? String(localized: "trade_buy_btc", defaultValue: "USD → BTC")
+                    : String(localized: "trade_sell_btc", defaultValue: "BTC → USD"))
                     .fontWeight(.medium)
                 Text(trade.date, style: .relative)
                     .font(.caption)
