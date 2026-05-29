@@ -69,25 +69,27 @@ final class KeychainService {
     }
 
     private func storeKey(_ keyData: Data) throws {
-        let baseQuery: [String: Any] = [
+        // Delete any existing key first to ensure clean state
+        let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrSynchronizable as String: true
         ]
+        SecItemDelete(deleteQuery as CFDictionary)
 
-        var result: AnyObject?
-        let lookupStatus = SecItemCopyMatching(baseQuery as CFDictionary, &result)
+        // Now add the new key
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: true,
+            kSecValueData as String: keyData,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked
+        ]
 
-        if lookupStatus == errSecSuccess {
-            return
-        }
-
-        var addAttrs: [String: Any] = baseQuery
-        addAttrs[kSecValueData as String] = keyData
-        addAttrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-        let addStatus = SecItemAdd(addAttrs as CFDictionary, nil)
-        if addStatus != errSecSuccess {
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
             throw BackupError.keychainUnavailable
         }
     }
