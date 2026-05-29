@@ -5,16 +5,22 @@ import CryptoKit
 @MainActor
 @Observable
 final class CloudBackupService {
-    static let shared = CloudBackupService()
+    static let shared = CloudBackupService(nodeService: NodeService.shared)
 
     private let recordType = "SeedBackup"
     private let recordIDName = "latestSeedBackup"
 
     private let keychain = KeychainService.shared
+    private let nodeService: NodeService
 
     private(set) var backupExists: Bool = false
     private(set) var syncStatus: SyncStatus = .idle
     private(set) var iCloudAvailable: Bool = false
+
+    init(nodeService: NodeService) {
+        self.nodeService = nodeService
+        Task { await checkAccountStatus() }
+    }
 
     enum SyncStatus: Equatable {
         case idle
@@ -23,10 +29,6 @@ final class CloudBackupService {
         case error(String)
         case iCloudNotAvailable
         case notSupported
-    }
-
-    init() {
-        Task { await checkAccountStatus() }
     }
 
     // MARK: - iCloud Account
@@ -179,7 +181,7 @@ final class CloudBackupService {
     // MARK: - Helpers
 
     private func getMnemonic() -> String? {
-        NodeService().savedMnemonic
+        nodeService.savedMnemonic
     }
 
     func refreshStatus() {
