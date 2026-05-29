@@ -4,6 +4,9 @@
     "" : {
 
     },
+    " " : {
+
+    },
     "%@" : {
 
     },
@@ -2767,24 +2770,13 @@
     "Price" : {
 
     },
-    "recovery_banner_title" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Need Help?"
-          }
-        }
-      }
-    },
     "recovery_banner_text_prefix" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Can't access your backup? Email"
+            "value" : "Please email"
           }
         }
       }
@@ -2795,7 +2787,18 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "for recovery."
+            "value" : "for wallet recovery assistance."
+          }
+        }
+      }
+    },
+    "recovery_banner_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Need Help?"
           }
         }
       }
@@ -3385,6 +3388,9 @@
           }
         }
       }
+    },
+    "support@stablechannels.com" : {
+
     },
     "tab_history" : {
       "extractionState" : "manual",

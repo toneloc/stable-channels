@@ -332,23 +332,23 @@ struct BackupSettingsView: View {
                         .fontWeight(.bold)
                         .foregroundStyle(.primary)
 
-                    HStack(spacing: 4) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(String(
                             localized: "recovery_banner_text_prefix",
-                            defaultValue: "Can't access your backup? Email"
+                            defaultValue: "Please email"
                         ))
-                        .font(.caption)
-                        .foregroundStyle(Color(uiColor: .label).opacity(0.7))
-                        Link(
-                            "support@stablechannels.com",
-                            destination: URL(string: "mailto:support@stablechannels.com")!
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                        Text(String(localized: "recovery_banner_text_suffix", defaultValue: "for recovery."))
-                            .font(.caption)
-                            .foregroundStyle(Color(uiColor: .label).opacity(0.7))
+                            + Text(" ")
+                            + Text("support@stablechannels.com")
+                            .foregroundStyle(.blue)
+                            .underline()
+                            + Text(" ")
+                            + Text(String(
+                                localized: "recovery_banner_text_suffix",
+                                defaultValue: "for wallet recovery assistance."
+                            ))
                     }
+                    .font(.caption)
+                    .foregroundStyle(Color(uiColor: .label).opacity(0.7))
                 }
                 Spacer()
             }
