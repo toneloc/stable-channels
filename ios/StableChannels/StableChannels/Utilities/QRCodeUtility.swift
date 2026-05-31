@@ -11,7 +11,7 @@ enum QRCodeUtility {
         return c
     }()
 
-    static func generate(from string: String, size: CGFloat = 2048) -> UIImage? {
+    static func generate(from string: String, size: CGFloat = 512) -> UIImage? {
         let cacheKey = NSString(string: "\(string)_\(Int(size))")
         if let cached = cache.object(forKey: cacheKey) {
             return cached
@@ -28,7 +28,7 @@ enum QRCodeUtility {
 
     /// Async variant for SwiftUI .task compatibility
     @MainActor
-    static func generateAsync(from string: String, size: CGFloat = 2048) async -> UIImage? {
+    static func generateAsync(from string: String, size: CGFloat = 512) async -> UIImage? {
         generate(from: string, size: size)
     }
 
