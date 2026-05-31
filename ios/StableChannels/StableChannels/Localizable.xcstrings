@@ -221,6 +221,17 @@
         }
       }
     },
+    "Bitcoin address QR code" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bitcoin address QR code"
+          }
+        }
+      }
+    },
     "button_any_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -448,6 +459,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Restore Seed"
+          }
+        }
+      }
+    },
+    "button_retry" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry"
           }
         }
       }
@@ -2342,6 +2364,17 @@
     "Price" : {
 
     },
+    "QR Code" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR Code"
+          }
+        }
+      }
+    },
     "section_about" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2902,6 +2935,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Settings"
+          }
+        }
+      }
+    },
+    "Tap to close" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap to close"
           }
         }
       }
