@@ -15,7 +15,7 @@ struct FullscreenQRZoomView: View {
                 .scaledToFit()
                 .frame(maxWidth: UIScreen.main.bounds.width - horizontalPadding,
                        maxHeight: UIScreen.main.bounds.width - horizontalPadding)
-                .accessibilityLabel("QR Code")
+                .accessibilityLabel(String(localized: "QR Code", defaultValue: "QR Code"))
                 .accessibilityHint(String(localized: "Tap to close", defaultValue: "Tap to close"))
 
             VStack {

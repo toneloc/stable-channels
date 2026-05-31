@@ -7,7 +7,8 @@ enum QRCodeUtility {
     private static let cache: NSCache<NSString, UIImage> = {
         let c = NSCache<NSString, UIImage>()
         c.countLimit = 100
-        c.totalCostLimit = 50_000_000 // 50MB limit
+        // 512x512x4 = ~1MB per image. 10MB limit allows ~10 cached QR codes (wallet use case).
+        c.totalCostLimit = 10_000_000
         return c
     }()
 
@@ -24,12 +25,6 @@ enum QRCodeUtility {
         let cost = Int(size * size * 4) // Approximate bytes (RGBA)
         cache.setObject(image, forKey: cacheKey, cost: cost)
         return image
-    }
-
-    /// Async variant for SwiftUI .task compatibility
-    @MainActor
-    static func generateAsync(from string: String, size: CGFloat = 512) async -> UIImage? {
-        generate(from: string, size: size)
     }
 
     static func clearCache() {
