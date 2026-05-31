@@ -1,8 +1,10 @@
 mod auth;
 mod config;
+mod event_loop;
 mod handlers;
 mod price_task;
 mod push;
+mod stability_tick;
 mod stable_manager;
 mod state;
 mod tls;
@@ -120,6 +122,23 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         price_task::run().await;
     });
+
+    // One-shot reconcile from gRPC to catch up snapshots changed while the daemon was down. Skipped if the price cache is cold.
+    {
+        let btc_price = stable_channels::price_feeds::get_cached_price();
+        if btc_price > 0.0 {
+            let mut mgr = state.stable_manager.lock().await;
+            mgr.reconcile_from_grpc(
+                state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
+                btc_price,
+            )
+            .await;
+        } else {
+            tracing::warn!("startup reconcile skipped: price cache cold");
+        }
+    }
+    event_loop::spawn(state.clone());
+    stability_tick::spawn(state.clone());
 
     let router = Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))

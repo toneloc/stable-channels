@@ -25,8 +25,20 @@ pub async fn ldk_log(State(state): State<AppState>, body: Bytes) -> Response {
         return ok_response(LogResponse { content: String::new() });
     };
 
-    let content = read_tail_lines(path, req.max_lines as usize);
+    let content = read_tail_lines(path, effective_max_lines(req.max_lines as usize));
     ok_response(LogResponse { content })
+}
+
+/// Default tail length when a client passes `max_lines == 0`.
+const DEFAULT_LDK_LOG_LINES: usize = 200;
+
+/// Resolve the effective tail length: a request of 0 means "use the default".
+fn effective_max_lines(requested: usize) -> usize {
+    if requested == 0 {
+        DEFAULT_LDK_LOG_LINES
+    } else {
+        requested
+    }
 }
 
 /// Read the last `max_lines` lines from `path`. Returns empty string on any error.
@@ -59,7 +71,15 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn empty_max_lines_returns_empty() {
+    fn max_lines_zero_defaults_to_200() {
+        // A client request of 0 means use the default.
+        assert_eq!(effective_max_lines(0), 200);
+        assert_eq!(effective_max_lines(7), 7);
+    }
+
+    #[test]
+    fn read_tail_lines_zero_is_pure_empty() {
+        // The low-level reader treats 0 literally. The 0 -> default coercion is at the request boundary.
         let mut tmp = NamedTempFile::new().unwrap();
         writeln!(tmp, "line1").unwrap();
         assert_eq!(read_tail_lines(tmp.path(), 0), "");

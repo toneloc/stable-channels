@@ -64,13 +64,18 @@ impl ApnsService {
     /// Send a wake-up notification to the device token. Direction ("incoming"/"outgoing") rides in the payload.
     pub async fn send(&self, device_token: &str, direction: &str, environment: &str) {
         let _ = environment;
-        let body = format!("Lightning {direction} payment pending");
+        let body = match direction {
+            "lsp_to_user" => "Receiving stability payment...",
+            "user_to_lsp" => "Sending stability payment...",
+            _ => "Processing payment...",
+        };
         let builder = DefaultNotificationBuilder::new()
-            .set_title("Stable Channels")
-            .set_body(&body)
+            .set_title("Stability Update")
+            .set_body(body)
+            .set_sound("default")
             .set_mutable_content()
             .set_content_available();
-        let payload = builder.build(
+        let mut payload = builder.build(
             device_token,
             NotificationOptions {
                 apns_topic: Some(&self.topic),
@@ -78,6 +83,9 @@ impl ApnsService {
                 ..Default::default()
             },
         );
+        let mut stability_data = std::collections::HashMap::new();
+        stability_data.insert("direction", direction);
+        let _ = payload.add_custom_data("stability", &stability_data);
         match self.client.send(payload).await {
             Ok(resp) => info!(
                 "[apns] Sent push to {} (code={})",
