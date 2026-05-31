@@ -1,51 +1,35 @@
 import SwiftUI
-import CoreImage.CIFilterBuiltins
 
 struct FundWalletView: View {
     @Environment(AppState.self) private var appState
     @State private var address: String?
+    @State private var bitcoinURI: String?
     @State private var isCopied = false
+    @State private var showFullscreenQR = false
+    @State private var loadError: Error?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
                 if let address {
-                    VStack(spacing: 16) {
-                        // QR Code
-                        if let qrImage = generateQRCode(from: "bitcoin:\(address)") {
-                            Image(uiImage: qrImage)
-                                .interpolation(.none)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 200, height: 200)
-                        }
+                    qrCodeSection(address: address)
 
-                        Text(address)
-                            .font(.system(.caption, design: .monospaced))
-                            .padding()
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                            .textSelection(.enabled)
+                    addressDisplay(address: address)
 
-                        Button {
-                            UIPasteboard.general.string = address
-                            isCopied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isCopied = false }
-                        } label: {
-                            Label(
-                                isCopied
-                                    ? String(localized: "button_copied", defaultValue: "Copied")
-                                    : String(localized: "button_copy_address", defaultValue: "Copy Address"),
-                                systemImage: isCopied ? "checkmark" : "doc.on.doc"
-                            )
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
+                    copyButton(address: address)
+                } else if let error = loadError {
+                    errorView(error: error)
                 } else {
                     ProgressView()
                         .task {
-                            let addr = try? appState.nodeService.newOnchainAddress()
-                            address = addr
-                            appState.onchainReceiveAddress = addr
+                            do {
+                                let addr = try await appState.nodeService.newOnchainAddress()
+                                address = addr
+                                bitcoinURI = QRCodeUtility.generateBitcoinURI(from: addr)
+                                appState.onchainReceiveAddress = addr
+                            } catch {
+                                loadError = error
+                            }
                         }
                 }
             }
@@ -53,16 +37,89 @@ struct FundWalletView: View {
         }
         .navigationTitle(String(localized: "title_on_chain_receive", defaultValue: "On-chain Receive"))
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(isPresented: $showFullscreenQR) {
+            if let uri = bitcoinURI,
+               let qrImage = QRCodeUtility.generate(from: uri) {
+                FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
+            }
+        }
     }
 
-    private func generateQRCode(from string: String) -> UIImage? {
-        let context = CIContext()
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(string.uppercased().utf8)
+    // MARK: - Subviews
 
-        guard let outputImage = filter.outputImage else { return nil }
-        let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
-        guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else { return nil }
-        return UIImage(cgImage: cgImage)
+    private func qrCodeSection(address _: String) -> some View {
+        VStack(spacing: 4) {
+            if let uri = bitcoinURI,
+               let qrImage = QRCodeUtility.generate(from: uri) {
+                Image(uiImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 200, height: 200)
+                    .accessibilityLabel("Bitcoin address QR code")
+                    .accessibilityHint(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
+                    .onTapGesture {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                            showFullscreenQR = true
+                        }
+                    }
+
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption2)
+                    Text(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func addressDisplay(address: String) -> some View {
+        Text(address)
+            .font(.system(.caption, design: .monospaced))
+            .padding()
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .textSelection(.enabled)
+    }
+
+    private func copyButton(address: String) -> some View {
+        Button {
+            UIPasteboard.general.string = address
+            isCopied = true
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                isCopied = false
+            }
+        } label: {
+            Label(
+                isCopied
+                    ? String(localized: "button_copied", defaultValue: "Copied")
+                    : String(localized: "button_copy_address", defaultValue: "Copy Address"),
+                systemImage: isCopied ? "checkmark" : "doc.on.doc"
+            )
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityLabel(isCopied
+            ? String(localized: "button_copied", defaultValue: "Copied")
+            : String(localized: "button_copy_address", defaultValue: "Copy Address"))
+    }
+
+    private func errorView(error: Error) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
+            Text(error.localizedDescription)
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button(String(localized: "button_retry", defaultValue: "Retry")) {
+                loadError = nil
+                address = nil
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
     }
 }

@@ -21,6 +21,9 @@
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
 		49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E12FB6E52E00133509 /* BiometricService.swift */; };
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
+		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
+		49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */; };
+		49E456822FCC596F00B0CA85 /* FullscreenQRZoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */; };
 		49F0B0DE2FC0EF3A003A3B89 /* BackupSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */; };
 		49F0B0DF2FC0EF3A003A3B89 /* ChannelSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */; };
 		49F0B0E02FC0EF3A003A3B89 /* NodeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */; };
@@ -103,6 +106,8 @@
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
 		49D9C2E12FB6E52E00133509 /* BiometricService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricService.swift; sourceTree = "<group>"; };
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
+		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
+		49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeUtility.swift; sourceTree = "<group>"; };
 		49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSettingsView.swift; sourceTree = "<group>"; };
 		49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettingsView.swift; sourceTree = "<group>"; };
 		49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSettingsView.swift; sourceTree = "<group>"; };
@@ -150,6 +155,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */,
 				BE362D96DB2063959BD092BC /* LDKNode in Frameworks */,
 				96F38A820CB6644940199C95 /* KeychainAccess in Frameworks */,
 				02EB2F2AFFACF5F588CF7912 /* CodeScanner in Frameworks */,
@@ -257,6 +263,8 @@
 		AD3E779FC98D09AA36FFCAE9 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
+				49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */,
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
 				3B46630309755AE15EF291D4 /* HistoricalPrices.swift */,
@@ -363,8 +371,6 @@
 				08FE78FD6D230E0A01C11743 /* PBXTargetDependency */,
 			);
 			name = StableChannelsTests;
-			packageProductDependencies = (
-			);
 			productName = StableChannelsTests;
 			productReference = D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -388,6 +394,7 @@
 				925308E8B38E5B35C4AB30A4 /* LDKNode */,
 				79D34B41CFF9ABC3C914B624 /* KeychainAccess */,
 				C5B41595048B8AA9D3617B42 /* CodeScanner */,
+				49E4567D2FCA3E8B00B0CA85 /* QRCode */,
 			);
 			productName = StableChannels;
 			productReference = AAE0551124703F8BAA9C44C0 /* StableChannels.app */;
@@ -416,7 +423,9 @@
 				42173C82F7AE7108B707E5F8 /* XCRemoteSwiftPackageReference "CodeScanner" */,
 				5C44A4ACEB5EFD7C2E78B8A6 /* XCRemoteSwiftPackageReference "KeychainAccess" */,
 				70EEE76071EE59F64A24FD4F /* XCRemoteSwiftPackageReference "ldk-node" */,
+				49E4567C2FCA3E8B00B0CA85 /* XCRemoteSwiftPackageReference "QRCode" */,
 			);
+			productRefGroup = 052E4A6FC61BFB06E0A2A974 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -487,6 +496,8 @@
 				49F0B0E12FC0EF3A003A3B89 /* NotificationsSettingsView.swift in Sources */,
 				49F0B0E22FC0EF3A003A3B89 /* Colors.swift in Sources */,
 				49F0B0E32FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift in Sources */,
+				49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */,
+				49E456822FCC596F00B0CA85 /* FullscreenQRZoomView.swift in Sources */,
 				49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */,
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
@@ -582,6 +593,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
+				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -663,6 +675,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
+				GENERATE_INFOPLIST_FILE = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -707,6 +720,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
+				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StableChannels/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -753,6 +767,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
+				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StableChannels/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -817,6 +832,14 @@
 				minimumVersion = 2.5.0;
 			};
 		};
+		49E4567C2FCA3E8B00B0CA85 /* XCRemoteSwiftPackageReference "QRCode" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/dagronf/QRCode.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 28.0.2;
+			};
+		};
 		5C44A4ACEB5EFD7C2E78B8A6 /* XCRemoteSwiftPackageReference "KeychainAccess" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/kishikawakatsumi/KeychainAccess.git";
@@ -836,6 +859,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		49E4567D2FCA3E8B00B0CA85 /* QRCode */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 49E4567C2FCA3E8B00B0CA85 /* XCRemoteSwiftPackageReference "QRCode" */;
+			productName = QRCode;
+		};
 		74AB91D77B62D8BA24840317 /* LDKNode */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 70EEE76071EE59F64A24FD4F /* XCRemoteSwiftPackageReference "ldk-node" */;

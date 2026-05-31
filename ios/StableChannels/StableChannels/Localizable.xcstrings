@@ -2906,6 +2906,17 @@
         }
       }
     },
+    "Tap to enlarge" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap to enlarge"
+          }
+        }
+      }
+    },
     "theme_dark" : {
       "extractionState" : "manual",
       "localizations" : {
