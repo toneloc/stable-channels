@@ -29,7 +29,10 @@ struct SendView: View {
     }
 
     private var detectedType: InputType {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.hasPrefix("bitcoin:") {
+            trimmed = String(trimmed.dropFirst(8))
+        }
         if trimmed.hasPrefix("lnbc") || trimmed.hasPrefix("lntb") || trimmed.hasPrefix("lnts") {
             return .bolt11
         } else if trimmed.hasPrefix("lno") {

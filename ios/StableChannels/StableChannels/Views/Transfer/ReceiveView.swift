@@ -1,5 +1,4 @@
 import SwiftUI
-import CoreImage.CIFilterBuiltins
 import LDKNode
 
 struct ReceiveView: View {
@@ -11,6 +10,7 @@ struct ReceiveView: View {
     @State private var errorMessage: String?
     @State private var isCopied = false
     @State private var showOnChain = false
+    @State private var showFullscreenQR = false
 
     private var hasChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
@@ -60,6 +60,11 @@ struct ReceiveView: View {
             .navigationDestination(isPresented: $showOnChain) {
                 FundWalletView()
             }
+            .fullScreenCover(isPresented: $showFullscreenQR) {
+                if let invoice, let qrImage = QRCodeUtility.generate(from: invoice) {
+                    FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
+                }
+            }
         }
     }
 
@@ -104,14 +109,17 @@ struct ReceiveView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-                Text(String(localized: "max_channel_limit", defaultValue: "Maximum: $") +
-                    "\(Int(Constants.maxChannelUSD))")
+                Text(String(localized: "max_channel_limit", defaultValue: "Maximum: $\(Int(Constants.maxChannelUSD))"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
 
             if !hasChannel && enteredUSDValue > Constants.maxChannelUSD {
-                let limitStr = String(localized: "error_exceeds_limit", defaultValue: "Amount exceeds $") + "\(Int(Constants.maxChannelUSD)) channel limit"
+                let maxAmount = Int(Constants.maxChannelUSD)
+                let limitStr = String(
+                    localized: "error_exceeds_limit",
+                    defaultValue: "Amount exceeds $\(maxAmount) channel limit"
+                )
                 Text(limitStr)
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -158,16 +166,30 @@ struct ReceiveView: View {
             }
 
             // QR Code
-            if let qrImage = generateQRCode(from: invoiceStr) {
-                Image(uiImage: qrImage)
-                    .interpolation(.none)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 220, height: 220)
-                    .padding()
+            if let qrImage = QRCodeUtility.generate(from: invoiceStr) {
+                VStack(spacing: 4) {
+                    Image(uiImage: qrImage)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 220, height: 220)
+                        .padding()
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                                showFullscreenQR = true
+                            }
+                        }
+
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption2)
+                        Text(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
+                            .font(.caption2)
+                    }
+                    .foregroundStyle(.secondary)
+                }
             }
 
-            // Invoice text
             Text(invoiceStr)
                 .font(.system(.caption2, design: .monospaced))
                 .lineLimit(3)
@@ -178,7 +200,10 @@ struct ReceiveView: View {
             Button {
                 UIPasteboard.general.string = invoiceStr
                 isCopied = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isCopied = false }
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    isCopied = false
+                }
             } label: {
                 Label(isCopied
                     ? String(localized: "button_copied", defaultValue: "Copied")
@@ -227,16 +252,5 @@ struct ReceiveView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    private func generateQRCode(from string: String) -> UIImage? {
-        let context = CIContext()
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(string.uppercased().utf8)
-
-        guard let outputImage = filter.outputImage else { return nil }
-        let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
-        guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else { return nil }
-        return UIImage(cgImage: cgImage)
     }
 }
