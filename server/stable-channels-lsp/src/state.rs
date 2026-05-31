@@ -5,6 +5,10 @@ use std::sync::Arc;
 
 use ldk_server_client::client::LdkServerClient;
 use stable_channels::db::Database;
+use tokio::sync::Mutex;
+
+use crate::push::PushService;
+use crate::stable_manager::StableChannelManager;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -18,4 +22,10 @@ pub struct AppState {
     pub network: String,
     /// sqlite handle to the SC daemon's stable channels database.
     pub db: Arc<Database>,
+    /// Push notification service. Wrapped in a tokio mutex because `notify` mutates the cooldown map.
+    pub push: Arc<Mutex<PushService>>,
+    /// In-memory + sqlite-backed stable channel manager.
+    pub stable_manager: Arc<Mutex<StableChannelManager>>,
+    /// LDK Server's log file path, resolved at daemon startup. None if not configured.
+    pub ldk_log_file: Option<PathBuf>,
 }
