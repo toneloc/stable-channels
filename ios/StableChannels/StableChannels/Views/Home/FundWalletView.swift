@@ -56,7 +56,10 @@ struct FundWalletView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 200, height: 200)
-                    .accessibilityLabel("Bitcoin address QR code")
+                    .accessibilityLabel(String(
+                        localized: "Bitcoin address QR code",
+                        defaultValue: "Bitcoin address QR code"
+                    ))
                     .accessibilityHint(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
                     .onTapGesture {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
