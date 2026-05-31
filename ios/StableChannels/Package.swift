@@ -10,7 +10,7 @@ let package = Package(
         .package(url: "https://github.com/lightningdevkit/ldk-node.git", exact: "0.7.0"),
         .package(url: "https://github.com/kishikawakatsumi/KeychainAccess.git", from: "4.2.2"),
         .package(url: "https://github.com/twostraws/CodeScanner.git", from: "2.5.0"),
-        .package(url: "https://github.com/dagronf/QRCode.git", from: "28.0.0")
+        .package(url: "https://github.com/dagronf/QRCode.git", exact: "28.0.2")
     ],
     targets: [
         .executableTarget(
