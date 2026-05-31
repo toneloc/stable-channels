@@ -14,6 +14,10 @@ ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev
 ldk-node          = { git = "https://github.com/lightningdevkit/ldk-node", rev = "16eaa6f46308965f501904506be3ceecd293f358" }
 hex               = "0.4"
 
+# Async trait support for &dyn LdkServerCalls (stable Rust async-fn-in-trait
+# does not yet support trait objects).
+async-trait       = "0.1"
+
 # HTTP/REST stack
 axum             = "0.8"
 axum-server      = { version = "0.7", features = ["tls-rustls"] }
