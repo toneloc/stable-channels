@@ -5,12 +5,14 @@ use axum::extract::State;
 use axum::response::Response;
 
 use sc_protos::stable::{
-    ListStableChannelsRequest, ListStableChannelsResponse, StableChannelInfo,
+    EditStableChannelRequest, EditStableChannelResponse, ListStableChannelsRequest,
+    ListStableChannelsResponse, StableChannelInfo,
 };
 use stable_channels::price_feeds::get_cached_price_no_fetch;
 use tracing::warn;
 
 use crate::handlers::{decode_body, error_response, ok_response};
+use crate::stable_manager::EditOutcome;
 use crate::state::AppState;
 use ldk_server_client::ldk_server_grpc::error::ErrorCode;
 
@@ -49,4 +51,30 @@ pub async fn list_stable_channels(
         .collect::<Vec<_>>();
 
     ok_response(ListStableChannelsResponse { channels })
+}
+
+pub async fn edit_stable_channel(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let req: EditStableChannelRequest = match decode_body(&body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let btc_price = stable_channels::price_feeds::get_cached_price_no_fetch();
+
+    let EditOutcome { ok, status } = {
+        let mut mgr = state.stable_manager.lock().await;
+        mgr.edit_stable_channel(
+            &req.channel_id,
+            req.expected_usd,
+            req.note,
+            state.ldk_server.as_ref(),
+            btc_price,
+        )
+        .await
+    };
+
+    ok_response(EditStableChannelResponse { ok, status })
 }

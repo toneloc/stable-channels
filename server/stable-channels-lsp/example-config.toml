@@ -26,3 +26,16 @@ config_path = "/path/to/ldk-server-config.toml"
 # grpc_address = "127.0.0.1:3536"
 # cert_path    = "/path/to/ldk-server/tls.crt"
 # api_key_path = "/path/to/ldk-server/regtest/api_key"
+
+# Push notifications. All fields optional. If a credentials file is missing
+# at startup, that sender is disabled and RegisterPush still works.
+[push]
+# APNs (iOS)
+apns_key_path            = "/path/to/AuthKey.p8"
+apns_key_id              = "<10-char Apple key id>"
+apns_team_id             = "<10-char Apple team id>"
+apns_topic               = "com.stablechannels.app"
+apns_environment         = "sandbox"          # "sandbox" or "production"
+
+# FCM (Android)
+fcm_service_account_path = "/path/to/firebase-service-account.json"

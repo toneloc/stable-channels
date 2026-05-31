@@ -109,6 +109,8 @@ min_payment_size_msat        = 1000000
 proxy_address = "127.0.0.1:9050"
 ```
 
+For the LdkLog route to return content, set `[log] file = "/some/path/ldk-server.log"` in the same config so a file exists to tail.
+
 Comment out the `[bitcoind]`, `[electrum]`, and `[liquidity.lsps2_client]` blocks. The `[tor]` block must stay uncommented even if Tor isn't running.
 
 ### 3. Configure the SC daemon
@@ -126,6 +128,8 @@ config_path = "/absolute/path/to/ldk-server/contrib/ldk-server-config.toml"
 ```
 
 `config_path` is how the SC daemon discovers LDK Server's TLS cert and api_key.
+
+For push notifications, add an optional `[push]` section with `apns_*` and `fcm_service_account_path` fields. Each is optional. Missing credentials disable that sender and log a warning at startup, but `RegisterPush` keeps working. See `server/stable-channels-lsp/example-config.toml` for the full schema.
 
 ### 4. Configure the desktop wallet
 
