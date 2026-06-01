@@ -19,6 +19,7 @@
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
 		496A44432FCD4F75005AF12F /* QRInputToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44422FCD4F75005AF12F /* QRInputToolbar.swift */; };
 		496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */; };
+		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
 		4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */; };
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
 		49948C312FBB9DF900327290 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 49948C302FBB9DF900327290 /* Localizable.xcstrings */; };
@@ -108,6 +109,7 @@
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
 		496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractor.swift; sourceTree = "<group>"; };
 		496A44422FCD4F75005AF12F /* QRInputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRInputToolbar.swift; sourceTree = "<group>"; };
+		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
 		4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheetPresenter.swift; sourceTree = "<group>"; };
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
 		49948C302FBB9DF900327290 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
@@ -271,6 +273,7 @@
 		AD3E779FC98D09AA36FFCAE9 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				496A44452FCD5845005AF12F /* InputSanitizer.swift */,
 				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
 				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
 				4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */,
@@ -480,6 +483,7 @@
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
+				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
