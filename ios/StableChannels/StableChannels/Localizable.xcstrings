@@ -507,6 +507,17 @@
         }
       }
     },
+    "button_share_qr" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Share QR"
+          }
+        }
+      }
+    },
     "button_show_node_id" : {
       "extractionState" : "manual",
       "localizations" : {

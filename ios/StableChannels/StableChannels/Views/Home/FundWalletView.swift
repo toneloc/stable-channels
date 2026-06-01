@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct FundWalletView: View {
     @Environment(AppState.self) private var appState
@@ -7,6 +8,9 @@ struct FundWalletView: View {
     @State private var isCopied = false
     @State private var showFullscreenQR = false
     @State private var loadError: Error?
+    @State private var showShareSheet = false
+    @State private var shareImage: UIImage?
+    @State private var isSharing = false
 
     var body: some View {
         ScrollView {
@@ -41,6 +45,23 @@ struct FundWalletView: View {
             if let uri = bitcoinURI,
                let qrImage = QRCodeUtility.generate(from: uri) {
                 FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
+            }
+        }
+        .onChange(of: showShareSheet) { _, newValue in
+            if newValue, let img = shareImage, let uriStr = bitcoinURI {
+                let addressToShare = uriStr.replacingOccurrences(of: "bitcoin:", with: "")
+                let activityVC = UIActivityViewController(
+                    activityItems: [img, addressToShare],
+                    applicationActivities: nil
+                )
+                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = windowScene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    topVC.present(activityVC, animated: true)
+                }
             }
         }
     }
@@ -87,25 +108,72 @@ struct FundWalletView: View {
     }
 
     private func copyButton(address: String) -> some View {
-        Button {
-            UIPasteboard.general.string = address
-            isCopied = true
-            Task {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                isCopied = false
+        VStack(spacing: 12) {
+            Button {
+                UIPasteboard.general.string = address
+                isCopied = true
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    isCopied = false
+                }
+            } label: {
+                Label(
+                    isCopied
+                        ? String(localized: "button_copied", defaultValue: "Copied")
+                        : String(localized: "button_copy_address", defaultValue: "Copy Address"),
+                    systemImage: isCopied ? "checkmark" : "doc.on.doc"
+                )
             }
-        } label: {
-            Label(
-                isCopied
-                    ? String(localized: "button_copied", defaultValue: "Copied")
-                    : String(localized: "button_copy_address", defaultValue: "Copy Address"),
-                systemImage: isCopied ? "checkmark" : "doc.on.doc"
-            )
+            .buttonStyle(.borderedProminent)
+            .accessibilityLabel(isCopied
+                ? String(localized: "button_copied", defaultValue: "Copied")
+                : String(localized: "button_copy_address", defaultValue: "Copy Address"))
+
+            Button {
+                shareQR()
+            } label: {
+                Label(
+                    String(localized: "button_share_qr", defaultValue: "Share QR"),
+                    systemImage: "square.and.arrow.up"
+                )
+            }
+            .buttonStyle(.bordered)
         }
-        .buttonStyle(.borderedProminent)
-        .accessibilityLabel(isCopied
-            ? String(localized: "button_copied", defaultValue: "Copied")
-            : String(localized: "button_copy_address", defaultValue: "Copy Address"))
+    }
+
+    private func shareQR() {
+        guard let uri = bitcoinURI,
+              let qrImage = QRCodeUtility.generate(from: uri) else { return }
+
+        shareImage = ShareableQRGenerator.generateShareImage(
+            qrImage: qrImage,
+            invoice: address ?? uri,
+            amount: nil,
+            isOnChain: true
+        )
+
+        Task { @MainActor in
+            showFullscreenQR = false
+            try? await Task.sleep(nanoseconds: 100_000_000)
+
+            guard let img = shareImage, let uriStr = bitcoinURI else { return }
+            let addressToShare = uriStr.replacingOccurrences(of: "bitcoin:", with: "")
+            let activityVC = UIActivityViewController(
+                activityItems: [img, addressToShare],
+                applicationActivities: nil
+            )
+            activityVC.completionWithItemsHandler = { _, _, _, _ in
+            }
+
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootVC = windowScene.windows.first?.rootViewController {
+                var topVC = rootVC
+                while let presented = topVC.presentedViewController {
+                    topVC = presented
+                }
+                topVC.present(activityVC, animated: true)
+            }
+        }
     }
 
     private func errorView(error: Error) -> some View {
