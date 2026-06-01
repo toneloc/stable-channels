@@ -1,8 +1,6 @@
 import SwiftUI
 import UIKit
 import LDKNode
-import PhotosUI
-import Vision
 import CoreImage
 
 struct SendView: View {
@@ -15,10 +13,6 @@ struct SendView: View {
     @State private var errorMessage: String?
     @State private var success = false
     @State private var sentAmountSats: UInt64 = 0
-    @State private var showScanner = false
-    @State private var showPhotoPicker = false
-    @State private var selectedPhotoItem: PhotosPickerItem?
-    @State private var showQRAlert = false
     @State private var qrAlertMessage = ""
 
     private enum InputType {
@@ -313,53 +307,8 @@ struct SendView: View {
                         defaultValue: "Cancel"
                     )) { dismiss() }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    HStack(spacing: 16) {
-                        Button {
-                            showPhotoPicker = true
-                        } label: {
-                            Image(systemName: "photo.on.rectangle")
-                        }
-                        Button {
-                            showScanner = true
-                        } label: {
-                            Image(systemName: "qrcode.viewfinder")
-                        }
-                    }
-                }
             }
-            .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhotoItem, matching: .images)
-            .onChange(of: selectedPhotoItem) { _, newItem in
-                guard let item = newItem else { return }
-                Task {
-                    if let data = try? await item.loadTransferable(type: Data.self),
-                       let image = UIImage(data: data),
-                       let code = extractQRCode(from: image) {
-                        input = code
-                    } else {
-                        qrAlertMessage = String(
-                            localized: "alert_qr_error",
-                            defaultValue: "Selected image doesn't contain a Lightning invoice or Bitcoin address QR code."
-                        )
-                        showQRAlert = true
-                    }
-                    selectedPhotoItem = nil
-                }
-            }
-            .sheet(isPresented: $showScanner) {
-                InvoiceScanView(
-                    onScan: { scanned in
-                        input = scanned
-                        showScanner = false
-                    },
-                    onCancel: { showScanner = false }
-                )
-            }
-            .alert(String(localized: "alert_no_qr", defaultValue: "No QR Code Found"), isPresented: $showQRAlert) {
-                Button(String(localized: "button_ok", defaultValue: "OK"), role: .cancel) {}
-            } message: {
-                Text(qrAlertMessage)
-            }
+            .qrInputToolbar(text: $input, sanitize: QRCodeExtractor.sanitizePaymentInput)
         }
     }
 
@@ -520,23 +469,5 @@ struct SendView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    private func extractQRCode(from image: UIImage) -> String? {
-        guard let cgImage = image.cgImage else { return nil }
-
-        let request = VNDetectBarcodesRequest()
-        request.symbologies = [.qr]
-
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try? handler.perform([request])
-
-        guard let results = request.results,
-              let qrCode = results.first,
-              let value = qrCode.payloadStringValue,
-              !value.isEmpty
-        else { return nil }
-
-        return value
     }
 }

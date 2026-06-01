@@ -364,17 +364,6 @@
         }
       }
     },
-    "button_enlarge_qr" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Enlarge QR"
-          }
-        }
-      }
-    },
     "button_enable_in_settings" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -393,6 +382,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Enable Settings"
+          }
+        }
+      }
+    },
+    "button_enlarge_qr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enlarge QR"
           }
         }
       }
@@ -441,6 +441,17 @@
         }
       }
     },
+    "button_pick_image" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Pick Image"
+          }
+        }
+      }
+    },
     "button_receive" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -481,6 +492,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Retry"
+          }
+        }
+      }
+    },
+    "button_scan_qr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Scan QR"
           }
         }
       }
@@ -965,6 +987,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Invoice Address"
+          }
+        }
+      }
+    },
+    "header_onchain_subtitle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Move funds to any Bitcoin address"
           }
         }
       }
