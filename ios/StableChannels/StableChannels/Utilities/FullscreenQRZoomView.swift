@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct FullscreenQRZoomView: View {
     private let horizontalPadding: CGFloat = 48
@@ -9,14 +10,17 @@ struct FullscreenQRZoomView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            Image(uiImage: qrImage)
-                .interpolation(.none)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: UIScreen.main.bounds.width - horizontalPadding,
-                       maxHeight: UIScreen.main.bounds.width - horizontalPadding)
-                .accessibilityLabel(String(localized: "QR Code", defaultValue: "QR Code"))
-                .accessibilityHint(String(localized: "Tap to close", defaultValue: "Tap to close"))
+            GeometryReader { geo in
+                let side = min(geo.size.width, geo.size.height) - horizontalPadding
+                Image(uiImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: side, height: side)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .accessibilityLabel(String(localized: "QR Code", defaultValue: "QR Code"))
+            .accessibilityHint(String(localized: "Tap to close", defaultValue: "Tap to close"))
 
             VStack {
                 Spacer()

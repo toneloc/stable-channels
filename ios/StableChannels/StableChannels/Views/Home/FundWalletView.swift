@@ -8,6 +8,7 @@ struct FundWalletView: View {
     @State private var isCopied = false
     @State private var showFullscreenQR = false
     @State private var loadError: Error?
+    @State private var copyResetTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -120,12 +121,7 @@ struct FundWalletView: View {
                 .contentShape(Rectangle())
                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isCopied)
                 .onTapGesture {
-                    UIPasteboard.general.string = address
-                    isCopied = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        isCopied = false
-                    }
+                    copyAddress(address)
                 }
         }
     }
@@ -133,12 +129,7 @@ struct FundWalletView: View {
     private func actionButtons(address: String) -> some View {
         HStack(spacing: 12) {
             Button {
-                UIPasteboard.general.string = address
-                isCopied = true
-                Task {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    isCopied = false
-                }
+                copyAddress(address)
             } label: {
                 Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 17, weight: .semibold))
@@ -211,5 +202,16 @@ struct FundWalletView: View {
             .buttonStyle(.bordered)
         }
         .padding()
+    }
+
+    private func copyAddress(_ address: String) {
+        UIPasteboard.general.string = address
+        isCopied = true
+        copyResetTask?.cancel()
+        copyResetTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            isCopied = false
+        }
     }
 }

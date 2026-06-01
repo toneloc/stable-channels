@@ -7,20 +7,25 @@ enum ShareSheetPresenter {
             applicationActivities: nil
         )
 
-        guard let windowScene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }),
-            let rootVC = windowScene.windows
-            .first(where: \.isKeyWindow)?
-            .rootViewController else {
-            assertionFailure("ShareSheetPresenter: no active foreground window scene with rootViewController")
+        guard let topVC = topMostViewController() else {
+            assertionFailure("ShareSheetPresenter: no view controller in any window scene")
             return
         }
 
-        var topVC = rootVC
-        while let presented = topVC.presentedViewController {
-            topVC = presented
-        }
         topVC.present(activityVC, animated: true)
+    }
+
+    private static func topMostViewController() -> UIViewController? {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows where window.isKeyWindow {
+                guard var top = window.rootViewController else { continue }
+                while let presented = top.presentedViewController {
+                    top = presented
+                }
+                return top
+            }
+        }
+        return nil
     }
 }

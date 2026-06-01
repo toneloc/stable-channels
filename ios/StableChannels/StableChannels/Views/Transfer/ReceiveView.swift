@@ -12,6 +12,7 @@ struct ReceiveView: View {
     @State private var isCopied = false
     @State private var showOnChain = false
     @State private var showFullscreenQR = false
+    @State private var copyResetTask: Task<Void, Never>?
 
     private var hasChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
@@ -236,24 +237,14 @@ struct ReceiveView: View {
                     .contentShape(Rectangle())
                     .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isCopied)
                     .onTapGesture {
-                        UIPasteboard.general.string = invoiceStr
-                        isCopied = true
-                        Task {
-                            try? await Task.sleep(nanoseconds: 2_000_000_000)
-                            isCopied = false
-                        }
+                        copyInvoice(invoiceStr)
                     }
             }
             .padding(.horizontal)
 
             HStack(spacing: 12) {
                 Button {
-                    UIPasteboard.general.string = invoiceStr
-                    isCopied = true
-                    Task {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        isCopied = false
-                    }
+                    copyInvoice(invoiceStr)
                 } label: {
                     Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 17, weight: .semibold))
@@ -339,6 +330,17 @@ struct ReceiveView: View {
             invoice = inv.description
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func copyInvoice(_ invoice: String) {
+        UIPasteboard.general.string = invoice
+        isCopied = true
+        copyResetTask?.cancel()
+        copyResetTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            isCopied = false
         }
     }
 
