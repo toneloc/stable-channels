@@ -81,6 +81,9 @@ struct ReceiveView: View {
                 .keyboardType(.decimalPad)
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
+                .onChange(of: amountUSD) { _, new in
+                    amountUSD = Self.sanitizeAmount(new)
+                }
                 .overlay(alignment: .leading) {
                     if !amountUSD.isEmpty {
                         GeometryReader { geo in
@@ -193,12 +196,55 @@ struct ReceiveView: View {
                 }
             }
 
-            Text(invoiceStr)
-                .font(.system(.caption2, design: .monospaced))
-                .lineLimit(3)
-                .truncationMode(.middle)
-                .padding(.horizontal)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "label_your_invoice", defaultValue: "Your Lightning Invoice"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(invoiceStr)
+                    .font(.system(.caption2, design: .monospaced))
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(.ultraThinMaterial)
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(isCopied ? Color.green.opacity(0.25) : Color.clear)
+                        }
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(isCopied ? Color.green : Color.primary.opacity(0.1), lineWidth: 1)
+                    )
+                    .overlay(alignment: .center) {
+                        if isCopied {
+                            Label(
+                                String(localized: "button_copied", defaultValue: "Copied"),
+                                systemImage: "checkmark.circle.fill"
+                            )
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.regularMaterial, in: Capsule())
+                            .transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isCopied)
+                    .onTapGesture {
+                        UIPasteboard.general.string = invoiceStr
+                        isCopied = true
+                        Task {
+                            try? await Task.sleep(nanoseconds: 2_000_000_000)
+                            isCopied = false
+                        }
+                    }
+            }
+            .padding(.horizontal)
 
             HStack(spacing: 12) {
                 Button {
@@ -307,5 +353,30 @@ struct ReceiveView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private static func sanitizeAmount(_ raw: String) -> String {
+        var s = raw
+        while s.hasPrefix("0") && s.count > 1 && !s.hasPrefix("0.") {
+            s.removeFirst()
+        }
+        var result = ""
+        var seenDot = false
+        var decimals = 0
+        for ch in s {
+            if ch.isNumber {
+                if seenDot {
+                    decimals += 1
+                    if decimals > 2 { continue }
+                }
+                result.append(ch)
+            } else if ch == "." && !seenDot {
+                seenDot = true
+                result.append(ch)
+            }
+        }
+        if result.isEmpty { return "" }
+        if result == "." { return "0." }
+        return result
     }
 }

@@ -80,11 +80,54 @@ struct FundWalletView: View {
     }
 
     private func addressDisplay(address: String) -> some View {
-        Text(address)
-            .font(.system(.caption, design: .monospaced))
-            .padding()
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(String(localized: "label_your_address", defaultValue: "Your Bitcoin Address"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(address)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(3)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(.ultraThinMaterial)
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(isCopied ? Color.green.opacity(0.25) : Color.clear)
+                    }
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(isCopied ? Color.green : Color.primary.opacity(0.1), lineWidth: 1)
+                )
+                .overlay(alignment: .center) {
+                    if isCopied {
+                        Label(
+                            String(localized: "button_copied", defaultValue: "Copied"),
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(.regularMaterial, in: Capsule())
+                        .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .contentShape(Rectangle())
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isCopied)
+                .onTapGesture {
+                    UIPasteboard.general.string = address
+                    isCopied = true
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        isCopied = false
+                    }
+                }
+        }
     }
 
     private func actionButtons(address: String) -> some View {
