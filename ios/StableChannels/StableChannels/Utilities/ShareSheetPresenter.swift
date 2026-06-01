@@ -13,6 +13,7 @@ enum ShareSheetPresenter {
             let rootVC = windowScene.windows
             .first(where: \.isKeyWindow)?
             .rootViewController else {
+            assertionFailure("ShareSheetPresenter: no active foreground window scene with rootViewController")
             return
         }
 
