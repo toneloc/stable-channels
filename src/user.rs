@@ -2768,11 +2768,30 @@ impl UserApp {
         format!("{} BTC", Self::format_btc_spaced(msats as f64 / 100_000_000_000.0))
     }
 
+    /// Parse a USD amount. Tolerant of leading `$`, spaces, commas, and
+    /// underscores so `$1,250.50` and `1250.50` both work.
+    fn parse_usd(input: &str) -> Option<f64> {
+        let cleaned: String = input
+            .trim()
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '$' && *c != ',' && *c != '_')
+            .collect();
+        if cleaned.is_empty() {
+            return None;
+        }
+        let usd: f64 = cleaned.parse().ok()?;
+        if !usd.is_finite() || usd < 0.0 {
+            return None;
+        }
+        Some(usd)
+    }
+
     /// Accept an amount typed as either BTC (contains a `.`) or sats (integer),
     /// returning the value in sats. Tolerant of spaces, thin spaces, commas,
     /// and an optional "BTC"/"btc" suffix so users can paste the canonical
     /// `0.00 025 000 BTC` display form back in. Returns `None` on malformed
     /// input or on values above the 21M BTC supply ceiling.
+    #[allow(dead_code)] // kept for future input fields that may want BTC/sats parsing
     fn parse_btc_or_sats(input: &str) -> Option<u64> {
         let cleaned: String = input
             .trim()
@@ -3294,8 +3313,22 @@ impl UserApp {
 
                     match self.fund_tab {
                         FundTab::Lightning => {
+                            // If the invoice carries a fixed amount, show it as
+                            // both BTC and USD; otherwise hint that the sender
+                            // chooses.
+                            let invoice_amount_msat: Option<u64> = Bolt11Invoice::from_str(
+                                &self.invoice_result,
+                            )
+                            .ok()
+                            .and_then(|inv| inv.amount_milli_satoshis());
+
+                            let subtitle = if invoice_amount_msat.is_some() {
+                                "Lightning invoice".to_string()
+                            } else {
+                                "Send any amount of bitcoin via Lightning".to_string()
+                            };
                             ui.label(
-                                egui::RichText::new("Send any amount of bitcoin via Lightning")
+                                egui::RichText::new(subtitle)
                                     .size(12.0)
                                     .color(egui::Color32::DARK_GRAY),
                             );
@@ -3307,6 +3340,28 @@ impl UserApp {
                                 ui.add(img);
                             } else {
                                 ui.label("Loading QR...");
+                            }
+
+                            // Show the amount below the QR if the invoice is for
+                            // a specific amount.
+                            if let Some(msat) = invoice_amount_msat {
+                                let sats = msat / 1000;
+                                ui.add_space(8.0);
+                                if self.btc_price > 0.0 {
+                                    let usd = sats as f64 * self.btc_price / 100_000_000.0;
+                                    ui.label(
+                                        egui::RichText::new(Self::format_price(usd))
+                                            .size(20.0)
+                                            .strong()
+                                            .color(egui::Color32::BLACK),
+                                    );
+                                    ui.add_space(2.0);
+                                }
+                                ui.label(
+                                    egui::RichText::new(Self::format_sats_as_btc(sats))
+                                        .size(12.0)
+                                        .color(egui::Color32::DARK_GRAY),
+                                );
                             }
 
                             ui.add_space(10.0);
@@ -3406,7 +3461,11 @@ impl UserApp {
                     }
 
                     ui.add_space(8.0);
+                });
 
+                // Footer row: Cancel (left), Specify amount (right).
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
                     if ui
                         .link(
                             egui::RichText::new("Cancel")
@@ -3417,14 +3476,233 @@ impl UserApp {
                     {
                         self.waiting_for_payment = false;
                     }
-
-                    ui.add_space(10.0);
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(16.0);
+                            let specify_btn = egui::Button::new(
+                                egui::RichText::new("Specify amount")
+                                    .color(egui::Color32::BLACK)
+                                    .size(14.0),
+                            )
+                            .min_size(egui::vec2(150.0, 38.0))
+                            .fill(theme::SUBTLE_BG)
+                            .corner_radius(theme::RADIUS_PILL);
+                            if ui.add(specify_btn).clicked() {
+                                self.waiting_for_payment = false;
+                                self.jit_choice_open = true;
+                                self.jit_fixed_mode = true;
+                                self.jit_amount_input.clear();
+                            }
+                        },
+                    );
                 });
+
+                ui.add_space(10.0);
             });
 
         // Close if clicked outside
         if self.check_click_outside_modal(ctx) {
             self.waiting_for_payment = false;
+        }
+    }
+
+    fn show_jit_choice_modal(&mut self, ctx: &egui::Context) {
+        const JIT_MIN_SATS: u64 = 1_000;
+        egui::Window::new("Receive Bitcoin")
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(Color32::WHITE)
+                    .corner_radius(theme::RADIUS_LG),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.add_space(18.0);
+
+                if !self.jit_fixed_mode {
+                    // Variable-amount default state: one big Receive button creates
+                    // an "any amount" invoice. "Specify amount" in the bottom-right
+                    // switches to fixed-amount entry.
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Receive Bitcoin")
+                                .size(20.0)
+                                .strong()
+                                .color(egui::Color32::BLACK),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Sender chooses the amount")
+                                .size(13.0)
+                                .color(egui::Color32::DARK_GRAY),
+                        );
+                        ui.add_space(20.0);
+
+                        let var_btn = egui::Button::new(
+                            egui::RichText::new("Receive")
+                                .color(egui::Color32::WHITE)
+                                .strong()
+                                .size(16.0),
+                        )
+                        .min_size(egui::vec2(240.0, 48.0))
+                        .fill(egui::Color32::BLACK)
+                        .corner_radius(theme::RADIUS_PILL);
+                        if ui.add(var_btn).clicked() {
+                            self.status_message = "Creating your wallet...".to_string();
+                            self.get_jit_invoice(ctx, None);
+                            self.jit_choice_open = false;
+                            self.jit_fixed_mode = false;
+                        }
+                    });
+
+                    ui.add_space(16.0);
+
+                    // Footer row: Cancel left, "Specify amount" right.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .link(
+                                egui::RichText::new("Cancel")
+                                    .size(13.0)
+                                    .color(egui::Color32::DARK_GRAY),
+                            )
+                            .clicked()
+                        {
+                            self.jit_choice_open = false;
+                            self.jit_fixed_mode = false;
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let specify_btn = egui::Button::new(
+                                    egui::RichText::new("Specify amount")
+                                        .size(13.0)
+                                        .color(egui::Color32::BLACK),
+                                )
+                                .fill(theme::SUBTLE_BG)
+                                .corner_radius(theme::RADIUS_PILL);
+                                if ui.add(specify_btn).clicked() {
+                                    self.jit_fixed_mode = true;
+                                    self.jit_amount_input.clear();
+                                }
+                            },
+                        );
+                    });
+                } else {
+                    // Fixed-amount entry, denominated in USD.
+                    let price = self.btc_price;
+                    let min_usd = if price > 0.0 {
+                        JIT_MIN_SATS as f64 * price / 100_000_000.0
+                    } else {
+                        0.0
+                    };
+
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Receive Bitcoin")
+                                .size(20.0)
+                                .strong()
+                                .color(egui::Color32::BLACK),
+                        );
+                        ui.add_space(4.0);
+                        let subtitle = if price > 0.0 {
+                            format!("Minimum {}", Self::format_price(min_usd))
+                        } else {
+                            "Loading price…".to_string()
+                        };
+                        ui.label(
+                            egui::RichText::new(subtitle)
+                                .size(12.0)
+                                .color(egui::Color32::DARK_GRAY),
+                        );
+                        ui.add_space(16.0);
+
+                        let amt_edit =
+                            egui::TextEdit::singleline(&mut self.jit_amount_input)
+                                .hint_text("e.g. $25.00")
+                                .desired_width(240.0);
+                        ui.add(amt_edit);
+                        ui.add_space(16.0);
+
+                        let receive_enabled = price > 0.0;
+                        let gen_btn = egui::Button::new(
+                            egui::RichText::new("Receive")
+                                .color(egui::Color32::WHITE)
+                                .strong()
+                                .size(16.0),
+                        )
+                        .min_size(egui::vec2(240.0, 48.0))
+                        .fill(egui::Color32::BLACK)
+                        .corner_radius(theme::RADIUS_PILL);
+                        if ui.add_enabled(receive_enabled, gen_btn).clicked() {
+                            match Self::parse_usd(&self.jit_amount_input) {
+                                Some(usd) if usd > 0.0 => {
+                                    let sats =
+                                        (usd * 100_000_000.0 / price).round() as u64;
+                                    if sats >= JIT_MIN_SATS {
+                                        self.status_message = format!(
+                                            "Creating invoice for {}...",
+                                            Self::format_price(usd)
+                                        );
+                                        self.get_jit_invoice(ctx, Some(sats));
+                                        self.jit_choice_open = false;
+                                        self.jit_fixed_mode = false;
+                                    } else {
+                                        self.status_message = format!(
+                                            "Amount must be at least {}",
+                                            Self::format_price(min_usd)
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    self.status_message =
+                                        "Enter a positive amount".to_string();
+                                }
+                            }
+                        }
+                    });
+
+                    ui.add_space(16.0);
+
+                    // Footer row: Cancel left, Back-to-variable right.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .link(
+                                egui::RichText::new("Cancel")
+                                    .size(13.0)
+                                    .color(egui::Color32::DARK_GRAY),
+                            )
+                            .clicked()
+                        {
+                            self.jit_choice_open = false;
+                            self.jit_fixed_mode = false;
+                        }
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui
+                                    .link(
+                                        egui::RichText::new("Any amount")
+                                            .size(13.0)
+                                            .color(egui::Color32::DARK_GRAY),
+                                    )
+                                    .clicked()
+                                {
+                                    self.jit_fixed_mode = false;
+                                }
+                            },
+                        );
+                    });
+                }
+                ui.add_space(18.0);
+            });
+
+        if self.check_click_outside_modal(ctx) {
+            self.jit_choice_open = false;
+            self.jit_fixed_mode = false;
         }
     }
 
@@ -3516,133 +3794,24 @@ impl UserApp {
 
                     ui.add_space(50.0);
 
-                    if !self.jit_choice_open {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Add Bitcoin")
-                                .color(egui::Color32::WHITE)
-                                .strong()
-                                .size(18.0),
-                        )
-                        .min_size(egui::vec2(200.0, 55.0))
-                        .fill(egui::Color32::BLACK)
-                        .corner_radius(theme::RADIUS_PILL);
-                        if ui.add(btn).clicked() {
-                            self.jit_choice_open = true;
-                            self.jit_fixed_mode = false;
-                            self.jit_amount_input.clear();
-                        }
-                    } else if !self.jit_fixed_mode {
-                        ui.label(
-                            egui::RichText::new("Choose how to receive:")
-                                .size(15.0)
-                                .color(egui::Color32::BLACK),
-                        );
-                        ui.add_space(14.0);
-
-                        let var_btn = egui::Button::new(
-                            egui::RichText::new("Variable amount")
-                                .color(egui::Color32::WHITE)
-                                .strong()
-                                .size(16.0),
-                        )
-                        .min_size(egui::vec2(220.0, 48.0))
-                        .fill(egui::Color32::BLACK)
-                        .corner_radius(theme::RADIUS_PILL);
-                        if ui.add(var_btn).clicked() {
-                            self.status_message = "Creating your wallet...".to_string();
-                            self.get_jit_invoice(ctx, None);
-                            self.jit_choice_open = false;
-                            self.jit_fixed_mode = false;
-                        }
-
-                        ui.add_space(10.0);
-
-                        let fixed_btn = egui::Button::new(
-                            egui::RichText::new("Fixed amount")
-                                .color(egui::Color32::BLACK)
-                                .strong()
-                                .size(16.0),
-                        )
-                        .min_size(egui::vec2(220.0, 48.0))
-                        .fill(theme::SUBTLE_BG)
-                        .corner_radius(theme::RADIUS_PILL);
-                        if ui.add(fixed_btn).clicked() {
-                            self.jit_fixed_mode = true;
-                        }
-
-                        ui.add_space(12.0);
-                        if ui
-                            .link(
-                                egui::RichText::new("Cancel")
-                                    .size(13.0)
-                                    .color(egui::Color32::DARK_GRAY),
-                            )
-                            .clicked()
-                        {
-                            self.jit_choice_open = false;
-                        }
-                    } else {
-                        const JIT_MIN_SATS: u64 = 1_000;
-                        ui.label(
-                            egui::RichText::new("Amount")
-                                .size(15.0)
-                                .color(egui::Color32::BLACK),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!("Minimum {}", Self::format_sats_as_btc(JIT_MIN_SATS)))
-                                .size(12.0)
-                                .color(egui::Color32::DARK_GRAY),
-                        );
-                        ui.add_space(8.0);
-                        let amt_edit =
-                            egui::TextEdit::singleline(&mut self.jit_amount_input)
-                                .hint_text("e.g. 0.00 025 000")
-                                .desired_width(200.0);
-                        ui.add(amt_edit);
-                        ui.add_space(12.0);
-                        let gen_btn = egui::Button::new(
-                            egui::RichText::new("Receive")
-                                .color(egui::Color32::WHITE)
-                                .strong()
-                                .size(15.0),
-                        )
-                        .min_size(egui::vec2(200.0, 40.0))
-                        .fill(egui::Color32::BLACK)
-                        .corner_radius(theme::RADIUS_PILL);
-                        if ui.add(gen_btn).clicked() {
-                            match Self::parse_btc_or_sats(&self.jit_amount_input) {
-                                Some(sats) if sats >= JIT_MIN_SATS => {
-                                    self.status_message =
-                                        format!("Creating invoice for {}...", Self::format_sats_as_btc(sats));
-                                    self.get_jit_invoice(ctx, Some(sats));
-                                    self.jit_choice_open = false;
-                                    self.jit_fixed_mode = false;
-                                }
-                                Some(_) => {
-                                    self.status_message = format!(
-                                        "Amount must be at least {}",
-                                        Self::format_sats_as_btc(JIT_MIN_SATS)
-                                    );
-                                }
-                                None => {
-                                    self.status_message =
-                                        "Enter a positive amount".to_string();
-                                }
-                            }
-                        }
-
-                        ui.add_space(12.0);
-                        if ui
-                            .link(
-                                egui::RichText::new("Back")
-                                    .size(13.0)
-                                    .color(egui::Color32::DARK_GRAY),
-                            )
-                            .clicked()
-                        {
-                            self.jit_fixed_mode = false;
-                        }
+                    let btn = egui::Button::new(
+                        egui::RichText::new("Add Bitcoin")
+                            .color(egui::Color32::WHITE)
+                            .strong()
+                            .size(18.0),
+                    )
+                    .min_size(egui::vec2(200.0, 55.0))
+                    .fill(egui::Color32::BLACK)
+                    .corner_radius(theme::RADIUS_PILL);
+                    if ui.add(btn).clicked() {
+                        // Original UX: Add Bitcoin → variable-amount invoice
+                        // immediately. The Fund Your Wallet modal then has a
+                        // "Specify amount" button in the bottom-right for users
+                        // who want a fixed-amount invoice instead.
+                        self.status_message = "Creating your wallet...".to_string();
+                        self.get_jit_invoice(ctx, None);
+                        self.jit_choice_open = false;
+                        self.jit_fixed_mode = false;
                     }
 
                     // Show transfer option if user has onchain funds
@@ -7914,6 +8083,10 @@ impl App for UserApp {
         // Show payment modal on top if waiting for payment
         if self.waiting_for_payment {
             self.show_waiting_for_payment_modal(ctx);
+        }
+        // Show JIT receive choice modal on top when triggered
+        if self.jit_choice_open {
+            self.show_jit_choice_modal(ctx);
         }
         self.show_log_window_if_open(ctx);
 
