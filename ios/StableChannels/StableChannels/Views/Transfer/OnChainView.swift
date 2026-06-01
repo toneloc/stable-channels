@@ -131,7 +131,7 @@ struct OnChainSendView: View {
                     .keyboardType(.decimalPad)
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
                     .onChange(of: amountUSDStr) { _, new in
-                        amountUSDStr = Self.sanitizeAmount(new)
+                        amountUSDStr = InputSanitizer.decimal(new)
                     }
                 }
                 if let sats = amountSats, sats > 0 {
@@ -267,31 +267,6 @@ struct OnChainSendView: View {
         t.underlineStyle = .single
         t.link = URL(string: "https://mempool.space/tx/\(txid)")
         return s + t
-    }
-
-    private static func sanitizeAmount(_ raw: String) -> String {
-        var s = raw
-        while s.hasPrefix("0") && s.count > 1 && !s.hasPrefix("0.") {
-            s.removeFirst()
-        }
-        var result = ""
-        var seenDot = false
-        var decimals = 0
-        for ch in s {
-            if ch.isNumber {
-                if seenDot {
-                    decimals += 1
-                    if decimals > 2 { continue }
-                }
-                result.append(ch)
-            } else if ch == "." && !seenDot {
-                seenDot = true
-                result.append(ch)
-            }
-        }
-        if result.isEmpty { return "" }
-        if result == "." { return "0." }
-        return result
     }
 
     private func send() async {
