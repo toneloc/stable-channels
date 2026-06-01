@@ -45,6 +45,7 @@ struct FundWalletView: View {
                 FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
             }
         }
+        .onDisappear { copyResetTask?.cancel() }
     }
 
     // MARK: - Subviews
