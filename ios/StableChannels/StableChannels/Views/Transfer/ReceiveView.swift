@@ -1,5 +1,6 @@
 import SwiftUI
 import LDKNode
+import UIKit
 
 struct ReceiveView: View {
     @Environment(AppState.self) private var appState
@@ -11,6 +12,8 @@ struct ReceiveView: View {
     @State private var isCopied = false
     @State private var showOnChain = false
     @State private var showFullscreenQR = false
+    @State private var showShareSheet = false
+    @State private var shareImage: UIImage?
 
     private var hasChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
@@ -63,6 +66,22 @@ struct ReceiveView: View {
             .fullScreenCover(isPresented: $showFullscreenQR) {
                 if let invoice, let qrImage = QRCodeUtility.generate(from: invoice) {
                     FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
+                }
+            }
+            .onChange(of: showShareSheet) { _, newValue in
+                if newValue, let img = shareImage, let invoiceStr = invoice {
+                    let activityVC = UIActivityViewController(
+                        activityItems: [img, invoiceStr],
+                        applicationActivities: nil
+                    )
+                    if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                       let rootVC = windowScene.windows.first?.rootViewController {
+                        var topVC = rootVC
+                        while let presented = topVC.presentedViewController {
+                            topVC = presented
+                        }
+                        topVC.present(activityVC, animated: true)
+                    }
                 }
             }
         }
@@ -211,6 +230,57 @@ struct ReceiveView: View {
                     systemImage: isCopied ? "checkmark" : "doc.on.doc")
             }
             .buttonStyle(.borderedProminent)
+
+            Button {
+                shareQR()
+            } label: {
+                Label(
+                    String(localized: "button_share_qr", defaultValue: "Share QR"),
+                    systemImage: "square.and.arrow.up"
+                )
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private func shareQR() {
+        guard let invoiceStr = invoice,
+              let qrImage = QRCodeUtility.generate(from: invoiceStr) else { return }
+
+        let amountText: String?
+        if let sats = invoiceAmountSats, sats > 0 {
+            amountText = "\(sats.btcSpacedFormatted) BTC"
+        } else {
+            amountText = nil
+        }
+
+        shareImage = ShareableQRGenerator.generateShareImage(
+            qrImage: qrImage,
+            invoice: invoiceStr,
+            amount: amountText,
+            isOnChain: false
+        )
+
+        Task { @MainActor in
+            showFullscreenQR = false
+            try? await Task.sleep(nanoseconds: 100_000_000)
+
+            guard let img = shareImage, let invoiceStr = invoice else { return }
+            let activityVC = UIActivityViewController(
+                activityItems: [img, invoiceStr],
+                applicationActivities: nil
+            )
+            activityVC.completionWithItemsHandler = { _, _, _, _ in
+            }
+
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootVC = windowScene.windows.first?.rootViewController {
+                var topVC = rootVC
+                while let presented = topVC.presentedViewController {
+                    topVC = presented
+                }
+                topVC.present(activityVC, animated: true)
+            }
         }
     }
 
