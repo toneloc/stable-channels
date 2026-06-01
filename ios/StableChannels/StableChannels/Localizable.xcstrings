@@ -364,6 +364,17 @@
         }
       }
     },
+    "button_enlarge_qr" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enlarge QR"
+          }
+        }
+      }
+    },
     "button_enable_in_settings" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {

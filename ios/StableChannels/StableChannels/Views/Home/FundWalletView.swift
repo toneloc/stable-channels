@@ -17,7 +17,7 @@ struct FundWalletView: View {
 
                     addressDisplay(address: address)
 
-                    copyButton(address: address)
+                    actionButtons(address: address)
                 } else if let error = loadError {
                     errorView(error: error)
                 } else {
@@ -87,8 +87,8 @@ struct FundWalletView: View {
             .textSelection(.enabled)
     }
 
-    private func copyButton(address: String) -> some View {
-        VStack(spacing: 12) {
+    private func actionButtons(address: String) -> some View {
+        HStack(spacing: 12) {
             Button {
                 UIPasteboard.general.string = address
                 isCopied = true
@@ -97,27 +97,37 @@ struct FundWalletView: View {
                     isCopied = false
                 }
             } label: {
-                Label(
-                    isCopied
-                        ? String(localized: "button_copied", defaultValue: "Copied")
-                        : String(localized: "button_copy_address", defaultValue: "Copy Address"),
-                    systemImage: isCopied ? "checkmark" : "doc.on.doc"
-                )
+                Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
             }
-            .buttonStyle(.borderedProminent)
-            .accessibilityLabel(isCopied
-                ? String(localized: "button_copied", defaultValue: "Copied")
-                : String(localized: "button_copy_address", defaultValue: "Copy Address"))
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "button_copy_address", defaultValue: "Copy Address"))
 
             Button {
                 shareQR()
             } label: {
-                Label(
-                    String(localized: "button_share_qr", defaultValue: "Share QR"),
-                    systemImage: "square.and.arrow.up"
-                )
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "button_share_qr", defaultValue: "Share QR"))
+
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    showFullscreenQR = true
+                }
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "button_enlarge_qr", defaultValue: "Enlarge QR"))
         }
     }
 

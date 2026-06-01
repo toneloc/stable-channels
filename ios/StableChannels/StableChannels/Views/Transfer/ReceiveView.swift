@@ -54,8 +54,9 @@ struct ReceiveView: View {
                     Button {
                         showOnChain = true
                     } label: {
-                        Label(String(localized: "toolbar_on_chain", defaultValue: "On-Chain"), systemImage: "link")
+                        Image(systemName: "link")
                     }
+                    .accessibilityLabel(String(localized: "toolbar_on_chain", defaultValue: "On-Chain"))
                 }
             }
             .navigationDestination(isPresented: $showOnChain) {
@@ -199,30 +200,47 @@ struct ReceiveView: View {
                 .padding(.horizontal)
                 .textSelection(.enabled)
 
-            Button {
-                UIPasteboard.general.string = invoiceStr
-                isCopied = true
-                Task {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    isCopied = false
+            HStack(spacing: 12) {
+                Button {
+                    UIPasteboard.general.string = invoiceStr
+                    isCopied = true
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        isCopied = false
+                    }
+                } label: {
+                    Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
                 }
-            } label: {
-                Label(isCopied
-                    ? String(localized: "button_copied", defaultValue: "Copied")
-                    : String(localized: "button_copy_invoice", defaultValue: "Copy Invoice"),
-                    systemImage: isCopied ? "checkmark" : "doc.on.doc")
-            }
-            .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "button_copy_invoice", defaultValue: "Copy Invoice"))
 
-            Button {
-                shareQR()
-            } label: {
-                Label(
-                    String(localized: "button_share_qr", defaultValue: "Share QR"),
-                    systemImage: "square.and.arrow.up"
-                )
+                Button {
+                    shareQR()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "button_share_qr", defaultValue: "Share QR"))
+
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                        showFullscreenQR = true
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "button_enlarge_qr", defaultValue: "Enlarge QR"))
             }
-            .buttonStyle(.bordered)
         }
     }
 
