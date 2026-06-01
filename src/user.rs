@@ -2238,7 +2238,7 @@ impl UserApp {
                             None,
                         );
 
-                        self.status_message = format!("Received payment of {} msats", amount_msat);
+                        self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
                             update_balances(&self.node, &mut sc);
@@ -2252,9 +2252,9 @@ impl UserApp {
                         // Show toast notification
                         let sats = amount_msat / 1000;
                         let toast_msg = if let Some(usd) = amount_usd {
-                            format!("Received {} sats (${:.2})", sats, usd)
+                            format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
                         } else {
-                            format!("Received {} sats", sats)
+                            format!("Received {}", Self::format_sats_as_btc(sats))
                         };
                         self.show_toast(&toast_msg, "+");
                     }
@@ -2756,6 +2756,42 @@ impl UserApp {
             }
         }
         raw
+    }
+
+    /// Canonical Bitcoin display: "0.00 100 000 BTC" for any sat value.
+    fn format_sats_as_btc(sats: u64) -> String {
+        format!("{} BTC", Self::format_btc_spaced(sats as f64 / 100_000_000.0))
+    }
+
+    /// Canonical Bitcoin display for msat values: same "0.00 000 001 BTC" shape.
+    fn format_msats_as_btc(msats: u64) -> String {
+        format!("{} BTC", Self::format_btc_spaced(msats as f64 / 100_000_000_000.0))
+    }
+
+    /// Accept an amount typed as either BTC (contains a `.`) or sats (integer),
+    /// returning the value in sats. Tolerant of spaces, thin spaces, commas,
+    /// and an optional "BTC"/"btc" suffix so users can paste the canonical
+    /// `0.00 025 000 BTC` display form back in. Returns `None` on malformed
+    /// input or on values above the 21M BTC supply ceiling.
+    fn parse_btc_or_sats(input: &str) -> Option<u64> {
+        let cleaned: String = input
+            .trim()
+            .trim_end_matches(|c: char| c == 'C' || c == 'c' || c == 'T' || c == 't' || c == 'B' || c == 'b' || c.is_whitespace())
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != ',' && *c != '_')
+            .collect();
+        if cleaned.is_empty() {
+            return None;
+        }
+        if cleaned.contains('.') {
+            let btc: f64 = cleaned.parse().ok()?;
+            if !btc.is_finite() || btc < 0.0 || btc > 21_000_000.0 {
+                return None;
+            }
+            Some((btc * 100_000_000.0).round() as u64)
+        } else {
+            cleaned.parse::<u64>().ok()
+        }
     }
 
     /// Format a price with comma separators and 2 decimal places (e.g., 100000.50 -> "$100,000.50")
@@ -3548,20 +3584,20 @@ impl UserApp {
                     } else {
                         const JIT_MIN_SATS: u64 = 1_000;
                         ui.label(
-                            egui::RichText::new("Enter amount (sats):")
+                            egui::RichText::new("Amount")
                                 .size(15.0)
                                 .color(egui::Color32::BLACK),
                         );
                         ui.add_space(4.0);
                         ui.label(
-                            egui::RichText::new(format!("Minimum {} sats", JIT_MIN_SATS))
+                            egui::RichText::new(format!("Minimum {}", Self::format_sats_as_btc(JIT_MIN_SATS)))
                                 .size(12.0)
                                 .color(egui::Color32::DARK_GRAY),
                         );
                         ui.add_space(8.0);
                         let amt_edit =
                             egui::TextEdit::singleline(&mut self.jit_amount_input)
-                                .hint_text("e.g. 25000")
+                                .hint_text("e.g. 0.00 025 000")
                                 .desired_width(200.0);
                         ui.add(amt_edit);
                         ui.add_space(12.0);
@@ -3575,23 +3611,23 @@ impl UserApp {
                         .fill(egui::Color32::BLACK)
                         .corner_radius(theme::RADIUS_PILL);
                         if ui.add(gen_btn).clicked() {
-                            match self.jit_amount_input.trim().parse::<u64>() {
-                                Ok(sats) if sats >= JIT_MIN_SATS => {
+                            match Self::parse_btc_or_sats(&self.jit_amount_input) {
+                                Some(sats) if sats >= JIT_MIN_SATS => {
                                     self.status_message =
-                                        format!("Creating invoice for {} sats...", sats);
+                                        format!("Creating invoice for {}...", Self::format_sats_as_btc(sats));
                                     self.get_jit_invoice(ctx, Some(sats));
                                     self.jit_choice_open = false;
                                     self.jit_fixed_mode = false;
                                 }
-                                Ok(_) => {
+                                Some(_) => {
                                     self.status_message = format!(
-                                        "Amount must be at least {} sats",
-                                        JIT_MIN_SATS
+                                        "Amount must be at least {}",
+                                        Self::format_sats_as_btc(JIT_MIN_SATS)
                                     );
                                 }
-                                Err(_) => {
+                                None => {
                                     self.status_message =
-                                        "Enter a positive number of sats".to_string();
+                                        "Enter a positive amount".to_string();
                                 }
                             }
                         }
@@ -3615,8 +3651,8 @@ impl UserApp {
                         ui.add_space(20.0);
                         ui.label(
                             egui::RichText::new(format!(
-                                "You have {} sats available",
-                                onchain_sats
+                                "You have {} available",
+                                Self::format_sats_as_btc(onchain_sats)
                             ))
                             .size(14.0)
                             .color(egui::Color32::DARK_GRAY),
@@ -4680,7 +4716,7 @@ impl UserApp {
                         ui.add_space(4.0);
                         if total_pending > 0 {
                             ui.label(
-                                RichText::new(format!("{} sats pending sweep", total_pending))
+                                RichText::new(format!("{} pending sweep", Self::format_sats_as_btc(total_pending)))
                                     .size(12.0)
                                     .color(Color32::DARK_GRAY),
                             );
@@ -4688,8 +4724,8 @@ impl UserApp {
                         if total_claimable > 0 {
                             ui.label(
                                 RichText::new(format!(
-                                    "{} sats awaiting confirmation",
-                                    total_claimable
+                                    "{} awaiting confirmation",
+                                    Self::format_sats_as_btc(total_claimable)
                                 ))
                                 .size(12.0)
                                 .color(Color32::DARK_GRAY),
@@ -5405,7 +5441,7 @@ impl UserApp {
                             };
                             total_pending += amount;
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("{} sats", amount)).size(12.0).color(Color32::BLACK).strong());
+                                ui.label(RichText::new(Self::format_sats_as_btc(amount)).size(12.0).color(Color32::BLACK).strong());
                                 ui.label(RichText::new(format!("- {}", status)).size(11.0).color(Color32::DARK_GRAY));
                             });
                         }
@@ -5415,7 +5451,7 @@ impl UserApp {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Total pending:").size(12.0).color(Color32::DARK_GRAY));
-                                ui.label(RichText::new(format!("{} sats", total_pending)).size(12.0).color(Color32::BLACK).strong());
+                                ui.label(RichText::new(Self::format_sats_as_btc(total_pending)).size(12.0).color(Color32::BLACK).strong());
                             });
                         }
                     });
@@ -5436,31 +5472,31 @@ impl UserApp {
                             match balance {
                                 ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
                                         ui.label(RichText::new(format!("- claimable at block {}", confirmation_height)).size(11.0).color(Color32::DARK_GRAY));
                                     });
                                 },
                                 ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
                                         ui.label(RichText::new(format!("- claimable at height {}", timeout_height)).size(11.0).color(Color32::DARK_GRAY));
                                     });
                                 },
                                 ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
                                         ui.label(RichText::new(format!("- HTLC claimable at {}", claimable_height)).size(11.0).color(Color32::DARK_GRAY));
                                     });
                                 },
                                 ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
                                         ui.label(RichText::new(format!("- needs preimage, expires {}", expiry_height)).size(11.0).color(Color32::DARK_GRAY));
                                     });
                                 },
                                 ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new(format!("{} sats", amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
+                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
                                         ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(theme::DANGER_HOVER));
                                     });
                                 },
@@ -7053,7 +7089,7 @@ impl UserApp {
                 ui.label(RichText::new("You receive").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new(format!("{:.8} BTC", btc_amount))
+                        RichText::new(format!("{} BTC", Self::format_btc_spaced(btc_amount)))
                             .color(Color32::BLACK)
                             .strong(),
                     );
@@ -7324,7 +7360,7 @@ impl UserApp {
                 ui.label(RichText::new("You're selling").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new(format!("{:.8} BTC", btc_amount))
+                        RichText::new(format!("{} BTC", Self::format_btc_spaced(btc_amount)))
                             .color(Color32::BLACK)
                             .strong(),
                     );
@@ -7450,7 +7486,7 @@ impl UserApp {
                     if total_sats > 0 {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Balance:").size(12.0).color(Color32::DARK_GRAY));
-                            ui.label(RichText::new(format!("{} sats", total_sats)).size(12.0).color(Color32::BLACK).strong());
+                            ui.label(RichText::new(Self::format_sats_as_btc(total_sats)).size(12.0).color(Color32::BLACK).strong());
                         });
                         ui.add_space(5.0);
                     }
