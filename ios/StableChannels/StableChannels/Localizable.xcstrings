@@ -2006,6 +2006,28 @@
         }
       }
     },
+    "label_your_address" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Your Bitcoin Address"
+          }
+        }
+      }
+    },
+    "label_your_invoice" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Your Lightning Invoice"
+          }
+        }
+      }
+    },
     "link_about" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
