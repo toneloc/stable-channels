@@ -8,9 +8,6 @@ struct FundWalletView: View {
     @State private var isCopied = false
     @State private var showFullscreenQR = false
     @State private var loadError: Error?
-    @State private var showShareSheet = false
-    @State private var shareImage: UIImage?
-    @State private var isSharing = false
 
     var body: some View {
         ScrollView {
@@ -45,23 +42,6 @@ struct FundWalletView: View {
             if let uri = bitcoinURI,
                let qrImage = QRCodeUtility.generate(from: uri) {
                 FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
-            }
-        }
-        .onChange(of: showShareSheet) { _, newValue in
-            if newValue, let img = shareImage, let uriStr = bitcoinURI {
-                let addressToShare = uriStr.replacingOccurrences(of: "bitcoin:", with: "")
-                let activityVC = UIActivityViewController(
-                    activityItems: [img, addressToShare],
-                    applicationActivities: nil
-                )
-                if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let rootVC = windowScene.windows.first?.rootViewController {
-                    var topVC = rootVC
-                    while let presented = topVC.presentedViewController {
-                        topVC = presented
-                    }
-                    topVC.present(activityVC, animated: true)
-                }
             }
         }
     }
@@ -143,11 +123,12 @@ struct FundWalletView: View {
 
     private func shareQR() {
         guard let uri = bitcoinURI,
-              let qrImage = QRCodeUtility.generate(from: uri) else { return }
+              let qrImage = QRCodeUtility.generate(from: uri),
+              let addr = address else { return }
 
-        shareImage = ShareableQRGenerator.generateShareImage(
+        let shareImage = ShareableQRGenerator.generateShareImage(
             qrImage: qrImage,
-            invoice: address ?? uri,
+            invoice: addr,
             amount: nil,
             isOnChain: true
         )
@@ -156,23 +137,8 @@ struct FundWalletView: View {
             showFullscreenQR = false
             try? await Task.sleep(nanoseconds: 100_000_000)
 
-            guard let img = shareImage, let uriStr = bitcoinURI else { return }
-            let addressToShare = uriStr.replacingOccurrences(of: "bitcoin:", with: "")
-            let activityVC = UIActivityViewController(
-                activityItems: [img, addressToShare],
-                applicationActivities: nil
-            )
-            activityVC.completionWithItemsHandler = { _, _, _, _ in
-            }
-
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                var topVC = rootVC
-                while let presented = topVC.presentedViewController {
-                    topVC = presented
-                }
-                topVC.present(activityVC, animated: true)
-            }
+            let addressToShare = uri.replacingOccurrences(of: "bitcoin:", with: "")
+            ShareSheetPresenter.present(items: [shareImage, addressToShare])
         }
     }
 

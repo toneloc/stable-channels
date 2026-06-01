@@ -12,8 +12,6 @@ struct ReceiveView: View {
     @State private var isCopied = false
     @State private var showOnChain = false
     @State private var showFullscreenQR = false
-    @State private var showShareSheet = false
-    @State private var shareImage: UIImage?
 
     private var hasChannel: Bool {
         appState.nodeService.channels.contains { $0.isChannelReady }
@@ -68,22 +66,6 @@ struct ReceiveView: View {
                     FullscreenQRZoomView(qrImage: qrImage, isPresented: $showFullscreenQR)
                 }
             }
-            .onChange(of: showShareSheet) { _, newValue in
-                if newValue, let img = shareImage, let invoiceStr = invoice {
-                    let activityVC = UIActivityViewController(
-                        activityItems: [img, invoiceStr],
-                        applicationActivities: nil
-                    )
-                    if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                       let rootVC = windowScene.windows.first?.rootViewController {
-                        var topVC = rootVC
-                        while let presented = topVC.presentedViewController {
-                            topVC = presented
-                        }
-                        topVC.present(activityVC, animated: true)
-                    }
-                }
-            }
         }
     }
 
@@ -128,9 +110,12 @@ struct ReceiveView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-                Text(String(localized: "max_channel_limit", defaultValue: "Maximum: $\(Int(Constants.maxChannelUSD))"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                Text(String(
+                    format: NSLocalizedString("max_channel_limit", comment: ""),
+                    Int64(Constants.maxChannelUSD)
+                ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
 
             if !hasChannel && enteredUSDValue > Constants.maxChannelUSD {
@@ -165,7 +150,6 @@ struct ReceiveView: View {
 
     private func invoiceDisplay(_ invoiceStr: String) -> some View {
         VStack(spacing: 16) {
-            // Amount summary
             if let sats = invoiceAmountSats, sats > 0 {
                 VStack(spacing: 2) {
                     let price = appState.btcPrice
@@ -184,7 +168,6 @@ struct ReceiveView: View {
                     .foregroundStyle(.secondary)
             }
 
-            // QR Code
             if let qrImage = QRCodeUtility.generate(from: invoiceStr) {
                 VStack(spacing: 4) {
                     Image(uiImage: qrImage)
@@ -254,7 +237,7 @@ struct ReceiveView: View {
             amountText = nil
         }
 
-        shareImage = ShareableQRGenerator.generateShareImage(
+        let shareImage = ShareableQRGenerator.generateShareImage(
             qrImage: qrImage,
             invoice: invoiceStr,
             amount: amountText,
@@ -265,22 +248,7 @@ struct ReceiveView: View {
             showFullscreenQR = false
             try? await Task.sleep(nanoseconds: 100_000_000)
 
-            guard let img = shareImage, let invoiceStr = invoice else { return }
-            let activityVC = UIActivityViewController(
-                activityItems: [img, invoiceStr],
-                applicationActivities: nil
-            )
-            activityVC.completionWithItemsHandler = { _, _, _, _ in
-            }
-
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                var topVC = rootVC
-                while let presented = topVC.presentedViewController {
-                    topVC = presented
-                }
-                topVC.present(activityVC, animated: true)
-            }
+            ShareSheetPresenter.present(items: [shareImage, invoiceStr])
         }
     }
 
@@ -298,7 +266,6 @@ struct ReceiveView: View {
                     description: "Stable Channels payment"
                 )
             } else {
-                // No channel yet — use JIT channel via LSPS2
                 inv = try appState.nodeService.receiveViaJitChannel(
                     amountMsat: sats * 1000,
                     description: "Stable Channels payment"
