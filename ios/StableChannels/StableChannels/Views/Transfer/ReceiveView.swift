@@ -69,6 +69,7 @@ struct ReceiveView: View {
                 }
             }
         }
+        .onDisappear { copyResetTask?.cancel() }
     }
 
     // MARK: - Amount Input
