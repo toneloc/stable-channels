@@ -265,7 +265,7 @@ struct OnChainSendView: View {
         var t = AttributedString(txid)
         t.foregroundColor = .blue
         t.underlineStyle = .single
-        t.link = URL(string: "https://mempool.space/tx/\(txid)")
+        t.link = Constants.txExplorerLink(for: txid)
         return s + t
     }
 
