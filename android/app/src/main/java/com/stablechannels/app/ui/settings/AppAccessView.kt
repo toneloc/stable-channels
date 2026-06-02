@@ -20,7 +20,7 @@ fun AppAccessView() {
         mutableStateOf(prefs.getBoolean("app_unlock_enabled", false))
     }
     var paymentConfirmEnabled by remember {
-        mutableStateOf(prefs.getBoolean("payment_confirm_enabled", false))
+        mutableStateOf(prefs.getBoolean("payment_confirmation_enabled", false))
     }
 
     val biometricManager = BiometricManager.from(context)
@@ -124,7 +124,7 @@ fun AppAccessView() {
                     onCheckedChange = { newValue ->
                         if (biometricsAvailable) {
                             paymentConfirmEnabled = newValue
-                            prefs.edit().putBoolean("payment_confirm_enabled", newValue).apply()
+                            prefs.edit().putBoolean("payment_confirmation_enabled", newValue).apply()
                         }
                     },
                     enabled = biometricsAvailable,

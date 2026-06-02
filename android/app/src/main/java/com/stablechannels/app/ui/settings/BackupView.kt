@@ -16,7 +16,9 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.Dispatchers
@@ -28,9 +30,11 @@ import org.lightningdevkit.ldknode.Network
 fun BackupView(appState: AppState) {
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
+    val activity = LocalContext.current as? FragmentActivity
     val scope = rememberCoroutineScope()
 
     var showSeedWords by remember { mutableStateOf(false) }
+    var seedAuthError by remember { mutableStateOf<String?>(null) }
     var showRestore by remember { mutableStateOf(false) }
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
@@ -43,7 +47,28 @@ fun BackupView(appState: AppState) {
     ) {
         // Show/hide seed words
         Button(
-            onClick = { showSeedWords = !showSeedWords },
+            onClick = {
+                if (showSeedWords) {
+                    // Hiding seed words — no auth needed
+                    showSeedWords = false
+                    seedAuthError = null
+                } else {
+                    // Showing seed words — require biometric auth
+                    scope.launch {
+                        if (activity != null) {
+                            val authResult = BiometricService.authenticate(activity, "View seed phrase")
+                            if (authResult == BiometricService.AuthResult.SUCCESS) {
+                                showSeedWords = true
+                                seedAuthError = null
+                            } else {
+                                seedAuthError = "Authentication required"
+                            }
+                        } else {
+                            seedAuthError = "Authentication required"
+                        }
+                    }
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.buttonColors(
                 containerColor = Color(0xFF10B981),
@@ -51,6 +76,11 @@ fun BackupView(appState: AppState) {
             )
         ) {
             Text(if (showSeedWords) "Hide Seed Words" else "Backup Seed Words")
+        }
+
+        seedAuthError?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
 
         if (showSeedWords) {
