@@ -46,7 +46,7 @@ struct ChannelSettingsView: View {
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
-                        if let url = URL(string: "https://mempool.space/tx/\(txid)") {
+                        if let url = Constants.txExplorerLink(for: txid) {
                             Link(destination: url) {
                                 HStack(spacing: 4) {
                                     Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))

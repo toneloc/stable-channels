@@ -402,14 +402,16 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
             Spacer()
             if let txid, !txid.isEmpty {
-                Link(destination: URL(string: "https://mempool.space/tx/\(txid)")!) {
-                    HStack(spacing: 2) {
-                        Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
-                            .font(.caption2)
-                        Image(systemName: "arrow.up.right.square")
-                            .font(.caption2)
+                if let url = Constants.txExplorerLink(for: txid) {
+                    Link(destination: url) {
+                        HStack(spacing: 2) {
+                            Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                                .font(.caption2)
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(.blue)
                     }
-                    .foregroundStyle(.blue)
                 }
             }
         }
