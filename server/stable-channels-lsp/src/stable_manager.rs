@@ -206,7 +206,9 @@ impl StableChannelManager {
         }
     }
 
-    /// Remove the stable_channel record from memory + DB when a channel closes.
+    /// Remove the stable_channel record from in-memory state when a channel
+    /// closes, and soft-close the DB row (preserved for forensics, excluded
+    /// from future reconcile/tick reads).
     pub fn handle_channel_closed(&mut self, user_channel_id: String) {
         let target = parse_user_channel_id(&user_channel_id);
         self.stable_channels.retain(|sc| {
@@ -216,9 +218,9 @@ impl StableChannelManager {
                 format!("{}", sc.user_channel_id) != user_channel_id
             }
         });
-        if let Err(e) = self.db.delete_channel(&user_channel_id) {
+        if let Err(e) = self.db.mark_channel_closed(&user_channel_id) {
             tracing::error!(
-                "[stable] handle_channel_closed: db.delete_channel failed for {}: {}",
+                "[stable] handle_channel_closed: db.mark_channel_closed failed for {}: {}",
                 user_channel_id, e
             );
         }
@@ -268,15 +270,18 @@ impl StableChannelManager {
                 .and_then(|uid| by_user_channel_id.get(&uid).map(|c| (uid, c)));
 
             let Some((user_channel_id_u128, c)) = live else {
-                // Channel closed while the daemon was down: drop from db, audit.
-                if let Err(e) = self.db.delete_channel(&record.user_channel_id) {
+                // Channel not in current live snapshot — soft-close in DB so
+                // forensics survive a transient gRPC blip. If the channel
+                // comes back on a future reconcile or save_channel call,
+                // closed_at is cleared automatically.
+                if let Err(e) = self.db.mark_channel_closed(&record.user_channel_id) {
                     tracing::error!(
-                        "[stable] reconcile: db.delete_channel({}) failed: {}",
+                        "[stable] reconcile: db.mark_channel_closed({}) failed: {}",
                         record.user_channel_id, e
                     );
                 }
                 stable_channels::audit::audit_event(
-                    "CHANNEL_DROPPED_AT_STARTUP",
+                    "CHANNEL_MARKED_CLOSED_AT_STARTUP",
                     serde_json::json!({ "user_channel_id": record.user_channel_id }),
                 );
                 continue;
