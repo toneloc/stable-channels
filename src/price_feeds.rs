@@ -13,7 +13,10 @@ use ureq::Agent;
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
         price: 0.0,
-        last_update: Instant::now() - Duration::from_secs(10),
+        // checked_sub avoids a Windows panic when uptime < the offset.
+        last_update: Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now),
         updating: false,
     }));
 }

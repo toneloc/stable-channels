@@ -564,7 +564,9 @@ impl UserApp {
             audit_log_path,
             show_advanced: false,
             settings_show_sats: true,
-            balance_last_update: std::time::Instant::now() - Duration::from_secs(10),
+            balance_last_update: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(std::time::Instant::now),
             confirm_close_popup: false,
             stable_message: String::new(),
             show_confirm_trade: false,
@@ -578,7 +580,9 @@ impl UserApp {
             show_transfer_modal: false,
             show_buy_modal: false,
             show_sell_modal: false,
-            modal_opened_at: std::time::Instant::now() - Duration::from_secs(10),
+            modal_opened_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(std::time::Instant::now),
             transfer_tab: TransferTab::Send,
             send_input: String::new(),
             send_all: false,
@@ -596,9 +600,17 @@ impl UserApp {
             lightning_receive_error: String::new(),
             chart_period: ChartPeriod::Month1,
             chart_prices: Vec::new(),
-            chart_last_update: std::time::Instant::now() - std::time::Duration::from_secs(3600),
+            // checked_sub guards against Windows panics where Instant origin =
+            // system boot. Subtracting a duration larger than uptime underflows.
+            // Fallback (Instant::now()) means the first refresh fires after the
+            // normal interval instead of immediately — acceptable trade-off.
+            chart_last_update: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3600))
+                .unwrap_or_else(std::time::Instant::now),
             intraday_prices: Vec::new(),
-            last_price_record: std::time::Instant::now() - std::time::Duration::from_secs(300),
+            last_price_record: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(300))
+                .unwrap_or_else(std::time::Instant::now),
             is_syncing: true, // Always start syncing until we have price AND balance data
             pending_trade_payments: HashMap::new(),
             pending_payments: HashMap::new(),
