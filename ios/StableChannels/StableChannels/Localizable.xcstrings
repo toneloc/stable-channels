@@ -1,6 +1,12 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+
+    },
+    " " : {
+
+    },
     "%@" : {
 
     },
@@ -221,6 +227,20 @@
         }
       }
     },
+    "Backup enabled!" : {
+
+    },
+    "backup_now" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup Now"
+          }
+        }
+      }
+    },
     "button_any_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -353,6 +373,17 @@
         }
       }
     },
+    "button_enable_icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup to iCloud"
+          }
+        }
+      }
+    },
     "button_enable_in_settings" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -397,6 +428,17 @@
         }
       }
     },
+    "button_import_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Import from File"
+          }
+        }
+      }
+    },
     "button_ok" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -437,6 +479,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Restore"
+          }
+        }
+      }
+    },
+    "button_restore_icloud" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from iCloud"
           }
         }
       }
@@ -518,6 +571,9 @@
         }
       }
     },
+    "Cancel" : {
+
+    },
     "channel_status_pending" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -540,6 +596,28 @@
         }
       }
     },
+    "confirm_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirm Passphrase"
+          }
+        }
+      }
+    },
+    "confirm_passphrase_hint" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirm your passphrase"
+          }
+        }
+      }
+    },
     "custody_self" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -547,6 +625,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Self-custodial"
+          }
+        }
+      }
+    },
+    "Delete" : {
+
+    },
+    "Delete Backup?" : {
+
+    },
+    "delete_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Delete Backup"
           }
         }
       }
@@ -613,6 +708,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "No Orders"
+          }
+        }
+      }
+    },
+    "enable_icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enable iCloud Backup"
+          }
+        }
+      }
+    },
+    "enabled" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enabled"
+          }
+        }
+      }
+    },
+    "enter_backup_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enter backup passphrase"
+          }
+        }
+      }
+    },
+    "enter_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enter passphrase"
           }
         }
       }
@@ -716,6 +855,28 @@
         }
       }
     },
+    "error_export_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export failed"
+          }
+        }
+      }
+    },
+    "error_import_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Decryption failed. Check passphrase."
+          }
+        }
+      }
+    },
     "error_insufficient_balance" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -727,6 +888,39 @@
         }
       }
     },
+    "error_invalid_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Invalid backup file"
+          }
+        }
+      }
+    },
+    "error_locked_for" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Locked for"
+          }
+        }
+      }
+    },
+    "error_no_file" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No file selected"
+          }
+        }
+      }
+    },
     "error_no_ready_channel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -734,6 +928,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "No ready channel"
+          }
+        }
+      }
+    },
+    "error_no_seed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No seed available"
           }
         }
       }
@@ -760,6 +965,17 @@
         }
       }
     },
+    "error_old_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup version not supported"
+          }
+        }
+      }
+    },
     "error_open_channel" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -782,6 +998,17 @@
         }
       }
     },
+    "error_rate_limited" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Too many attempts. Try again in"
+          }
+        }
+      }
+    },
     "error_read_balances" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -794,15 +1021,7 @@
       }
     },
     "error_restore_failed" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Restore failed: "
-          }
-        }
-      }
+
     },
     "error_seed_word_count" : {
       "extractionState" : "manual",
@@ -888,6 +1107,83 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Failed to create wallet"
+          }
+        }
+      }
+    },
+    "error_wrong_passphrase" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wrong passphrase. %lld attempts remaining"
+          }
+        }
+      }
+    },
+    "export" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Export"
+          }
+        }
+      }
+    },
+    "export_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export Backup"
+          }
+        }
+      }
+    },
+    "export_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Add a passphrase to protect your exported backup. You'll need this to restore."
+          }
+        }
+      }
+    },
+    "export_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export Your Backup"
+          }
+        }
+      }
+    },
+    "export_to_files" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Export to Files"
+          }
+        }
+      }
+    },
+    "file_ready" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "File ready to restore"
           }
         }
       }
@@ -998,6 +1294,83 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Syncing..."
+          }
+        }
+      }
+    },
+    "icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iCloud Backup"
+          }
+        }
+      }
+    },
+    "icloud_backup_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Protect your wallet with encrypted cloud backup."
+          }
+        }
+      }
+    },
+    "icloud_backup_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iCloud Seed Backup"
+          }
+        }
+      }
+    },
+    "import" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import"
+          }
+        }
+      }
+    },
+    "import_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Import Backup"
+          }
+        }
+      }
+    },
+    "import_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Select your .stablebackup file and enter the passphrase used when creating it."
+          }
+        }
+      }
+    },
+    "import_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from Backup"
           }
         }
       }
@@ -1320,6 +1693,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "App Unlock"
+          }
+        }
+      }
+    },
+    "label_attempts_left" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "attempts left"
           }
         }
       }
@@ -1962,6 +2346,17 @@
         }
       }
     },
+    "last_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Last backup"
+          }
+        }
+      }
+    },
     "link_about" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -2105,6 +2500,17 @@
         }
       }
     },
+    "maybe_later" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Maybe Later"
+          }
+        }
+      }
+    },
     "Min" : {
 
     },
@@ -2148,6 +2554,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Notifications Enabled"
+          }
+        }
+      }
+    },
+    "passphrase" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Passphrase"
+          }
+        }
+      }
+    },
+    "passphrase_min_length" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "At least 12 characters required"
+          }
+        }
+      }
+    },
+    "passphrase_mismatch" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Passphrases don't match"
           }
         }
       }
@@ -2342,6 +2781,94 @@
     "Price" : {
 
     },
+    "recovery_banner_text_prefix" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Please email"
+          }
+        }
+      }
+    },
+    "recovery_banner_text_suffix" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "for wallet recovery assistance."
+          }
+        }
+      }
+    },
+    "recovery_banner_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Need Help?"
+          }
+        }
+      }
+    },
+    "restore_action" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore Wallet"
+          }
+        }
+      }
+    },
+    "restore_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore Backup"
+          }
+        }
+      }
+    },
+    "restore_description" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore your wallet from backup."
+          }
+        }
+      }
+    },
+    "restore_from_icloud" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restore from iCloud"
+          }
+        }
+      }
+    },
+    "restoring" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Restoring..."
+          }
+        }
+      }
+    },
     "section_about" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2415,6 +2942,17 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Custody Model"
+          }
+        }
+      }
+    },
+    "section_icloud_backup" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iCloud"
           }
         }
       }
@@ -2529,17 +3067,6 @@
         }
       }
     },
-    "section_seed_phrase" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Seed Phrase"
-          }
-        }
-      }
-    },
     "section_stable_position" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2602,6 +3129,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Orders"
+          }
+        }
+      }
+    },
+    "select_backup_file" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Select .stablebackup File"
           }
         }
       }
@@ -2873,6 +3411,9 @@
         }
       }
     },
+    "support@stablechannels.com" : {
+
+    },
     "tab_history" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2902,6 +3443,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Settings"
+          }
+        }
+      }
+    },
+    "tap_to_select" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Tap to browse your files"
           }
         }
       }
@@ -3327,13 +3879,16 @@
         }
       }
     },
+    "Wallet restored!" : {
+
+    },
     "warning_copy_seed_message" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Clipboard is shared with other apps. Consider writing down your seed instead."
+            "value" : "Clipboard is shared with other apps."
           }
         }
       }
@@ -3359,6 +3914,9 @@
           }
         }
       }
+    },
+    "You'll need your seed phrase to restore. This cannot be undone." : {
+
     }
   },
   "version" : "1.2"
