@@ -105,6 +105,12 @@ impl Database {
             [],
         ); // Ignore error if column already exists
 
+        // Migration: Add closed_at column. NULL = active, unix timestamp = soft-closed.
+        // We never hard-delete channel rows from reconcile / handle_channel_closed —
+        // they're marked closed so closed-channel forensics survive transient gRPC blips.
+        let _ = conn.execute("ALTER TABLE channels ADD COLUMN closed_at INTEGER", []);
+        // Ignore error if column already exists
+
         // Price history table - stores historical prices for charts
         conn.execute(
             "CREATE TABLE IF NOT EXISTS price_history (
@@ -219,7 +225,12 @@ impl Database {
     // Channel Operations
     // =========================================================================
 
-    /// Save or update channel settings
+    /// Save or update channel settings.
+    ///
+    /// Calling this is an active assertion that the channel is live, so any
+    /// prior `closed_at` is cleared on UPDATE. This way a channel that was
+    /// marked closed in error (e.g. a transient gRPC blip during reconcile)
+    /// re-activates the next time we save it.
     pub fn save_channel(
         &self,
         channel_id: &str,
@@ -234,6 +245,7 @@ impl Database {
         let updated = conn.execute(
             "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
                                  note = ?4, user_channel_id = ?5, native_sats = ?6,
+                                 closed_at = NULL,
                                  updated_at = strftime('%s', 'now')
              WHERE user_channel_id = ?5",
             params![
@@ -256,6 +268,7 @@ impl Database {
                     stable_sats = ?4,
                     native_sats = ?5,
                     note = ?6,
+                    closed_at = NULL,
                     updated_at = strftime('%s', 'now')",
                 params![channel_id, user_channel_id, expected_usd, backing_sats as i64, native_sats as i64, note],
             )?;
@@ -263,11 +276,28 @@ impl Database {
         Ok(())
     }
 
-    /// Delete channel settings (e.g. after channel close)
+    /// Hard-delete a channel row. Reserved for explicit admin purge; reconcile
+    /// and channel-close paths should call `mark_channel_closed` instead so the
+    /// row survives for forensics.
     pub fn delete_channel(&self, user_channel_id: &str) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM channels WHERE user_channel_id = ?1",
+            params![user_channel_id],
+        )?;
+        Ok(())
+    }
+
+    /// Soft-close a channel row: set `closed_at` to now if not already set.
+    /// Idempotent — preserves the original close time on subsequent calls so
+    /// the audit trail stays meaningful.
+    pub fn mark_channel_closed(&self, user_channel_id: &str) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE channels
+             SET closed_at = strftime('%s', 'now'),
+                 updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?1 AND closed_at IS NULL",
             params![user_channel_id],
         )?;
         Ok(())
@@ -299,8 +329,40 @@ impl Database {
         }
     }
 
-    /// Load all channel records from the database
+    /// Load all *active* channel records (closed_at IS NULL). This is the
+    /// load called by reconcile and the stability tick — closed channels are
+    /// excluded so we never act on them.
     pub fn load_all_channels(&self) -> SqliteResult<Vec<ChannelRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, native_sats
+             FROM channels
+             WHERE closed_at IS NULL",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let backing_sats: i64 = row.get(3).unwrap_or(0);
+            let native_sats: i64 = row.get(5).unwrap_or(0);
+            Ok(ChannelRecord {
+                channel_id: row.get(0)?,
+                user_channel_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                expected_usd: row.get(1)?,
+                note: row.get(2)?,
+                backing_sats: backing_sats as u64,
+                native_sats: native_sats as u64,
+            })
+        })?;
+
+        let mut channels = Vec::new();
+        for row in rows {
+            channels.push(row?);
+        }
+        Ok(channels)
+    }
+
+    /// Load every channel row, active or closed. Use this for forensics /
+    /// closed-channel history views, never for reconcile.
+    pub fn load_all_channels_including_closed(&self) -> SqliteResult<Vec<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT channel_id, expected_usd, note, stable_sats, user_channel_id, native_sats FROM channels",
@@ -931,6 +993,74 @@ mod tests {
         assert!((loaded.expected_usd - 100.0).abs() < 0.001);
         assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.native_sats, 20_000);
+    }
+
+    #[test]
+    fn test_mark_channel_closed_excludes_from_load_all() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("ch_a", "uch_a", 10.0, 1000, 0, None).unwrap();
+        db.save_channel("ch_b", "uch_b", 20.0, 2000, 0, None).unwrap();
+        assert_eq!(db.load_all_channels().unwrap().len(), 2);
+
+        db.mark_channel_closed("uch_a").unwrap();
+
+        let active = db.load_all_channels().unwrap();
+        assert_eq!(active.len(), 1, "closed channel must be excluded from load_all_channels");
+        assert_eq!(active[0].user_channel_id, "uch_b");
+
+        let all = db.load_all_channels_including_closed().unwrap();
+        assert_eq!(all.len(), 2, "closed channel must still exist in DB");
+    }
+
+    #[test]
+    fn test_save_channel_reactivates_closed_row() {
+        // A row marked closed by mistake (e.g. transient gRPC blip) must
+        // re-activate the next time we save it.
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("ch_x", "uch_x", 50.0, 5000, 0, None).unwrap();
+        db.mark_channel_closed("uch_x").unwrap();
+        assert!(db.load_all_channels().unwrap().is_empty());
+
+        db.save_channel("ch_x", "uch_x", 75.0, 7500, 0, Some("revived")).unwrap();
+
+        let active = db.load_all_channels().unwrap();
+        assert_eq!(active.len(), 1, "save_channel must clear closed_at");
+        assert!((active[0].expected_usd - 75.0).abs() < 0.001);
+        assert_eq!(active[0].note.as_deref(), Some("revived"));
+    }
+
+    #[test]
+    fn test_mark_channel_closed_is_idempotent() {
+        // Calling mark_channel_closed twice must preserve the original
+        // close timestamp, not overwrite it.
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("ch_y", "uch_y", 10.0, 1000, 0, None).unwrap();
+
+        db.mark_channel_closed("uch_y").unwrap();
+        // Read the closed_at value directly so we can compare across calls.
+        let conn = db.conn.lock().unwrap();
+        let first_ts: i64 = conn
+            .query_row(
+                "SELECT closed_at FROM channels WHERE user_channel_id = ?1",
+                params!["uch_y"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+
+        // Sleep a beat so the wall clock advances past 1s resolution, then mark closed again.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.mark_channel_closed("uch_y").unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let second_ts: i64 = conn
+            .query_row(
+                "SELECT closed_at FROM channels WHERE user_channel_id = ?1",
+                params!["uch_y"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_ts, second_ts, "closed_at must not be overwritten");
     }
 
     #[test]

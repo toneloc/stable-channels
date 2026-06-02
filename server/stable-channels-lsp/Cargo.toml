@@ -8,6 +8,15 @@ edition = "2021"
 stable-channels   = { path = "../.." }
 sc-protos         = { path = "../sc-protos" }
 ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "3f98b857abfa9bcf660fd14db35be17cf79e03c6", features = ["serde"], default-features = false }
+# ldk-node is pulled transitively by stable-channels but we need it as a direct
+# dep so we can name `ldk_node::lightning::ln::types::ChannelId` etc. in our
+# module path. The rev must match the root Cargo.toml.
+ldk-node          = { git = "https://github.com/lightningdevkit/ldk-node", rev = "16eaa6f46308965f501904506be3ceecd293f358" }
+hex               = "0.4"
+
+# Async trait support for &dyn LdkServerCalls (stable Rust async-fn-in-trait
+# does not yet support trait objects).
+async-trait       = "0.1"
 
 # HTTP/REST stack
 axum             = "0.8"
@@ -18,6 +27,17 @@ tower-http       = { version = "0.6", features = ["trace"] }
 # Protobuf wire format
 prost            = "0.11"
 bytes            = "1"
+
+# APNs push notifications.
+a2 = "0.10"
+
+# FCM (Android) push notifications: HTTPS + OAuth2 JWT.
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde_json = "1"
+openssl    = { version = "0.10", default-features = false, features = ["vendored"] }
+
+# sqlite for the push tokens store (declared explicitly even though stable-channels pulls it transitively).
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # HMAC + TLS
 bitcoin_hashes   = "0.14"
@@ -40,3 +60,4 @@ thiserror        = "1"
 
 [dev-dependencies]
 getrandom        = "0.2"
+tempfile         = "3"

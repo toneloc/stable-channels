@@ -3,12 +3,14 @@
 pub mod audit_log;
 pub mod channels;
 pub mod graph;
+pub mod ldk_log;
 pub mod lightning;
 pub mod onchain;
 pub mod payments;
 pub mod peers;
 pub mod price;
 pub mod proxy;
+pub mod register_push;
 pub mod stable_channels;
 pub mod tools;
 

@@ -1,5 +1,6 @@
 package com.stablechannels.app.ui.transfer
 
+import android.content.ContextWrapper
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -19,11 +20,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.AppAccessPreferencesManager
+import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
@@ -31,6 +35,7 @@ import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.lightningdevkit.ldknode.Bolt11Invoice
 import org.lightningdevkit.ldknode.Offer
 
@@ -47,6 +52,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var isExtractingQR by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val activity = context.findActivity()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
 
     val inputType = remember(input) {
@@ -272,67 +278,93 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 onClick = {
                     isSending = true
                     error = null
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            appState.ensureLSPConnected()
-                            val trimmed = input.trim()
-                            val price = btcPrice
-                            when (inputType) {
-                                InputType.BOLT11 -> {
-                                    val invoice = Bolt11Invoice.fromStr(trimmed)
-                                    val invoiceMsat = invoice.amountMilliSatoshis()?.toLong() ?: 0L
-                                    val paymentId: String
-                                    val actualMsat: Long
-                                    if (invoiceMsat > 0) {
-                                        paymentId = appState.nodeService.sendPayment(invoice)
-                                        actualMsat = invoiceMsat
-                                    } else {
-                                        actualMsat = manualAmountMsat
-                                        paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
-                                    }
-                                    appState.databaseService?.recordPayment(
-                                        paymentId = paymentId, paymentType = "lightning",
-                                        direction = "sent", amountMsat = actualMsat, btcPrice = price
-                                    )
-                                    result = "Payment sent"
-                                }
-                                InputType.BOLT12 -> {
-                                    val sats = manualAmountSats
-                                    if (sats <= 0) throw Exception("Enter amount")
-                                    val offer = Offer.fromStr(trimmed)
-                                    val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
-                                    appState.databaseService?.recordPayment(
-                                        paymentId = paymentId, paymentType = "bolt12",
-                                        direction = "sent", amountMsat = sats * 1000, btcPrice = price
-                                    )
-                                    result = "Bolt12 payment sent"
-                                }
-                                InputType.ONCHAIN -> {
-                                    val sats = manualAmountSats
-                                    if (sats <= 0) throw Exception("Enter amount")
-                                    val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
-                                    if (hasChannel) {
-                                        if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
-                                        val sc = appState.stableChannel.value
-                                        appState.pendingSplice = com.stablechannels.app.models.PendingSplice("out", sats, trimmed)
-                                        appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
-                                        result = "Splice-out initiated"
-                                    } else {
-                                        val txid = appState.nodeService.sendOnchain(trimmed, sats)
-                                        appState.databaseService?.recordPayment(
-                                            paymentId = null, paymentType = "onchain",
-                                            direction = "sent", amountMsat = sats * 1000,
-                                            btcPrice = price, txid = txid, address = trimmed
-                                        )
-                                        result = "On-chain tx sent: $txid"
-                                    }
-                                }
-                                InputType.UNKNOWN -> throw Exception("Enter a valid invoice, offer, or address")
+                    scope.launch {
+                        // Auth gate: check if authentication is required
+                        val isOnChain = inputType == InputType.ONCHAIN
+                        val requiresAuth = AppAccessPreferencesManager.shouldRequireAuth(context, isOnChain)
+
+                        if (requiresAuth && activity != null) {
+                            val reason = if (isOnChain) {
+                                "Confirm on-chain withdrawal"
+                            } else {
+                                "Confirm payment of $displaySats sats"
                             }
-                        } catch (e: Exception) {
-                            error = e.message ?: "Send failed"
+                            val authResult = BiometricService.authenticate(activity, reason)
+                            if (authResult != BiometricService.AuthResult.SUCCESS) {
+                                error = "Authentication required to send"
+                                isSending = false
+                                return@launch
+                            }
+                        } else if (requiresAuth) {
+                            // Activity not available (e.g., inside bottom sheet) — block send
+                            error = "Authentication required to send"
+                            isSending = false
+                            return@launch
                         }
-                        isSending = false
+
+                        // Auth succeeded (or not required), proceed with send on IO thread
+                        withContext(Dispatchers.IO) {
+                            try {
+                                appState.ensureLSPConnected()
+                                val trimmed = input.trim()
+                                val price = btcPrice
+                                when (inputType) {
+                                    InputType.BOLT11 -> {
+                                        val invoice = Bolt11Invoice.fromStr(trimmed)
+                                        val invoiceMsat = invoice.amountMilliSatoshis()?.toLong() ?: 0L
+                                        val paymentId: String
+                                        val actualMsat: Long
+                                        if (invoiceMsat > 0) {
+                                            paymentId = appState.nodeService.sendPayment(invoice)
+                                            actualMsat = invoiceMsat
+                                        } else {
+                                            actualMsat = manualAmountMsat
+                                            paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
+                                        }
+                                        appState.databaseService?.recordPayment(
+                                            paymentId = paymentId, paymentType = "lightning",
+                                            direction = "sent", amountMsat = actualMsat, btcPrice = price
+                                        )
+                                        result = "Payment sent"
+                                    }
+                                    InputType.BOLT12 -> {
+                                        val sats = manualAmountSats
+                                        if (sats <= 0) throw Exception("Enter amount")
+                                        val offer = Offer.fromStr(trimmed)
+                                        val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
+                                        appState.databaseService?.recordPayment(
+                                            paymentId = paymentId, paymentType = "bolt12",
+                                            direction = "sent", amountMsat = sats * 1000, btcPrice = price
+                                        )
+                                        result = "Bolt12 payment sent"
+                                    }
+                                    InputType.ONCHAIN -> {
+                                        val sats = manualAmountSats
+                                        if (sats <= 0) throw Exception("Enter amount")
+                                        val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+                                        if (hasChannel) {
+                                            if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
+                                            val sc = appState.stableChannel.value
+                                            appState.pendingSplice = com.stablechannels.app.models.PendingSplice("out", sats, trimmed)
+                                            appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
+                                            result = "Splice-out initiated"
+                                        } else {
+                                            val txid = appState.nodeService.sendOnchain(trimmed, sats)
+                                            appState.databaseService?.recordPayment(
+                                                paymentId = null, paymentType = "onchain",
+                                                direction = "sent", amountMsat = sats * 1000,
+                                                btcPrice = price, txid = txid, address = trimmed
+                                            )
+                                            result = "On-chain tx sent: $txid"
+                                        }
+                                    }
+                                    InputType.UNKNOWN -> throw Exception("Enter a valid invoice, offer, or address")
+                                }
+                            } catch (e: Exception) {
+                                error = e.message ?: "Send failed"
+                            }
+                            isSending = false
+                        }
                     }
                 },
                 enabled = !isSending && input.isNotBlank() && !needsAmount,
@@ -395,4 +427,18 @@ private fun InputTypeIndicator(inputType: InputType) {
             color = tint
         )
     }
+}
+
+
+/**
+ * Walks up the Context wrapper chain to find the hosting FragmentActivity.
+ * Works even inside ModalBottomSheet where LocalContext is a ContextThemeWrapper.
+ */
+private fun android.content.Context.findActivity(): FragmentActivity? {
+    var ctx = this
+    while (ctx is ContextWrapper) {
+        if (ctx is FragmentActivity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
 }

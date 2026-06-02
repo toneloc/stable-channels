@@ -1,7 +1,11 @@
 mod auth;
 mod config;
+mod event_loop;
 mod handlers;
 mod price_task;
+mod push;
+mod stability_tick;
+mod stable_manager;
 mod state;
 mod tls;
 
@@ -14,7 +18,10 @@ use axum::Router;
 use clap::Parser;
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::config as ldk_config;
-use sc_protos::stable::{AUDIT_LOG_PATH, GET_PRICE_PATH, LIST_STABLE_CHANNELS_PATH};
+use sc_protos::stable::{
+    AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
+    LIST_STABLE_CHANNELS_PATH, REGISTER_PUSH_PATH,
+};
 use ldk_server_client::ldk_server_grpc::endpoints::{
     BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
     CLOSE_CHANNEL_PATH, CONNECT_PEER_PATH, DISCONNECT_PEER_PATH, EXPORT_PATHFINDING_SCORES_PATH,
@@ -78,24 +85,60 @@ async fn main() -> Result<()> {
     let (ldk_server, ldk_addr) = build_ldk_server_client(&cfg)?;
     info!("LDK Server gRPC endpoint: {}", ldk_addr);
 
+    let ldk_log_file = cfg.resolve_ldk_log_file();
+    match &ldk_log_file {
+        Some(p) => info!("LDK Server log file path: {}", p.display()),
+        None => info!("LDK Server log file path not configured; /LdkLog will return empty"),
+    }
+
     let db = Database::open(&data_dir).map_err(|e| anyhow::anyhow!("DB open failed: {}", e))?;
     let channel_count = db
         .load_all_channels()
         .map_err(|e| anyhow::anyhow!("load_all_channels failed: {}", e))?
         .len();
     info!("loaded {} stable channel records from sqlite", channel_count);
+    let db_arc = Arc::new(db);
+
+    let push_cfg = cfg.push.clone().unwrap_or_default();
+    let push_service = crate::push::PushService::new(&push_cfg, &data_dir);
+    info!("push service initialized");
+
+    let stable_manager = crate::stable_manager::StableChannelManager::new(
+        Arc::clone(&db_arc),
+        data_dir.clone(),
+    );
 
     let state = AppState {
         ldk_server: Arc::new(ldk_server),
         api_key: Arc::new(api_key),
         data_dir: data_dir.clone(),
         network: cfg.node.network.clone(),
-        db: Arc::new(db),
+        db: db_arc,
+        push: Arc::new(tokio::sync::Mutex::new(push_service)),
+        stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
+        ldk_log_file,
     };
 
     tokio::spawn(async move {
         price_task::run().await;
     });
+
+    // One-shot reconcile from gRPC to catch up snapshots changed while the daemon was down. Skipped if the price cache is cold.
+    {
+        let btc_price = stable_channels::price_feeds::get_cached_price();
+        if btc_price > 0.0 {
+            let mut mgr = state.stable_manager.lock().await;
+            mgr.reconcile_from_grpc(
+                state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
+                btc_price,
+            )
+            .await;
+        } else {
+            tracing::warn!("startup reconcile skipped: price cache cold");
+        }
+    }
+    event_loop::spawn(state.clone());
+    stability_tick::spawn(state.clone());
 
     let router = Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))
@@ -144,8 +187,20 @@ async fn main() -> Result<()> {
             post(handlers::stable_channels::list_stable_channels),
         )
         .route(
+            &format!("/{}", EDIT_STABLE_CHANNEL_PATH),
+            post(handlers::stable_channels::edit_stable_channel),
+        )
+        .route(
+            &format!("/{}", REGISTER_PUSH_PATH),
+            post(handlers::register_push::register_push),
+        )
+        .route(
             &format!("/{}", AUDIT_LOG_PATH),
             post(handlers::audit_log::audit_log),
+        )
+        .route(
+            &format!("/{}", LDK_LOG_PATH),
+            post(handlers::ldk_log::ldk_log),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
