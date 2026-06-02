@@ -167,6 +167,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     waitForBackgroundService()
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    _phase.value = Phase.WALLET
                     _isSyncing.value = false
                     refreshBalances()
                     detectOnchainDeposit()
