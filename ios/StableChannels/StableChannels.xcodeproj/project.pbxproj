@@ -740,7 +740,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
-				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StableChannels/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -787,7 +786,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = VJF3VBKXV9;
-				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = StableChannels/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
