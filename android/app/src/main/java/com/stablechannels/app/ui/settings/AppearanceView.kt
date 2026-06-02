@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.settings
 
-import android.content.Context
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -13,30 +12,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-
-enum class ThemePreference(val label: String) {
-    LIGHT("Light"),
-    DARK("Dark"),
-    SYSTEM("System");
-
-    companion object {
-        private const val PREFS_NAME = "theme_prefs"
-        private const val KEY_THEME = "theme_preference"
-
-        fun load(context: Context): ThemePreference {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val stored = prefs.getString(KEY_THEME, null)
-            return entries.find { it.name == stored } ?: SYSTEM
-        }
-
-        fun save(context: Context, preference: ThemePreference) {
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_THEME, preference.name)
-                .apply()
-        }
-    }
-}
+import com.stablechannels.app.ui.theme.ThemePreference
 
 @Composable
 fun AppearanceView() {
