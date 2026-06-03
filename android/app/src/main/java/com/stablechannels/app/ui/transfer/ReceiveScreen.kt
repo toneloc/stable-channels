@@ -8,7 +8,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -46,7 +48,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     } else 0L
 
     if (showOnChain) {
-        FundWalletScreen(appState)
+        FundWalletScreen(appState, onBack = { showOnChain = false })
         return
     }
 
@@ -56,30 +58,30 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Receive", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(16.dp))
-
-        // Lightning vs On-Chain toggle
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        // Toolbar (Cancel button, centered title, top-right Onchain button)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
         ) {
-            FilledTonalButton(
-                onClick = { showOnChain = false },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.filledTonalButtonColors(
-                    containerColor = if (!showOnChain) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (!showOnChain) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            ) { Text("Lightning") }
-            FilledTonalButton(
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.CenterStart)
+            ) {
+                Text("Cancel", style = MaterialTheme.typography.bodyMedium)
+            }
+            Text(
+                text = "Receive",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            TextButton(
                 onClick = { showOnChain = true },
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.filledTonalButtonColors(
-                    containerColor = if (showOnChain) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                    contentColor = if (showOnChain) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            ) { Text("On-Chain") }
+                modifier = Modifier.align(Alignment.CenterEnd)
+            ) {
+                Text("Onchain", style = MaterialTheme.typography.bodyMedium)
+            }
         }
         Spacer(Modifier.height(16.dp))
 
@@ -147,17 +149,33 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
             }
 
-            Text("Amount (USD)", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(8.dp))
-
-            OutlinedTextField(
-                value = amountUSD,
-                onValueChange = { amountUSD = it.filter { c -> c.isDigit() || c == '.' } },
-                placeholder = { Text("0.00") },
-                prefix = { Text("$") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+ 
+            Row(
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
-            )
+            ) {
+                Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(2.dp))
+                TextField(
+                    value = amountUSD,
+                    onValueChange = { amountUSD = it.filter { c -> c.isDigit() || c == '.' } },
+                    placeholder = { Text("0.00", style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    textStyle = LocalTextStyle.current.copy(fontSize = 44.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+                    singleLine = true,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
+                    ),
+                    modifier = Modifier.width(IntrinsicSize.Min).defaultMinSize(minWidth = 120.dp)
+                )
+            }
 
             if (enteredSats > 0) {
                 Spacer(Modifier.height(4.dp))

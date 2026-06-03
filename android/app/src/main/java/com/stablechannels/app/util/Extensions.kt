@@ -16,18 +16,18 @@ fun Long.btcFormatted(): String {
     return String.format(Locale.US, "%.8f BTC", btc)
 }
 
-/** Format as BTC with spaced digit groups: "0.00 190 079 BTC" (matches iOS) */
+/** Format as BTC with spaced digit groups: "0.00 190 079" (matches iOS) */
 fun Long.btcSpacedFormatted(): String {
     val btc = this.toDouble() / Constants.SATS_IN_BTC
     val raw = String.format(Locale.US, "%.8f", btc)
     val dotIndex = raw.indexOf('.')
-    if (dotIndex < 0) return "$raw BTC"
+    if (dotIndex < 0) return raw
     val whole = raw.substring(0, dotIndex)
     val decimals = raw.substring(dotIndex + 1)
     val grouped = decimals.substring(0, 2) +
             "\u2009" + decimals.substring(2, 5) +
             "\u2009" + decimals.substring(5, 8)
-    return "$whole.$grouped BTC"
+    return "$whole.$grouped"
 }
 
 fun Double.usdFormatted(): String {

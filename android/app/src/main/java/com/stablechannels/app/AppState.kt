@@ -10,6 +10,7 @@ import com.stablechannels.app.push.FCMService
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.*
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -338,7 +339,8 @@ class AppState(private val context: Context) : ViewModel() {
         val sc = StabilityService.reconcileIncoming(_stableChannel.value)
         _stableChannel.value = sc
         saveChannelToDB()
-        _statusMessage.value = "Payment received: ${amountMsat / 1000} sats"
+        val usdVal = (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price
+        _statusMessage.value = "Payment received: ${usdVal.usdFormatted()}"
         triggerPaymentFlash()
     }
 
@@ -401,11 +403,26 @@ class AppState(private val context: Context) : ViewModel() {
                 reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
             }
             _stableChannel.value = reconciled
+            var displayVal: String? = null
             if (paymentId != null) {
                 databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+                try {
+                    val db = databaseService?.readableDatabase
+                    val cursor = db?.rawQuery("SELECT amount_msat, amount_usd FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                    cursor?.use {
+                        if (it.moveToFirst()) {
+                            val amountMsat = it.getLong(0)
+                            val amountUsd = if (!it.isNull(1)) it.getDouble(1) else 0.0
+                            val usdVal = if (amountUsd > 0.0) amountUsd else ((amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price)
+                            displayVal = usdVal.usdFormatted()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
+                }
             }
             saveChannelToDB()
-            _statusMessage.value = "Payment confirmed"
+            _statusMessage.value = if (displayVal != null) "Payment sent: $displayVal" else "Payment confirmed"
         }
     }
 

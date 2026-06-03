@@ -7,7 +7,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.util.Constants
@@ -36,7 +40,27 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("On-Chain Send", style = MaterialTheme.typography.headlineSmall)
+        // Toolbar (Cancel button, centered title)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+        ) {
+            if (result == null) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            Text(
+                text = "Onchain Send",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
         Spacer(Modifier.height(16.dp))
 
         if (result != null) {
@@ -60,33 +84,83 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(12.dp))
             }
 
+            if (appState.isChannelClosing) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                ) {
+                    Text(
+                        "Channel is closing — you should sweep your remaining onchain funds.",
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
             OutlinedTextField(
                 value = address,
                 onValueChange = { address = it },
                 label = { Text("Bitcoin Address") },
                 modifier = Modifier.fillMaxWidth()
             )
+            Spacer(Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(
+                    onClick = { sendAll = !sendAll },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(if (sendAll) "Enter Amount" else "Send Max", style = MaterialTheme.typography.labelMedium)
+                }
+            }
             Spacer(Modifier.height(12.dp))
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = sendAll, onCheckedChange = { sendAll = it })
-                Text("Send all (${onchainSats.satsFormatted()})")
-            }
-
             if (!sendAll) {
-                OutlinedTextField(
-                    value = amountUSDStr,
-                    onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
-                    label = { Text("Amount (USD)") },
-                    prefix = { Text("$") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
-                )
+                ) {
+                    Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(2.dp))
+                    TextField(
+                        value = amountUSDStr,
+                        onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        placeholder = { Text("0.00", style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        textStyle = LocalTextStyle.current.copy(fontSize = 44.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+                        singleLine = true,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        ),
+                        modifier = Modifier.width(IntrinsicSize.Min).defaultMinSize(minWidth = 120.dp)
+                    )
+                }
+
                 val usd = amountUSDStr.toDoubleOrNull() ?: 0.0
                 val satsFromUSD = if (btcPrice > 0 && usd > 0) (usd / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
                 if (satsFromUSD > 0) {
-                    Text("~ ${satsFromUSD.satsFormatted()}", style = MaterialTheme.typography.labelSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text("~ ${satsFromUSD.satsFormatted()} sats", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            } else {
+                Text(
+                    text = "Send All (${onchainSats.satsFormatted()} sats)",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
 
             error?.let {
