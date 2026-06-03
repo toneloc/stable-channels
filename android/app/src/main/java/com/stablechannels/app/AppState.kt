@@ -93,6 +93,7 @@ class AppState(private val context: Context) : ViewModel() {
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
     var pendingSplice: PendingSplice? = null
     var isChannelClosing = false
+    var pendingClosePaymentId: String? = null
     var spliceTxid: String? = null
     var fundingTxid: String? = null
         set(value) {
@@ -445,16 +446,25 @@ class AppState(private val context: Context) : ViewModel() {
             ))
 
             // Record in payment history before clearing state
+            // If user initiated close, mark pending until on-chain confirms.
+            // If force-closed by counterparty, mark completed immediately.
             val closeTxid = fundingTxid
+            val paymentId = closeTxid ?: channelId
+            val initialStatus = if (isChannelClosing) {
+                pendingClosePaymentId = paymentId
+                "pending"
+            } else {
+                "completed"
+            }
             databaseService?.recordPayment(
-                paymentId = closeTxid ?: channelId,
+                paymentId = paymentId,
                 paymentType = "channel_close",
                 direction = "received",
                 amountMsat = balanceSats * 1000,
                 amountUSD = balanceUSD,
                 btcPrice = if (price > 0) price else null,
                 counterparty = sc.counterparty.ifEmpty { null },
-                status = "completed",
+                status = initialStatus,
                 txid = closeTxid
             )
 
@@ -471,7 +481,7 @@ class AppState(private val context: Context) : ViewModel() {
         // Keep isChannelClosing = true until lightning balance actually drains to 0
         // to avoid double-counting with on-chain. refreshBalances() clears it when ready.
         refreshBalances()
-        _statusMessage.value = "Channel closed"
+        _statusMessage.value = if (isChannelClosing) "Channel closing…" else "Channel closed"
     }
 
     private fun startStabilityTimer() {
@@ -675,7 +685,13 @@ class AppState(private val context: Context) : ViewModel() {
         _spendableOnchainSats.value = balances.spendableOnchainBalanceSats.toLong()
 
         // Clear closing flag once lightning balance fully resolves
-        if (isChannelClosing && lightning == 0L) isChannelClosing = false
+        if (isChannelClosing && lightning == 0L) {
+            isChannelClosing = false
+            pendingClosePaymentId?.let {
+                databaseService?.updatePaymentStatus(it, "completed")
+                pendingClosePaymentId = null
+            }
+        }
 
         _totalBalanceSats.value = when {
             isChannelClosing -> onchain
