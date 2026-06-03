@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event as EventVariant;
 use ldk_server_client::ldk_server_grpc::events::{ChannelState, EventEnvelope};
@@ -68,9 +68,8 @@ async fn dispatch(
                 mgr.handle_channel_closed(e.user_channel_id.clone());
             }
         },
-        Some(EventVariant::PaymentReceived(_)) => {
-            // Upstream PaymentReceived has no channel_id, so run_tick + reconcile_from_grpc catch up instead.
-            debug!("[event_loop] PaymentReceived (no channel_id available, deferred to tick)");
+        Some(EventVariant::PaymentReceived(e)) => {
+            mgr.handle_payment_received(e.custom_records, ldk, btc_price).await;
         },
         Some(EventVariant::PaymentForwarded(e)) => {
             if let Some(fp) = e.forwarded_payment {

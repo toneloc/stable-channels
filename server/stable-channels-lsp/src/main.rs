@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod event_loop;
 mod handlers;
+pub mod messages;
 mod price_task;
 mod push;
 mod stability_tick;
