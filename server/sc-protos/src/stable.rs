@@ -73,6 +73,10 @@ pub struct RegisterPushRequest {
 	pub node_id: ::prost::alloc::string::String,
 	#[prost(string, tag = "4")]
 	pub environment: ::prost::alloc::string::String,
+	#[prost(string, tag = "5")]
+	pub signature: ::prost::alloc::string::String,
+	#[prost(uint64, tag = "6")]
+	pub timestamp: u64,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]

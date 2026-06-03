@@ -774,6 +774,7 @@ impl LspServerApp {
 						amount_msat,
 						node_id,
 						route_parameters: None,
+						custom_tlvs: vec![],
 					})
 					.await
 					.map_err(|e| e.to_string())
