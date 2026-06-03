@@ -46,7 +46,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     ) {
         when (step) {
             TradeStep.AMOUNT -> {
-                Text("Buy BTC", style = MaterialTheme.typography.headlineSmall)
+                Text("USD → BTC", style = MaterialTheme.typography.headlineSmall)
                 Spacer(Modifier.height(4.dp))
                 Text("Max: ${maxBuyUSD.usdFormatted()}", style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(16.dp))
@@ -88,7 +88,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
             }
 
             TradeStep.CONFIRM -> {
-                Text("Confirm Buy", style = MaterialTheme.typography.headlineSmall)
+                Text("Confirm Order", style = MaterialTheme.typography.headlineSmall)
                 Spacer(Modifier.height(16.dp))
 
                 ConfirmRow("Amount", amountUSD.usdFormatted())
@@ -124,7 +124,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                     action = "buy"
                                 ))
                                 pendingPaymentId = result.paymentId
-                                appState.setStatus(String.format(Locale.US, "Buy pending (fee: $%.2f)", feeUSD))
+                                appState.setStatus(String.format(Locale.US, "Order pending (fee: $%.2f)", feeUSD))
                                 step = TradeStep.DONE
                             } catch (e: Exception) {
                                 error = e.message ?: "Trade failed"
@@ -136,7 +136,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isExecuting) CircularProgressIndicator(Modifier.size(20.dp))
-                    else Text("Confirm Buy")
+                    else Text("Confirm Order")
                 }
                 Spacer(Modifier.height(8.dp))
                 TextButton(onClick = { step = TradeStep.AMOUNT }) { Text("Back") }
@@ -154,19 +154,19 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Trade Confirmed", style = MaterialTheme.typography.headlineMedium)
+                    Text("Order Confirmed", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your buy order has been confirmed.",
+                        "Your order has been confirmed.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
                     CircularProgressIndicator(Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text("Trade Pending", style = MaterialTheme.typography.headlineMedium)
+                    Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your buy order is being processed. Balance will update when the payment confirms.",
+                        "Your order is being processed. Balance will update when the payment confirms.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }

@@ -23,7 +23,7 @@ fun PaymentDetailDialog(payment: PaymentRecord, onDismiss: () -> Unit) {
                     "stability" -> "Stability"
                     "splice_in" -> "Splice In"
                     "splice_out" -> "Splice Out"
-                    "onchain" -> "On-chain"
+                    "onchain" -> "Onchain"
                     "channel_close" -> "Channel Close"
                     else -> "Lightning"
                 }
@@ -31,7 +31,7 @@ fun PaymentDetailDialog(payment: PaymentRecord, onDismiss: () -> Unit) {
                 DetailRow("Amount", payment.amountUSD?.usdFormatted() ?: payment.amountSats.satsFormatted())
                 payment.btcPrice?.let { DetailRow("BTC Price", it.usdFormatted()) }
                 if (payment.feeMsat > 0) DetailRow("Fee", (payment.feeMsat / 1000).satsFormatted())
-                DetailRow("Status", payment.status)
+                DetailRow("Status", payment.status.replaceFirstChar { it.uppercase() })
                 DetailRow("Date", payment.date.toString())
                 payment.paymentId?.let { DetailRow("Payment ID", it) }
                 payment.txid?.let { DetailRow("TXID", it) }

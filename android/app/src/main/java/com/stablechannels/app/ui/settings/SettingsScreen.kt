@@ -173,11 +173,11 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         Spacer(Modifier.height(16.dp))
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                Text("On-Chain", style = MaterialTheme.typography.titleMedium)
+                Text("Onchain", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
                 DetailRow("Balance", onchainSats.satsFormatted())
 
-                TextButton(onClick = { showOnchainSend = true }) { Text("Send On-Chain") }
+                TextButton(onClick = { showOnchainSend = true }) { Text("Send Onchain") }
             }
         }
 
