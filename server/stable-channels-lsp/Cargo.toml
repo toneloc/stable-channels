@@ -32,9 +32,9 @@ bytes            = "1"
 a2 = "0.10"
 
 # FCM (Android) push notifications: HTTPS + OAuth2 JWT.
-reqwest    = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-serde_json = "1"
-openssl    = { version = "0.10", default-features = false, features = ["vendored"] }
+reqwest      = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde_json   = "1"
+jsonwebtoken = "9"
 
 # sqlite for the push tokens store (declared explicitly even though stable-channels pulls it transitively).
 rusqlite = { version = "0.31", features = ["bundled"] }

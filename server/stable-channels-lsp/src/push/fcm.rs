@@ -93,17 +93,11 @@ impl FcmService {
 }
 
 async fn generate_access_token(creds: &FcmCredentials) -> Option<String> {
-    use openssl::base64;
-    use openssl::hash::MessageDigest;
-    use openssl::pkey::PKey;
-    use openssl::sign::Signer;
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
 
-    let header = serde_json::json!({"alg": "RS256", "typ": "JWT"});
     let claims = serde_json::json!({
         "iss": creds.client_email,
         "scope": "https://www.googleapis.com/auth/firebase.messaging",
@@ -112,24 +106,10 @@ async fn generate_access_token(creds: &FcmCredentials) -> Option<String> {
         "exp": now + 3600,
     });
 
-    let b64_encode = |data: &[u8]| -> String {
-        base64::encode_block(data)
-            .replace('+', "-")
-            .replace('/', "_")
-            .replace('=', "")
-    };
-
-    let header_b64 = b64_encode(header.to_string().as_bytes());
-    let claims_b64 = b64_encode(claims.to_string().as_bytes());
-    let signing_input = format!("{}.{}", header_b64, claims_b64);
-
-    let pkey = PKey::private_key_from_pem(creds.private_key.as_bytes()).ok()?;
-    let mut signer = Signer::new(MessageDigest::sha256(), &pkey).ok()?;
-    signer.update(signing_input.as_bytes()).ok()?;
-    let signature = signer.sign_to_vec().ok()?;
-    let sig_b64 = b64_encode(&signature);
-
-    let jwt = format!("{}.{}", signing_input, sig_b64);
+    // RS256-sign the OAuth2 assertion with the service account key.
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    let key = jsonwebtoken::EncodingKey::from_rsa_pem(creds.private_key.as_bytes()).ok()?;
+    let jwt = jsonwebtoken::encode(&header, &claims, &key).ok()?;
 
     let client = reqwest::Client::new();
     let resp = client
