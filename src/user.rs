@@ -2729,6 +2729,21 @@ impl UserApp {
         painter.line_segment([egui::pos2(right, top), egui::pos2(left, bot)], stroke);
     }
 
+    /// Paint a "verified" badge — filled green circle with a white checkmark
+    /// inside. Approximates iOS's `checkmark.shield.fill` at small sizes
+    /// without needing SF Symbols or a vector glyph.
+    fn paint_check_badge(painter: &egui::Painter, center: egui::Pos2, size: f32) {
+        // Filled green circle.
+        painter.circle_filled(center, size * 0.5, theme::SUCCESS);
+        // White checkmark, two segments forming the ✓ shape.
+        let stroke = egui::Stroke::new((size * 0.10).max(2.0), Color32::WHITE);
+        let p1 = egui::pos2(center.x - size * 0.18, center.y + size * 0.02);
+        let p2 = egui::pos2(center.x - size * 0.04, center.y + size * 0.16);
+        let p3 = egui::pos2(center.x + size * 0.20, center.y - size * 0.13);
+        painter.line_segment([p1, p2], stroke);
+        painter.line_segment([p2, p3], stroke);
+    }
+
     /// Paint an "external link" icon — a rounded square with an arrow pointing
     /// out the top-right corner. Roughly mirrors iOS's `arrow.up.right.square`.
     fn paint_explorer_arrow(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
@@ -4584,11 +4599,44 @@ impl UserApp {
                                 ldk_node::PendingSweepBalance::PendingBroadcast { .. } => None,
                             });
 
-                        // Helper: a "View on explorer ↗" link. Prefers the close-related
-                        // txid above when a channel is closing; otherwise falls back to
-                        // the latest pending splice_in / onchain inbound payment from
-                        // the DB (covers the splice-pending state).
+                        // Live ldk-node lookup for the most recent inbound on-chain tx.
+                        // The deposit-detection thread (L763) tries to capture the txid
+                        // at the moment the on-chain balance jumps, but ldk-node's
+                        // payment list can lag the balance update by a tick. When that
+                        // race loses, the DB row gets written with txid = NULL and the
+                        // DB-heuristic fallback below skips it and walks straight to the
+                        // channel-funding tx — wrong, and a real bug visible in the
+                        // "Deposit confirming…" state. Asking ldk-node live at click
+                        // time avoids the race entirely: by the time the user taps
+                        // "View on explorer," the payment list is caught up.
+                        let live_inbound_onchain_txid: Option<String> = self
+                            .node
+                            .list_payments()
+                            .iter()
+                            .rev()
+                            .find_map(|p| {
+                                if p.direction == ldk_node::payment::PaymentDirection::Inbound {
+                                    if let ldk_node::payment::PaymentKind::Onchain {
+                                        ref txid,
+                                        ..
+                                    } = p.kind
+                                    {
+                                        return Some(txid.to_string());
+                                    }
+                                }
+                                None
+                            });
+
+                        // Helper: a "View on explorer ↗" link. Priority order:
+                        //   1. close-related sweep / commit tx (channel closing)
+                        //   2. DB splice_in tx (swap-pending; SplicePending handler
+                        //      writes the splice txid here)
+                        //   3. live ldk-node inbound on-chain tx (deposit confirming;
+                        //      bypasses the DB-NULL race described above)
+                        //   4. any DB on-chain row with a txid (last-resort fallback;
+                        //      covers ldk-node-forgot-but-DB-remembers edge case)
                         let open_explorer = |db: &Database, ctx: &egui::Context| {
+                            // 1.
                             if let Some(txid) = close_related_txid.as_deref() {
                                 ctx.open_url(egui::OpenUrl::new_tab(format!(
                                     "https://mempool.space/tx/{}",
@@ -4596,14 +4644,34 @@ impl UserApp {
                                 )));
                                 return true;
                             }
+                            // 2.
+                            if let Ok(payments) = db.get_recent_payments(10) {
+                                if let Some(p) = payments
+                                    .iter()
+                                    .find(|p| p.payment_type == "splice_in" && p.txid.is_some())
+                                {
+                                    if let Some(txid) = p.txid.as_ref() {
+                                        ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                            "https://mempool.space/tx/{}",
+                                            txid
+                                        )));
+                                        return true;
+                                    }
+                                }
+                            }
+                            // 3.
+                            if let Some(txid) = live_inbound_onchain_txid.as_deref() {
+                                ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                    "https://mempool.space/tx/{}",
+                                    txid
+                                )));
+                                return true;
+                            }
+                            // 4.
                             if let Ok(payments) = db.get_recent_payments(10) {
                                 let pick = payments
                                     .iter()
-                                    .find(|p| {
-                                        (p.payment_type == "splice_in"
-                                            || p.payment_type == "onchain")
-                                            && p.txid.is_some()
-                                    })
+                                    .find(|p| p.payment_type == "onchain" && p.txid.is_some())
                                     .cloned();
                                 if let Some(p) = pick {
                                     if let Some(txid) = p.txid.as_ref() {
@@ -5411,6 +5479,54 @@ impl UserApp {
     fn show_settings_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading(RichText::new("Settings").color(Color32::BLACK));
+                ui.add_space(16.0);
+
+                // Self-custody banner — mirrors iOS settings header. Light-gray
+                // card with a green border, a check badge on the left, and
+                // bold + body copy explaining the custody model.
+                let banner_frame = egui::Frame::default()
+                    .fill(theme::SUBTLE_BG)
+                    .stroke(egui::Stroke::new(1.5, theme::SUCCESS))
+                    .corner_radius(theme::RADIUS_LG)
+                    .inner_margin(egui::Margin::symmetric(20, 18));
+                banner_frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Check badge on the left, vertically centered against
+                        // the text block.
+                        let badge_size = 48.0;
+                        let (badge_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(badge_size, badge_size),
+                            egui::Sense::hover(),
+                        );
+                        Self::paint_check_badge(
+                            ui.painter(),
+                            badge_rect.center(),
+                            badge_size,
+                        );
+
+                        ui.add_space(14.0);
+
+                        ui.vertical(|ui| {
+                            ui.label(
+                                RichText::new("Your keys, your coins.")
+                                    .size(18.0)
+                                    .strong()
+                                    .color(theme::ON_SURFACE),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "Stable Channels is a self-custodial wallet. \
+                                     You control your private keys. Third parties \
+                                     do not custody, access, or freeze your funds.",
+                                )
+                                .size(13.5)
+                                .color(theme::MUTED),
+                            );
+                        });
+                    });
+                });
+
                 ui.add_space(20.0);
 
                 // Channel Balance Distribution
