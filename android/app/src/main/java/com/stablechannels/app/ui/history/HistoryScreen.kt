@@ -75,7 +75,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                     inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             ) {
-                Text("Trades")
+                Text("Orders")
             }
             SegmentedButton(
                 selected = selectedSegment == 1,
@@ -98,8 +98,8 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
             if (selectedSegment == 0 && trades.isEmpty()) {
                 EmptyStateView(
                     icon = Icons.Default.SwapHoriz,
-                    title = "No Trades",
-                    description = "Buy or sell BTC to see trades here."
+                    title = "No Orders",
+                    description = "Convert BTC to see orders here."
                 )
             } else if (selectedSegment == 1 && payments.isEmpty()) {
                 EmptyStateView(
@@ -165,7 +165,7 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
             // Title + time
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (isBuy) "Buy BTC" else "Sell BTC",
+                    text = if (isBuy) "USD → BTC" else "BTC → USD",
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium
                 )
@@ -199,7 +199,7 @@ private fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
         "lightning" -> "Lightning"
         "splice_in" -> "Splice In"
         "splice_out" -> "Splice Out"
-        "onchain" -> "On-chain"
+        "onchain" -> "Onchain"
         "channel_close" -> "Channel Close"
         "bolt12" -> "Bolt12"
         else -> payment.paymentType

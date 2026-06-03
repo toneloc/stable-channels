@@ -296,7 +296,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("On-chain", style = MaterialTheme.typography.labelMedium)
+                            Text("Onchain", style = MaterialTheme.typography.labelMedium)
                             Text(
                                 "${onchainSats.satsFormatted()} (${onchainUSD.usdFormatted()})",
                                 style = MaterialTheme.typography.labelSmall,
@@ -383,8 +383,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("Buy BTC", Icons.Default.TrendingUp, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
-                ActionButton("Sell BTC", Icons.Default.TrendingDown, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
+                ActionButton("USD → BTC", Icons.Default.TrendingUp, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
+                ActionButton("BTC → USD", Icons.Default.TrendingDown, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
             }
 
             // Status capsule

@@ -14,16 +14,16 @@ import java.util.Locale
 fun TradeDetailDialog(trade: TradeRecord, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Trade Details") },
+        title = { Text("Order Details") },
         text = {
             SelectionContainer {
             Column {
-                DetailRow("Action", if (trade.action == "buy") "Buy BTC" else "Sell BTC")
+                DetailRow("Action", if (trade.action == "buy") "USD → BTC" else "BTC → USD")
                 DetailRow("Amount", trade.amountUSD.usdFormatted())
-                DetailRow("BTC Amount", String.format(Locale.US, "%.8f BTC", trade.amountBTC))
+                DetailRow("BTC Amount", String.format(Locale.US, "%.8f", trade.amountBTC))
                 DetailRow("BTC Price", trade.btcPrice.usdFormatted())
                 DetailRow("Fee", trade.feeUSD.usdFormatted())
-                DetailRow("Status", trade.status)
+                DetailRow("Status", trade.status.replaceFirstChar { it.uppercase() })
                 DetailRow("Date", trade.date.toString())
                 trade.paymentId?.let { DetailRow("Payment ID", it) }
             }
