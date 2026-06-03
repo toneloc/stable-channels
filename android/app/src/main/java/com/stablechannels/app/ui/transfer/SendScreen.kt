@@ -5,7 +5,10 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Link
@@ -13,6 +16,9 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.material3.*
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -177,7 +183,17 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             if (result == null) {
                 TextButton(
                     onClick = onDismiss,
-                    modifier = Modifier.align(Alignment.CenterStart)
+                    modifier = Modifier.align(Alignment.CenterStart),
+                    colors = ButtonDefaults.textButtonColors(
+                        containerColor = if (isSystemInDarkTheme()) {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        } else {
+                            Color(0xFFE5E5EA)
+                        },
+                        contentColor = MaterialTheme.colorScheme.primary
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
                     Text("Cancel", style = MaterialTheme.typography.bodyMedium)
                 }
@@ -189,26 +205,61 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 modifier = Modifier.align(Alignment.Center)
             )
             if (result == null) {
-                Row(modifier = Modifier.align(Alignment.CenterEnd)) {
-                    // Photo library button
-                    IconButton(onClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .background(
+                            color = if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color(0xFFE5E5EA)
+                            },
+                            shape = RoundedCornerShape(20.dp)
                         )
-                    }) {
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Photo library button
+                    IconButton(
+                        onClick = {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        modifier = Modifier.size(36.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.PhotoLibrary,
                             contentDescription = "Import from photo library",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
+                    // Divider
+                    Box(
+                        modifier = Modifier
+                            .width(0.5.dp)
+                            .height(20.dp)
+                            .background(
+                                color = if (isSystemInDarkTheme()) {
+                                    Color(0xFF38383A)
+                                } else {
+                                    Color(0xFFC7C7CC)
+                                }
+                            )
+                    )
+
                     // QR Scanner button
-                    IconButton(onClick = { showScanner = true }) {
+                    IconButton(
+                        onClick = { showScanner = true },
+                        modifier = Modifier.size(36.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.QrCodeScanner,
                             contentDescription = "Scan QR code",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -242,7 +293,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                label = { Text("Invoice, Offer, or Address") },
+                label = { Text("Lightning invoice or Onchain address") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2
             )
@@ -295,21 +346,35 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 ) {
                     Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(2.dp))
-                    TextField(
+                    BasicTextField(
                         value = amountUSDStr,
                         onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
-                        placeholder = { Text("0.00", style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        textStyle = LocalTextStyle.current.copy(fontSize = 44.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
-                        singleLine = true,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent
+                        textStyle = TextStyle(
+                            fontSize = 44.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Start
                         ),
-                        modifier = Modifier.width(IntrinsicSize.Min).defaultMinSize(minWidth = 120.dp)
+                        singleLine = true,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier.width(IntrinsicSize.Min),
+                        decorationBox = { innerTextField ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (amountUSDStr.isEmpty()) {
+                                    Text(
+                                        text = "0.00",
+                                        style = TextStyle(
+                                            fontSize = 44.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                            textAlign = TextAlign.Start
+                                        )
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        }
                     )
                 }
 

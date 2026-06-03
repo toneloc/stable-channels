@@ -1,7 +1,12 @@
 package com.stablechannels.app.ui.transfer
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,7 +54,17 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
             if (result == null) {
                 TextButton(
                     onClick = onDismiss,
-                    modifier = Modifier.align(Alignment.CenterStart)
+                    modifier = Modifier.align(Alignment.CenterStart),
+                    colors = ButtonDefaults.textButtonColors(
+                        containerColor = if (isSystemInDarkTheme()) {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        } else {
+                            Color(0xFFE5E5EA)
+                        },
+                        contentColor = MaterialTheme.colorScheme.primary
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                 ) {
                     Text("Cancel", style = MaterialTheme.typography.bodyMedium)
                 }
@@ -130,21 +145,35 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 ) {
                     Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(2.dp))
-                    TextField(
+                    BasicTextField(
                         value = amountUSDStr,
                         onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
-                        placeholder = { Text("0.00", style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        textStyle = LocalTextStyle.current.copy(fontSize = 44.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
-                        singleLine = true,
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                            focusedIndicatorColor = Color.Transparent,
-                            unfocusedIndicatorColor = Color.Transparent
+                        textStyle = TextStyle(
+                            fontSize = 44.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Start
                         ),
-                        modifier = Modifier.width(IntrinsicSize.Min).defaultMinSize(minWidth = 120.dp)
+                        singleLine = true,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier.width(IntrinsicSize.Min),
+                        decorationBox = { innerTextField ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (amountUSDStr.isEmpty()) {
+                                    Text(
+                                        text = "0.00",
+                                        style = TextStyle(
+                                            fontSize = 44.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                            textAlign = TextAlign.Start
+                                        )
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        }
                     )
                 }
 

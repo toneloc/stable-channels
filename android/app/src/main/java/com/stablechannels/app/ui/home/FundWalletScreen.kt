@@ -3,6 +3,8 @@ package com.stablechannels.app.ui.home
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -55,7 +57,17 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
         ) {
             TextButton(
                 onClick = onBack,
-                modifier = Modifier.align(Alignment.CenterStart)
+                modifier = Modifier.align(Alignment.CenterStart),
+                colors = ButtonDefaults.textButtonColors(
+                    containerColor = if (isSystemInDarkTheme()) {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    } else {
+                        Color(0xFFE5E5EA)
+                    },
+                    contentColor = MaterialTheme.colorScheme.primary
+                ),
+                shape = RoundedCornerShape(20.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 Text("Back", style = MaterialTheme.typography.bodyMedium)
             }
