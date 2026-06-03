@@ -10,6 +10,8 @@ class NodeService {
     private(set) var savedMnemonic: String?
     private var eventTask: Task<Void, Never>?
 
+    weak var databaseService: DatabaseService?
+
     init() {
         // Pre-load saved mnemonic from disk so it's available immediately,
         // even before start() completes (avoids race with early UI display)
@@ -193,6 +195,55 @@ class NodeService {
     func closeChannel(userChannelId: UserChannelId, counterpartyNodeId: PublicKey) throws {
         guard let node else { throw NodeServiceError.notRunning }
         try node.closeChannel(userChannelId: userChannelId, counterpartyNodeId: counterpartyNodeId)
+    }
+
+    func requestChannelClose(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        fundingOutpointTxid: String,
+        fundingOutpointVout: UInt32,
+        balanceSats: UInt64,
+        balanceUsd: Double?,
+        btcPrice: Double?,
+        counterparty: String?
+    ) async throws {
+        guard let node else { throw NodeServiceError.notRunning }
+
+        // Persist intent + snapshot first: resolver reads from this row at resolve time
+        let opId = "close-\(userChannelId)"
+        databaseService?.insertPendingOperation(
+            opId: opId,
+            opType: "channel_close",
+            fundingOutpointTxid: fundingOutpointTxid,
+            fundingOutpointVout: fundingOutpointVout,
+            balanceSats: balanceSats,
+            balanceUsd: balanceUsd,
+            btcPrice: btcPrice,
+            counterparty: counterparty
+        )
+
+        AuditService.log("CHANNEL_CLOSE_REQUESTED", data: [
+            "user_channel_id": "\(userChannelId)",
+            "funding_outpoint": "\(fundingOutpointTxid):\(fundingOutpointVout)"
+        ])
+
+        do {
+            try node.closeChannel(
+                userChannelId: userChannelId,
+                counterpartyNodeId: counterpartyNodeId
+            )
+        } catch {
+            databaseService?.updatePendingOperation(
+                opId: opId,
+                closingTxid: "",
+                status: "failed"
+            )
+            AuditService.log("CHANNEL_CLOSE_REQUEST_FAILED", data: [
+                "user_channel_id": "\(userChannelId)",
+                "error": "\(error)"
+            ])
+            throw error
+        }
     }
 
     // MARK: - Splice Operations

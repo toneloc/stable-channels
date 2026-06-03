@@ -106,7 +106,24 @@ class DatabaseService {
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS pending_operations (
+                op_id TEXT PRIMARY KEY NOT NULL,
+                op_type TEXT NOT NULL,
+                funding_outpoint_txid TEXT,
+                funding_outpoint_vout INTEGER,
+                closing_txid TEXT,
+                balance_sats INTEGER,
+                balance_usd REAL,
+                btc_price REAL,
+                counterparty TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                resolved_at INTEGER
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)"
@@ -381,6 +398,127 @@ class DatabaseService {
         }
     }
 
+    // MARK: - Pending Operations
+
+    @discardableResult
+    func insertPendingOperation(
+        opId: String,
+        opType: String,
+        fundingOutpointTxid: String?,
+        fundingOutpointVout: UInt32?,
+        balanceSats: UInt64? = nil,
+        balanceUsd: Double? = nil,
+        btcPrice: Double? = nil,
+        counterparty: String? = nil
+    ) -> Bool {
+        do {
+            try execute(
+                """
+                INSERT INTO pending_operations
+                    (op_id, op_type, funding_outpoint_txid, funding_outpoint_vout,
+                     balance_sats, balance_usd, btc_price, counterparty, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                ON CONFLICT(op_id) DO UPDATE SET
+                    op_type = excluded.op_type,
+                    funding_outpoint_txid = excluded.funding_outpoint_txid,
+                    funding_outpoint_vout = excluded.funding_outpoint_vout,
+                    balance_sats = excluded.balance_sats,
+                    balance_usd = excluded.balance_usd,
+                    btc_price = excluded.btc_price,
+                    counterparty = excluded.counterparty,
+                    status = 'pending'
+                """,
+                params: [
+                    .text(opId),
+                    .text(opType),
+                    fundingOutpointTxid.map { .text($0) } ?? .null,
+                    fundingOutpointVout.map { .integer(Int64($0)) } ?? .null,
+                    balanceSats.map { .integer(Int64($0)) } ?? .null,
+                    balanceUsd.map { .real($0) } ?? .null,
+                    btcPrice.map { .real($0) } ?? .null,
+                    counterparty.map { .text($0) } ?? .null
+                ]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Update a pending_operations row, only if it is still in 'pending' state.
+    /// Used by the resolver so a stale update can't clobber a row that's
+    /// already been marked resolved/failed by a parallel attempt.
+    @discardableResult
+    func updatePendingOperation(opId: String, closingTxid: String, status: String) -> Bool {
+        do {
+            try execute(
+                """
+                UPDATE pending_operations
+                SET closing_txid = ?, status = ?, resolved_at = strftime('%s', 'now')
+                WHERE op_id = ? AND status = 'pending'
+                """,
+                params: [.text(closingTxid), .text(status), .text(opId)]
+            )
+            return sqlite3_changes(db) > 0
+        } catch {
+            return false
+        }
+    }
+
+    func fetchPendingOperations() -> [PendingOperation] {
+        do {
+            let rows = try query(
+                """
+                SELECT op_id, op_type, funding_outpoint_txid, funding_outpoint_vout,
+                       closing_txid, balance_sats, balance_usd, btc_price, counterparty,
+                       status, created_at, resolved_at
+                FROM pending_operations
+                """
+            )
+            return rows.map { Self.parsePendingOperation($0) }
+        } catch {
+            return []
+        }
+    }
+
+    /// Fetch a single pending_operations row by opId. Uses the primary key
+    /// index for an O(1) lookup instead of a full table scan.
+    func fetchPendingOperation(opId: String) -> PendingOperation? {
+        do {
+            let rows = try query(
+                """
+                SELECT op_id, op_type, funding_outpoint_txid, funding_outpoint_vout,
+                       closing_txid, balance_sats, balance_usd, btc_price, counterparty,
+                       status, created_at, resolved_at
+                FROM pending_operations
+                WHERE op_id = ?
+                LIMIT 1
+                """,
+                params: [.text(opId)]
+            )
+            return rows.first.map { Self.parsePendingOperation($0) }
+        } catch {
+            return nil
+        }
+    }
+
+    private static func parsePendingOperation(_ row: [Any?]) -> PendingOperation {
+        PendingOperation(
+            opId: row[0] as? String ?? "",
+            opType: row[1] as? String ?? "",
+            fundingOutpointTxid: row[2] as? String,
+            fundingOutpointVout: row[3].flatMap { ($0 as? Int64).map { UInt32($0) } },
+            closingTxid: row[4] as? String,
+            balanceSats: row[5].flatMap { ($0 as? Int64).map { UInt64($0) } },
+            balanceUsd: row[6] as? Double,
+            btcPrice: row[7] as? Double,
+            counterparty: row[8] as? String,
+            status: row[9] as? String ?? "pending",
+            createdAt: row[10] as? Int64 ?? 0,
+            resolvedAt: row[11] as? Int64
+        )
+    }
+
     // MARK: - Price History
 
     func recordPrice(_ price: Double, source: String? = nil) throws {
@@ -573,4 +711,19 @@ enum DatabaseError: LocalizedError {
         case .executeFailed(let msg): return "SQL execute failed: \(msg)"
         }
     }
+}
+
+struct PendingOperation: Equatable {
+    let opId: String
+    let opType: String
+    let fundingOutpointTxid: String?
+    let fundingOutpointVout: UInt32?
+    let closingTxid: String?
+    let balanceSats: UInt64?
+    let balanceUsd: Double?
+    let btcPrice: Double?
+    let counterparty: String?
+    let status: String
+    let createdAt: Int64
+    let resolvedAt: Int64?
 }

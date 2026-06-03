@@ -133,6 +133,17 @@ class AppState {
         }
     }
 
+    // MARK: - Close-txid resolver state
+
+    private(set) var lastCloseTxid: String?
+    // Close metadata (balance, price, counterparty) is persisted to the
+    // pending_operations row at request time (NodeService.requestChannelClose)
+    // and read back at resolve time. No need for in-memory snapshot fields.
+
+    private var closeTxidResolver: CloseTxidResolver?
+    private var resolverTasks: [String: Task<Void, Never>] = [:]
+    private var resolverTaskGenerations: [String: UUID] = [:]
+
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
 
@@ -157,6 +168,22 @@ class AppState {
         } catch {
             await MainActor.run { phase = .error("Database init failed: \(error.localizedDescription)") }
             return
+        }
+
+        nodeService.databaseService = databaseService
+
+        if databaseService != nil {
+            let resolverConfig = URLSessionConfiguration.default
+            resolverConfig.timeoutIntervalForRequest = 5
+            resolverConfig.timeoutIntervalForResource = 10
+            let resolverSession = URLSession(configuration: resolverConfig)
+            closeTxidResolver = CloseTxidResolver(
+                chainURLs: [Constants.primaryChainURL, Constants.fallbackChainURL],
+                onResolved: { [weak self] opId, closingTxid in
+                    await self?.handleCloseTxidResolved(opId: opId, closingTxid: closingTxid)
+                },
+                urlSession: resolverSession
+            )
         }
 
         tradeService = TradeService(nodeService: nodeService)
@@ -240,6 +267,7 @@ class AppState {
                 reregisterPushTokenIfNeeded()
                 // Check if NSE flagged a pending payment while app was killed
                 await processPendingPushPayment()
+                replayPendingChannelCloses()
             } catch {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
@@ -264,9 +292,39 @@ class AppState {
                 }
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
+                replayPendingChannelCloses()
             } catch {
                 await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
             }
+        }
+    }
+
+    private func replayPendingChannelCloses() {
+        guard let db = databaseService else { return }
+        let pending = db.fetchPendingOperations()
+        for (i, op) in pending.enumerated() where op.opType == "channel_close" && op.status == "pending" {
+            // Stagger across close ops so a backlog of N pending closes does
+            // not hit Esplora with N concurrent requests. 1s per op = at
+            // most 1 req/sec on the public endpoints.
+            let delayNs = UInt64(i) * 1_000_000_000
+            // Cancel prior task: replay may run twice in some lifecycle paths
+            if let existing = resolverTasks[op.opId] {
+                existing.cancel()
+            }
+            let generation = UUID()
+            let newTask = Task { @MainActor [weak self] in
+                if delayNs > 0 {
+                    try? await Task.sleep(nanoseconds: delayNs)
+                }
+                guard let self, let db = self.databaseService else { return }
+                await self.closeTxidResolver?.resolve(opId: op.opId, databaseService: db)
+                if self.resolverTaskGenerations[op.opId] == generation {
+                    self.resolverTasks[op.opId] = nil
+                    self.resolverTaskGenerations[op.opId] = nil
+                }
+            }
+            resolverTasks[op.opId] = newTask
+            resolverTaskGenerations[op.opId] = generation
         }
     }
 
@@ -982,6 +1040,34 @@ class AppState {
 
     // MARK: - Channel Closed
 
+    func requestChannelClose(
+        userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey,
+        fundingOutpointTxid: String,
+        fundingOutpointVout: UInt32
+    ) async throws {
+        // Snapshot here: AppState globals could be wrong for rapid re-tap or multi-channel
+        let balanceSats = stableChannel.stableReceiverBTC.sats
+        let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
+        let balanceUSD: Double? = price > 0
+            ? Double(balanceSats) / Double(Constants.satsInBTC) * price
+            : nil
+        let counterparty: String? = stableChannel.counterparty.isEmpty
+            ? nil
+            : stableChannel.counterparty
+
+        try await nodeService.requestChannelClose(
+            userChannelId: userChannelId,
+            counterpartyNodeId: counterpartyNodeId,
+            fundingOutpointTxid: fundingOutpointTxid,
+            fundingOutpointVout: fundingOutpointVout,
+            balanceSats: balanceSats,
+            balanceUsd: balanceUSD,
+            btcPrice: price > 0 ? price : nil,
+            counterparty: counterparty
+        )
+    }
+
     private func handleChannelClosed(
         channelId: ChannelId,
         userChannelId: UserChannelId,
@@ -989,10 +1075,6 @@ class AppState {
     ) {
         let reasonStr = reason.map { "\($0)" } ?? "unknown"
         let balanceSats = stableChannel.stableReceiverBTC.sats
-        let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
-        let balanceUSD: Double? = price > 0
-            ? Double(balanceSats) / Double(Constants.satsInBTC) * price
-            : nil
 
         AuditService.log("CHANNEL_CLOSED", data: [
             "channel_id": "\(channelId)",
@@ -1001,19 +1083,7 @@ class AppState {
             "balance_sats": "\(balanceSats)"
         ])
 
-        // Record in payment history — use funding txid as the close tx reference
-        let closeTxid = fundingTxid
-        _ = try? databaseService?.recordPayment(
-            paymentId: closeTxid ?? channelId,
-            paymentType: "channel_close",
-            direction: "received",
-            amountMsat: balanceSats * 1000,
-            amountUSD: balanceUSD,
-            btcPrice: price > 0 ? price : nil,
-            counterparty: stableChannel.counterparty.isEmpty ? nil : stableChannel.counterparty,
-            status: "completed",
-            txid: closeTxid
-        )
+        // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
         // Clear stable state if this is our channel or no channels remain
         if stableChannel.userChannelId == userChannelId || nodeService.channels.isEmpty {
@@ -1026,15 +1096,71 @@ class AppState {
             stableChannel.stableReceiverUSD = .zero
             stableChannel.channelId = ""
             stableChannel.userChannelId = ""
+            // Stale after close: would otherwise link to the old channel's funding tx.
+            fundingTxid = nil
+            UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                .removeObject(forKey: "funding_txid")
         }
 
-        // Refresh balances — keep isChannelClosing true until lightning balance
-        // fully resolves to avoid double-counting with on-chain balance.
+        // refreshBalances() self-clears isChannelClosing when lightning balance hits 0
         refreshBalances()
-        if lightningBalanceSats == 0 {
-            isChannelClosing = false
-        }
         statusMessage = "Channel closed"
+
+        // Cancel prior; new task only clears state if generation still matches
+        let opId = "close-\(userChannelId)"
+        if let existing = resolverTasks[opId] {
+            existing.cancel()
+        }
+        let generation = UUID()
+        let newTask = Task { @MainActor [weak self] in
+            guard let self, let db = self.databaseService else { return }
+            await self.closeTxidResolver?.resolve(opId: opId, databaseService: db)
+            if self.resolverTaskGenerations[opId] == generation {
+                self.resolverTasks[opId] = nil
+                self.resolverTaskGenerations[opId] = nil
+            }
+        }
+        resolverTasks[opId] = newTask
+        resolverTaskGenerations[opId] = generation
+    }
+
+    @MainActor
+    func handleCloseTxidResolved(opId: String, closingTxid: String) {
+        // Read snapshot from DB row, not AppState globals (stale on re-tap, wrong on multi-channel)
+        let op = databaseService?.fetchPendingOperation(opId: opId)
+        let balanceSats = op?.balanceSats ?? 0
+        let balanceUSD = op?.balanceUsd
+        let price = op?.btcPrice ?? 0
+        let counterparty = op?.counterparty
+
+        // UI state first: if recordPayment throws, resolver swallows; user still sees the link
+        lastCloseTxid = closingTxid
+
+        // recordPayment dedups on paymentId, so a re-run is a no-op
+        do {
+            try databaseService?.recordPayment(
+                paymentId: opId,
+                paymentType: "channel_close",
+                direction: "received",
+                amountMsat: balanceSats * 1000,
+                amountUSD: balanceUSD,
+                btcPrice: price > 0 ? price : nil,
+                counterparty: counterparty,
+                status: "completed",
+                txid: closingTxid
+            )
+        } catch {
+            AuditService.log("CLOSE_TXID_PAYMENT_ROW_FAILED", data: [
+                "op_id": opId,
+                "closing_txid": closingTxid,
+                "error": "\(error)"
+            ])
+        }
+
+        AuditService.log("CLOSE_TXID_RESOLVED", data: [
+            "op_id": opId,
+            "closing_txid": closingTxid
+        ])
     }
 
     // MARK: - Splice Pending
@@ -1197,6 +1323,15 @@ class AppState {
     private func detectOnchainDeposit() {
         // Use already-updated onchainBalanceSats — refreshBalances() was just called before this
         let currentOnchain = onchainBalanceSats
+
+        // Skip detection while a channel close is in flight: LDK sweeps the
+        // channel balance to the on-chain wallet, which makes onchainBalanceSats
+        // jump and would otherwise be recorded as a phantom "Received on-chain"
+        // row. The real close row is written by handleCloseTxidResolved.
+        if isChannelClosing {
+            prevOnchainSats = currentOnchain
+            return
+        }
 
         if currentOnchain > prevOnchainSats && !isSweeping && pendingSplice == nil {
             let depositSats = currentOnchain - prevOnchainSats
