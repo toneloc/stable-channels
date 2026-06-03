@@ -2,6 +2,7 @@ pub mod balances;
 pub mod channels;
 pub mod connection;
 pub mod forwarded_payments;
+pub mod ldk_log;
 pub mod lightning;
 pub mod network_graph;
 pub mod node_info;
