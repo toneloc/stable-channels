@@ -38,7 +38,7 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 .fillMaxWidth()
                 .padding(top = 16.dp)
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
 
         // Wallet section
         SettingsSectionHeader(title = "Wallet", color = Color(0xFF10B981))
@@ -69,8 +69,6 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 )
             }
 
-            Spacer(Modifier.height(16.dp))
-
             // Preferences section
             SettingsSectionHeader(title = "Preferences", color = Color(0xFF8B5CF6))
             SettingsNavLink(
@@ -85,8 +83,6 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 label = "Notifications",
                 onClick = { navController.navigate(SettingsRoute.Notifications.route) }
             )
-
-            Spacer(Modifier.height(16.dp))
 
             // Node & Network section
             SettingsSectionHeader(title = "Node & Network", color = Color(0xFF3B82F6))
@@ -103,8 +99,6 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 onClick = { navController.navigate(SettingsRoute.PushConnectivity.route) }
             )
 
-            Spacer(Modifier.height(16.dp))
-
             // Privacy & Security section
             SettingsSectionHeader(title = "Privacy & Security", color = Color(0xFF6366F1))
             SettingsNavLink(
@@ -113,8 +107,6 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 label = "App Access",
                 onClick = { navController.navigate(SettingsRoute.AppAccess.route) }
             )
-
-            Spacer(Modifier.height(16.dp))
 
             // About section
             SettingsSectionHeader(title = "About", color = Color(0xFF6B7280))
@@ -133,10 +125,10 @@ fun SettingsHub(appState: AppState, navController: NavController) {
 private fun SettingsSectionHeader(title: String, color: Color) {
     Text(
         text = title,
-        style = MaterialTheme.typography.titleMedium,
+        style = MaterialTheme.typography.titleSmall,
         fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
         color = color,
-        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 8.dp)
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 2.dp)
     )
 }
 
@@ -148,14 +140,14 @@ private fun SettingsNavLink(
     onClick: () -> Unit
 ) {
     ListItem(
-        headlineContent = { Text(label) },
+        headlineContent = { Text(label, style = MaterialTheme.typography.bodyMedium) },
         leadingContent = {
             Box(
                 modifier = Modifier
-                    .size(32.dp)
+                    .size(28.dp)
                     .background(
                         color = iconBackground.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(6.dp)
                     ),
                 contentAlignment = Alignment.Center
             ) {
@@ -163,7 +155,7 @@ private fun SettingsNavLink(
                     imageVector = icon,
                     contentDescription = label,
                     tint = iconBackground,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
         },
@@ -174,6 +166,6 @@ private fun SettingsNavLink(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         },
-        modifier = Modifier.clickable(onClick = onClick)
+        modifier = Modifier.height(44.dp).clickable(onClick = onClick)
     )
 }
