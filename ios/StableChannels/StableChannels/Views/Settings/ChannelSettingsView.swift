@@ -37,7 +37,33 @@ struct ChannelSettingsView: View {
                         Text(((channel.inboundCapacityMsat) / 1000).satsFormatted)
                     }
 
-                    if let txid = appState.fundingTxid, !txid.isEmpty {
+                    if let closeTxid = appState.lastCloseTxid, !closeTxid.isEmpty {
+                        HStack {
+                            Text(String(localized: "label_close_tx", defaultValue: "Close Tx"))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(String(closeTxid.prefix(8)) + "..." + String(closeTxid.suffix(8)))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let url = URL(string: "https://mempool.space/tx/\(closeTxid)") {
+                            Link(destination: url) {
+                                HStack(spacing: 4) {
+                                    Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                                    Image(systemName: "arrow.up.right.square")
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                            }
+                        }
+                    } else if appState.isChannelClosing {
+                        Text(String(
+                            localized: "info_close_pending_confirmation",
+                            defaultValue: "Channel closing — will appear on explorer after confirmation"
+                        ))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    } else if let txid = appState.fundingTxid, !txid.isEmpty {
                         HStack {
                             Text(String(localized: "label_funding_tx", defaultValue: "Funding Tx"))
                                 .foregroundStyle(.secondary)
@@ -95,12 +121,30 @@ struct ChannelSettingsView: View {
         }
     }
 
+    @MainActor
     private func closeChannel() {
-        guard let channel = appState.nodeService.channels.first else { return }
+        guard let channel = appState.nodeService.channels.first,
+              let outpoint = channel.fundingTxo else {
+            // Edge case: channel exists but no funding outpoint. Log and abort.
+            // AuditService.log is synchronous — call directly.
+            AuditService.log("CHANNEL_CLOSE_NO_OUTPOINT", data: [
+                "user_channel_id": appState.stableChannel.userChannelId
+            ])
+            return
+        }
         appState.isChannelClosing = true
-        try? appState.nodeService.closeChannel(
-            userChannelId: channel.userChannelId,
-            counterpartyNodeId: channel.counterpartyNodeId
-        )
+        Task { @MainActor in
+            do {
+                try await appState.requestChannelClose(
+                    userChannelId: channel.userChannelId,
+                    counterpartyNodeId: channel.counterpartyNodeId,
+                    fundingOutpointTxid: "\(outpoint.txid)",
+                    fundingOutpointVout: outpoint.vout
+                )
+            } catch {
+                appState.statusMessage = "Close channel failed: \(error.localizedDescription)"
+                appState.isChannelClosing = false
+            }
+        }
     }
 }

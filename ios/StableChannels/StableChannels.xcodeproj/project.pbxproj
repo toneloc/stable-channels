@@ -24,6 +24,9 @@
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
 		49948C312FBB9DF900327290 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 49948C302FBB9DF900327290 /* Localizable.xcstrings */; };
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
+		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
+		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
+		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
 		49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E12FB6E52E00133509 /* BiometricService.swift */; };
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
@@ -114,6 +117,9 @@
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
 		49948C302FBB9DF900327290 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
+		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
+		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
+		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
 		49D9C2E12FB6E52E00133509 /* BiometricService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricService.swift; sourceTree = "<group>"; };
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
@@ -232,6 +238,7 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
@@ -346,6 +353,8 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
+				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
+				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 			);
@@ -468,6 +477,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
+				49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
 			);
@@ -500,6 +511,7 @@
 				8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */,
 				4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */,
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
+				49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */,
 				37DA6E9D4F5D4BF36DD86BC8 /* ReceiveView.swift in Sources */,
 				B4C85619D6A5506E1BD9FC11 /* SellView.swift in Sources */,
 				E8C9430FF8920728747EF550 /* SendView.swift in Sources */,

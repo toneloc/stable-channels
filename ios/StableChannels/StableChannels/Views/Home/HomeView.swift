@@ -337,10 +337,13 @@ struct HomeView: View {
 
             if appState.isSweeping {
                 // 1. Splice-in in progress
-                pendingRow(
-                    text: String(localized: "status_sweeping", defaultValue: "Swap pending..."),
-                    txid: appState.spliceTxid
-                )
+                pendingRow(kind: .sweep(txid: appState.spliceTxid))
+            } else if appState.isChannelClosing {
+                if let closeTxid = appState.lastCloseTxid, !closeTxid.isEmpty {
+                    pendingRow(kind: .close(txid: closeTxid))
+                } else {
+                    pendingRow(kind: .closeNoLink)
+                }
             } else if hasReadyChannel && appState.spendableOnchainSats > 0 {
                 // 2. Channel + confirmed funds — offer to sweep
                 HStack {
@@ -361,11 +364,11 @@ struct HomeView: View {
                     }
                 }
             } else if appState.spendableOnchainSats == 0 {
-                // 3. Unconfirmed deposit (with or without channel)
-                pendingRow(
-                    text: String(localized: "status_channel_opening", defaultValue: "Deposit confirming..."),
-                    txid: appState.fundingTxid
-                )
+                if appState.isOpeningChannel, let fundingTx = appState.fundingTxid {
+                    pendingRow(kind: .deposit(txid: fundingTx))
+                } else {
+                    pendingRow(kind: .onchainReceive)
+                }
                 if !hasReadyChannel {
                     Text(String(
                         localized: "hint_create_account",
@@ -388,7 +391,62 @@ struct HomeView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func pendingRow(text: String, txid: String?) -> some View {
+    private enum PendingRowKind {
+        case deposit(txid: String?)
+        case sweep(txid: String?)
+        case close(txid: String?)
+        case closeNoLink
+        case onchainReceive
+    }
+
+    @ViewBuilder
+    private func pendingRow(kind: PendingRowKind) -> some View {
+        switch kind {
+        case .deposit(let txid):
+            pendingRowImpl(
+                text: String(localized: "status_channel_opening", defaultValue: "Deposit confirming..."),
+                txid: txid
+            )
+        case .sweep(let txid):
+            pendingRowImpl(
+                text: String(localized: "status_sweeping", defaultValue: "Swap pending..."),
+                txid: txid
+            )
+        case .close(let txid):
+            pendingRowImpl(
+                text: String(localized: "status_channel_closing", defaultValue: "Channel closing…"),
+                txid: txid
+            )
+        case .closeNoLink:
+            HStack(spacing: 6) {
+                Image(systemName: "hourglass")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text(String(
+                    localized: "info_close_pending_confirmation",
+                    defaultValue: "Channel closing - pending confirmation"
+                ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                Spacer()
+            }
+        case .onchainReceive:
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                Text(String(
+                    localized: "status_onchain_receiving",
+                    defaultValue: "Receiving on-chain..."
+                ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                Spacer()
+            }
+        }
+    }
+
+    private func pendingRowImpl(text: String, txid: String?) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "hourglass")
                 .font(.caption)
