@@ -18,7 +18,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	VerifySignatureRequest,
 };
 use sc_rest_client::sc_protos::stable::{
-	EditStableChannelRequest, GetPriceRequest, ListStableChannelsRequest,
+	EditStableChannelRequest, GetPriceRequest, ListStableChannelsRequest, LogRequest,
 };
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
@@ -237,6 +237,19 @@ impl LspServerApp {
 					.list_forwarded_payments(ListForwardedPaymentsRequest { page_token })
 					.await
 					.map_err(|e| e.to_string())
+			}));
+		}
+	}
+
+	pub fn fetch_ldk_log(&mut self) {
+		if self.state.tasks.ldk_log.is_some() {
+			return;
+		}
+		let max_lines = self.state.forms.ldk_log.max_lines.parse::<u32>().unwrap_or(200);
+		if let Some(client) = &self.state.client {
+			let client = client.clone();
+			self.state.tasks.ldk_log = Some(self.spawn_task(async move {
+				client.ldk_log(LogRequest { max_lines }).await.map_err(|e| e.to_string())
 			}));
 		}
 	}
@@ -961,6 +974,10 @@ impl LspServerApp {
 			self.state.forwarded_payments = Some(v);
 		});
 
+		poll_task!(self.state.tasks.ldk_log => |v| {
+			self.state.ldk_log = Some(v);
+		});
+
 		poll_task!(self.state.tasks.payment_details => |v| {
 			self.state.payment_details = Some(v);
 		});
@@ -1173,6 +1190,7 @@ impl App for LspServerApp {
 				(ActiveTab::StableChannels, "Stable"),
 				(ActiveTab::Tools, "Tools"),
 				(ActiveTab::NetworkGraph, "Graph"),
+				(ActiveTab::Logs, "Logs"),
 			];
 
 			for (tab, label) in tabs {
@@ -1218,6 +1236,7 @@ impl App for LspServerApp {
 			ActiveTab::StableChannels => ui::stable_channels::render(ui, self),
 			ActiveTab::Tools => ui::tools::render(ui, self),
 			ActiveTab::NetworkGraph => ui::network_graph::render(ui, self),
+			ActiveTab::Logs => ui::ldk_log::render(ui, self),
 		});
 
 		ui::channels::render_dialogs(ctx, self);

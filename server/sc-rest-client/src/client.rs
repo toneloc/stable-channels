@@ -43,8 +43,8 @@ use ldk_server_client::ldk_server_grpc::endpoints::{
 use ldk_server_client::ldk_server_grpc::error::{ErrorCode, ErrorResponse};
 use sc_protos::stable::{
 	EditStableChannelRequest, EditStableChannelResponse, GetPriceRequest, GetPriceResponse,
-	ListStableChannelsRequest, ListStableChannelsResponse, EDIT_STABLE_CHANNEL_PATH,
-	GET_PRICE_PATH, LIST_STABLE_CHANNELS_PATH,
+	ListStableChannelsRequest, ListStableChannelsResponse, LogRequest, LogResponse,
+	EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH, LIST_STABLE_CHANNELS_PATH,
 };
 use prost::Message;
 use reqwest::header::CONTENT_TYPE;
@@ -500,6 +500,12 @@ impl LspRestClient {
 		&self, request: EditStableChannelRequest,
 	) -> Result<EditStableChannelResponse, LspRestError> {
 		let url = self.build_url(EDIT_STABLE_CHANNEL_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Tail LDK Server's log file via the SC daemon.
+	pub async fn ldk_log(&self, request: LogRequest) -> Result<LogResponse, LspRestError> {
+		let url = self.build_url(LDK_LOG_PATH);
 		self.post_request(&request, &url).await
 	}
 

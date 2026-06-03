@@ -18,7 +18,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	VerifySignatureResponse,
 };
 use sc_rest_client::sc_protos::stable::{
-	EditStableChannelResponse, GetPriceResponse, ListStableChannelsResponse,
+	EditStableChannelResponse, GetPriceResponse, ListStableChannelsResponse, LogResponse,
 };
 use sc_rest_client::ldk_server_grpc::types::PageToken;
 
@@ -44,6 +44,7 @@ pub enum ActiveTab {
 	StableChannels,
 	Tools,
 	NetworkGraph,
+	Logs,
 }
 
 #[derive(Default, Clone)]
@@ -161,6 +162,17 @@ pub struct GraphGetNodeForm {
 	pub node_id: String,
 }
 
+#[derive(Clone)]
+pub struct LogForm {
+	pub max_lines: String,
+}
+
+impl Default for LogForm {
+	fn default() -> Self {
+		Self { max_lines: "200".to_string() }
+	}
+}
+
 /// Editable chain source configuration (used on native only)
 #[allow(dead_code)]
 #[derive(Default, Clone)]
@@ -236,6 +248,7 @@ pub struct Forms {
 	pub verify_signature: VerifySignatureForm,
 	pub graph_get_channel: GraphGetChannelForm,
 	pub graph_get_node: GraphGetNodeForm,
+	pub ldk_log: LogForm,
 	#[allow(dead_code)]
 	pub chain_source: ChainSourceForm,
 }
@@ -308,6 +321,7 @@ pub struct AsyncTasks {
 	pub get_price: Option<ChannelTaskHandle<GetPriceResponse>>,
 	pub list_stable_channels: Option<ChannelTaskHandle<ListStableChannelsResponse>>,
 	pub edit_stable_channel: Option<ChannelTaskHandle<EditStableChannelResponse>>,
+	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 }
 
 impl Default for AsyncTasks {
@@ -345,6 +359,7 @@ impl Default for AsyncTasks {
 			get_price: None,
 			list_stable_channels: None,
 			edit_stable_channel: None,
+			ldk_log: None,
 		}
 	}
 }
@@ -383,6 +398,7 @@ impl AsyncTasks {
 			|| self.get_price.is_some()
 			|| self.list_stable_channels.is_some()
 			|| self.edit_stable_channel.is_some()
+			|| self.ldk_log.is_some()
 	}
 }
 
@@ -416,6 +432,7 @@ pub struct AppState {
 	pub payment_details: Option<GetPaymentDetailsResponse>,
 	pub price: Option<GetPriceResponse>,
 	pub stable_channels: Option<ListStableChannelsResponse>,
+	pub ldk_log: Option<LogResponse>,
 
 	// Operation results
 	pub onchain_address: Option<String>,
@@ -502,6 +519,7 @@ impl Default for AppState {
 			payment_details: None,
 			price: None,
 			stable_channels: None,
+			ldk_log: None,
 
 			onchain_address: None,
 			generated_invoice: None,
