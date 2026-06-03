@@ -4,10 +4,14 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -19,7 +23,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import com.stablechannels.app.AppState
 
 @Composable
-fun FundWalletScreen(appState: AppState) {
+fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
     var address by remember { mutableStateOf<String?>(null) }
     var isCopied by remember { mutableStateOf(false) }
     val clipboardManager = LocalClipboardManager.current
@@ -30,13 +34,39 @@ fun FundWalletScreen(appState: AppState) {
         } catch (_: Exception) {}
     }
 
+    LaunchedEffect(isCopied) {
+        if (isCopied) {
+            kotlinx.coroutines.delay(2000)
+            isCopied = false
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("On-chain Receive", style = MaterialTheme.typography.headlineSmall)
+        // Toolbar (Back button, centered title)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+        ) {
+            TextButton(
+                onClick = onBack,
+                modifier = Modifier.align(Alignment.CenterStart)
+            ) {
+                Text("Back", style = MaterialTheme.typography.bodyMedium)
+            }
+            Text(
+                text = "Onchain Receive",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
         Spacer(Modifier.height(16.dp))
 
         val addr = address
@@ -49,24 +79,52 @@ fun FundWalletScreen(appState: AppState) {
                     modifier = Modifier.size(200.dp)
                 )
             }
-            Spacer(Modifier.height(16.dp))
-            SelectionContainer {
-                Text(
-                    text = addr,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Center
-                )
+            Spacer(Modifier.height(24.dp))
+
+            // Address container with background
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SelectionContainer(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = addr,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Start,
+                            maxLines = 2
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(addr))
+                            isCopied = true
+                        }
+                    ) {
+                        Icon(
+                            imageVector = if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                            contentDescription = "Copy Address",
+                            tint = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
             }
             Spacer(Modifier.height(12.dp))
-            Button(onClick = {
-                clipboardManager.setText(AnnotatedString(addr))
-                isCopied = true
-            }) {
-                Text(if (isCopied) "Copied!" else "Copy Address")
-            }
+            Text(
+                text = if (isCopied) "Address Copied!" else "Tap copy icon to copy address",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+            )
         } else {
-            CircularProgressIndicator()
+            Box(Modifier.height(300.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
         }
     }
 }

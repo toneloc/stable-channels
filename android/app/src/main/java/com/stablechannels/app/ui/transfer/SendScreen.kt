@@ -20,6 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.fragment.app.FragmentActivity
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
@@ -54,6 +57,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val activity = context.findActivity()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    val lightningSats by appState.lightningBalanceSats.collectAsState()
+    val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
 
     val inputType = remember(input) {
         val lower = input.trim().lowercase()
@@ -163,35 +168,49 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Header row with title and action buttons
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        // Header row
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
         ) {
-            Text("Send", style = MaterialTheme.typography.headlineSmall)
-
-            Row {
-                // Photo library button (Task 7.4)
-                IconButton(onClick = {
-                    photoPickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                }) {
-                    Icon(
-                        imageVector = Icons.Default.PhotoLibrary,
-                        contentDescription = "Import from photo library",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+            if (result == null) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
                 }
+            }
+            Text(
+                text = "Send",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            if (result == null) {
+                Row(modifier = Modifier.align(Alignment.CenterEnd)) {
+                    // Photo library button
+                    IconButton(onClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    }) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoLibrary,
+                            contentDescription = "Import from photo library",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
 
-                // QR Scanner button (Task 7.5)
-                IconButton(onClick = { showScanner = true }) {
-                    Icon(
-                        imageVector = Icons.Default.QrCodeScanner,
-                        contentDescription = "Scan QR code",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+                    // QR Scanner button
+                    IconButton(onClick = { showScanner = true }) {
+                        Icon(
+                            imageVector = Icons.Default.QrCodeScanner,
+                            contentDescription = "Scan QR code",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
             }
         }
@@ -249,15 +268,51 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             // Amount input (USD) — for amountless bolt11, bolt12, onchain
             if (isAmountlessBolt11 || inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN) {
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(
+                        onClick = {
+                            val maxSats = if (inputType == InputType.ONCHAIN) spendableOnchainSats else lightningSats
+                            val maxUSD = (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                            amountUSDStr = String.format(java.util.Locale.US, "%.2f", maxUSD)
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("Send Max", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = amountUSDStr,
-                    onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
-                    label = { Text("Amount (USD)") },
-                    prefix = { Text("$") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
-                )
+                ) {
+                    Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(2.dp))
+                    TextField(
+                        value = amountUSDStr,
+                        onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        placeholder = { Text("0.00", style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        textStyle = LocalTextStyle.current.copy(fontSize = 44.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+                        singleLine = true,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        ),
+                        modifier = Modifier.width(IntrinsicSize.Min).defaultMinSize(minWidth = 120.dp)
+                    )
+                }
+
                 if (manualAmountSats > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(

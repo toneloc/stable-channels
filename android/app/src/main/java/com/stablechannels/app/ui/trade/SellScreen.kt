@@ -11,6 +11,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
@@ -47,33 +48,86 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Toolbar header
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+        ) {
+            if (step != TradeStep.DONE) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.CenterStart)
+                ) {
+                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            Text(
+                text = if (step == TradeStep.CONFIRM) "Confirm Order" else if (step == TradeStep.DONE) "Order Confirmed" else "BTC → USD",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+
         when (step) {
             TradeStep.AMOUNT -> {
-                Text("BTC → USD", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(4.dp))
-                Text("Max: ${maxSellUSD.usdFormatted()}", style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(
+                        onClick = { amountText = String.format(Locale.US, "%.2f", maxSellUSD) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("Max", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
 
-                OutlinedTextField(
-                    value = amountText,
-                    onValueChange = { amountText = it },
-                    label = { Text("Amount (USD)") },
-                    prefix = if (amountText.isNotEmpty()) {{ Text("$", fontSize = 16.sp, fontWeight = FontWeight.Medium) }} else null,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
-                )
+                ) {
+                    Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(2.dp))
+                    TextField(
+                        value = amountText,
+                        onValueChange = { amountText = it.filter { c -> c.isDigit() || c == '.' } },
+                        placeholder = { Text("0.00", style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        textStyle = LocalTextStyle.current.copy(fontSize = 44.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
+                        singleLine = true,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                            disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        ),
+                        modifier = Modifier.width(IntrinsicSize.Min).defaultMinSize(minWidth = 120.dp)
+                    )
+                }
 
                 if (amountUSD > 0 && btcPrice > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "~ ${String.format(Locale.US, "%.8f", btcAmount)} BTC",
-                        style = MaterialTheme.typography.labelSmall
+                        "~ ${String.format(Locale.US, "%.8f", btcAmount)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
 
+                Spacer(Modifier.height(8.dp))
+                Text("Max: ${maxSellUSD.usdFormatted()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
                 error?.let {
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = MaterialTheme.colorScheme.error)
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
 
                 Spacer(Modifier.height(16.dp))
@@ -91,20 +145,28 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
             }
 
             TradeStep.CONFIRM -> {
-                Text("Confirm Order", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(16.dp))
-
-                ConfirmRow("Amount", amountUSD.usdFormatted())
-                ConfirmRow("Fee (1%)", feeUSD.usdFormatted())
-                ConfirmRow("BTC Price", btcPrice.usdFormatted())
-                ConfirmRow("You receive", (amountUSD - feeUSD).usdFormatted())
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        ConfirmRow("Amount", amountUSD.usdFormatted())
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ConfirmRow("Fee (1%)", feeUSD.usdFormatted())
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ConfirmRow("BTC Price", btcPrice.usdFormatted())
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ConfirmRow("You receive", (amountUSD - feeUSD).usdFormatted())
+                    }
+                }
 
                 error?.let {
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = MaterialTheme.colorScheme.error)
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
 
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(24.dp))
                 Button(
                     onClick = {
                         isExecuting = true
@@ -154,23 +216,23 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     Icon(
                         Icons.Filled.CheckCircle,
                         contentDescription = "Confirmed",
-                        tint = Color(0xFF4CAF50),
+                        tint = Color(0xFF10B981),
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Order Confirmed", style = MaterialTheme.typography.headlineMedium)
+                    Text("Trade Confirmed", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your order has been confirmed.",
+                        "Your sell order has been confirmed.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
                     CircularProgressIndicator(Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
+                    Text("Trade Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your order is being processed. Balance will update when the payment confirms.",
+                        "Your sell order is being processed. Balance will update when the payment confirms.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
