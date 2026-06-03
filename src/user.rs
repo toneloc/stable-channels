@@ -231,9 +231,9 @@ pub struct UserApp {
     pub onchain_send_address: String,
     pub onchain_send_amount: String,
     pending_splice: Arc<std::sync::Mutex<Option<PendingSplice>>>,
-    auto_sweep_in_progress: Arc<std::sync::atomic::AtomicBool>,
-    /// On-chain sats at the time auto-sweep was initiated; used to detect confirmation.
-    auto_sweep_onchain_at_start: Arc<std::sync::atomic::AtomicU64>,
+    auto_splice_in_progress: Arc<std::sync::atomic::AtomicBool>,
+    /// On-chain sats at the time the auto-splice was initiated; used to detect confirmation.
+    auto_splice_onchain_at_start: Arc<std::sync::atomic::AtomicU64>,
     pub show_onchain_receive: bool,
     pub show_onchain_send: bool,
     pub show_advanced: bool,
@@ -546,8 +546,8 @@ impl UserApp {
             onchain_send_address: String::new(),
             onchain_send_amount: String::new(),
             pending_splice: Arc::new(std::sync::Mutex::new(None)),
-            auto_sweep_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            auto_sweep_onchain_at_start: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_splice_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auto_splice_onchain_at_start: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             show_onchain_receive: false,
             show_onchain_send: false,
             lightning_balance_btc: 0.0,
@@ -677,8 +677,8 @@ impl UserApp {
         let node_arc = Arc::clone(&self.node);
         let sc_arc = Arc::clone(&self.stable_channel);
         let db = self.db.clone();
-        let sweep_flag = Arc::clone(&self.auto_sweep_in_progress);
-        let sweep_onchain_start = Arc::clone(&self.auto_sweep_onchain_at_start);
+        let splice_flag = Arc::clone(&self.auto_splice_in_progress);
+        let splice_onchain_start = Arc::clone(&self.auto_splice_onchain_at_start);
 
         std::thread::spawn(move || {
             fn current_unix_time() -> i64 {
@@ -759,8 +759,8 @@ impl UserApp {
                     // Detect new on-chain deposits
                     {
                         let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
-                        let is_sweeping = sweep_flag.load(std::sync::atomic::Ordering::Relaxed);
-                        if current_onchain > prev_onchain_sats && !is_sweeping {
+                        let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
+                        if current_onchain > prev_onchain_sats && !is_splicing {
                             let deposit_sats = current_onchain - prev_onchain_sats;
                             let amount_usd = if price > 0.0 {
                                 Some(deposit_sats as f64 / 100_000_000.0 * price)
@@ -801,19 +801,19 @@ impl UserApp {
                         prev_onchain_sats = current_onchain;
                     }
 
-                    // Auto-sweep: if on-chain balance exists and channel is ready,
+                    // Auto-splice: if on-chain balance exists and channel is ready,
                     // splice it into the channel automatically.
-                    // The sweep_flag stays true until the on-chain balance drops
-                    // (confirming the splice tx landed), preventing duplicate sweeps.
-                    if sweep_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        // Check if the on-chain balance dropped since we started the sweep
-                        let prev = sweep_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
+                    // The splice_flag stays true until the on-chain balance drops
+                    // (confirming the splice tx landed), preventing duplicate splices.
+                    if splice_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        // Check if the on-chain balance dropped since we started the splice
+                        let prev = splice_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
                         let current = node_arc.list_balances().total_onchain_balance_sats;
                         if prev > 0 && current < prev {
-                            sweep_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                            sweep_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
+                            splice_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                            splice_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
                             audit_event(
-                                "AUTO_SWEEP_CONFIRMED",
+                                "AUTO_SPLICE_CONFIRMED",
                                 json!({
                                     "prev_onchain": prev,
                                     "new_onchain": current,
@@ -822,10 +822,10 @@ impl UserApp {
                         }
                     }
 
-                    // Auto-sweep trigger removed for iOS parity (2026-05-19): on-chain →
+                    // Auto-splice trigger removed for iOS parity (2026-05-19): on-chain →
                     // channel splice is now user-initiated via the Swap button in the home
                     // tab. The clear-flag-on-balance-drop path above remains so user-initiated
-                    // sweeps still get their in-progress flag cleared when confirmed.
+                    // splices still get their in-progress flag cleared when confirmed.
                 }
 
                 std::thread::sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
@@ -1306,9 +1306,9 @@ impl UserApp {
                             .find(|c| c.is_channel_ready);
 
                         if let Some(ch) = ready_channel {
-                            // Block if a splice is already in flight (auto-sweep or prior splice)
+                            // Block if a splice is already in flight (auto-splice or prior splice)
                             if self
-                                .auto_sweep_in_progress
+                                .auto_splice_in_progress
                                 .load(std::sync::atomic::Ordering::Relaxed)
                             {
                                 self.send_error =
@@ -1333,10 +1333,10 @@ impl UserApp {
                                 amount_sats,
                             ) {
                                 Ok(()) => {
-                                    // Block auto-sweep while this splice is in flight
-                                    self.auto_sweep_in_progress
+                                    // Block auto-splice while this splice is in flight
+                                    self.auto_splice_in_progress
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
-                                    self.auto_sweep_onchain_at_start.store(
+                                    self.auto_splice_onchain_at_start.store(
                                         self.node.list_balances().total_onchain_balance_sats,
                                         std::sync::atomic::Ordering::Relaxed,
                                     );
@@ -1558,13 +1558,14 @@ impl UserApp {
     }
 
     /// User-initiated splice-in: move spendable on-chain BTC into the channel.
-    /// Mirrors iOS `AppState.sweepToChannel` — see decisions/cross-platform-consistency.
-    pub fn sweep_to_channel(&mut self) {
+    /// Mirrors iOS `AppState.sweepToChannel` (pending the same rename on iOS / Android)
+    /// — see decisions/cross-platform-consistency.
+    pub fn splice_to_channel(&mut self) {
         if self
-            .auto_sweep_in_progress
+            .auto_splice_in_progress
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            self.status_message = "Sweep already in progress".to_string();
+            self.status_message = "Splice already in progress".to_string();
             return;
         }
 
@@ -1597,12 +1598,12 @@ impl UserApp {
             self.status_message = "Insufficient on-chain balance".to_string();
             return;
         }
-        let sweep_amount = spendable - fee_reserve;
+        let splice_amount = spendable - fee_reserve;
 
         audit_event(
             "SWEEP_TO_CHANNEL",
             json!({
-                "amount_sats": sweep_amount,
+                "amount_sats": splice_amount,
                 "fee_rate_sat_vb": fee_rate_sat_vb,
             }),
         );
@@ -1610,25 +1611,25 @@ impl UserApp {
         match self.node.splice_in(
             &ch.user_channel_id,
             ch.counterparty_node_id,
-            sweep_amount,
+            splice_amount,
         ) {
             Ok(()) => {
-                self.auto_sweep_in_progress
+                self.auto_splice_in_progress
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                self.auto_sweep_onchain_at_start.store(
+                self.auto_splice_onchain_at_start.store(
                     balances.total_onchain_balance_sats,
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 *self.pending_splice.lock().unwrap() = Some(PendingSplice {
                     direction: "in".to_string(),
-                    amount_sats: sweep_amount,
+                    amount_sats: splice_amount,
                     address: None,
                 });
                 let _ = self.db.record_payment(
                     None,
                     "splice_in",
                     "received",
-                    sweep_amount * 1000,
+                    splice_amount * 1000,
                     None,
                     None,
                     None,
@@ -1636,15 +1637,15 @@ impl UserApp {
                     None,
                     None,
                 );
-                self.status_message = format!("Moving {} sats to channel...", sweep_amount);
-                self.show_toast("Sweep started", "~");
+                self.status_message = format!("Moving {} sats to channel...", splice_amount);
+                self.show_toast("Splice started", "~");
             }
             Err(e) => {
                 audit_event(
-                    "SWEEP_FAILED",
+                    "SPLICE_FAILED",
                     json!({ "error": format!("{e}") }),
                 );
-                self.status_message = format!("Sweep failed: {}", e);
+                self.status_message = format!("Splice failed: {}", e);
             }
         }
     }
@@ -2047,11 +2048,12 @@ impl UserApp {
                                     }),
                                 );
                             }
-                            // Splice complete: clear sweep flag (bg-thread clear only
-                            // handles splice-in via balance drop; splice-out needs this).
-                            self.auto_sweep_in_progress
+                            // Splice complete: clear the auto-splice flag (bg-thread
+                            // clear only handles splice-in via balance drop;
+                            // splice-out needs this explicit clear).
+                            self.auto_splice_in_progress
                                 .store(false, std::sync::atomic::Ordering::Relaxed);
-                            self.auto_sweep_onchain_at_start
+                            self.auto_splice_onchain_at_start
                                 .store(0, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
@@ -2489,9 +2491,9 @@ impl UserApp {
                     new_funding_txo,
                     ..
                 } => {
-                    // NOTE: Do NOT clear auto_sweep_in_progress here!
+                    // NOTE: Do NOT clear auto_splice_in_progress here!
                     // The on-chain balance doesn't update until the splice tx confirms.
-                    // Clearing the flag here allows the auto-sweep to fire again on
+                    // Clearing the flag here allows the auto-splice to fire again on
                     // the same unspent UTXO, creating duplicate splice_in calls.
 
                     audit_event(
@@ -2507,7 +2509,7 @@ impl UserApp {
                     if let Some(splice) = self.pending_splice.lock().unwrap().take() {
                         let txid_str = new_funding_txo.txid.to_string();
                         if splice.direction == "in" {
-                            // Auto-sweep splice_in was already recorded in background thread
+                            // Auto-splice (splice_in) was already recorded in background thread
                             // — just update it with the txid now that we know it
                             let _ = self.db.set_pending_splice_txid(&txid_str);
                         } else {
@@ -2610,9 +2612,9 @@ impl UserApp {
                     user_channel_id,
                     ..
                 } => {
-                    self.auto_sweep_in_progress
+                    self.auto_splice_in_progress
                         .store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.auto_sweep_onchain_at_start
+                    self.auto_splice_onchain_at_start
                         .store(0, std::sync::atomic::Ordering::Relaxed);
                     audit_event(
                         "SPLICE_FAILED",
@@ -4495,8 +4497,8 @@ impl UserApp {
             if has_any_onchain_activity {
                 let has_ready_channel =
                     self.node.list_channels().iter().any(|c| c.is_channel_ready);
-                let sweeping = self
-                    .auto_sweep_in_progress
+                let splicing = self
+                    .auto_splice_in_progress
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let total_visible_sats = total_onchain_sats + pending_sweep_sats;
                 let total_visible_btc = total_visible_sats as f64 / 100_000_000.0;
@@ -4546,9 +4548,54 @@ impl UserApp {
 
                         ui.add_space(6.0);
 
-                        // Helper: a "View on explorer ↗" link pulled from the latest
-                        // pending splice_in or onchain inbound payment in the DB.
+                        // Pull `latest_spending_txid` from ldk-node when a channel
+                        // closure is currently in flight. Per ldk-node, this is the
+                        // most recent transaction it knows about that spends the
+                        // output being swept from a close — which means:
+                        //   - cooperative close → typically the close commit tx itself
+                        //     (coop-close output pays the user directly, no separate
+                        //     sweep needed),
+                        //   - force / unilateral close → the close commit first, then
+                        //     a later sweep tx (after CSV, HTLC claims, etc.) once
+                        //     ldk-node has built and broadcast the claim package.
+                        // Either way it's the correct on-chain target for "what is
+                        // this closing channel doing right now."
+                        //
+                        // The previous behaviour fell straight through to the DB and
+                        // picked the most recent splice_in/onchain payment, which is
+                        // almost always the channel-FUNDING tx — confusing for users
+                        // clicking through after a close.
+                        let close_related_txid: Option<String> = self
+                            .node
+                            .list_balances()
+                            .pending_balances_from_channel_closures
+                            .iter()
+                            .find_map(|p| match p {
+                                ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation {
+                                    latest_spending_txid,
+                                    ..
+                                }
+                                | ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations {
+                                    latest_spending_txid,
+                                    ..
+                                } => Some(latest_spending_txid.to_string()),
+                                // PendingBroadcast: ldk-node hasn't built / broadcast
+                                // a spending tx yet, so there's no txid to point at.
+                                ldk_node::PendingSweepBalance::PendingBroadcast { .. } => None,
+                            });
+
+                        // Helper: a "View on explorer ↗" link. Prefers the close-related
+                        // txid above when a channel is closing; otherwise falls back to
+                        // the latest pending splice_in / onchain inbound payment from
+                        // the DB (covers the splice-pending state).
                         let open_explorer = |db: &Database, ctx: &egui::Context| {
+                            if let Some(txid) = close_related_txid.as_deref() {
+                                ctx.open_url(egui::OpenUrl::new_tab(format!(
+                                    "https://mempool.space/tx/{}",
+                                    txid
+                                )));
+                                return true;
+                            }
                             if let Ok(payments) = db.get_recent_payments(10) {
                                 let pick = payments
                                     .iter()
@@ -4571,7 +4618,7 @@ impl UserApp {
                             false
                         };
 
-                        if sweeping {
+                        if splicing {
                             // State 1: user-initiated splice-in in flight.
                             ui.horizontal(|ui| {
                                 let (icon_rect, _) = ui.allocate_exact_size(
@@ -4649,7 +4696,7 @@ impl UserApp {
                                         .corner_radius(theme::RADIUS_PILL)
                                         .min_size(egui::vec2(64.0, 26.0));
                                         if ui.add(swap_btn).clicked() {
-                                            self.sweep_to_channel();
+                                            self.splice_to_channel();
                                         }
                                     },
                                 );
@@ -8023,7 +8070,7 @@ impl App for UserApp {
             self.trigger_fund_wallet = false;
             let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
             if has_channel {
-                // Channel exists — show on-chain deposit address (auto-sweep handles the rest)
+                // Channel exists — show on-chain deposit address (auto-splice handles the rest)
                 self.fund_tab = FundTab::Onchain;
                 if self.on_chain_address.is_empty() {
                     self.get_address();

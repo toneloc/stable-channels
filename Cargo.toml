@@ -84,3 +84,9 @@ members = [
     "server/stable-channels-lsp",
 ]
 
+# Windows-only build dep: lets build.rs embed an icon resource (.ico) into
+# the .exe so Explorer and the taskbar show the branded icon. No effect on
+# macOS / Linux builds.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
+
