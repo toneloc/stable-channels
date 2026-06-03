@@ -124,12 +124,12 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
             }
         }
 
-    // Detail dialogs
+    // Detail bottom sheets
     selectedTrade?.let { trade ->
-        TradeDetailDialog(trade) { selectedTrade = null }
+        OrderDetailBottomSheet(trade) { selectedTrade = null }
     }
     selectedPayment?.let { payment ->
-        PaymentDetailDialog(payment) { selectedPayment = null }
+        PaymentDetailBottomSheet(payment) { selectedPayment = null }
     }
 }
 
