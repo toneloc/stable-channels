@@ -21,7 +21,8 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+        containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White
     ) {
         Column(
             modifier = Modifier

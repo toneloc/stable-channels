@@ -20,24 +20,28 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import com.stablechannels.app.AppState
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsHub(appState: AppState, navController: NavController) {
     val onchainSats by appState.onchainBalanceSats.collectAsState()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("Settings") })
-        }
-    ) { padding ->
-        Column(
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
+        Text(
+            text = "Settings",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-        ) {
-            // Wallet section
-            SettingsSectionHeader(title = "Wallet", color = Color(0xFF10B981))
+                .fillMaxWidth()
+                .padding(top = 16.dp)
+        )
+        Spacer(Modifier.height(12.dp))
+
+        // Wallet section
+        SettingsSectionHeader(title = "Wallet", color = Color(0xFF10B981))
             SettingsNavLink(
                 icon = Icons.Default.AccountBalance,
                 iconBackground = Color(0xFF10B981),
@@ -123,7 +127,6 @@ fun SettingsHub(appState: AppState, navController: NavController) {
 
             Spacer(Modifier.height(32.dp))
         }
-    }
 }
 
 @Composable

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -61,7 +62,13 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text("Settings", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            text = "Settings",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.fillMaxWidth()
+        )
         Spacer(Modifier.height(16.dp))
 
         // Node section
@@ -410,11 +417,11 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         )
     }
 
-    // On-chain send sheet
     if (showOnchainSend) {
         ModalBottomSheet(
             onDismissRequest = { showOnchainSend = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White
         ) {
             OnChainSendScreen(appState) { showOnchainSend = false }
         }
