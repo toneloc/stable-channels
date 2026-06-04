@@ -367,7 +367,7 @@ struct HomeView: View {
                 if appState.isOpeningChannel, let fundingTx = appState.fundingTxid {
                     pendingRow(kind: .deposit(txid: fundingTx))
                 } else {
-                    pendingRow(kind: .onchainReceive)
+                    pendingRow(kind: .onchainReceive(txid: appState.lastReceiveTxid))
                 }
                 if !hasReadyChannel {
                     Text(String(
@@ -396,7 +396,7 @@ struct HomeView: View {
         case sweep(txid: String?)
         case close(txid: String?)
         case closeNoLink
-        case onchainReceive
+        case onchainReceive(txid: String?)
     }
 
     @ViewBuilder
@@ -430,19 +430,11 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
                 Spacer()
             }
-        case .onchainReceive:
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down.circle")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-                Text(String(
-                    localized: "status_onchain_receiving",
-                    defaultValue: "Receiving on-chain..."
-                ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                Spacer()
-            }
+        case .onchainReceive(let txid):
+            pendingRowImpl(
+                text: String(localized: "status_onchain_receiving", defaultValue: "Receiving on-chain..."),
+                txid: txid
+            )
         }
     }
 
