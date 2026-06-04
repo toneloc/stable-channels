@@ -101,7 +101,7 @@ fun SettingsSubViewScaffold(
 ) {
     Scaffold(
         topBar = {
-            TopAppBar(
+            CenterAlignedTopAppBar(
                 title = { Text(title) },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {

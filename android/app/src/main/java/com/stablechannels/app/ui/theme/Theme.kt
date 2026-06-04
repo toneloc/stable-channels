@@ -21,16 +21,16 @@ import androidx.compose.ui.platform.LocalContext
 
 // ─── Branded Color Palette ───────────────────────────────────────────────────
 
-// Primary: Green (stability/USD)
-private val PrimaryLight = Color(0xFF10B981)
+// Primary: Blue (active tint)
+private val PrimaryLight = Color(0xFF007AFF)
 private val OnPrimaryLight = Color(0xFFFFFFFF)
-private val PrimaryContainerLight = Color(0xFFD1FAE5)
-private val OnPrimaryContainerLight = Color(0xFF064E3B)
+private val PrimaryContainerLight = Color(0xFFE5F1FF)
+private val OnPrimaryContainerLight = Color(0xFF003366)
 
-private val PrimaryDark = Color(0xFF34D399)
-private val OnPrimaryDark = Color(0xFF064E3B)
-private val PrimaryContainerDark = Color(0xFF065F46)
-private val OnPrimaryContainerDark = Color(0xFFD1FAE5)
+private val PrimaryDark = Color(0xFF0A84FF)
+private val OnPrimaryDark = Color(0xFFFFFFFF)
+private val PrimaryContainerDark = Color(0xFF004488)
+private val OnPrimaryContainerDark = Color(0xFFE5F1FF)
 
 // Secondary: Orange (BTC/native)
 private val SecondaryLight = Color(0xFFF59E0B)
@@ -66,24 +66,24 @@ private val ErrorContainerDark = Color(0xFF991B1B)
 private val OnErrorContainerDark = Color(0xFFFEE2E2)
 
 // Surfaces - Light
-private val BackgroundLight = Color(0xFFFAFAFA)
-private val OnBackgroundLight = Color(0xFF1A1A1A)
+private val BackgroundLight = Color(0xFFFFFFFF)
+private val OnBackgroundLight = Color(0xFF000000)
 private val SurfaceLight = Color(0xFFFFFFFF)
-private val OnSurfaceLight = Color(0xFF1A1A1A)
-private val SurfaceVariantLight = Color(0xFFF3F4F6)
-private val OnSurfaceVariantLight = Color(0xFF4B5563)
-private val OutlineLight = Color(0xFFD1D5DB)
-private val OutlineVariantLight = Color(0xFFE5E7EB)
+private val OnSurfaceLight = Color(0xFF000000)
+private val SurfaceVariantLight = Color(0xFFF2F2F7) // systemGray6
+private val OnSurfaceVariantLight = Color(0xFF3C3C43)
+private val OutlineLight = Color(0xFFC7C7CC)
+private val OutlineVariantLight = Color(0xFFE5E5EA)
 
 // Surfaces - Dark
-private val BackgroundDark = Color(0xFF111111)
-private val OnBackgroundDark = Color(0xFFF3F4F6)
-private val SurfaceDark = Color(0xFF1A1A1A)
-private val OnSurfaceDark = Color(0xFFF3F4F6)
-private val SurfaceVariantDark = Color(0xFF2D2D2D)
-private val OnSurfaceVariantDark = Color(0xFFD1D5DB)
-private val OutlineDark = Color(0xFF4B5563)
-private val OutlineVariantDark = Color(0xFF374151)
+private val BackgroundDark = Color(0xFF000000)
+private val OnBackgroundDark = Color(0xFFFFFFFF)
+private val SurfaceDark = Color(0xFF000000)
+private val OnSurfaceDark = Color(0xFFFFFFFF)
+private val SurfaceVariantDark = Color(0xFF1C1C1E) // systemGray6
+private val OnSurfaceVariantDark = Color(0xFFEBEBF5)
+private val OutlineDark = Color(0xFF38383A)
+private val OutlineVariantDark = Color(0xFF2C2C2E)
 
 // ─── Color Schemes ───────────────────────────────────────────────────────────
 

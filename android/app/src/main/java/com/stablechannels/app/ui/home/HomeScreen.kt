@@ -27,8 +27,10 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -141,6 +143,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 text = "Stable Channels",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(8.dp))
@@ -383,8 +386,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("USD → BTC", Icons.Default.TrendingUp, Color(0xFFF59E0B), Modifier.weight(1f)) { showBuy = true }
-                ActionButton("BTC → USD", Icons.Default.TrendingDown, Color(0xFF8B5CF6), Modifier.weight(1f)) { showSell = true }
+                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, Color(0xFFF59E0B), Modifier.weight(1f), rotation = 45f) { showBuy = true }
+                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, Color(0xFF8B5CF6), Modifier.weight(1f), rotation = -45f) { showSell = true }
             }
 
             // Status capsule
@@ -402,6 +405,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             SendScreen(appState) { showSend = false }
@@ -411,6 +415,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showReceive = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             ReceiveScreen(appState) { showReceive = false }
@@ -420,6 +425,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showBuy = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) { showBuy = false; prefillTradeAmount = 0.0 }
@@ -429,6 +435,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showSell = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }
@@ -437,17 +444,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, pulse: Boolean = false, onClick: () -> Unit) {
+fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, rotation: Float = 0f, pulse: Boolean = false, onClick: () -> Unit) {
     Box(modifier = modifier.height(56.dp).clip(RoundedCornerShape(12.dp))) {
         FilledTonalButton(
             onClick = onClick,
             modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(12.dp),
             colors = ButtonDefaults.filledTonalButtonColors(
-                containerColor = color.copy(alpha = 0.1f),
+                containerColor = color.copy(alpha = if (isSystemInDarkTheme()) 0.1f else 0.15f),
                 contentColor = color
             )
         ) {
-            Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp))
+            Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp).rotate(rotation))
             Spacer(Modifier.width(6.dp))
             Text(title)
         }
@@ -463,7 +471,7 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
                 Box(
                     Modifier
                         .matchParentSize()
-                        .clip(ButtonDefaults.shape)
+                        .clip(RoundedCornerShape(12.dp))
                         .background(color.copy(alpha = alpha))
                 )
             }

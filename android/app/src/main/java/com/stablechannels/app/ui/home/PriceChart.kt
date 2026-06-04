@@ -7,6 +7,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -196,8 +197,8 @@ fun PriceChart(
                     val selected = chartPeriod == period
                     Surface(
                         onClick = { chartPeriod = period },
-                        shape = CircleShape,
-                        color = if (selected) Color(0xFF3B82F6) else Color.Transparent,
+                        shape = RoundedCornerShape(20.dp),
+                        color = if (selected) Color(0xFF3B82F6) else MaterialTheme.colorScheme.surfaceVariant,
                     ) {
                         Text(
                             period.label,

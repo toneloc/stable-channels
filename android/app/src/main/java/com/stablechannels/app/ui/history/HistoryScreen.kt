@@ -1,9 +1,11 @@
 package com.stablechannels.app.ui.history
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowCircleDown
@@ -55,41 +57,58 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
             text = "History",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(12.dp))
 
         // Segmented control (like iOS Picker .segmented)
-        SingleChoiceSegmentedButtonRow(
-            modifier = Modifier.fillMaxWidth()
+        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+        val activeBg = if (isDark) Color(0xFF3A3A3C) else Color.White
+        val inactiveBg = if (isDark) Color(0xFF1C1C1E) else Color(0xFFE5E5EA)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(36.dp)
+                .background(inactiveBg, shape = RoundedCornerShape(8.dp))
+                .padding(2.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            SegmentedButton(
-                selected = selectedSegment == 0,
-                onClick = { selectedSegment = 0 },
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                icon = {},
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = Color(0xFF10B981).copy(alpha = 0.15f),
-                    activeContentColor = Color(0xFF10B981),
-                    inactiveContainerColor = Color.Transparent,
-                    inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(
+                        color = if (selectedSegment == 0) activeBg else Color.Transparent,
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .clickable { selectedSegment = 0 },
+                contentAlignment = Alignment.Center
             ) {
-                Text("Orders")
+                Text(
+                    text = "Orders",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (selectedSegment == 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-            SegmentedButton(
-                selected = selectedSegment == 1,
-                onClick = { selectedSegment = 1 },
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                icon = {},
-                colors = SegmentedButtonDefaults.colors(
-                    activeContainerColor = Color(0xFF10B981).copy(alpha = 0.15f),
-                    activeContentColor = Color(0xFF10B981),
-                    inactiveContainerColor = Color.Transparent,
-                    inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(
+                        color = if (selectedSegment == 1) activeBg else Color.Transparent,
+                        shape = RoundedCornerShape(6.dp)
+                    )
+                    .clickable { selectedSegment = 1 },
+                contentAlignment = Alignment.Center
             ) {
-                Text("Payments")
+                Text(
+                    text = "Payments",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (selectedSegment == 1) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -108,28 +127,40 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                     description = "Send or receive payments to see history here."
                 )
             } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
+                LazyColumn {
                     if (selectedSegment == 0) {
-                        items(trades) { trade ->
+                        itemsIndexed(trades) { index, trade ->
                             TradeRow(trade) { selectedTrade = trade }
+                            if (index < trades.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(start = 68.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    thickness = 0.5.dp
+                                )
+                            }
                         }
                     } else {
-                        items(payments) { payment ->
+                        itemsIndexed(payments) { index, payment ->
                             PaymentRow(payment) { selectedPayment = payment }
+                            if (index < payments.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(start = 68.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    thickness = 0.5.dp
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-    // Detail dialogs
+    // Detail bottom sheets
     selectedTrade?.let { trade ->
-        TradeDetailDialog(trade) { selectedTrade = null }
+        OrderDetailBottomSheet(trade) { selectedTrade = null }
     }
     selectedPayment?.let { payment ->
-        PaymentDetailDialog(payment) { selectedPayment = null }
+        PaymentDetailBottomSheet(payment) { selectedPayment = null }
     }
 }
 
@@ -139,52 +170,48 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
     val icon = if (isBuy) Icons.Default.TrendingUp else Icons.Default.TrendingDown
     val iconColor = if (isBuy) Color(0xFFF59E0B) else Color(0xFF8B5CF6)
 
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Icon with colored background
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = iconColor.copy(alpha = 0.12f),
+            modifier = Modifier.size(40.dp)
         ) {
-            // Icon with colored background
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = iconColor.copy(alpha = 0.12f),
-                modifier = Modifier.size(40.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
-                }
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
             }
+        }
 
-            Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(12.dp))
 
-            // Title + time
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (isBuy) "USD → BTC" else "BTC → USD",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = trade.date.relativeString(),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+        // Title + time
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (isBuy) "USD → BTC" else "BTC → USD",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = trade.date.relativeString(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
-            // Amount + status
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = trade.amountUSD.usdFormatted(),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
-                )
-                StatusBadge(trade.status)
-            }
+        // Amount + status
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                text = trade.amountUSD.usdFormatted(),
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
+            StatusBadge(trade.status)
         }
     }
 }
@@ -205,52 +232,50 @@ private fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
         else -> payment.paymentType
     }
 
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Icon with colored background
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = iconColor.copy(alpha = 0.12f),
+            modifier = Modifier.size(40.dp)
         ) {
-            // Icon with colored background
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = iconColor.copy(alpha = 0.12f),
-                modifier = Modifier.size(40.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
-                }
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
             }
+        }
 
-            Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(12.dp))
 
-            // Title + type + time
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (isIncoming) "Received" else "Sent",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "$typeLabel · ${payment.date.relativeString()}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+        // Title + type + time
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (isIncoming) "Received" else "Sent",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "$typeLabel · ${payment.date.relativeString()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
-            // Amount + status
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = payment.amountUSD?.usdFormatted() ?: payment.amountSats.satsFormatted(),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium
-                )
-                StatusBadge(payment.status)
-            }
+        // Amount + status
+        Column(horizontalAlignment = Alignment.End) {
+            val usdVal = payment.amountUSD ?: ((payment.amountSats.toDouble() / 100_000_000.0) * (payment.btcPrice ?: 0.0))
+            Text(
+                text = (if (isIncoming) "+" else "-") + usdVal.usdFormatted(),
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = if (isIncoming) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface
+            )
+            StatusBadge(payment.status)
         }
     }
 }
