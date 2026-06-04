@@ -5,6 +5,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.runtime.*
@@ -33,6 +35,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     var sendAll by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
+    var successTxid by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
@@ -81,9 +84,49 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
 
         if (result != null) {
             Spacer(Modifier.height(40.dp))
-            Text("Sent!", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(8.dp))
-            Text(result!!, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+            Icon(
+                imageVector = Icons.Filled.CheckCircle,
+                contentDescription = "Success",
+                tint = Color(0xFF10B981),
+                modifier = Modifier.size(64.dp)
+            )
+            Spacer(Modifier.height(16.dp))
+            Text("Sent!", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isSystemInDarkTheme()) {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    } else {
+                        Color(0xFFF2F2F7)
+                    }
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = result!!,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (successTxid != null) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            text = "Transaction ID",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = successTxid!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.weight(1f))
             Button(
                 onClick = onDismiss,
@@ -237,7 +280,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     btcPrice = if (price > 0) price else null,
                                     txid = txid, address = addr
                                 )
-                                result = "All funds sent. TXID: $txid"
+                                result = "All funds sent successfully."
+                                successTxid = txid
                             } else {
                                 val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
                                 val sats = if (price > 0) (usd / price * Constants.SATS_IN_BTC).toLong() else throw Exception("No price available")
@@ -246,7 +290,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     val sc = appState.stableChannel.value
                                     appState.pendingSplice = PendingSplice("out", sats, addr)
                                     appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
-                                    result = "Splice-out initiated for $sats sats"
+                                    result = "Splice-out initiated for ${sats.satsFormatted()} sats."
+                                    successTxid = null
                                 } else {
                                     val txid = appState.nodeService.sendOnchain(addr, sats)
                                     appState.databaseService?.recordPayment(
@@ -256,7 +301,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         btcPrice = if (price > 0) price else null,
                                         txid = txid, address = addr
                                     )
-                                    result = "Sent. TXID: $txid"
+                                    result = "Sent successfully."
+                                    successTxid = txid
                                 }
                             }
                         } catch (e: Exception) {

@@ -64,7 +64,7 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 SettingsNavLink(
                     icon = Icons.Default.Send,
                     iconBackground = Color(0xFF10B981),
-                    label = "Send On-Chain",
+                    label = "Send Onchain",
                     onClick = { navController.navigate(SettingsRoute.OnChainSend.route) }
                 )
             }
