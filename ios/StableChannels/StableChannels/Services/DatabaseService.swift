@@ -70,6 +70,7 @@ class DatabaseService {
                 txid TEXT,
                 address TEXT,
                 confirmations INTEGER NOT NULL DEFAULT 0,
+                resolution_id INTEGER,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
@@ -122,11 +123,22 @@ class DatabaseService {
                 resolved_at INTEGER
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS onchain_receive_txids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                txid TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                resolved_at INTEGER
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)"
         ]
 
         for sql in statements {
@@ -144,6 +156,13 @@ class DatabaseService {
         }
         if !colNames.contains("native_sats") {
             try execute("ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0")
+        }
+
+        // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
+        let paymentsCols = try query("PRAGMA table_info(payments)")
+        let paymentsColNames = paymentsCols.compactMap { $0[1] as? String }
+        if !paymentsColNames.contains("resolution_id") {
+            try execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
     }
 
@@ -502,6 +521,230 @@ class DatabaseService {
         }
     }
 
+    // MARK: - Onchain Receive Resolutions
+
+    @discardableResult
+    func insertOnchainReceiveResolution(address: String) -> Int64? {
+        do {
+            try execute(
+                """
+                INSERT INTO onchain_receive_txids (address, status)
+                VALUES (?, 'pending')
+                """,
+                params: [.text(address)]
+            )
+            return Int64(sqlite3_last_insert_rowid(db))
+        } catch {
+            AuditService.log("DB_INSERT_RECEIVE_RES_FAILED", data: ["error": "\(error)"])
+            return nil
+        }
+    }
+
+    func fetchPendingOnchainReceives() -> [OnchainReceiveResolution] {
+        do {
+            let rows = try query(
+                """
+                SELECT id, address, txid, status, created_at, resolved_at
+                FROM onchain_receive_txids
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                """,
+                params: []
+            )
+            return rows.map { row in
+                OnchainReceiveResolution(
+                    id: row[0] as? Int64 ?? 0,
+                    address: row[1] as? String ?? "",
+                    txid: row[2] as? String,
+                    status: row[3] as? String ?? "pending",
+                    createdAt: row[4] as? Int64 ?? 0,
+                    resolvedAt: row[5] as? Int64
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+
+    @discardableResult
+    func updateOnchainReceiveResolution(id: Int64, txid: String) -> Bool {
+        do {
+            try execute(
+                """
+                UPDATE onchain_receive_txids
+                SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
+                WHERE id = ? AND status = 'pending'
+                """,
+                params: [.text(txid), .integer(id)]
+            )
+            return sqlite3_changes(db) > 0
+        } catch {
+            return false
+        }
+    }
+
+    /// Read pending onchain received payments (no txid yet). Used by the
+    /// AppState to find the row to back-fill once the resolver returns a
+    /// real txid. FIFO order (oldest first).
+    func fetchPendingOnchainReceiveRows() -> [PendingOnchainPayment] {
+        do {
+            let rows = try query(
+                """
+                SELECT payment_id, amount_msat, created_at
+                FROM payments
+                WHERE payment_type = 'onchain'
+                  AND direction = 'received'
+                  AND status = 'pending'
+                ORDER BY created_at ASC
+                """,
+                params: []
+            )
+            return rows.map { row in
+                PendingOnchainPayment(
+                    paymentId: row[0] as? String ?? "",
+                    amountMsat: row[1] as? Int64 ?? 0,
+                    createdAt: row[2] as? Int64 ?? 0
+                )
+            }
+        } catch {
+            return []
+        }
+    }
+
+    /// Update a payments row with a real txid and status. Used by the
+    /// AppState once the onchain resolver hits Esplora and we know the
+    /// real receiving txid.
+    @discardableResult
+    func updatePaymentTxid(paymentId: String, txid: String, status: String) -> Bool {
+        do {
+            try execute(
+                """
+                UPDATE payments
+                SET txid = ?, status = ?
+                WHERE payment_id = ?
+                """,
+                params: [.text(txid), .text(status), .text(paymentId)]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Set the `resolution_id` link on a payments row. Used to wire a
+    /// `payments` row to its corresponding `onchain_receive_txids` resolver row.
+    @discardableResult
+    func updatePaymentResolution(paymentId: String, resolutionId: Int64) -> Bool {
+        do {
+            try execute(
+                "UPDATE payments SET resolution_id = ? WHERE payment_id = ?",
+                params: [.integer(resolutionId), .text(paymentId)]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Insert a pending onchain-received `payments` row that is pre-linked
+    /// to a freshly-created `onchain_receive_txids` resolution. Use this
+    /// (instead of `recordPayment` + `updatePaymentResolution`) so a crash
+    /// between the two writes cannot leave an orphan row.
+    @discardableResult
+    func recordOnchainPaymentWithResolution(
+        paymentId: String,
+        amountMsat: Int64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        resolutionId: Int64
+    ) -> Bool {
+        do {
+            try execute(
+                """
+                INSERT INTO payments (
+                    payment_id, payment_type, direction, amount_msat,
+                    amount_usd, btc_price, status, created_at, resolution_id
+                )
+                VALUES (?, 'onchain', 'received', ?, ?, ?, 'pending', strftime('%s', 'now'), ?)
+                """,
+                params: [
+                    .text(paymentId),
+                    .integer(amountMsat),
+                    amountUSD.map { .real($0) } ?? .null,
+                    btcPrice.map { .real($0) } ?? .null,
+                    .integer(resolutionId)
+                ]
+            )
+            return true
+        } catch {
+            AuditService.log("DB_INSERT_ONCHAIN_PAYMENT_FAILED", data: ["error": "\(error)"])
+            return false
+        }
+    }
+
+    /// Fetch the single pending onchain-received payments row that was
+    /// created with the given `resolutionId`. Used to back-fill the row
+    /// with the real txid once the resolver succeeds.
+    func fetchPendingOnchainReceiveRow(resolutionId: Int64) -> PendingOnchainPayment? {
+        do {
+            let rows = try query(
+                """
+                SELECT payment_id, amount_msat, created_at
+                FROM payments
+                WHERE payment_type = 'onchain'
+                  AND direction = 'received'
+                  AND status = 'pending'
+                  AND resolution_id = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                params: [.integer(resolutionId)]
+            )
+            guard let row = rows.first else { return nil }
+            return PendingOnchainPayment(
+                paymentId: row[0] as? String ?? "",
+                amountMsat: row[1] as? Int64 ?? 0,
+                createdAt: row[2] as? Int64 ?? 0
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    /// Fetch the most recent *resolved* onchain receive txid. Used by
+    /// `AppState.handleOnchainReceiveResolved` so the UI shows the latest
+    /// resolved txid (not just the one that fired the callback).
+    func fetchLatestResolvedOnchainTxid() -> String? {
+        do {
+            let rows = try query(
+                """
+                SELECT txid FROM onchain_receive_txids
+                WHERE status = 'resolved' AND txid IS NOT NULL
+                ORDER BY resolved_at DESC LIMIT 1
+                """,
+                params: []
+            )
+            return rows.first?.first as? String
+        } catch {
+            return nil
+        }
+    }
+
+    /// Delete a pending `onchain_receive_txids` row. Used to roll back the
+    /// resolver-side row if the linked `payments` row insert fails.
+    @discardableResult
+    func deleteOnchainReceiveResolution(id: Int64) -> Bool {
+        do {
+            try execute(
+                "DELETE FROM onchain_receive_txids WHERE id = ?",
+                params: [.integer(id)]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private static func parsePendingOperation(_ row: [Any?]) -> PendingOperation {
         PendingOperation(
             opId: row[0] as? String ?? "",
@@ -711,6 +954,21 @@ enum DatabaseError: LocalizedError {
         case .executeFailed(let msg): return "SQL execute failed: \(msg)"
         }
     }
+}
+
+struct OnchainReceiveResolution: Hashable {
+    let id: Int64
+    let address: String
+    let txid: String?
+    let status: String
+    let createdAt: Int64
+    let resolvedAt: Int64?
+}
+
+struct PendingOnchainPayment: Hashable {
+    let paymentId: String
+    let amountMsat: Int64
+    let createdAt: Int64
 }
 
 struct PendingOperation: Equatable {

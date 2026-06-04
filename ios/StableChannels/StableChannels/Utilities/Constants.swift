@@ -18,6 +18,7 @@ enum Constants {
 
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
+    static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
     static let txExplorerURL = "https://mempool.space/tx"
 
     static func txExplorerLink(for txid: String) -> URL? {
