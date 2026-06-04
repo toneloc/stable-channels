@@ -21,6 +21,8 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.util.usdFormatted
+import com.stablechannels.app.util.btcSpacedFormatted
+import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -182,7 +184,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         ConfirmRow("BTC Price", btcPrice.usdFormatted())
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        ConfirmRow("You receive", String.format(Locale.US, "%.8f", btcAmount))
+                        ConfirmRow("You receive", Math.round(btcAmount * Constants.SATS_IN_BTC).btcSpacedFormatted() + " BTC")
                     }
                 }
 

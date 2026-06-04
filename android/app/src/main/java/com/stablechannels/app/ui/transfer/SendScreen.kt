@@ -301,8 +301,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.weight(1f))
             Button(
-                onClick = onDismiss,
-                modifier = Modifier.fillMaxWidth()
+                onClick = onDismiss
             ) {
                 Text("Done")
             }
@@ -481,7 +480,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         }
                                         appState.databaseService?.recordPayment(
                                             paymentId = paymentId, paymentType = "lightning",
-                                            direction = "sent", amountMsat = actualMsat, btcPrice = price
+                                            direction = "sent", amountMsat = actualMsat,
+                                            amountUSD = if (price > 0) (actualMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price else null,
+                                            btcPrice = if (price > 0) price else null
                                         )
                                         result = "Payment sent"
                                     }
@@ -492,7 +493,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
                                         appState.databaseService?.recordPayment(
                                             paymentId = paymentId, paymentType = "bolt12",
-                                            direction = "sent", amountMsat = sats * 1000, btcPrice = price
+                                            direction = "sent", amountMsat = sats * 1000,
+                                            amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                                            btcPrice = if (price > 0) price else null
                                         )
                                         result = "Bolt12 payment sent"
                                     }
@@ -511,7 +514,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             appState.databaseService?.recordPayment(
                                                 paymentId = null, paymentType = "onchain",
                                                 direction = "sent", amountMsat = sats * 1000,
-                                                btcPrice = price, txid = txid, address = trimmed
+                                                amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                                                btcPrice = if (price > 0) price else null,
+                                                txid = txid, address = trimmed
                                             )
                                             result = "On-chain tx sent: $txid"
                                         }

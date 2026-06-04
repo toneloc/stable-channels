@@ -86,7 +86,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     DetailRow("Amount", trade.amountUSD.usdFormatted())
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    DetailRow("BTC Amount", Math.round(trade.amountBTC * Constants.SATS_IN_BTC).btcSpacedFormatted() + " BTC")
+                    DetailRow("BTC Amount", Math.round(trade.amountBTC * Constants.SATS_IN_BTC).btcSpacedFormatted())
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     DetailRow("BTC Price", trade.btcPrice.usdFormatted())
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
