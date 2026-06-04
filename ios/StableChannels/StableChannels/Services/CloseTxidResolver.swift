@@ -1,8 +1,9 @@
 import Foundation
 
-/// Resolves the real close txid for a cooperatively-closed channel by
-/// polling Esplora's `/outspend/{vout}` endpoint for the funding outpoint.
-/// `databaseService` is passed per-call so the struct stays Sendable.
+/// Polls `/tx/{fundingTxid}/outspend/{vout}` for a cooperatively-closed
+/// channel's closing txid. HTTP/retry plumbing lives in
+/// `ResilientEsploraClient`. `databaseService` is per-call so the struct
+/// stays Sendable.
 struct CloseTxidResolver {
     struct Config {
         let maxAttempts: Int
@@ -27,8 +28,8 @@ struct CloseTxidResolver {
         }
     }
 
-    private let urlSession: URLSession
-    private let config: Config
+    private let client: ResilientEsploraClient
+    private let onResolved: @Sendable (String, String) async -> Void
 
     init(
         chainURLs: [String],
@@ -37,19 +38,21 @@ struct CloseTxidResolver {
         config: Config? = nil
     ) {
         precondition(!chainURLs.isEmpty, "CloseTxidResolver requires at least one chain URL")
-        self.urlSession = urlSession
-        self.config = config ?? Config(chainURLs: chainURLs, onResolved: onResolved)
+        self.onResolved = onResolved
+        let cfg = config ?? Config(chainURLs: chainURLs, onResolved: onResolved)
+        self.client = ResilientEsploraClient(
+            urlSession: urlSession,
+            config: .init(
+                chainURLs: cfg.chainURLs,
+                maxAttempts: cfg.maxAttempts,
+                backoffSeconds: cfg.backoffSeconds,
+                timeout: cfg.esploraTimeout
+            )
+        )
     }
 
     static func isValidTxid(_ s: String) -> Bool {
-        guard s.count == 64 else { return false }
-        for c in s {
-            switch c {
-            case "0"..."9", "a"..."f": continue
-            default: return false
-            }
-        }
-        return true
+        ResilientEsploraClient.isValidTxid(s)
     }
 
     func resolve(opId: String, databaseService: DatabaseService) async {
@@ -59,49 +62,30 @@ struct CloseTxidResolver {
               let vout = op.fundingOutpointVout
         else { return }
 
-        for attempt in 0..<config.maxAttempts {
-            if attempt > 0 {
-                if Task.isCancelled { return }
-                let sleepSeconds = config.backoffSeconds[
-                    min(attempt - 1, config.backoffSeconds.count - 1)
-                ]
-                do {
-                    try await Task.sleep(nanoseconds: sleepSeconds * 1_000_000_000)
-                } catch {
-                    return
-                }
-            }
-            for chainURL in config.chainURLs {
-                if Task.isCancelled { return }
-                do {
-                    let trimmedBase = chainURL.hasSuffix("/")
-                        ? String(chainURL.dropLast())
-                        : chainURL
-                    guard !trimmedBase.isEmpty,
-                          let url = URL(string: "\(trimmedBase)/tx/\(fundingTxid)/outspend/\(vout)")
-                    else { continue }
-                    var req = URLRequest(url: url, timeoutInterval: config.esploraTimeout)
-                    req.httpMethod = "GET"
-                    let (data, response) = try await urlSession.data(for: req)
-                    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let spent = json["spent"] as? Bool
-                    else { continue }
-
-                    if spent, let spendingTxid = json["txid"] as? String,
-                       Self.isValidTxid(spendingTxid) {
-                        databaseService.updatePendingOperation(
-                            opId: opId,
-                            closingTxid: spendingTxid,
-                            status: "resolved"
-                        )
-                        await config.onResolved(opId, spendingTxid)
-                        return
-                    }
-                } catch {
-                    continue
-                }
-            }
+        let onResolved = self.onResolved
+        let parser: ResilientEsploraClient.ResultParser<String> = { data in
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let spent = json["spent"] as? Bool
+            else { return nil }
+            guard spent, let txid = json["txid"] as? String,
+                  ResilientEsploraClient.isValidTxid(txid)
+            else { return nil }
+            return txid
         }
+
+        await client.run(
+            endpointBuilder: { base in
+                ["\(ResilientEsploraClient.trimSlash(base))/tx/\(fundingTxid)/outspend/\(vout)"]
+            },
+            resultParser: parser,
+            onResolved: { txid in
+                databaseService.updatePendingOperation(
+                    opId: opId,
+                    closingTxid: txid,
+                    status: "resolved"
+                )
+                await onResolved(opId, txid)
+            }
+        )
     }
 }
