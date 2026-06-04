@@ -56,7 +56,7 @@ fun SettingsNavHost(appState: AppState, modifier: Modifier = Modifier) {
         }
         composable(SettingsRoute.OnChainSend.route) {
             SettingsSubViewScaffold(title = "Send On-Chain", navController = navController) {
-                OnChainSendSettingsView(appState = appState)
+                OnChainSendSettingsView(appState = appState, onDismiss = { navController.popBackStack() })
             }
         }
         composable(SettingsRoute.Appearance.route) {

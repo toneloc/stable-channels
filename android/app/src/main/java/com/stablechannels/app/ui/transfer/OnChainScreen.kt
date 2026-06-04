@@ -22,6 +22,7 @@ import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
+import com.stablechannels.app.util.btcSpacedFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -41,7 +42,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
 
     Column(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -79,11 +80,17 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
         Spacer(Modifier.height(16.dp))
 
         if (result != null) {
+            Spacer(Modifier.height(40.dp))
             Text("Sent!", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(8.dp))
-            Text(result!!, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(16.dp))
-            Button(onClick = onDismiss) { Text("Done") }
+            Text(result!!, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Done")
+            }
         } else {
             if (hasChannel && !sendAll) {
                 Card(
@@ -184,12 +191,25 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Text("~ ${satsFromUSD.satsFormatted()} sats", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
-                Text(
-                    text = "Send All (${onchainSats.satsFormatted()} sats)",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = onchainUSD.usdFormatted(),
+                        fontSize = 44.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = onchainSats.btcSpacedFormatted() + " BTC",
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
             }
 
             error?.let {
@@ -198,6 +218,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
 
             Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.weight(1f))
             Button(
                 onClick = {
                     isSending = true
