@@ -129,8 +129,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.weight(1f))
             Button(
-                onClick = onDismiss,
-                modifier = Modifier.fillMaxWidth()
+                onClick = onDismiss
             ) {
                 Text("Done")
             }
