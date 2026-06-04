@@ -140,9 +140,12 @@ class AppState {
     // pending_operations row at request time (NodeService.requestChannelClose)
     // and read back at resolve time. No need for in-memory snapshot fields.
 
+    private(set) var lastReceiveTxid: String?
+
     private var closeTxidResolver: CloseTxidResolver?
-    private var resolverTasks: [String: Task<Void, Never>] = [:]
-    private var resolverTaskGenerations: [String: UUID] = [:]
+    private var onchainTxidResolver: OnchainTxidResolver?
+    private var closeLauncher = StaggeredTaskLauncher()
+    private var onchainLauncher = StaggeredTaskLauncher()
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
@@ -178,12 +181,31 @@ class AppState {
             resolverConfig.timeoutIntervalForResource = 10
             let resolverSession = URLSession(configuration: resolverConfig)
             closeTxidResolver = CloseTxidResolver(
-                chainURLs: [Constants.primaryChainURL, Constants.fallbackChainURL],
+                chainURLs: Constants.esploraChainURLs,
                 onResolved: { [weak self] opId, closingTxid in
                     await self?.handleCloseTxidResolved(opId: opId, closingTxid: closingTxid)
                 },
                 urlSession: resolverSession
             )
+            onchainTxidResolver = OnchainTxidResolver(
+                chainURLs: Constants.esploraChainURLs,
+                onResolved: { [weak self] resolutionId, txid in
+                    await self?.handleOnchainReceiveResolved(resolutionId: resolutionId, txid: txid)
+                },
+                urlSession: resolverSession
+            )
+            // Restore lastReceiveTxid from UserDefaults, with 7-day expiry so
+            // a txid from a previous session doesn't linger forever.
+            let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            if let stored = defaults?.string(forKey: "last_receive_txid"),
+               let storedAt = defaults?.object(forKey: "last_receive_txid_at") as? Int64,
+               Date().timeIntervalSince1970 - TimeInterval(storedAt) < 7 * 86400 {
+                lastReceiveTxid = stored
+            } else {
+                defaults?.removeObject(forKey: "last_receive_txid")
+                defaults?.removeObject(forKey: "last_receive_txid_at")
+                lastReceiveTxid = nil
+            }
         }
 
         tradeService = TradeService(nodeService: nodeService)
@@ -268,6 +290,7 @@ class AppState {
                 // Check if NSE flagged a pending payment while app was killed
                 await processPendingPushPayment()
                 replayPendingChannelCloses()
+                replayPendingOnchainReceives()
             } catch {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
@@ -293,6 +316,7 @@ class AppState {
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
                 replayPendingChannelCloses()
+                replayPendingOnchainReceives()
             } catch {
                 await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
             }
@@ -306,25 +330,28 @@ class AppState {
             // Stagger across close ops so a backlog of N pending closes does
             // not hit Esplora with N concurrent requests. 1s per op = at
             // most 1 req/sec on the public endpoints.
-            let delayNs = UInt64(i) * 1_000_000_000
-            // Cancel prior task: replay may run twice in some lifecycle paths
-            if let existing = resolverTasks[op.opId] {
-                existing.cancel()
-            }
-            let generation = UUID()
-            let newTask = Task { @MainActor [weak self] in
-                if delayNs > 0 {
-                    try? await Task.sleep(nanoseconds: delayNs)
-                }
+            let delay = UInt64(i) // 1s per op
+            closeLauncher.launch(opId: op.opId, delaySeconds: delay) { [weak self] in
                 guard let self, let db = self.databaseService else { return }
                 await self.closeTxidResolver?.resolve(opId: op.opId, databaseService: db)
-                if self.resolverTaskGenerations[op.opId] == generation {
-                    self.resolverTasks[op.opId] = nil
-                    self.resolverTaskGenerations[op.opId] = nil
-                }
             }
-            resolverTasks[op.opId] = newTask
-            resolverTaskGenerations[op.opId] = generation
+        }
+    }
+
+    private func replayPendingOnchainReceives() {
+        guard let db = databaseService else { return }
+        let pending = db.fetchPendingOnchainReceives()
+        for (i, res) in pending.enumerated() {
+            let delay = UInt64(i) // 1s per resolution
+            let opId = "onchain-receive-\(res.id)"
+            onchainLauncher.launch(opId: opId, delaySeconds: delay) { [weak self] in
+                guard let self, let db = self.databaseService else { return }
+                await self.onchainTxidResolver?.resolve(
+                    resolutionId: res.id,
+                    address: res.address,
+                    databaseService: db
+                )
+            }
         }
     }
 
@@ -1108,20 +1135,21 @@ class AppState {
 
         // Cancel prior; new task only clears state if generation still matches
         let opId = "close-\(userChannelId)"
-        if let existing = resolverTasks[opId] {
-            existing.cancel()
-        }
-        let generation = UUID()
-        let newTask = Task { @MainActor [weak self] in
+        closeLauncher.launch(opId: opId) { [weak self] in
             guard let self, let db = self.databaseService else { return }
             await self.closeTxidResolver?.resolve(opId: opId, databaseService: db)
-            if self.resolverTaskGenerations[opId] == generation {
-                self.resolverTasks[opId] = nil
-                self.resolverTaskGenerations[opId] = nil
-            }
         }
-        resolverTasks[opId] = newTask
-        resolverTaskGenerations[opId] = generation
+    }
+
+    private func setLastReceiveTxid(_ txid: String?) {
+        lastReceiveTxid = txid
+        let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        defaults?.set(txid, forKey: "last_receive_txid")
+        if txid != nil {
+            defaults?.set(Int64(Date().timeIntervalSince1970), forKey: "last_receive_txid_at")
+        } else {
+            defaults?.removeObject(forKey: "last_receive_txid_at")
+        }
     }
 
     @MainActor
@@ -1160,6 +1188,25 @@ class AppState {
         AuditService.log("CLOSE_TXID_RESOLVED", data: [
             "op_id": opId,
             "closing_txid": closingTxid
+        ])
+    }
+
+    @MainActor
+    func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
+        if let db = databaseService,
+           let row = db.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
+            db.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
+        }
+        // Latest resolved wins if a more recent resolver beat us to it.
+        if let db = databaseService,
+           let latest = db.fetchLatestResolvedOnchainTxid() {
+            setLastReceiveTxid(latest)
+        } else {
+            setLastReceiveTxid(txid)
+        }
+        AuditService.log("ONCHAIN_RECEIVE_RESOLVED", data: [
+            "resolution_id": "\(resolutionId)",
+            "txid": txid
         ])
     }
 
@@ -1344,22 +1391,67 @@ class AppState {
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
 
-            let depositId = "\(Int64(Date().timeIntervalSince1970))_\(depositSats)"
-            _ = try? databaseService?.recordPayment(
-                paymentId: depositId,
-                paymentType: "onchain",
-                direction: "received",
-                amountMsat: depositSats * 1000,
-                amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil,
-                counterparty: nil,
-                status: "completed"
-            )
+            // UUID -> unique depositId -> recordPayment dedup on retry.
+            let depositId = "onchain_deposit_\(UUID().uuidString)"
+
+            // Resolver row first, then payments row linked via resolution_id.
+            // Crash between the two leaves an orphan resolver row, harmless
+            // on replay. Reverse order could leak a payments row with a
+            // dangling resolution_id.
+            if let address = onchainReceiveAddress, !address.isEmpty {
+                guard let resolutionId = databaseService?.insertOnchainReceiveResolution(address: address) else {
+                    AuditService.log("ONCHAIN_RECEIVE_RES_INSERT_FAILED", data: ["address": address])
+                    prevOnchainSats = currentOnchain
+                    return
+                }
+                let ok = databaseService?.recordOnchainPaymentWithResolution(
+                    paymentId: depositId,
+                    amountMsat: Int64(depositSats * 1000),
+                    amountUSD: amountUSD,
+                    btcPrice: price > 0 ? price : nil,
+                    resolutionId: resolutionId
+                ) ?? false
+                if !ok {
+                    // Roll back the resolver row to keep the world consistent.
+                    _ = databaseService?.deleteOnchainReceiveResolution(id: resolutionId)
+                    prevOnchainSats = currentOnchain
+                    return
+                }
+                // Kick the resolver
+                let opId = "onchain-receive-\(resolutionId)"
+                onchainLauncher.launch(opId: opId, delaySeconds: 0) { [weak self] in
+                    guard let self, let db = self.databaseService else { return }
+                    await self.onchainTxidResolver?.resolve(
+                        resolutionId: resolutionId,
+                        address: address,
+                        databaseService: db
+                    )
+                }
+                // NOTE: do NOT clear lastReceiveTxid here. The view should
+                // show the most recent resolved txid, not be blanked during
+                // the re-detection window. The resolver will update
+                // lastReceiveTxid via handleOnchainReceiveResolved.
+            } else {
+                // No current address known: write completed row without txid
+                // (the explorer link won't be available; user can re-generate
+                // an address to see the on-chain link).
+                try? databaseService?.recordPayment(
+                    paymentId: depositId,
+                    paymentType: "onchain",
+                    direction: "received",
+                    amountMsat: depositSats * 1000,
+                    amountUSD: amountUSD,
+                    btcPrice: price > 0 ? price : nil,
+                    counterparty: nil,
+                    status: "completed"
+                )
+            }
 
             AuditService.log("ONCHAIN_DEPOSIT_DETECTED", data: [
                 "amount_sats": "\(depositSats)",
                 "prev_onchain": "\(prevOnchainSats)",
-                "new_onchain": "\(currentOnchain)"
+                "new_onchain": "\(currentOnchain)",
+                "address_known": "\(onchainReceiveAddress != nil)"
             ])
         }
         prevOnchainSats = currentOnchain
