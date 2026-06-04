@@ -33,7 +33,7 @@ struct PaymentDetailView: View {
                     }
                     if let txid = payment.txid {
                         row(String(localized: "label_txid", defaultValue: "TXID"), txid)
-                        if let url = URL(string: "https://mempool.space/tx/\(txid)") {
+                        if let url = Constants.txExplorerLink(for: txid) {
                             Link(destination: url) {
                                 HStack(spacing: 4) {
                                     Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
