@@ -8,7 +8,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.lightningdevkit.ldknode.*
 import java.io.File
@@ -17,8 +20,9 @@ class NodeService(private val context: Context) {
 
     var node: Node? = null
         private set
-    var isRunning: Boolean = false
-        private set
+    private val _isRunning = MutableStateFlow(false)
+    val isRunningFlow: StateFlow<Boolean> = _isRunning.asStateFlow()
+    val isRunning: Boolean get() = _isRunning.value
     var nodeId: String = ""
         private set
     var channels: List<ChannelDetails> = emptyList()
@@ -104,7 +108,7 @@ class NodeService(private val context: Context) {
         ldkNode.start()
 
         node = ldkNode
-        isRunning = true
+        _isRunning.value = true
         nodeId = ldkNode.nodeId()
 
         // Connect to gateway and LSP
@@ -128,7 +132,7 @@ class NodeService(private val context: Context) {
         eventJob = null
         node?.stop()
         node = null
-        isRunning = false
+        _isRunning.value = false
     }
 
     private fun startEventLoop() {

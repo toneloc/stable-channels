@@ -78,6 +78,10 @@ class StabilityProcessingService : Service() {
             return
         }
 
+        // Strip gossip from SQLite to avoid OOM in the foreground service.
+        // The NSE doesn't need gossip (it only routes to the LSP, a direct peer).
+        stripGossipFromDB(dataDir)
+
         // Build lightweight LDK node (no RGS, no LSPS2)
         val anchorConfig = AnchorChannelsConfig(
             trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
@@ -258,7 +262,7 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
 
         try {
-            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), emptyList())
+            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), listOf(1.toUByte()))
             node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),
                 Constants.DEFAULT_LSP_PUBKEY,
@@ -299,7 +303,7 @@ class StabilityProcessingService : Service() {
             val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
                 // Deterministic fallback row when multiple channels exist.
-                "SELECT expected_usd, receiver_sats, latest_price, native_sats, stable_sats FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
+                "SELECT expected_usd, receiver_sats, latest_price, stable_sats FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -307,8 +311,8 @@ class StabilityProcessingService : Service() {
                     ChannelState(
                         expectedUsd = it.getDouble(0),
                         receiverSats = it.getLong(1),
-                        nativeSats = if (it.columnCount > 3) it.getLong(3) else 0,
-                        backingSats = if (it.columnCount > 4) it.getLong(4) else 0,
+                        nativeSats = 0,  // not in DB schema, computed at runtime
+                        backingSats = it.getLong(3),
                         latestPrice = it.getDouble(2)
                     )
                 } else null
@@ -438,6 +442,36 @@ class StabilityProcessingService : Service() {
             is String -> current.toDoubleOrNull()
             is JSONArray -> (current.opt(0) as? String)?.toDoubleOrNull()
             else -> null
+        }
+    }
+
+    /**
+     * Delete network_graph, scorer, and node_metrics from the LDK SQLite DB.
+     * The background service doesn't need gossip (it only routes to the LSP, a direct peer).
+     * This reduces the DB from ~10MB to ~30KB, preventing OOM on low-memory devices.
+     */
+    private fun stripGossipFromDB(dataDir: File) {
+        val ldkDbPath = File(dataDir, "ldk_node_data.sqlite")
+        if (!ldkDbPath.exists()) return
+
+        try {
+            val db = SQLiteDatabase.openDatabase(ldkDbPath.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
+
+            // Check if network_graph exists and is large enough to matter
+            val cursor = db.rawQuery("SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'", null)
+            val graphSize = cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
+
+            if (graphSize > 100_000) {
+                db.execSQL("DELETE FROM ldk_node_data WHERE key = 'network_graph'")
+                db.execSQL("DELETE FROM ldk_node_data WHERE key = 'scorer'")
+                db.execSQL("DELETE FROM ldk_node_data WHERE key = 'node_metrics'")
+                Log.d(TAG, "Stripped gossip from LDK DB (saved ${graphSize / 1024}KB)")
+            } else {
+                Log.d(TAG, "Gossip data small ($graphSize bytes), skipping strip")
+            }
+            db.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to strip gossip from LDK DB: ${e.message}")
         }
     }
 }
