@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -17,6 +18,7 @@ import com.stablechannels.app.util.Constants
 @Composable
 fun NodeView(appState: AppState) {
     val clipboardManager = LocalClipboardManager.current
+    val isRunning by appState.nodeService.isRunningFlow.collectAsState()
     var showNodeId by remember { mutableStateOf(false) }
     var copiedNodeId by remember { mutableStateOf(false) }
 
@@ -41,14 +43,14 @@ fun NodeView(appState: AppState) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
-                        color = if (appState.nodeService.isRunning) Color(0xFF10B981) else Color(0xFFEF4444),
+                        color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444),
                         modifier = Modifier.size(8.dp)
                     ) {}
                     Text(
-                        text = if (appState.nodeService.isRunning) "Running" else "Stopped",
+                        text = if (isRunning) "Running" else "Stopped",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium,
-                        color = if (appState.nodeService.isRunning) Color(0xFF10B981) else Color(0xFFEF4444)
+                        color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444)
                     )
                 }
             }
