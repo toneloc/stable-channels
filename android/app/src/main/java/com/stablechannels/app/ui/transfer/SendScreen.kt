@@ -328,7 +328,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
                         onClick = {
-                            val maxSats = if (inputType == InputType.ONCHAIN) spendableOnchainSats else lightningSats
+                            val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+                            val maxSats = if (inputType == InputType.ONCHAIN) {
+                                if (hasChannel) lightningSats else spendableOnchainSats
+                            } else {
+                                lightningSats
+                            }
                             val maxUSD = (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                             amountUSDStr = String.format(java.util.Locale.US, "%.2f", maxUSD)
                         },
