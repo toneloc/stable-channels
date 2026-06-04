@@ -9,6 +9,6 @@ import com.stablechannels.app.ui.transfer.OnChainSendScreen
  * The dismiss callback is a no-op since back navigation is handled by the scaffold.
  */
 @Composable
-fun OnChainSendSettingsView(appState: AppState) {
-    OnChainSendScreen(appState = appState, onDismiss = {})
+fun OnChainSendSettingsView(appState: AppState, onDismiss: () -> Unit) {
+    OnChainSendScreen(appState = appState, onDismiss = onDismiss)
 }

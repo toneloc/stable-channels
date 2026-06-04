@@ -207,7 +207,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(4.dp))
                 if (showBTC) {
                     Text(
-                        text = totalSats.btcSpacedFormatted(),
+                        text = totalSats.btcSpacedFormatted() + " BTC",
                         fontSize = 32.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
@@ -237,7 +237,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Text(
                     text = if (showBTC) {
                         if (btcPrice > 0) totalUSD.usdFormatted() else "—"
-                    } else totalSats.btcSpacedFormatted(),
+                    } else totalSats.btcSpacedFormatted() + " BTC",
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -301,7 +301,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         ) {
                             Text("Onchain", style = MaterialTheme.typography.labelMedium)
                             Text(
-                                "${onchainSats.satsFormatted()} (${onchainUSD.usdFormatted()})",
+                                onchainUSD.usdFormatted(),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
