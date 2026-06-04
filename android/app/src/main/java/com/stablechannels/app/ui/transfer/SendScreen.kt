@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.QuestionMark
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
@@ -170,7 +171,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
     Column(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -269,11 +270,42 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         Spacer(Modifier.height(16.dp))
 
         if (result != null) {
-            Text("Sent!", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(8.dp))
-            Text(result!!, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(40.dp))
+            Icon(
+                imageVector = Icons.Filled.CheckCircle,
+                contentDescription = "Success",
+                tint = Color(0xFF10B981),
+                modifier = Modifier.size(64.dp)
+            )
             Spacer(Modifier.height(16.dp))
-            Button(onClick = onDismiss) { Text("Done") }
+            Text("Sent!", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(12.dp))
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isSystemInDarkTheme()) {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    } else {
+                        Color(0xFFF2F2F7)
+                    }
+                ),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+            ) {
+                Text(
+                    text = result!!,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(16.dp),
+                    textAlign = TextAlign.Center
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = onDismiss,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Done")
+            }
         } else {
             // Loading indicator during photo QR extraction
             if (isExtractingQR) {
@@ -399,6 +431,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
 
             Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.weight(1f))
             Button(
                 onClick = {
                     isSending = true
