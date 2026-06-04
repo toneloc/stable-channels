@@ -39,6 +39,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     var payments by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
     var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
+    val currentPrice by appState.priceService.currentPrice.collectAsState()
 
     fun loadHistory() {
         trades = appState.databaseService?.getRecentTrades() ?: emptyList()
@@ -160,7 +161,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         OrderDetailBottomSheet(trade) { selectedTrade = null }
     }
     selectedPayment?.let { payment ->
-        PaymentDetailBottomSheet(payment) { selectedPayment = null }
+        PaymentDetailBottomSheet(payment, currentPrice) { selectedPayment = null }
     }
 }
 

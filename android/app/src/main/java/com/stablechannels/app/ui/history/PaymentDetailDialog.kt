@@ -17,7 +17,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PaymentDetailBottomSheet(payment: PaymentRecord, onDismiss: () -> Unit) {
+fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0, onDismiss: () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -89,7 +89,20 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, onDismiss: () -> Unit) {
                     DetailRow("Type", typeLabel)
                     
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    DetailRow("Amount", payment.amountUSD?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats")
+                    val isLightning = payment.paymentType == "lightning" || payment.paymentType == "bolt12" || payment.paymentType == "bolt11" || typeLabel == "Lightning" || typeLabel == "Bolt12"
+                    val amountStr = if (isLightning) {
+                        val usdVal = payment.amountUSD ?: payment.btcPrice?.let { price ->
+                            if (price > 0.0) (payment.amountSats.toDouble() / 100_000_000.0) * price else null
+                        } ?: if (currentPrice > 0.0) {
+                            (payment.amountSats.toDouble() / 100_000_000.0) * currentPrice
+                        } else {
+                            null
+                        }
+                        usdVal?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
+                    } else {
+                        payment.amountUSD?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
+                    }
+                    DetailRow("Amount", amountStr)
                     
                     payment.btcPrice?.let {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
