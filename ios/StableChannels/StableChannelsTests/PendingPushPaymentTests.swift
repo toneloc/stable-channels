@@ -1,6 +1,7 @@
 @testable import StableChannels
 import XCTest
 
+@MainActor
 final class PendingPushPaymentTests: XCTestCase {
     private let key = "pending_push_payment"
 
