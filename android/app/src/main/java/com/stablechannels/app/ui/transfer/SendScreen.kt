@@ -6,6 +6,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -169,9 +171,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         return
     }
 
+    val isDark = MaterialTheme.colorScheme.background == Color.Black
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -186,7 +190,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
                     colors = ButtonDefaults.textButtonColors(
-                        containerColor = if (isSystemInDarkTheme()) {
+                        containerColor = if (isDark) {
                             MaterialTheme.colorScheme.surfaceVariant
                         } else {
                             Color(0xFFE5E5EA)
@@ -210,7 +214,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
                         .background(
-                            color = if (isSystemInDarkTheme()) {
+                            color = if (isDark) {
                                 MaterialTheme.colorScheme.surfaceVariant
                             } else {
                                 Color(0xFFE5E5EA)
@@ -243,7 +247,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                             .width(0.5.dp)
                             .height(20.dp)
                             .background(
-                                color = if (isSystemInDarkTheme()) {
+                                color = if (isDark) {
                                     Color(0xFF38383A)
                                 } else {
                                     Color(0xFFC7C7CC)
@@ -359,13 +363,19 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
                         onClick = {
-                            val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
-                            val maxSats = if (inputType == InputType.ONCHAIN) {
-                                if (hasChannel) lightningSats else spendableOnchainSats
+                            val maxUSD = if (inputType == InputType.ONCHAIN) {
+                                val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+                                val maxSats = if (hasChannel) lightningSats else spendableOnchainSats
+                                (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                             } else {
-                                lightningSats
+                                val sc = appState.stableChannel.value
+                                if (sc.expectedUSD.amount > 0.0) {
+                                    sc.expectedUSD.amount
+                                } else {
+                                    val maxSats = maxOf(lightningSats, spendableOnchainSats)
+                                    (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                                }
                             }
-                            val maxUSD = (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                             amountUSDStr = String.format(java.util.Locale.US, "%.2f", maxUSD)
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)

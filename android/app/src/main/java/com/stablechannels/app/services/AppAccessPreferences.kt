@@ -105,7 +105,10 @@ object AppAccessPreferencesManager {
 
     /**
      * Whether auth is required to view the seed phrase.
-     * Always returns true — seed phrase viewing is always gated.
+     * Returns true if either app unlock or payment confirmation is enabled.
      */
-    fun shouldRequireAuthForSeedPhrase(): Boolean = true
+    fun shouldRequireAuthForSeedPhrase(context: Context): Boolean {
+        val prefs = getPreferences(context)
+        return prefs.appUnlockEnabled || prefs.paymentConfirmationEnabled
+    }
 }
