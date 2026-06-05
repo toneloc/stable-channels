@@ -24,6 +24,12 @@
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
 		49948C312FBB9DF900327290 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 49948C302FBB9DF900327290 /* Localizable.xcstrings */; };
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
+		499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */; };
+		499DBE712FD2DACF003E89F9 /* ResilientEsploraClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */; };
+		499DBE722FD2DACF003E89F9 /* StaggeredTaskLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */; };
+		499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */; };
+		499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */; };
+		499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -117,6 +123,12 @@
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
 		49948C302FBB9DF900327290 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
+		499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainTxidResolver.swift; sourceTree = "<group>"; };
+		499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResilientEsploraClient.swift; sourceTree = "<group>"; };
+		499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncher.swift; sourceTree = "<group>"; };
+		499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainTxidResolverTests.swift; sourceTree = "<group>"; };
+		499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResilientEsploraClientTests.swift; sourceTree = "<group>"; };
+		499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncherTests.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -238,6 +250,9 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
+				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
+				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
 				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
@@ -353,6 +368,9 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
+				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
+				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
+				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
@@ -478,6 +496,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
+				499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */,
+				499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */,
+				499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */,
 				49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
@@ -494,6 +515,9 @@
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
+				499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */,
+				499DBE712FD2DACF003E89F9 /* ResilientEsploraClient.swift in Sources */,
+				499DBE722FD2DACF003E89F9 /* StaggeredTaskLauncher.swift in Sources */,
 				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
