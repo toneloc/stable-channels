@@ -714,14 +714,15 @@ class DatabaseService {
 
     /// Fetch the most recent *resolved* onchain receive txid. Used by
     /// `AppState.handleOnchainReceiveResolved` so the UI shows the latest
-    /// resolved txid (not just the one that fired the callback).
+    /// resolved txid (not just the one that fired the callback). Tiebreak
+    /// by `id DESC` so two resolutions in the same second are deterministic.
     func fetchLatestResolvedOnchainTxid() -> String? {
         do {
             let rows = try query(
                 """
                 SELECT txid FROM onchain_receive_txids
                 WHERE status = 'resolved' AND txid IS NOT NULL
-                ORDER BY resolved_at DESC LIMIT 1
+                ORDER BY resolved_at DESC, id DESC LIMIT 1
                 """,
                 params: []
             )
