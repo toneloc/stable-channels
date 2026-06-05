@@ -8,8 +8,9 @@ final class StaggeredTaskLauncher {
     private var tasks: [String: Task<Void, Never>] = [:]
     private var generations: [String: UUID] = [:]
 
-    /// Launch `task` after `delaySeconds`. If a task is already running
-    /// for `opId`, it is cancelled and replaced. The closure may exit
+    /// Launch `task` after `delaySeconds` (SECONDS, not milliseconds — multiplied
+    /// by 1e9 below to get nanoseconds for `Task.sleep`). If a task is already
+    /// running for `opId`, it is cancelled and replaced. The closure may exit
     /// early by checking `Task.isCancelled`.
     func launch(opId: String, delaySeconds: UInt64 = 0, _ task: @escaping @MainActor () async -> Void) {
         tasks[opId]?.cancel()
@@ -17,6 +18,8 @@ final class StaggeredTaskLauncher {
         generations[opId] = generation
         let newTask = Task { @MainActor [weak self] in
             if delaySeconds > 0 {
+                // Unit: seconds. Caller passes e.g. UInt64(i) where i is a per-op index
+                // in a burst-replay loop, e.g. 0s, 2s, 4s, 6s for 4 ops.
                 try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
                 if Task.isCancelled { return }
             }

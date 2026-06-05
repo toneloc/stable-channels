@@ -183,7 +183,7 @@ final class OnchainTxidResolverTests: XCTestCase {
         XCTAssertNotNil(pending)
     }
 
-    func testResolve_cancelsBeforeAnyFire_strict() async throws {
+    func testResolve_allFailingResponses_neverFiresOnResolved() async throws {
         // Force a 503 on every response so onResolved can never fire
         // regardless of cancellation timing.
         MockURLProtocol.requestHandler = { _ in

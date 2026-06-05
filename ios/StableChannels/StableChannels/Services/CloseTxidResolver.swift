@@ -10,21 +10,17 @@ struct CloseTxidResolver {
         let backoffSeconds: [UInt64]
         let esploraTimeout: TimeInterval
         let chainURLs: [String]
-        let onResolved: @Sendable (String, String) async
-            -> Void // (opId, closingTxid); never throws, caller handles its own errors
 
         init(
             maxAttempts: Int = 5,
             backoffSeconds: [UInt64] = [1, 4, 16, 64, 256],
             esploraTimeout: TimeInterval = 5,
-            chainURLs: [String],
-            onResolved: @escaping @Sendable (String, String) async -> Void
+            chainURLs: [String]
         ) {
             self.maxAttempts = maxAttempts
             self.backoffSeconds = backoffSeconds
             self.esploraTimeout = esploraTimeout
             self.chainURLs = chainURLs
-            self.onResolved = onResolved
         }
     }
 
@@ -39,7 +35,7 @@ struct CloseTxidResolver {
     ) {
         precondition(!chainURLs.isEmpty, "CloseTxidResolver requires at least one chain URL")
         self.onResolved = onResolved
-        let cfg = config ?? Config(chainURLs: chainURLs, onResolved: onResolved)
+        let cfg = config ?? Config(chainURLs: chainURLs)
         self.client = ResilientEsploraClient(
             urlSession: urlSession,
             config: .init(

@@ -61,6 +61,14 @@ struct OnchainTxidResolver {
             onResolved: { txid in
                 if databaseService.updateOnchainReceiveResolution(id: resolutionId, txid: txid) {
                     await onResolved(resolutionId, txid)
+                } else {
+                    // Update refused: row already resolved by an earlier resolver run,
+                    // or the row was deleted. Skip onResolved to avoid clobbering the
+                    // existing state. Log so a stuck UI is debuggable from audit trail.
+                    AuditService.log("ONCHAIN_RECEIVE_RES_UPDATE_SKIPPED", data: [
+                        "resolution_id": "\(resolutionId)",
+                        "txid": "\(txid)"
+                    ])
                 }
             }
         )
