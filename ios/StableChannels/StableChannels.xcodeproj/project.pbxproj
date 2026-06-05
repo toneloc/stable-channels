@@ -30,6 +30,8 @@
 		499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */; };
 		499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */; };
 		499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */; };
+		499DBE7B2FD2F06F003E89F9 /* TxidLinkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */; };
+		499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -129,6 +131,8 @@
 		499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainTxidResolverTests.swift; sourceTree = "<group>"; };
 		499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResilientEsploraClientTests.swift; sourceTree = "<group>"; };
 		499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncherTests.swift; sourceTree = "<group>"; };
+		499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepositRecorder.swift; sourceTree = "<group>"; };
+		499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidLinkStore.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -250,6 +254,8 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
+				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
@@ -545,6 +551,8 @@
 				49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */,
 				06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */,
 				49F0B0DE2FC0EF3A003A3B89 /* BackupSettingsView.swift in Sources */,
+				499DBE7B2FD2F06F003E89F9 /* TxidLinkStore.swift in Sources */,
+				499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */,
 				49F0B0DF2FC0EF3A003A3B89 /* ChannelSettingsView.swift in Sources */,
 				49F0B0E02FC0EF3A003A3B89 /* NodeSettingsView.swift in Sources */,
 				49F0B0E12FC0EF3A003A3B89 /* NotificationsSettingsView.swift in Sources */,

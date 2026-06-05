@@ -4,15 +4,12 @@ import Foundation
 /// updates the DB row (`resolutionId`) and fires `onResolved`. Thin
 /// policy wrapper over `ResilientEsploraClient`: paths + parser only.
 struct OnchainTxidResolver {
-    typealias OnResolved = @MainActor (Int64, String) async
-        -> Void // (resolutionId, txid); never throws
-
     private let client: ResilientEsploraClient
-    private let onResolved: OnResolved
+    private let onResolved: CloseTxidResolver.OnTxidResolved
 
     init(
         chainURLs: [String],
-        onResolved: @escaping OnResolved,
+        onResolved: @escaping OnTxidResolved,
         urlSession: URLSession = .shared,
         maxAttempts: Int = 8,
         backoffSeconds: [UInt64] = [2, 8, 30, 60, 120, 300, 600, 900],
@@ -38,6 +35,7 @@ struct OnchainTxidResolver {
     /// on exhaustion, budget overrun, or cancellation.
     func resolve(resolutionId: Int64, address: String, databaseService: DatabaseService) async {
         let onResolved = self.onResolved
+        let workId = "res-\(resolutionId)"
         let parser: ResilientEsploraClient.ResultParser<String> = { data in
             guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
             else { return nil }
@@ -59,16 +57,23 @@ struct OnchainTxidResolver {
             },
             resultParser: parser,
             onResolved: { txid in
-                if databaseService.updateOnchainReceiveResolution(id: resolutionId, txid: txid) {
-                    await onResolved(resolutionId, txid)
+                // databaseService is non-Sendable; hop to MainActor for the DB
+                // call so the closure stays Sendable-safe.
+                let updated = await MainActor.run {
+                    databaseService.updateOnchainReceiveResolution(id: resolutionId, txid: txid)
+                }
+                if updated {
+                    await onResolved(workId, txid)
                 } else {
                     // Update refused: row already resolved by an earlier resolver run,
                     // or the row was deleted. Skip onResolved to avoid clobbering the
                     // existing state. Log so a stuck UI is debuggable from audit trail.
-                    AuditService.log("ONCHAIN_RECEIVE_RES_UPDATE_SKIPPED", data: [
-                        "resolution_id": "\(resolutionId)",
-                        "txid": "\(txid)"
-                    ])
+                    await MainActor.run {
+                        AuditService.log("ONCHAIN_RECEIVE_RES_UPDATE_SKIPPED", data: [
+                            "resolution_id": "\(resolutionId)",
+                            "txid": "\(txid)"
+                        ])
+                    }
                 }
             }
         )

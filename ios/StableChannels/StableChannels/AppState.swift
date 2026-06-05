@@ -135,12 +135,10 @@ class AppState {
 
     // MARK: - Close-txid resolver state
 
-    private(set) var lastCloseTxid: String?
+    let txidLinks = TxidLinkStore()
     // Close metadata (balance, price, counterparty) is persisted to the
     // pending_operations row at request time (NodeService.requestChannelClose)
     // and read back at resolve time. No need for in-memory snapshot fields.
-
-    private(set) var lastReceiveTxid: String?
 
     private var closeTxidResolver: CloseTxidResolver?
     private var onchainTxidResolver: OnchainTxidResolver?
@@ -189,33 +187,16 @@ class AppState {
             )
             onchainTxidResolver = OnchainTxidResolver(
                 chainURLs: Constants.esploraChainURLs,
-                onResolved: { [weak self] resolutionId, txid in
+                onResolved: { [weak self] workId, txid in
+                    // workId is "res-<resolutionId>"; recover the Int64.
+                    guard let idStr = workId.split(separator: "-", maxSplits: 1).last,
+                          let resolutionId = Int64(idStr) else { return }
                     await self?.handleOnchainReceiveResolved(resolutionId: resolutionId, txid: txid)
                 },
                 urlSession: resolverSession
             )
-            // Restore lastReceiveTxid / lastCloseTxid from UserDefaults, with 7-day expiry
-            // so a txid from a previous session doesn't linger forever.
-            let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
-            let now = Date().timeIntervalSince1970
-            if let stored = defaults?.string(forKey: "last_receive_txid"),
-               let storedAt = defaults?.object(forKey: "last_receive_txid_at") as? Int64,
-               now - TimeInterval(storedAt) < 7 * 86400 {
-                lastReceiveTxid = stored
-            } else {
-                defaults?.removeObject(forKey: "last_receive_txid")
-                defaults?.removeObject(forKey: "last_receive_txid_at")
-                lastReceiveTxid = nil
-            }
-            if let stored = defaults?.string(forKey: "last_close_txid"),
-               let storedAt = defaults?.object(forKey: "last_close_txid_at") as? Int64,
-               now - TimeInterval(storedAt) < 7 * 86400 {
-                lastCloseTxid = stored
-            } else {
-                defaults?.removeObject(forKey: "last_close_txid")
-                defaults?.removeObject(forKey: "last_close_txid_at")
-                lastCloseTxid = nil
-            }
+            // txidLinks (TxidLinkStore) restores its own lastClose/lastReceive
+            // from UserDefaults on init, with 7-day expiry.
         }
 
         tradeService = TradeService(nodeService: nodeService)
@@ -1152,25 +1133,11 @@ class AppState {
     }
 
     private func setLastReceiveTxid(_ txid: String?) {
-        lastReceiveTxid = txid
-        let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        defaults?.set(txid, forKey: "last_receive_txid")
-        if txid != nil {
-            defaults?.set(Int64(Date().timeIntervalSince1970), forKey: "last_receive_txid_at")
-        } else {
-            defaults?.removeObject(forKey: "last_receive_txid_at")
-        }
+        txidLinks.setReceive(txid)
     }
 
     private func setLastCloseTxid(_ txid: String?) {
-        lastCloseTxid = txid
-        let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        defaults?.set(txid, forKey: "last_close_txid")
-        if txid != nil {
-            defaults?.set(Int64(Date().timeIntervalSince1970), forKey: "last_close_txid_at")
-        } else {
-            defaults?.removeObject(forKey: "last_close_txid_at")
-        }
+        txidLinks.setClose(txid)
     }
 
     @MainActor
@@ -1415,58 +1382,42 @@ class AppState {
             // UUID -> unique depositId -> recordPayment dedup on retry.
             let depositId = "onchain_deposit_\(UUID().uuidString)"
 
-            // Resolver row first, then payments row linked via resolution_id.
-            // Crash between the two leaves an orphan resolver row, harmless
-            // on replay. Reverse order could leak a payments row with a
-            // dangling resolution_id.
-            if let address = onchainReceiveAddress, !address.isEmpty {
-                guard let resolutionId = databaseService?.insertOnchainReceiveResolution(address: address) else {
-                    AuditService.log("ONCHAIN_RECEIVE_RES_INSERT_FAILED", data: ["address": address])
-                    prevOnchainSats = currentOnchain
-                    return
-                }
-                let ok = databaseService?.recordOnchainPaymentWithResolution(
-                    paymentId: depositId,
-                    amountMsat: Int64(depositSats * 1000),
-                    amountUSD: amountUSD,
-                    btcPrice: price > 0 ? price : nil,
-                    resolutionId: resolutionId
-                ) ?? false
-                if !ok {
-                    // Roll back the resolver row to keep the world consistent.
-                    _ = databaseService?.deleteOnchainReceiveResolution(id: resolutionId)
-                    prevOnchainSats = currentOnchain
-                    return
-                }
-                // Kick the resolver
-                let opId = "onchain-receive-\(resolutionId)"
-                onchainLauncher.launch(opId: opId, delaySeconds: 0) { [weak self] in
-                    guard let self, let db = self.databaseService else { return }
-                    await self.onchainTxidResolver?.resolve(
-                        resolutionId: resolutionId,
-                        address: address,
-                        databaseService: db
-                    )
-                }
-                // NOTE: do NOT clear lastReceiveTxid here. The view should
-                // show the most recent resolved txid, not be blanked during
-                // the re-detection window. The resolver will update
-                // lastReceiveTxid via handleOnchainReceiveResolved.
-            } else {
-                // No current address known: write completed row without txid
-                // (the explorer link won't be available; user can re-generate
-                // an address to see the on-chain link).
-                try? databaseService?.recordPayment(
-                    paymentId: depositId,
-                    paymentType: "onchain",
-                    direction: "received",
-                    amountMsat: depositSats * 1000,
-                    amountUSD: amountUSD,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "completed"
+            // Select recorder based on whether we know the current receive
+            // address. Each strategy handles its own crash-safe ordering and
+            // resolver launching. See DepositRecorder.swift for invariants.
+            let address = onchainReceiveAddress
+            let recorder: DepositRecorder = (address?.isEmpty == false)
+                ? KnownAddressDepositRecorder(
+                    databaseService: databaseService,
+                    onLaunchResolver: { [weak self] resolutionId, addr in
+                        let opId = "onchain-receive-\(resolutionId)"
+                        self?.onchainLauncher.launch(opId: opId, delaySeconds: 0) {
+                            guard let self, let db = self.databaseService else { return }
+                            await self.onchainTxidResolver?.resolve(
+                                resolutionId: resolutionId,
+                                address: addr,
+                                databaseService: db
+                            )
+                        }
+                    }
                 )
+                : UnknownAddressDepositRecorder(databaseService: databaseService)
+
+            let deposit = DepositRecordInput(
+                depositId: depositId,
+                depositSats: depositSats,
+                amountUSD: amountUSD,
+                btcPrice: price > 0 ? price : nil
+            )
+            let recorded = recorder.record(deposit: deposit, address: address)
+            if !recorded {
+                prevOnchainSats = currentOnchain
+                return
             }
+            // NOTE: do NOT clear lastReceiveTxid here. The view should
+            // show the most recent resolved txid, not be blanked during
+            // the re-detection window. The resolver will update
+            // lastReceiveTxid via handleOnchainReceiveResolved.
 
             AuditService.log("ONCHAIN_DEPOSIT_DETECTED", data: [
                 "amount_sats": "\(depositSats)",
