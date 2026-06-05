@@ -194,17 +194,27 @@ class AppState {
                 },
                 urlSession: resolverSession
             )
-            // Restore lastReceiveTxid from UserDefaults, with 7-day expiry so
-            // a txid from a previous session doesn't linger forever.
+            // Restore lastReceiveTxid / lastCloseTxid from UserDefaults, with 7-day expiry
+            // so a txid from a previous session doesn't linger forever.
             let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            let now = Date().timeIntervalSince1970
             if let stored = defaults?.string(forKey: "last_receive_txid"),
                let storedAt = defaults?.object(forKey: "last_receive_txid_at") as? Int64,
-               Date().timeIntervalSince1970 - TimeInterval(storedAt) < 7 * 86400 {
+               now - TimeInterval(storedAt) < 7 * 86400 {
                 lastReceiveTxid = stored
             } else {
                 defaults?.removeObject(forKey: "last_receive_txid")
                 defaults?.removeObject(forKey: "last_receive_txid_at")
                 lastReceiveTxid = nil
+            }
+            if let stored = defaults?.string(forKey: "last_close_txid"),
+               let storedAt = defaults?.object(forKey: "last_close_txid_at") as? Int64,
+               now - TimeInterval(storedAt) < 7 * 86400 {
+                lastCloseTxid = stored
+            } else {
+                defaults?.removeObject(forKey: "last_close_txid")
+                defaults?.removeObject(forKey: "last_close_txid_at")
+                lastCloseTxid = nil
             }
         }
 
@@ -326,7 +336,7 @@ class AppState {
     private func replayPendingChannelCloses() {
         guard let db = databaseService else { return }
         let pending = db.fetchPendingOperations()
-        for (i, op) in pending.enumerated() where op.opType == "channel_close" && op.status == "pending" {
+        for (i, op) in pending.enumerated() where op.opType == "channel_close" {
             // Stagger across close ops so a backlog of N pending closes does
             // not hit Esplora with N concurrent requests. 1s per op = at
             // most 1 req/sec on the public endpoints.
@@ -1152,6 +1162,17 @@ class AppState {
         }
     }
 
+    private func setLastCloseTxid(_ txid: String?) {
+        lastCloseTxid = txid
+        let defaults = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        defaults?.set(txid, forKey: "last_close_txid")
+        if txid != nil {
+            defaults?.set(Int64(Date().timeIntervalSince1970), forKey: "last_close_txid_at")
+        } else {
+            defaults?.removeObject(forKey: "last_close_txid_at")
+        }
+    }
+
     @MainActor
     func handleCloseTxidResolved(opId: String, closingTxid: String) {
         // Read snapshot from DB row, not AppState globals (stale on re-tap, wrong on multi-channel)
@@ -1162,7 +1183,7 @@ class AppState {
         let counterparty = op?.counterparty
 
         // UI state first: if recordPayment throws, resolver swallows; user still sees the link
-        lastCloseTxid = closingTxid
+        setLastCloseTxid(closingTxid)
 
         // recordPayment dedups on paymentId, so a re-run is a no-op
         do {

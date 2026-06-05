@@ -61,6 +61,17 @@ struct ResilientEsploraClient {
     /// (and fires `onExhausted`) after `maxAttempts` or the wall-clock
     /// budget is exhausted. Honors `Task.isCancelled` between attempts
     /// and chain URLs.
+    ///
+    /// Exit semantics:
+    /// - `onResolved` fired: clean success, function returns.
+    /// - `Task.isCancelled`: silent return. `onExhausted` is NOT fired — the
+    ///   caller (e.g. `StaggeredTaskLauncher` replacing a stale task) is
+    ///   responsible for any cleanup, and treating cancellation as
+    ///   "exhaustion" would double-fire side effects.
+    /// - Budget or attempts exhausted: falls through to `onExhausted`.
+    ///   The exhaustion path is the only branch that fires the callback,
+    ///   so callers can use `onExhausted` as a definitive "we tried and
+    ///   gave up" signal.
     func run<T: Sendable>(
         endpointBuilder: @escaping EndpointBuilder,
         resultParser: @escaping ResultParser<T>,
@@ -107,7 +118,8 @@ struct ResilientEsploraClient {
                 }
             }
         }
-        // Fell through without a hit: exhaustion.
+        // Fell through without a hit AND without cancellation: true exhaustion.
+        // Cancellation paths above already returned without reaching this point.
         Self.log("ESPLORA_EXHAUSTED", [
             "chainURLs": "\(config.chainURLs)",
             "attempts": "\(config.maxAttempts)"

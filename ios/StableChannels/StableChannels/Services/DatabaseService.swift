@@ -492,6 +492,7 @@ class DatabaseService {
                        closing_txid, balance_sats, balance_usd, btc_price, counterparty,
                        status, created_at, resolved_at
                 FROM pending_operations
+                WHERE status = 'pending'
                 """
             )
             return rows.map { Self.parsePendingOperation($0) }
