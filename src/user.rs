@@ -76,10 +76,12 @@ mod theme {
     pub const IOS_RED: Color32 = rgb(235, 95, 95); // clear coral red — Sell
 
     // Corner radii (pick from these — don't sprinkle magic numbers)
-    pub const RADIUS_SM: f32 = 6.0;
-    pub const RADIUS_MD: f32 = 10.0;
-    pub const RADIUS_LG: f32 = 16.0;
+    pub const RADIUS_SM: f32 = 8.0;
+    pub const RADIUS_MD: f32 = 14.0;
+    pub const RADIUS_LG: f32 = 20.0;
     pub const RADIUS_PILL: f32 = 25.0;
+    pub const CARD_FILL: Color32 = Color32::from_rgb(245, 246, 250);
+    pub const CARD_STROKE: Color32 = Color32::from_rgb(228, 230, 238);
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -290,6 +292,7 @@ pub struct UserApp {
     lightning_receive_invoice: String,
     lightning_receive_qr: Option<egui::TextureHandle>,
     lightning_receive_error: String,
+    jit_specify_amount: bool,
 
     // Chart state
     chart_period: ChartPeriod,
@@ -330,9 +333,40 @@ pub struct UserApp {
     show_seed_words: bool,
     saved_mnemonic: Option<String>,
 
+    // Restore wallet modal
+    show_restore_modal: bool,
+    restore_seed_input: String,
+    restore_error: String,
+
     // Inline copy feedback: button key → moment the value was copied. The UI
     // reads back via `is_copied(key)` and renders "✓ Copied" for ~2 seconds.
     copy_feedback: HashMap<&'static str, std::time::Instant>,
+
+    // Balance flash: set when incoming payment detected, fades over 2s
+    payment_flash_at: Option<std::time::Instant>,
+    last_known_total_sats: u64,
+
+    // Three-step trade flow: Some(action) = show success screen
+    trade_success: Option<TradeAction>,
+}
+
+/// Renders a single-line amount text field with iOS-style rounded, light-gray styling.
+/// Returns the inner `Response` so callers can check `has_focus()` etc.
+fn amount_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(242, 242, 247))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin { left: 10, right: 10, top: 7, bottom: 7 })
+        .stroke(egui::Stroke::new(0.5, Color32::from_rgb(210, 210, 215)))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .frame(false)
+                    .hint_text(hint)
+                    .desired_width(width),
+            )
+        })
+        .inner
 }
 
 impl UserApp {
@@ -355,7 +389,7 @@ impl UserApp {
         let audit_log_path = audit_log_path_for("user");
         set_audit_log_path(&audit_log_path);
 
-        // Trust the LSP peer so no on-chain anchor reserve is held for their channel
+        // Trust the LSP peer so no onchain anchor reserve is held for their channel
         let config = Config {
             anchor_channels_config: Some(AnchorChannelsConfig {
                 trusted_peers_no_reserve: vec![lsp_pubkey],
@@ -512,12 +546,7 @@ impl UserApp {
         };
         let stable_channel = Arc::new(Mutex::new(sc_init));
 
-        // Show onboarding only if no channels AND no funds at all (pending or on-chain)
-        let balances = node.list_balances();
-        let has_any_funds = balances.total_lightning_balance_sats > 0
-            || !balances.pending_balances_from_channel_closures.is_empty()
-            || balances.total_onchain_balance_sats > 0;
-        let show_onboarding = node.list_channels().is_empty() && !has_any_funds;
+        let show_onboarding = false;
 
         // Initialize SQLite database
         let db =
@@ -598,6 +627,7 @@ impl UserApp {
             lightning_receive_invoice: String::new(),
             lightning_receive_qr: None,
             lightning_receive_error: String::new(),
+            jit_specify_amount: false,
             chart_period: ChartPeriod::Month1,
             chart_prices: Vec::new(),
             // checked_sub guards against Windows panics where Instant origin =
@@ -625,7 +655,13 @@ impl UserApp {
             selected_trade: None,
             show_seed_words: false,
             saved_mnemonic: mnemonic_words,
+            show_restore_modal: false,
+            restore_seed_input: String::new(),
+            restore_error: String::new(),
             copy_feedback: HashMap::new(),
+            payment_flash_at: None,
+            last_known_total_sats: 0,
+            trade_success: None,
         };
 
         // Seed historical price data if needed
@@ -756,7 +792,7 @@ impl UserApp {
                         std::thread::sleep(Duration::from_secs(2));
                     }
 
-                    // Detect new on-chain deposits
+                    // Detect new onchain deposits
                     {
                         let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
                         let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -801,12 +837,12 @@ impl UserApp {
                         prev_onchain_sats = current_onchain;
                     }
 
-                    // Auto-splice: if on-chain balance exists and channel is ready,
+                    // Auto-splice: if onchain balance exists and channel is ready,
                     // splice it into the channel automatically.
-                    // The splice_flag stays true until the on-chain balance drops
+                    // The splice_flag stays true until the onchain balance drops
                     // (confirming the splice tx landed), preventing duplicate splices.
                     if splice_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        // Check if the on-chain balance dropped since we started the splice
+                        // Check if the onchain balance dropped since we started the splice
                         let prev = splice_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
                         let current = node_arc.list_balances().total_onchain_balance_sats;
                         if prev > 0 && current < prev {
@@ -822,7 +858,7 @@ impl UserApp {
                         }
                     }
 
-                    // Auto-splice trigger removed for iOS parity (2026-05-19): on-chain →
+                    // Auto-splice trigger removed for iOS parity (2026-05-19): onchain →
                     // channel splice is now user-initiated via the Swap button in the home
                     // tab. The clear-flag-on-balance-drop path above remains so user-initiated
                     // splices still get their in-progress flag cleared when confirmed.
@@ -1076,6 +1112,73 @@ impl UserApp {
         }
     }
 
+    fn generate_jit_ln_invoice(&mut self, ctx: &egui::Context, amount_sats: Option<u64>) {
+        let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+            ldk_node::lightning_invoice::Description::new("Stable Channel Wallet".to_string())
+                .unwrap(),
+        );
+        let result = match amount_sats {
+            Some(sats) => {
+                let msats = sats * 1000;
+                let max_fee = (msats * 80 / 100).max(20_000_000);
+                self.node.bolt11_payment().receive_via_jit_channel(
+                    msats,
+                    &description,
+                    INVOICE_EXPIRY_SECS,
+                    Some(max_fee),
+                )
+            }
+            None => self.node.bolt11_payment().receive_variable_amount_via_jit_channel(
+                &description,
+                INVOICE_EXPIRY_SECS,
+                Some(MAX_PROPORTIONAL_LSP_FEE_LIMIT_PPM_MSAT),
+            ),
+        };
+        match result {
+            Ok(invoice) => {
+                self.lightning_receive_invoice = invoice.to_string();
+                let code = QrCode::new(&self.lightning_receive_invoice).unwrap();
+                let bits = code.to_colors();
+                let width = code.width();
+                let scale = 4;
+                let border = scale * 2;
+                let bordered_size = (width * scale) as u32 + (border * 2) as u32;
+                let mut imgbuf =
+                    GrayImage::from_pixel(bordered_size, bordered_size, Luma([255u8]));
+                for y in 0..width {
+                    for x in 0..width {
+                        let color = if bits[y * width + x] == Color::Dark { 0 } else { 255 };
+                        for dy in 0..scale {
+                            for dx in 0..scale {
+                                imgbuf.put_pixel(
+                                    (x * scale + dx) as u32 + border as u32,
+                                    (y * scale + dy) as u32 + border as u32,
+                                    Luma([color]),
+                                );
+                            }
+                        }
+                    }
+                }
+                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
+                let mut rgba = Vec::with_capacity(w * h * 4);
+                for p in imgbuf.pixels() {
+                    let lum = p[0];
+                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
+                }
+                let tex = ctx.load_texture(
+                    "lightning_receive_qr",
+                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
+                    TextureOptions::LINEAR,
+                );
+                self.lightning_receive_qr = Some(tex);
+                self.show_lightning_receive = true;
+            }
+            Err(e) => {
+                self.lightning_receive_error = format!("Could not generate invoice: {}", e);
+            }
+        }
+    }
+
     pub fn pay_invoice(&mut self) -> bool {
         match Bolt11Invoice::from_str(&self.invoice_to_pay) {
             Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
@@ -1097,7 +1200,7 @@ impl UserApp {
         }
     }
 
-    /// Unified send: auto-detects bolt11, bolt12, or on-chain address from self.send_input
+    /// Unified send: auto-detects bolt11, bolt12, or onchain address from self.send_input
     fn send_unified(&mut self) -> bool {
         let input = self.send_input.trim().to_string();
         if input.is_empty() {
@@ -1288,7 +1391,7 @@ impl UserApp {
             }
         }
 
-        // Try on-chain address — route through splice_out when a channel exists
+        // Try onchain address — route through splice_out when a channel exists
         if lower.starts_with("bc1")
             || lower.starts_with("tb1")
             || lower.starts_with("1")
@@ -1388,7 +1491,7 @@ impl UserApp {
                                 }
                             }
                         } else {
-                            // No channel — fallback to regular on-chain send
+                            // No channel — fallback to regular onchain send
                             let amount_sats = match self.send_amount.trim().parse::<f64>() {
                                 Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
                                 _ if self.send_all => {
@@ -1417,7 +1520,7 @@ impl UserApp {
                             };
                             match result {
                                 Ok(txid) => {
-                                    // Record on-chain send in payment history
+                                    // Record onchain send in payment history
                                     let amount_msat = amount_sats * 1000;
                                     let (amount_usd, btc_price_opt) = {
                                         let sc = self.stable_channel.lock().unwrap();
@@ -1496,6 +1599,13 @@ impl UserApp {
 
         let balances = self.node.list_balances();
 
+        // Detect incoming payment: total sats went up → trigger balance flash
+        let total_sats_now = balances.total_lightning_balance_sats + balances.total_onchain_balance_sats;
+        if self.last_known_total_sats > 0 && total_sats_now > self.last_known_total_sats {
+            self.payment_flash_at = Some(std::time::Instant::now());
+        }
+        self.last_known_total_sats = total_sats_now;
+
         self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
         self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
 
@@ -1557,7 +1667,7 @@ impl UserApp {
             .unwrap_or(false)
     }
 
-    /// User-initiated splice-in: move spendable on-chain BTC into the channel.
+    /// User-initiated splice-in: move spendable onchain BTC into the channel.
     /// Mirrors iOS `AppState.sweepToChannel` (pending the same rename on iOS / Android)
     /// — see decisions/cross-platform-consistency.
     pub fn splice_to_channel(&mut self) {
@@ -1595,7 +1705,7 @@ impl UserApp {
         let balances = self.node.list_balances();
         let spendable = balances.spendable_onchain_balance_sats;
         if spendable <= fee_reserve {
-            self.status_message = "Insufficient on-chain balance".to_string();
+            self.status_message = "Insufficient onchain balance".to_string();
             return;
         }
         let splice_amount = spendable - fee_reserve;
@@ -2479,20 +2589,20 @@ impl UserApp {
                     }
 
                     // Don't show onboarding after close — the update() loop
-                    // already checks for on-chain/pending funds before deciding.
+                    // already checks for onchain/pending funds before deciding.
                     // Setting it here would flash the onboarding screen before
-                    // the closed channel's funds appear on-chain.
+                    // the closed channel's funds appear onchain.
                     self.waiting_for_payment = false;
                 }
 
-                Event::SplicePending {
+                Event::SpliceNegotiated {
                     channel_id,
                     user_channel_id,
                     new_funding_txo,
                     ..
                 } => {
                     // NOTE: Do NOT clear auto_splice_in_progress here!
-                    // The on-chain balance doesn't update until the splice tx confirms.
+                    // The onchain balance doesn't update until the splice tx confirms.
                     // Clearing the flag here allows the auto-splice to fire again on
                     // the same unspent UTXO, creating duplicate splice_in calls.
 
@@ -2607,7 +2717,7 @@ impl UserApp {
                     self.update_balances();
                 }
 
-                Event::SpliceFailed {
+                Event::SpliceNegotiationFailed {
                     channel_id,
                     user_channel_id,
                     ..
@@ -2704,10 +2814,31 @@ impl UserApp {
     }
 
     /// Short timestamp for compact tables (MM-DD HH:MM)
+    #[allow(dead_code)]
     fn format_short_timestamp(timestamp: i64) -> String {
         match Utc.timestamp_opt(timestamp, 0) {
             chrono::LocalResult::Single(dt) => dt.format("%m-%d %H:%M").to_string(),
             _ => "—".to_string(),
+        }
+    }
+
+    /// Relative timestamp: "just now", "5m ago", "3h ago", "2d ago", or "MM/DD" beyond a week.
+    fn format_relative_timestamp(timestamp: i64) -> String {
+        let now = Utc::now().timestamp();
+        let diff = (now - timestamp).max(0);
+        if diff < 60 {
+            "just now".to_string()
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else if diff < 604800 {
+            format!("{}d ago", diff / 86400)
+        } else {
+            match Utc.timestamp_opt(timestamp, 0) {
+                chrono::LocalResult::Single(dt) => dt.format("%m/%d").to_string(),
+                _ => "—".to_string(),
+            }
         }
     }
 
@@ -3429,7 +3560,7 @@ impl UserApp {
                             let label = if has_channel {
                                 "Send bitcoin here — it will be deposited automatically"
                             } else {
-                                "Send bitcoin to this on-chain address"
+                                "Send bitcoin to this onchain address"
                             };
                             ui.label(
                                 egui::RichText::new(label)
@@ -4076,7 +4207,7 @@ impl UserApp {
                     _ => 0, // AwaitingThresholdConfirmations: already in onchain balance
                 })
                 .sum();
-            // pending_sweep_sats is folded into the on-chain card below.
+            // pending_sweep_sats is folded into the onchain card below.
 
             // NOTE: lightning_balances (claimable) intentionally not displayed —
             // LDK reports stale entries long after sweep confirms and funds are spent.
@@ -4101,7 +4232,7 @@ impl UserApp {
             };
             // Total balance calculation:
             // - Splice-in pending: lightning already reflects the post-splice
-            //   capacity but on-chain hasn't dropped yet — adding both would
+            //   capacity but onchain hasn't dropped yet — adding both would
             //   double-count the splice amount until BDK sees the spent UTXO.
             //   Show lightning only during this window. Matches iOS
             //   `if isSweeping { return lightningBalanceSats }` at
@@ -4169,20 +4300,52 @@ impl UserApp {
 
             // Large primary display + smaller secondary line. The whole area is
             // tappable to toggle USD↔BTC (same as the header click).
+            //
+            // While syncing: show em-dashes so users don't confuse $0 with no balance.
+            // On incoming payment: flash the primary amount green for 2 seconds.
+            let balance_color = if let Some(flash_at) = self.payment_flash_at {
+                let t = flash_at.elapsed().as_secs_f32();
+                if t < 2.0 {
+                    ui.ctx().request_repaint();
+                    let fade = (1.0 - t / 2.0).powi(2);
+                    let g = theme::SUCCESS;
+                    Color32::from_rgb(
+                        ((1.0 - fade) * Color32::BLACK.r() as f32 + fade * g.r() as f32) as u8,
+                        ((1.0 - fade) * Color32::BLACK.g() as f32 + fade * g.g() as f32) as u8,
+                        ((1.0 - fade) * Color32::BLACK.b() as f32 + fade * g.b() as f32) as u8,
+                    )
+                } else {
+                    self.payment_flash_at = None;
+                    Color32::BLACK
+                }
+            } else {
+                Color32::BLACK
+            };
+
             let mut balance_toggle_clicked = false;
             if self.bar_chart_show_btc {
+                let primary_str = if self.is_syncing {
+                    "— BTC".to_string()
+                } else {
+                    format!("{} BTC", Self::format_btc_spaced(total_btc))
+                };
+                let secondary_str = if self.is_syncing {
+                    "—".to_string()
+                } else {
+                    Self::format_price(total_usd)
+                };
                 let primary = ui.add(
                     egui::Label::new(
-                        RichText::new(format!("{} BTC", Self::format_btc_spaced(total_btc)))
+                        RichText::new(primary_str)
                             .size(38.0)
-                            .color(Color32::BLACK)
+                            .color(balance_color)
                             .strong(),
                     )
                     .sense(Sense::click()),
                 );
                 let secondary = ui.add(
                     egui::Label::new(
-                        RichText::new(Self::format_price(total_usd))
+                        RichText::new(secondary_str)
                             .size(14.0)
                             .color(Color32::DARK_GRAY),
                     )
@@ -4194,18 +4357,28 @@ impl UserApp {
                 primary.on_hover_cursor(CursorIcon::PointingHand);
                 secondary.on_hover_cursor(CursorIcon::PointingHand);
             } else {
+                let primary_str = if self.is_syncing {
+                    "—".to_string()
+                } else {
+                    Self::format_price(total_usd)
+                };
+                let secondary_str = if self.is_syncing {
+                    "— BTC".to_string()
+                } else {
+                    format!("{} BTC", Self::format_btc_spaced(total_btc))
+                };
                 let primary = ui.add(
                     egui::Label::new(
-                        RichText::new(Self::format_price(total_usd))
+                        RichText::new(primary_str)
                             .size(42.0)
-                            .color(Color32::BLACK)
+                            .color(balance_color)
                             .strong(),
                     )
                     .sense(Sense::click()),
                 );
                 let secondary = ui.add(
                     egui::Label::new(
-                        RichText::new(format!("{} BTC", Self::format_btc_spaced(total_btc)))
+                        RichText::new(secondary_str)
                             .size(14.0)
                             .color(Color32::DARK_GRAY),
                     )
@@ -4573,7 +4746,7 @@ impl UserApp {
                         //   - force / unilateral close → the close commit first, then
                         //     a later sweep tx (after CSV, HTLC claims, etc.) once
                         //     ldk-node has built and broadcast the claim package.
-                        // Either way it's the correct on-chain target for "what is
+                        // Either way it's the correct onchain target for "what is
                         // this closing channel doing right now."
                         //
                         // The previous behaviour fell straight through to the DB and
@@ -4599,9 +4772,9 @@ impl UserApp {
                                 ldk_node::PendingSweepBalance::PendingBroadcast { .. } => None,
                             });
 
-                        // Live ldk-node lookup for the most recent inbound on-chain tx.
+                        // Live ldk-node lookup for the most recent inbound onchain tx.
                         // The deposit-detection thread (L763) tries to capture the txid
-                        // at the moment the on-chain balance jumps, but ldk-node's
+                        // at the moment the onchain balance jumps, but ldk-node's
                         // payment list can lag the balance update by a tick. When that
                         // race loses, the DB row gets written with txid = NULL and the
                         // DB-heuristic fallback below skips it and walks straight to the
@@ -4631,9 +4804,9 @@ impl UserApp {
                         //   1. close-related sweep / commit tx (channel closing)
                         //   2. DB splice_in tx (swap-pending; SplicePending handler
                         //      writes the splice txid here)
-                        //   3. live ldk-node inbound on-chain tx (deposit confirming;
+                        //   3. live ldk-node inbound onchain tx (deposit confirming;
                         //      bypasses the DB-NULL race described above)
-                        //   4. any DB on-chain row with a txid (last-resort fallback;
+                        //   4. any DB onchain row with a txid (last-resort fallback;
                         //      covers ldk-node-forgot-but-DB-remembers edge case)
                         let open_explorer = |db: &Database, ctx: &egui::Context| {
                             // 1.
@@ -4824,7 +4997,7 @@ impl UserApp {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new(
-                                        "Receive over Lightning to create your Trading and Spending Account",
+                                        "Receive over Lightning to create your Stable Account",
                                     )
                                     .size(11.0)
                                     .color(theme::MUTED),
@@ -4835,7 +5008,7 @@ impl UserApp {
                             // Lightning receive to open one.
                             ui.label(
                                 RichText::new(
-                                    "Receive over Lightning to create your Trading and Spending Account",
+                                    "Receive over Lightning to create your Stable Account",
                                 )
                                 .size(11.0)
                                 .color(theme::MUTED),
@@ -4900,7 +5073,7 @@ impl UserApp {
 
                 if has_pending_funds || has_any_pending {
                     ui.label(
-                        RichText::new("Please wait while your funds are confirmed on-chain.")
+                        RichText::new("Please wait while your funds are confirmed onchain.")
                             .size(14.0)
                             .color(theme::WARNING),
                     );
@@ -4910,7 +5083,7 @@ impl UserApp {
                 // Compact pending funds summary
                 // Only count truly pending sweeps (not yet broadcast, or awaiting first confirmation)
                 // AwaitingThresholdConfirmations means the sweep tx IS confirmed - those funds
-                // should already be in the on-chain balance (or were already spent)
+                // should already be in the onchain balance (or were already spent)
                 let total_pending: u64 = balances_for_check
                     .pending_balances_from_channel_closures
                     .iter()
@@ -5414,9 +5587,21 @@ impl UserApp {
 
             ui.add_space(30.0);
 
+            // Hint text when no channel — sits just above the action buttons (iOS parity)
+            if !has_active_channel {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("Receive over Lightning to open your account")
+                            .size(12.0)
+                            .color(theme::MUTED),
+                    );
+                });
+                ui.add_space(8.0);
+            }
+
             // Action buttons — iOS-style 2x2 grid with matching colors:
-            //   Row 1: Send (blue ↑)        | Receive (green ↓)
-            //   Row 2: Buy BTC (orange ↗)   | Sell BTC (red ↘)
+            //   Row 1: Send (blue ↑)        | Receive (green ↓, pulses when no channel)
+            //   Row 2: USD → BTC (orange ↗) | BTC → USD (red ↘)
             let btn_height = 50.0_f32;
             let row_gap = 10.0_f32;
             let btn_width = (ui.available_width() - row_gap - 16.0) / 2.0;
@@ -5427,6 +5612,26 @@ impl UserApp {
                 .fill(fill)
                 .corner_radius(theme::RADIUS_PILL)
                 .min_size(egui::vec2(btn_width, btn_height))
+            };
+
+            // Compute pulsating green for the Receive button when no channel is open.
+            let receive_fill = if !has_active_channel {
+                let t = ui.ctx().input(|i| i.time);
+                let pulse = (0.5 + 0.5 * (t * std::f64::consts::PI / 1.2).sin()) as f32;
+                ui.ctx().request_repaint();
+                let g = theme::IOS_GREEN;
+                let lighter = Color32::from_rgb(
+                    (g.r() as f32 + (255.0 - g.r() as f32) * 0.35) as u8,
+                    (g.g() as f32 + (255.0 - g.g() as f32) * 0.35) as u8,
+                    (g.b() as f32 + (255.0 - g.b() as f32) * 0.35) as u8,
+                );
+                Color32::from_rgb(
+                    (g.r() as f32 * (1.0 - pulse) + lighter.r() as f32 * pulse) as u8,
+                    (g.g() as f32 * (1.0 - pulse) + lighter.g() as f32 * pulse) as u8,
+                    (g.b() as f32 * (1.0 - pulse) + lighter.b() as f32 * pulse) as u8,
+                )
+            } else {
+                theme::IOS_GREEN
             };
 
             // Row 1: Send | Receive
@@ -5440,7 +5645,7 @@ impl UserApp {
                 }
                 ui.add_space(row_gap);
                 if ui
-                    .add(make_action_btn("↓  Receive", theme::IOS_GREEN))
+                    .add(make_action_btn("↓  Receive", receive_fill))
                     .clicked()
                 {
                     self.send_input.clear();
@@ -5456,7 +5661,7 @@ impl UserApp {
             // Row 2: Buy BTC | Sell BTC
             ui.horizontal(|ui| {
                 if ui
-                    .add(make_action_btn("↗  Buy BTC", theme::IOS_ORANGE))
+                    .add(make_action_btn("USD → BTC", theme::IOS_ORANGE))
                     .clicked()
                 {
                     self.show_buy_modal = true;
@@ -5464,7 +5669,7 @@ impl UserApp {
                 }
                 ui.add_space(row_gap);
                 if ui
-                    .add(make_action_btn("↘  Sell BTC", theme::IOS_RED))
+                    .add(make_action_btn("BTC → USD", theme::IOS_RED))
                     .clicked()
                 {
                     self.show_sell_modal = true;
@@ -5477,391 +5682,463 @@ impl UserApp {
     }
 
     fn show_settings_tab(&mut self, ui: &mut egui::Ui) {
+        // Helper: draw an iOS-style icon badge (colored rounded square + centered symbol).
+        let icon_badge = |ui: &mut egui::Ui, symbol: &str, color: Color32| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), Sense::hover());
+            ui.painter().rect_filled(rect, egui::CornerRadius::same(8), color.gamma_multiply(0.15));
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, symbol, egui::FontId::proportional(15.0), color);
+        };
+
+        // Helper: section header label (colored, small-caps feel).
+        let section_header = |ui: &mut egui::Ui, title: &str, color: Color32| {
+            ui.add_space(8.0);
+            ui.label(RichText::new(title).size(11.5).strong().color(color));
+            ui.add_space(4.0);
+        };
+
+        // Helper: card frame used for every section.
+        let card = egui::Frame::new()
+            .fill(theme::CARD_FILL)
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD as u8))
+            .stroke(egui::Stroke::new(1.0, theme::CARD_STROKE))
+            .inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 12 });
+
         egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading(RichText::new("Settings").color(Color32::BLACK));
-                ui.add_space(16.0);
+            ui.heading(RichText::new("Settings").color(Color32::BLACK));
+            ui.add_space(16.0);
 
-                // Self-custody banner — mirrors iOS settings header. Light-gray
-                // card with a green border, a check badge on the left, and
-                // bold + body copy explaining the custody model.
-                let banner_frame = egui::Frame::default()
-                    .fill(theme::SUBTLE_BG)
-                    .stroke(egui::Stroke::new(1.5, theme::SUCCESS))
-                    .corner_radius(theme::RADIUS_LG)
-                    .inner_margin(egui::Margin::symmetric(20, 18));
-                banner_frame.show(ui, |ui| {
+            // ── Self-custody banner ──────────────────────────────────────
+            egui::Frame::default()
+                .fill(theme::SUBTLE_BG)
+                .stroke(egui::Stroke::new(1.5, theme::SUCCESS))
+                .corner_radius(theme::RADIUS_LG)
+                .inner_margin(egui::Margin::symmetric(16, 14))
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        // Check badge on the left, vertically centered against
-                        // the text block.
-                        let badge_size = 48.0;
-                        let (badge_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(badge_size, badge_size),
-                            egui::Sense::hover(),
-                        );
-                        Self::paint_check_badge(
-                            ui.painter(),
-                            badge_rect.center(),
-                            badge_size,
-                        );
-
-                        ui.add_space(14.0);
-
+                        let badge_size = 44.0;
+                        let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(badge_size, badge_size), Sense::hover());
+                        Self::paint_check_badge(ui.painter(), badge_rect.center(), badge_size);
+                        ui.add_space(12.0);
                         ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("Your keys, your coins.")
-                                    .size(18.0)
-                                    .strong()
-                                    .color(theme::ON_SURFACE),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(
-                                    "Stable Channels is a self-custodial wallet. \
-                                     You control your private keys. Third parties \
-                                     do not custody, access, or freeze your funds.",
-                                )
-                                .size(13.5)
-                                .color(theme::MUTED),
-                            );
+                            ui.label(RichText::new("Your keys, your coins.").size(15.0).strong().color(theme::ON_SURFACE));
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(
+                                "Stable Channels is a self-custodial wallet. You control your \
+                                 private keys. Third parties do not custody, access, or freeze your funds."
+                            ).size(12.0).color(theme::MUTED));
                         });
                     });
                 });
 
-                ui.add_space(20.0);
+            ui.add_space(20.0);
 
-                // Channel Balance Distribution
-                if let Some(ch) = self.node.list_channels().first() {
-                    let btc_price = {
-                        let sc = self.stable_channel.lock().unwrap();
-                        sc.latest_price
-                    };
+            // ── WALLET section ───────────────────────────────────────────
+            section_header(ui, "WALLET", theme::SUCCESS);
+            card.show(ui, |ui| {
+                // Row: Channel Details
+                let green = Color32::from_rgb(52, 199, 89);
+                let blue  = Color32::from_rgb(59, 130, 246);
+                let orange = Color32::from_rgb(251, 146, 60);
 
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Wallet Details").size(16.0).strong().color(Color32::BLACK));
-                        ui.add_space(10.0);
+                if let Some(ch) = self.node.list_channels().first().cloned() {
+                    let btc_price = { let sc = self.stable_channel.lock().unwrap(); sc.latest_price };
+                    let total_sats = ch.channel_value_sats;
+                    let our_sats = ch.outbound_capacity_msat / 1000 + ch.unspendable_punishment_reserve.unwrap_or(0);
+                    let lsp_sats = total_sats.saturating_sub(our_sats);
+                    let our_ratio = if total_sats > 0 { our_sats as f32 / total_sats as f32 } else { 0.5 };
 
-                        let total_sats = ch.channel_value_sats;
-                        let our_sats = ch.outbound_capacity_msat / 1000 + ch.unspendable_punishment_reserve.unwrap_or(0);
-                        let lsp_sats = total_sats.saturating_sub(our_sats);
-
-                        let our_ratio = if total_sats > 0 { our_sats as f32 / total_sats as f32 } else { 0.5 };
-
-                        // Draw the bar
-                        let bar_height = 24.0;
-                        let available_width = ui.available_width() - 20.0;
-                        let (rect, _response) = ui.allocate_exact_size(egui::vec2(available_width, bar_height), egui::Sense::hover());
-
-                        let our_width = rect.width() * our_ratio;
-                        let our_rect = egui::Rect::from_min_size(rect.min, egui::vec2(our_width, bar_height));
-                        let lsp_rect = egui::Rect::from_min_size(
-                            egui::pos2(rect.min.x + our_width, rect.min.y),
-                            egui::vec2(rect.width() - our_width, bar_height),
-                        );
-
-                        // Colors: blue for user, orange for LSP
-                        let our_color = Color32::from_rgb(59, 130, 246); // Blue
-                        let lsp_color = Color32::from_rgb(251, 146, 60); // Orange
-
-                        ui.painter().rect_filled(our_rect, 4.0, our_color);
-                        ui.painter().rect_filled(lsp_rect, 4.0, lsp_color);
-
+                    // Icon row header
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "⛓", green);
                         ui.add_space(8.0);
-
-                        // Labels below the bar — click to toggle sats/USD
-                        let mut toggled = false;
-                        let (our_label, lsp_label) = if self.settings_show_sats {
-                            let our_btc = our_sats as f64 / 100_000_000.0;
-                            let lsp_btc = lsp_sats as f64 / 100_000_000.0;
-                            (
-                                format!("Yours: {:.8} BTC", our_btc),
-                                format!("LSP: {:.8} BTC", lsp_btc),
-                            )
-                        } else if btc_price > 0.0 {
-                            let our_usd = our_sats as f64 / 100_000_000.0 * btc_price;
-                            let lsp_usd = lsp_sats as f64 / 100_000_000.0 * btc_price;
-                            (
-                                format!("Yours: ${:.2}", our_usd),
-                                format!("LSP: ${:.2}", lsp_usd),
-                            )
-                        } else {
-                            let our_btc = our_sats as f64 / 100_000_000.0;
-                            let lsp_btc = lsp_sats as f64 / 100_000_000.0;
-                            (
-                                format!("Yours: {:.8} BTC", our_btc),
-                                format!("LSP: {:.8} BTC", lsp_btc),
-                            )
-                        };
-
-                        ui.horizontal(|ui| {
-                            let our_resp = ui.add(egui::Label::new(
-                                RichText::new(&our_label).color(our_color)
-                            ).sense(egui::Sense::click()));
-                            if our_resp.clicked() { toggled = true; }
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let lsp_resp = ui.add(egui::Label::new(
-                                    RichText::new(&lsp_label).color(lsp_color)
-                                ).sense(egui::Sense::click()));
-                                if lsp_resp.clicked() { toggled = true; }
-                            });
-                        });
-                        if toggled { self.settings_show_sats = !self.settings_show_sats; }
-
-                        ui.add_space(5.0);
-                        let unit_hint = if self.settings_show_sats { "Tap to show USD" } else { "Tap to show BTC" };
-                        ui.label(RichText::new(unit_hint).size(10.0).color(Color32::GRAY));
+                        ui.label(RichText::new("Channel Balance").size(13.5).strong().color(Color32::BLACK));
                     });
+                    ui.add_space(10.0);
 
-                    ui.add_space(20.0);
+                    // Balance bar
+                    let bar_height = 18.0;
+                    let bar_width = ui.available_width() - 4.0;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, bar_height), Sense::hover());
+                    let our_w = rect.width() * our_ratio;
+                    let r = egui::CornerRadius::same(6);
+                    if our_w > 1.0 {
+                        let our_rect = egui::Rect::from_min_size(rect.min, egui::vec2(our_w, bar_height));
+                        ui.painter().rect_filled(our_rect, r, blue);
+                    }
+                    if our_w < rect.width() {
+                        let lsp_rect = egui::Rect::from_min_size(egui::pos2(rect.min.x + our_w, rect.min.y), egui::vec2(rect.width() - our_w, bar_height));
+                        ui.painter().rect_filled(lsp_rect, r, orange);
+                    }
+                    ui.add_space(6.0);
+
+                    // Labels (click to toggle sats/USD)
+                    let mut toggled = false;
+                    let (our_label, lsp_label) = if self.settings_show_sats {
+                        (format!("You: {} BTC", &format!("{:.6}", our_sats as f64 / 1e8)),
+                         format!("LSP: {} BTC", &format!("{:.6}", lsp_sats as f64 / 1e8)))
+                    } else if btc_price > 0.0 {
+                        (format!("You: ${:.2}", our_sats as f64 / 1e8 * btc_price),
+                         format!("LSP: ${:.2}", lsp_sats as f64 / 1e8 * btc_price))
+                    } else {
+                        (format!("You: {} sats", our_sats), format!("LSP: {} sats", lsp_sats))
+                    };
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Label::new(RichText::new(&our_label).size(11.0).color(blue)).sense(Sense::click())).clicked() { toggled = true; }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Label::new(RichText::new(&lsp_label).size(11.0).color(orange)).sense(Sense::click())).clicked() { toggled = true; }
+                        });
+                    });
+                    if toggled { self.settings_show_sats = !self.settings_show_sats; }
+                    ui.add_space(2.0);
+                    let unit_hint = if self.settings_show_sats { "Click to show USD" } else { "Click to show BTC" };
+                    ui.label(RichText::new(unit_hint).size(10.0).color(theme::DISABLED_TEXT));
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(12.0);
                 }
 
-                // Wallet Info section
-                ui.group(|ui| {
-                    ui.label(RichText::new("Wallet Information").size(16.0).strong().color(Color32::BLACK));
-                    ui.add_space(10.0);
-
-                    let wallet_id = self.node.node_id().to_string();
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Wallet ID:").color(Color32::DARK_GRAY));
-                        ui.label(RichText::new(&wallet_id[..7.min(wallet_id.len())]).monospace().size(12.0).color(Color32::BLACK));
-                        if ui.small_button("Copy").clicked() {
-                            ui.ctx().copy_text(wallet_id.clone());
-                            self.show_toast("Copied!", "OK");
-                        }
-                    });
-
-                    ui.add_space(10.0);
-
-                    if let Some(ch) = self.node.list_channels().first() {
-                        let user_ch_id = format!("{}", ch.user_channel_id.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Channel ID:").color(Color32::DARK_GRAY));
-                            ui.label(RichText::new(&user_ch_id[..7.min(user_ch_id.len())]).monospace().size(12.0).color(Color32::BLACK));
-                            if ui.small_button("Copy").clicked() {
-                                ui.ctx().copy_text(user_ch_id.clone());
-                                self.show_toast("Copied!", "OK");
-                            }
-                        });
-
-                        if let Some(funding_txo) = &ch.funding_txo {
-                            // Txid::to_string() already displays in reversed byte order (block explorer format)
-                            let txid_display = funding_txo.txid.to_string();
-                            ui.add_space(10.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Funding Tx:").color(Color32::DARK_GRAY));
-                                ui.label(RichText::new(&txid_display[..7.min(txid_display.len())]).monospace().size(12.0).color(Color32::BLACK));
-                                if ui.small_button("Copy").clicked() {
-                                    ui.ctx().copy_text(txid_display.clone());
-                                    self.show_toast("Copied!", "OK");
-                                }
-                                let mempool_base = match self.network {
-                                    Network::Signet => "https://mempool.space/signet",
-                                    Network::Testnet => "https://mempool.space/testnet",
-                                    _ => "https://mempool.space",
-                                };
-                                let url = format!("{}/tx/{}", mempool_base, txid_display);
-                                let link_btn = egui::Button::new(RichText::new("View").size(11.0).color(Color32::from_rgb(59, 130, 246)))
-                                    .frame(false);
-                                if ui.add(link_btn).clicked() {
-                                    ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
-                                }
-                            });
-                        }
-                    }
-                });
-
-                ui.add_space(20.0);
-
-                // Close Wallet
-                ui.group(|ui| {
-                    ui.label(RichText::new("Close Wallet").size(16.0).strong().color(theme::DANGER_HOVER));
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("After you close your wallet, all funds will be sent to an on-chain Bitcoin address you control. Your trade and payment history will be preserved.").size(12.0).color(theme::MUTED));
+                // Row: Backup
+                ui.horizontal(|ui| {
+                    icon_badge(ui, "🔐", orange);
                     ui.add_space(8.0);
-
-                    let close_btn = egui::Button::new(RichText::new("Close Wallet").color(theme::DANGER_HOVER))
-                        .fill(Color32::from_rgb(255, 241, 242));
-                    if ui.add(close_btn).clicked() {
-                        self.confirm_close_popup = true;
-                    }
-                    ui.add_space(5.0);
-                    ui.label(RichText::new("Confirm on the following screen.").size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new("Backup").size(13.5).strong().color(Color32::BLACK));
                 });
-
-                ui.add_space(20.0);
-
-                // Send Custom Message section
-                ui.group(|ui| {
-                    ui.label(RichText::new("Send Message").size(16.0).strong().color(Color32::BLACK));
-                    ui.add_space(10.0);
-
-                    ui.label(RichText::new("Send a message to the wallet devs.").color(Color32::DARK_GRAY).size(12.0));
-                    ui.add_space(5.0);
-
-                    ui.horizontal(|ui| {
-                        let msg_edit = egui::TextEdit::singleline(&mut self.stable_message)
-                            .hint_text("Say hello")
-                            .desired_width(180.0);
-                        ui.add(msg_edit);
-
-                        if ui.button("Send").clicked() && !self.stable_message.is_empty() {
-                            self.send_stable_message();
-                            self.show_toast("Message sent!", "OK");
-                        }
-                    });
-                });
-
-                ui.add_space(20.0);
-
-                // Backup section
-                ui.group(|ui| {
-                    ui.label(RichText::new("Backup").size(16.0).strong().color(Color32::BLACK));
-                    ui.add_space(10.0);
-
-                    ui.label(RichText::new("Download a backup of your wallet data").color(Color32::DARK_GRAY).size(12.0));
-                    ui.add_space(5.0);
-
-                    let backup_btn = egui::Button::new(RichText::new("Download Backup").color(Color32::WHITE))
-                        .fill(Color32::from_rgb(59, 130, 246));
+                ui.add_space(8.0);
+                ui.label(RichText::new("Save a full backup of your wallet data.").size(12.0).color(theme::MUTED));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let backup_btn = egui::Button::new(RichText::new("Download Backup").size(12.0).color(Color32::WHITE))
+                        .fill(blue)
+                        .corner_radius(theme::RADIUS_PILL);
                     if ui.add(backup_btn).clicked() {
                         match self.create_backup() {
-                            Ok(_path) => {
-                                self.show_toast("Backup saved!", "OK");
-                            }
-                            Err(e) => {
-                                self.show_toast("Backup failed", "!");
-                                self.status_message = format!("Backup failed: {}", e);
-                            }
-                        }
-                    }
-                    ui.add_space(5.0);
-                    ui.label(RichText::new("Your backup will be saved to your Downloads folder.").color(Color32::GRAY).size(11.0));
-
-                    ui.add_space(15.0);
-
-                    let seed_btn = egui::Button::new(RichText::new("Backup Seed Words").color(Color32::WHITE))
-                        .fill(Color32::from_rgb(59, 130, 246));
-                    if ui.add(seed_btn).clicked() {
-                        self.show_seed_words = !self.show_seed_words;
-                    }
-
-                    if self.show_seed_words {
-                        ui.add_space(10.0);
-                        if let Some(ref words) = self.saved_mnemonic {
-                            ui.label(RichText::new("Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.").color(theme::WARNING).size(12.0));
-                            ui.add_space(8.0);
-                            for (i, word) in words.split_whitespace().enumerate() {
-                                ui.label(RichText::new(format!("{}. {}", i + 1, word)).size(13.0).color(Color32::BLACK).monospace());
-                            }
-                        } else {
-                            ui.label(RichText::new("Seed phrase not available for this wallet.").color(Color32::GRAY).size(12.0));
+                            Ok(_) => self.show_toast("Backup saved!", "OK"),
+                            Err(e) => { self.show_toast("Backup failed", "!"); self.status_message = format!("Backup failed: {}", e); }
                         }
                     }
                 });
+                ui.add_space(4.0);
+                ui.label(RichText::new("Saved to your Downloads folder.").size(10.0).color(theme::DISABLED_TEXT));
 
-                ui.add_space(20.0);
+                ui.add_space(10.0);
 
-                // Pending Balances (from channel closures)
-                let balances = self.node.list_balances();
-                if !balances.pending_balances_from_channel_closures.is_empty() {
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Pending from Channel Closures").strong().color(theme::WARNING));
-                        ui.add_space(8.0);
-
-                        let mut total_pending: u64 = 0;
-                        for pending in &balances.pending_balances_from_channel_closures {
-                            let (status, amount) = match pending {
-                                ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } => {
-                                    ("Pending broadcast", *amount_satoshis)
-                                },
-                                ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, latest_spending_txid, .. } => {
-                                    let status = format!("Awaiting confirmation ({}...)", &latest_spending_txid.to_string()[..8]);
-                                    (status.leak() as &str, *amount_satoshis)
-                                },
-                                ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { amount_satoshis, confirmation_height, .. } => {
-                                    let status = format!("Confirming (height {})", confirmation_height);
-                                    (status.leak() as &str, *amount_satoshis)
-                                },
-                            };
-                            total_pending += amount;
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(Self::format_sats_as_btc(amount)).size(12.0).color(Color32::BLACK).strong());
-                                ui.label(RichText::new(format!("- {}", status)).size(11.0).color(Color32::DARK_GRAY));
-                            });
-                        }
-
-                        if balances.pending_balances_from_channel_closures.len() > 1 {
-                            ui.add_space(5.0);
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Total pending:").size(12.0).color(Color32::DARK_GRAY));
-                                ui.label(RichText::new(Self::format_sats_as_btc(total_pending)).size(12.0).color(Color32::BLACK).strong());
-                            });
-                        }
-                    });
-
-                    ui.add_space(20.0);
+                let seed_label = if self.show_seed_words { "Hide Seed Words" } else { "Show Seed Words" };
+                let seed_btn = egui::Button::new(RichText::new(seed_label).size(12.0).color(blue))
+                    .fill(blue.gamma_multiply(0.12))
+                    .corner_radius(theme::RADIUS_PILL)
+                    .stroke(egui::Stroke::NONE);
+                if ui.add(seed_btn).clicked() {
+                    self.show_seed_words = !self.show_seed_words;
                 }
 
-                // Claimable lightning balances
+                if self.show_seed_words {
+                    ui.add_space(10.0);
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(255, 247, 237))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 10 })
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("⚠  Write these words on paper. Never share them. Anyone with these words can access your funds.").size(11.0).color(theme::WARNING));
+                            ui.add_space(8.0);
+                            if let Some(ref words) = self.saved_mnemonic.clone() {
+                                let words_vec: Vec<&str> = words.split_whitespace().collect();
+                                let half = (words_vec.len() + 1) / 2;
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        for (i, word) in words_vec.iter().take(half).enumerate() {
+                                            ui.label(RichText::new(format!("{:2}. {}", i + 1, word)).size(12.0).color(Color32::BLACK).monospace());
+                                        }
+                                    });
+                                    ui.add_space(16.0);
+                                    ui.vertical(|ui| {
+                                        for (i, word) in words_vec.iter().skip(half).enumerate() {
+                                            ui.label(RichText::new(format!("{:2}. {}", i + half + 1, word)).size(12.0).color(Color32::BLACK).monospace());
+                                        }
+                                    });
+                                });
+                            } else {
+                                ui.label(RichText::new("Seed phrase not available.").size(12.0).color(Color32::GRAY));
+                            }
+                        });
+                }
+
+                ui.add_space(10.0);
+                let restore_btn = egui::Button::new(RichText::new("Restore from Seed Words").size(12.0).color(theme::DANGER))
+                    .fill(theme::DANGER.gamma_multiply(0.10))
+                    .corner_radius(theme::RADIUS_PILL)
+                    .stroke(egui::Stroke::NONE);
+                if ui.add(restore_btn).clicked() {
+                    self.show_restore_modal = true;
+                    self.restore_seed_input.clear();
+                    self.restore_error.clear();
+                }
+                ui.add_space(4.0);
+                ui.label(RichText::new("Replace this wallet with a different seed phrase.").size(10.0).color(theme::DISABLED_TEXT));
+
+                // Pending balances — only shown when present
+                let balances = self.node.list_balances();
+                if !balances.pending_balances_from_channel_closures.is_empty() {
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "⏳", orange);
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Pending from Closures").size(13.5).strong().color(orange));
+                    });
+                    ui.add_space(8.0);
+                    let mut total_pending: u64 = 0;
+                    for pending in &balances.pending_balances_from_channel_closures {
+                        let (status, amount) = match pending {
+                            ldk_node::PendingSweepBalance::PendingBroadcast { amount_satoshis, .. } =>
+                                ("Pending broadcast", *amount_satoshis),
+                            ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation { amount_satoshis, latest_spending_txid, .. } => {
+                                let s = format!("Awaiting confirmation ({}…)", &latest_spending_txid.to_string()[..8]);
+                                (s.leak() as &str, *amount_satoshis)
+                            },
+                            ldk_node::PendingSweepBalance::AwaitingThresholdConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                let s = format!("Confirming (height {})", confirmation_height);
+                                (s.leak() as &str, *amount_satoshis)
+                            },
+                        };
+                        total_pending += amount;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(Self::format_sats_as_btc(amount)).size(12.0).strong().color(Color32::BLACK));
+                            ui.label(RichText::new(format!("— {}", status)).size(11.0).color(theme::MUTED));
+                        });
+                    }
+                    if balances.pending_balances_from_channel_closures.len() > 1 {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Total:").size(12.0).color(theme::MUTED));
+                            ui.label(RichText::new(Self::format_sats_as_btc(total_pending)).size(12.0).strong().color(Color32::BLACK));
+                        });
+                    }
+                }
+
+                // Claimable lightning balances — only shown when present
                 let has_claimable = balances.lightning_balances.iter().any(|b| {
                     !matches!(b, ldk_node::LightningBalance::ClaimableOnChannelClose { .. })
                 });
                 if has_claimable {
-                    ui.group(|ui| {
-                        ui.label(RichText::new("Claimable Balances").strong().color(Color32::from_rgb(59, 130, 246)));
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "⚡", blue);
                         ui.add_space(8.0);
-
-                        for balance in &balances.lightning_balances {
-                            match balance {
-                                ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                        ui.label(RichText::new(format!("- claimable at block {}", confirmation_height)).size(11.0).color(Color32::DARK_GRAY));
-                                    });
-                                },
-                                ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                        ui.label(RichText::new(format!("- claimable at height {}", timeout_height)).size(11.0).color(Color32::DARK_GRAY));
-                                    });
-                                },
-                                ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                        ui.label(RichText::new(format!("- HTLC claimable at {}", claimable_height)).size(11.0).color(Color32::DARK_GRAY));
-                                    });
-                                },
-                                ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                        ui.label(RichText::new(format!("- needs preimage, expires {}", expiry_height)).size(11.0).color(Color32::DARK_GRAY));
-                                    });
-                                },
-                                ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).color(Color32::BLACK).strong());
-                                        ui.label(RichText::new("- revoked output (justice tx)").size(11.0).color(theme::DANGER_HOVER));
-                                    });
-                                },
-                                _ => {}
-                            }
+                        ui.label(RichText::new("Claimable Balances").size(13.5).strong().color(blue));
+                    });
+                    ui.add_space(8.0);
+                    for balance in &balances.lightning_balances {
+                        match balance {
+                            ldk_node::LightningBalance::ClaimableAwaitingConfirmations { amount_satoshis, confirmation_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).strong().color(Color32::BLACK));
+                                    ui.label(RichText::new(format!("— claimable at block {}", confirmation_height)).size(11.0).color(theme::MUTED));
+                                });
+                            },
+                            ldk_node::LightningBalance::ContentiousClaimable { amount_satoshis, timeout_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).strong().color(Color32::BLACK));
+                                    ui.label(RichText::new(format!("— claimable at height {}", timeout_height)).size(11.0).color(theme::MUTED));
+                                });
+                            },
+                            ldk_node::LightningBalance::MaybeTimeoutClaimableHTLC { amount_satoshis, claimable_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).strong().color(Color32::BLACK));
+                                    ui.label(RichText::new(format!("— HTLC claimable at {}", claimable_height)).size(11.0).color(theme::MUTED));
+                                });
+                            },
+                            ldk_node::LightningBalance::MaybePreimageClaimableHTLC { amount_satoshis, expiry_height, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).strong().color(Color32::BLACK));
+                                    ui.label(RichText::new(format!("— needs preimage, expires {}", expiry_height)).size(11.0).color(theme::MUTED));
+                                });
+                            },
+                            ldk_node::LightningBalance::CounterpartyRevokedOutputClaimable { amount_satoshis, .. } => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(Self::format_sats_as_btc(*amount_satoshis)).size(12.0).strong().color(Color32::BLACK));
+                                    ui.label(RichText::new("— revoked output (justice tx)").size(11.0).color(theme::DANGER_HOVER));
+                                });
+                            },
+                            _ => {}
                         }
+                    }
+                }
+            });
+
+            ui.add_space(20.0);
+
+            // ── NODE & NETWORK section ───────────────────────────────────
+            let teal = Color32::from_rgb(0, 150, 136);
+            section_header(ui, "NODE & NETWORK", teal);
+            card.show(ui, |ui| {
+                // Wallet ID row
+                let wallet_id = self.node.node_id().to_string();
+                let wallet_short = format!("{}…{}", &wallet_id[..6], &wallet_id[wallet_id.len()-4..]);
+                ui.horizontal(|ui| {
+                    icon_badge(ui, "🔑", teal);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Wallet ID").size(13.0).color(Color32::BLACK));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let copied = self.is_copied("settings_wallet_id");
+                        let btn = egui::Button::new(RichText::new(if copied { "✓" } else { "Copy" }).size(11.0).color(if copied { theme::SUCCESS } else { teal }))
+                            .fill(teal.gamma_multiply(0.1)).stroke(egui::Stroke::NONE).corner_radius(theme::RADIUS_PILL);
+                        if ui.add(btn).clicked() {
+                            self.copy_feedback.insert("settings_wallet_id", std::time::Instant::now());
+                            ui.ctx().copy_text(wallet_id.clone());
+                        }
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(&wallet_short).monospace().size(11.0).color(theme::MUTED));
+                    });
+                });
+
+                if let Some(ch) = self.node.list_channels().first().cloned() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    // Channel ID row
+                    let ch_id = format!("{}", ch.user_channel_id.0);
+                    let ch_short = format!("{}…", &ch_id[..6.min(ch_id.len())]);
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "↔", teal);
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Channel ID").size(13.0).color(Color32::BLACK));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let copied = self.is_copied("settings_channel_id");
+                            let btn = egui::Button::new(RichText::new(if copied { "✓" } else { "Copy" }).size(11.0).color(if copied { theme::SUCCESS } else { teal }))
+                                .fill(teal.gamma_multiply(0.1)).stroke(egui::Stroke::NONE).corner_radius(theme::RADIUS_PILL);
+                            if ui.add(btn).clicked() {
+                                self.copy_feedback.insert("settings_channel_id", std::time::Instant::now());
+                                ui.ctx().copy_text(ch_id.clone());
+                            }
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(&ch_short).monospace().size(11.0).color(theme::MUTED));
+                        });
                     });
 
-                    ui.add_space(20.0);
+                    if let Some(funding_txo) = &ch.funding_txo {
+                        let txid = funding_txo.txid.to_string();
+                        let txid_short = format!("{}…{}", &txid[..6], &txid[txid.len()-4..]);
+                        let mempool_base = match self.network {
+                            Network::Signet => "https://mempool.space/signet",
+                            Network::Testnet => "https://mempool.space/testnet",
+                            _ => "https://mempool.space",
+                        };
+                        let url = format!("{}/tx/{}", mempool_base, txid);
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            icon_badge(ui, "📡", teal);
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Funding Tx").size(13.0).color(Color32::BLACK));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let view_btn = egui::Button::new(RichText::new("View ↗").size(11.0).color(Color32::from_rgb(59, 130, 246)))
+                                    .fill(Color32::from_rgb(59, 130, 246).gamma_multiply(0.1)).stroke(egui::Stroke::NONE).corner_radius(theme::RADIUS_PILL);
+                                if ui.add(view_btn).clicked() {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                                }
+                                ui.add_space(4.0);
+                                let copied = self.is_copied("settings_funding_tx");
+                                let copy_btn = egui::Button::new(RichText::new(if copied { "✓" } else { "Copy" }).size(11.0).color(if copied { theme::SUCCESS } else { teal }))
+                                    .fill(teal.gamma_multiply(0.1)).stroke(egui::Stroke::NONE).corner_radius(theme::RADIUS_PILL);
+                                if ui.add(copy_btn).clicked() {
+                                    self.copy_feedback.insert("settings_funding_tx", std::time::Instant::now());
+                                    ui.ctx().copy_text(txid.clone());
+                                }
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(&txid_short).monospace().size(11.0).color(theme::MUTED));
+                            });
+                        });
+                    }
                 }
 
-                // Debug
-                ui.group(|ui| {
-                    ui.label(RichText::new("Debug").size(16.0).strong().color(Color32::BLACK));
-                    ui.add_space(10.0);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
 
-                    if ui.button("View Logs").clicked() {
-                        self.show_log_window = true;
+                // Send Message row
+                let purple = Color32::from_rgb(139, 92, 246);
+                ui.horizontal(|ui| {
+                    icon_badge(ui, "💬", purple);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Message Devs").size(13.0).color(Color32::BLACK));
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let msg_edit = egui::TextEdit::singleline(&mut self.stable_message)
+                        .hint_text("Say hello…")
+                        .desired_width(200.0);
+                    ui.add(msg_edit);
+                    let send_btn = egui::Button::new(RichText::new("Send").size(12.0).color(Color32::WHITE))
+                        .fill(purple).corner_radius(theme::RADIUS_PILL);
+                    if ui.add(send_btn).clicked() && !self.stable_message.is_empty() {
+                        self.send_stable_message();
+                        self.show_toast("Message sent!", "OK");
                     }
                 });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // Debug row
+                let gray = Color32::from_rgb(107, 114, 128);
+                ui.horizontal(|ui| {
+                    icon_badge(ui, "🐛", gray);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Debug").size(13.0).color(Color32::BLACK));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let log_btn = egui::Button::new(RichText::new("View Logs").size(11.0).color(gray))
+                            .fill(gray.gamma_multiply(0.12)).stroke(egui::Stroke::NONE).corner_radius(theme::RADIUS_PILL);
+                        if ui.add(log_btn).clicked() {
+                            self.show_log_window = true;
+                        }
+                    });
+                });
             });
+
+            ui.add_space(20.0);
+
+            // ── DANGER ZONE section ──────────────────────────────────────
+            let danger = theme::DANGER_HOVER;
+            section_header(ui, "DANGER ZONE", danger);
+            egui::Frame::new()
+                .fill(Color32::from_rgb(255, 245, 245))
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD as u8))
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(254, 202, 202)))
+                .inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 12 })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "⚠", danger);
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("Close Wallet").size(13.5).strong().color(danger));
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(
+                                "Closes your Lightning channel and sweeps all funds to an onchain address you control. \
+                                 Your trade and payment history will be preserved."
+                            ).size(11.5).color(theme::MUTED));
+                            ui.add_space(8.0);
+                            let close_btn = egui::Button::new(RichText::new("Close Wallet").size(13.0).color(danger).strong())
+                                .fill(Color32::from_rgb(255, 241, 242))
+                                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(252, 165, 165)))
+                                .corner_radius(theme::RADIUS_PILL);
+                            if ui.add(close_btn).clicked() {
+                                self.confirm_close_popup = true;
+                            }
+                        });
+                    });
+                });
+
+            ui.add_space(24.0);
+        });
     }
 
     fn show_history_tab(&mut self, ui: &mut egui::Ui) {
@@ -5869,9 +6146,9 @@ impl UserApp {
             ui.heading(RichText::new("History").color(Color32::BLACK));
             ui.add_space(20.0);
 
-            // Trade History
+            // Order History
             ui.label(
-                RichText::new("Trade History")
+                RichText::new("Order History")
                     .size(16.0)
                     .strong()
                     .color(Color32::BLACK),
@@ -5889,14 +6166,14 @@ impl UserApp {
                         );
                         ui.add_space(8.0);
                         ui.label(
-                            RichText::new("No trades yet")
+                            RichText::new("No orders yet")
                                 .size(15.0)
                                 .color(theme::MUTED)
                                 .strong(),
                         );
                         ui.add_space(2.0);
                         ui.label(
-                            RichText::new("Buy or sell BTC to see them here")
+                            RichText::new("Convert BTC to see orders here")
                                 .size(12.0)
                                 .color(theme::DISABLED_TEXT),
                         );
@@ -5990,9 +6267,9 @@ impl UserApp {
                                     }
 
                                     let (color, label) = if trade.action == "buy" {
-                                        (theme::SUCCESS, "Buy")
+                                        (theme::SUCCESS, "USD → BTC")
                                     } else {
-                                        (theme::DANGER, "Sell")
+                                        (theme::DANGER, "BTC → USD")
                                     };
                                     ui.add_sized(
                                         [30.0, 18.0],
@@ -6014,27 +6291,21 @@ impl UserApp {
                                     );
 
                                     let (status_label, status_color) = match trade.status.as_str() {
-                                        "completed" => {
-                                            ("Confirmed", theme::SUCCESS)
-                                        }
+                                        "completed" => ("Confirmed", theme::SUCCESS),
                                         "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
                                         "failed" => ("Failed", theme::DANGER_HOVER),
                                         _ => (&*trade.status, Color32::DARK_GRAY),
                                     };
-                                    ui.add_sized(
-                                        [58.0, 18.0],
-                                        egui::Label::new(
-                                            RichText::new(status_label)
-                                                .size(11.0)
-                                                .color(status_color),
-                                        ),
-                                    );
+                                    let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 18.0), Sense::hover());
+                                    let pill = badge_rect.shrink2(egui::vec2(0.0, 3.0));
+                                    ui.painter().rect_filled(pill, egui::CornerRadius::same(4), status_color.gamma_multiply(0.15));
+                                    ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER, status_label, egui::FontId::proportional(10.0), status_color);
 
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.label(
-                                                RichText::new(Self::format_short_timestamp(
+                                                RichText::new(Self::format_relative_timestamp(
                                                     trade.created_at,
                                                 ))
                                                 .size(11.0)
@@ -6190,13 +6461,13 @@ impl UserApp {
                                     }
 
                                     let (color, label) = if payment.direction == "received" {
-                                        (theme::SUCCESS, "In")
+                                        (theme::SUCCESS, "↓")
                                     } else {
-                                        (theme::WARNING, "Out")
+                                        (theme::MUTED, "↑")
                                     };
                                     ui.add_sized(
                                         [24.0, 18.0],
-                                        egui::Label::new(RichText::new(label).color(color)),
+                                        egui::Label::new(RichText::new(label).size(14.0).color(color).strong()),
                                     );
 
                                     let (type_label, type_color) = match payment
@@ -6241,29 +6512,22 @@ impl UserApp {
                                         ),
                                     );
 
-                                    let (status_label, status_color) = match payment.status.as_str()
-                                    {
-                                        "completed" => {
-                                            ("Confirmed", theme::SUCCESS)
-                                        }
+                                    let (status_label, status_color) = match payment.status.as_str() {
+                                        "completed" => ("Confirmed", theme::SUCCESS),
                                         "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
                                         "failed" => ("Failed", theme::DANGER_HOVER),
                                         _ => (&*payment.status, Color32::DARK_GRAY),
                                     };
-                                    ui.add_sized(
-                                        [58.0, 18.0],
-                                        egui::Label::new(
-                                            RichText::new(status_label)
-                                                .size(11.0)
-                                                .color(status_color),
-                                        ),
-                                    );
+                                    let (badge_rect, _) = ui.allocate_exact_size(egui::vec2(58.0, 18.0), Sense::hover());
+                                    let pill = badge_rect.shrink2(egui::vec2(0.0, 3.0));
+                                    ui.painter().rect_filled(pill, egui::CornerRadius::same(4), status_color.gamma_multiply(0.15));
+                                    ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER, status_label, egui::FontId::proportional(10.0), status_color);
 
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.label(
-                                                RichText::new(Self::format_short_timestamp(
+                                                RichText::new(Self::format_relative_timestamp(
                                                     payment.created_at,
                                                 ))
                                                 .size(11.0)
@@ -6281,19 +6545,26 @@ impl UserApp {
                                         };
                                         ui.horizontal(|ui| {
                                             ui.add_space(20.0);
+                                            let copied = self.is_copied("payment_txid");
+                                            let txid_label = if copied {
+                                                "✓ Copied".to_string()
+                                            } else {
+                                                format!("txid: {}", short)
+                                            };
                                             let resp = ui.add(
                                                 egui::Label::new(
-                                                    RichText::new(format!("txid: {}", short))
+                                                    RichText::new(txid_label)
                                                         .size(10.0)
-                                                        .color(Color32::GRAY)
+                                                        .color(if copied { theme::SUCCESS } else { Color32::GRAY })
                                                         .monospace(),
                                                 )
                                                 .sense(Sense::click()),
                                             );
                                             if resp.clicked() {
+                                                self.copy_feedback.insert("payment_txid", std::time::Instant::now());
                                                 ui.ctx().copy_text(txid.clone());
                                             }
-                                            if resp.hovered() {
+                                            if resp.hovered() && !copied {
                                                 resp.on_hover_text("Click to copy full txid");
                                             }
                                         });
@@ -6322,7 +6593,7 @@ impl UserApp {
             Some(t) => t.clone(),
             None => return,
         };
-        egui::Window::new("Trade Details")
+        egui::Window::new("Order Details")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6348,7 +6619,7 @@ impl UserApp {
                     ui.add_space(2.0);
                 };
 
-                let action = if trade.action == "buy" { "Buy" } else { "Sell" };
+                let action = if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
                 row(ui, "Type", action);
                 row(ui, "Amount (USD)", &format!("${:.2}", trade.amount_usd));
                 row(ui, "Amount (BTC)", &format!("{:.8}", trade.amount_btc));
@@ -6385,7 +6656,7 @@ impl UserApp {
 
                 if let Some(ref pid) = trade.payment_id {
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Trade ID").size(11.0).color(Color32::GRAY));
+                    ui.label(RichText::new("Order ID").size(11.0).color(Color32::GRAY));
                     ui.label(
                         RichText::new(pid)
                             .size(10.0)
@@ -6630,6 +6901,10 @@ impl UserApp {
                         self.show_lightning_receive = false;
                         self.lightning_receive_invoice.clear();
                         self.lightning_receive_qr = None;
+                        self.lightning_receive_error.clear();
+                        self.lightning_receive_amount.clear();
+                        self.lightning_receive_amount_usd.clear();
+                        self.jit_specify_amount = false;
                         self.send_error.clear();
                     }
                 });
@@ -6640,7 +6915,7 @@ impl UserApp {
 
     fn show_send_tab(&mut self, ui: &mut egui::Ui) {
         ui.label(
-            RichText::new("Paste an on-chain address, bolt11 invoice, or bolt12 offer")
+            RichText::new("Paste an onchain address, bolt11 invoice, or bolt12 offer")
                 .size(12.0)
                 .italics()
                 .color(theme::MUTED),
@@ -6649,6 +6924,7 @@ impl UserApp {
 
         let input_edit = egui::TextEdit::multiline(&mut self.send_input)
             .hint_text("bc1..., lnbc..., or lno1...")
+            .font(egui::FontId::monospace(11.0))
             .desired_width(300.0)
             .desired_rows(3);
         ui.add(input_edit);
@@ -6691,7 +6967,7 @@ impl UserApp {
             ui.add_space(8.0);
         }
 
-        // Show "Send all" checkbox for on-chain addresses
+        // Show "Send all" checkbox for onchain addresses
         let is_onchain = {
             let l = self.send_input.trim().to_lowercase();
             l.starts_with("bc1")
@@ -6717,10 +6993,7 @@ impl UserApp {
                         .color(Color32::DARK_GRAY),
                 );
                 let prev_usd = self.send_amount_usd.clone();
-                let usd_edit = egui::TextEdit::singleline(&mut self.send_amount_usd)
-                    .hint_text("e.g. 10.00")
-                    .desired_width(120.0);
-                let usd_resp = ui.add(usd_edit);
+                let usd_resp = amount_field(ui, &mut self.send_amount_usd, "e.g. 10.00", 120.0);
                 if usd_resp.has_focus() {
                     self.send_amount_editing = false;
                 }
@@ -6742,10 +7015,7 @@ impl UserApp {
                         .color(Color32::DARK_GRAY),
                 );
                 let prev_amount = self.send_amount.clone();
-                let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
-                    .hint_text("e.g. 0.0005")
-                    .desired_width(120.0);
-                let btc_resp = ui.add(amount_edit);
+                let btc_resp = amount_field(ui, &mut self.send_amount, "e.g. 0.0005", 120.0);
                 if btc_resp.has_focus() {
                     self.send_amount_editing = true;
                 }
@@ -6815,10 +7085,7 @@ impl UserApp {
                         .color(Color32::DARK_GRAY),
                 );
                 let prev_usd = self.send_amount_usd.clone();
-                let usd_edit = egui::TextEdit::singleline(&mut self.send_amount_usd)
-                    .hint_text("e.g. 10.00")
-                    .desired_width(140.0);
-                let usd_resp = ui.add(usd_edit);
+                let usd_resp = amount_field(ui, &mut self.send_amount_usd, "e.g. 10.00", 140.0);
                 if usd_resp.has_focus() {
                     self.send_amount_editing = false;
                 }
@@ -6839,10 +7106,7 @@ impl UserApp {
                         .color(Color32::DARK_GRAY),
                 );
                 let prev_btc = self.send_amount.clone();
-                let amount_edit = egui::TextEdit::singleline(&mut self.send_amount)
-                    .hint_text("e.g. 0.0005")
-                    .desired_width(140.0);
-                let btc_resp = ui.add(amount_edit);
+                let btc_resp = amount_field(ui, &mut self.send_amount, "e.g. 0.0005", 140.0);
                 if btc_resp.has_focus() {
                     self.send_amount_editing = true;
                 }
@@ -6927,7 +7191,7 @@ impl UserApp {
         let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
         if has_pending && spendable == 0 && !has_channel {
             ui.label(
-                RichText::new("Funds are pending on-chain confirmation and can't be sent yet.")
+                RichText::new("Funds are pending onchain confirmation and can't be sent yet.")
                     .size(12.0)
                     .color(theme::WARNING),
             );
@@ -6961,6 +7225,18 @@ impl UserApp {
     }
 
     fn show_receive_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let has_ready_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+
+        // When no channel exists, auto-generate a variable-amount JIT invoice on open
+        // unless the user has switched to the specify-amount form.
+        if !has_ready_channel
+            && !self.jit_specify_amount
+            && self.lightning_receive_invoice.is_empty()
+            && self.lightning_receive_error.is_empty()
+        {
+            self.generate_jit_ln_invoice(ctx, None);
+        }
+
         // On-chain address
         ui.group(|ui| {
             ui.label(
@@ -7008,6 +7284,17 @@ impl UserApp {
 
             if self.show_lightning_receive && !self.lightning_receive_invoice.is_empty() {
                 ui.vertical_centered(|ui| {
+                    if !has_ready_channel {
+                        ui.label(
+                            RichText::new(
+                                "First payment — a channel will be opened automatically via LSP",
+                            )
+                            .size(11.0)
+                            .color(theme::MUTED)
+                            .italics(),
+                        );
+                        ui.add_space(6.0);
+                    }
                     if let Some(ref qr) = self.lightning_receive_qr {
                         let img = egui::Image::from_texture(qr).max_size(egui::vec2(180.0, 180.0));
                         ui.add(img);
@@ -7038,66 +7325,149 @@ impl UserApp {
                             self.lightning_receive_invoice.clear();
                             self.lightning_receive_qr = None;
                             self.lightning_receive_error.clear();
+                            self.jit_specify_amount = false;
                         }
                     });
-                });
-            } else {
-                let price = self.btc_price;
 
-                // USD amount field
+                    // Small "Specify amount" toggle for JIT invoices (no channel)
+                    if !has_ready_channel {
+                        ui.add_space(6.0);
+                        let specify_label = if self.jit_specify_amount {
+                            "← Any amount"
+                        } else {
+                            "Specify amount →"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(specify_label).size(11.0).color(theme::IOS_BLUE),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            self.jit_specify_amount = !self.jit_specify_amount;
+                            // Clear invoice so the new mode generates fresh
+                            self.show_lightning_receive = false;
+                            self.lightning_receive_invoice.clear();
+                            self.lightning_receive_qr = None;
+                            self.lightning_receive_error.clear();
+                            self.lightning_receive_amount.clear();
+                            self.lightning_receive_amount_usd.clear();
+                        }
+                    }
+                });
+            } else if !has_ready_channel && self.jit_specify_amount {
+                // JIT specify-amount form
+                let price = self.btc_price;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Amount (USD):").color(Color32::DARK_GRAY));
                     let prev_usd = self.lightning_receive_amount_usd.clone();
-                    let usd_edit =
-                        egui::TextEdit::singleline(&mut self.lightning_receive_amount_usd)
-                            .hint_text("e.g. 10.00")
-                            .desired_width(100.0);
-                    let usd_resp = ui.add(usd_edit);
+                    let usd_resp = amount_field(ui, &mut self.lightning_receive_amount_usd, "e.g. 10.00", 100.0);
                     if usd_resp.has_focus() {
                         self.lightning_receive_editing_btc = false;
                     }
                     if !self.lightning_receive_editing_btc
                         && self.lightning_receive_amount_usd != prev_usd
                     {
-                        if let Ok(usd_val) = self.lightning_receive_amount_usd.trim().parse::<f64>()
-                        {
-                            if price > 0.0 && usd_val >= 0.0 {
-                                self.lightning_receive_amount = format!("{:.8}", usd_val / price);
+                        if let Ok(v) = self.lightning_receive_amount_usd.trim().parse::<f64>() {
+                            if price > 0.0 {
+                                self.lightning_receive_amount = format!("{:.8}", v / price);
                             }
                         }
                     }
                 });
-
-                // BTC amount field
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Amount (BTC):").color(Color32::DARK_GRAY));
                     let prev_btc = self.lightning_receive_amount.clone();
-                    let btc_edit = egui::TextEdit::singleline(&mut self.lightning_receive_amount)
-                        .hint_text("e.g. 0.0001")
-                        .desired_width(100.0);
-                    let btc_resp = ui.add(btc_edit);
+                    let btc_resp = amount_field(ui, &mut self.lightning_receive_amount, "e.g. 0.0001", 100.0);
                     if btc_resp.has_focus() {
                         self.lightning_receive_editing_btc = true;
                     }
                     if self.lightning_receive_editing_btc
                         && self.lightning_receive_amount != prev_btc
                     {
-                        if let Ok(btc_val) = self.lightning_receive_amount.trim().parse::<f64>() {
-                            if price > 0.0 && btc_val >= 0.0 {
-                                self.lightning_receive_amount_usd =
-                                    format!("{:.2}", btc_val * price);
+                        if let Ok(v) = self.lightning_receive_amount.trim().parse::<f64>() {
+                            if price > 0.0 {
+                                self.lightning_receive_amount_usd = format!("{:.2}", v * price);
                             }
                         }
                     }
                 });
-
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Generate").clicked() {
+                        let btc_val = self.lightning_receive_amount.trim().parse::<f64>().unwrap_or(0.0);
+                        if btc_val <= 0.0 {
+                            self.lightning_receive_error = "Please enter an amount.".to_string();
+                        } else {
+                            self.lightning_receive_error.clear();
+                            let sats = (btc_val * 100_000_000.0) as u64;
+                            self.generate_jit_ln_invoice(ctx, Some(sats));
+                        }
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("← Any amount").size(11.0).color(theme::IOS_BLUE),
+                            )
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        self.jit_specify_amount = false;
+                        self.lightning_receive_amount.clear();
+                        self.lightning_receive_amount_usd.clear();
+                        self.lightning_receive_error.clear();
+                    }
+                });
+                if !self.lightning_receive_error.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&self.lightning_receive_error).color(theme::DANGER_HOVER));
+                }
+            } else {
+                // Has-channel: standard fixed-amount invoice form
+                let price = self.btc_price;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (USD):").color(Color32::DARK_GRAY));
+                    let prev_usd = self.lightning_receive_amount_usd.clone();
+                    let usd_resp = amount_field(ui, &mut self.lightning_receive_amount_usd, "e.g. 10.00", 100.0);
+                    if usd_resp.has_focus() {
+                        self.lightning_receive_editing_btc = false;
+                    }
+                    if !self.lightning_receive_editing_btc
+                        && self.lightning_receive_amount_usd != prev_usd
+                    {
+                        if let Ok(usd_val) = self.lightning_receive_amount_usd.trim().parse::<f64>() {
+                            if price > 0.0 && usd_val >= 0.0 {
+                                self.lightning_receive_amount = format!("{:.8}", usd_val / price);
+                            }
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Amount (BTC):").color(Color32::DARK_GRAY));
+                    let prev_btc = self.lightning_receive_amount.clone();
+                    let btc_resp = amount_field(ui, &mut self.lightning_receive_amount, "e.g. 0.0001", 100.0);
+                    if btc_resp.has_focus() {
+                        self.lightning_receive_editing_btc = true;
+                    }
+                    if self.lightning_receive_editing_btc && self.lightning_receive_amount != prev_btc {
+                        if let Ok(btc_val) = self.lightning_receive_amount.trim().parse::<f64>() {
+                            if price > 0.0 && btc_val >= 0.0 {
+                                self.lightning_receive_amount_usd = format!("{:.2}", btc_val * price);
+                            }
+                        }
+                    }
+                });
                 ui.add_space(8.0);
                 if ui.button("Generate Invoice").clicked() {
                     let amount = self.lightning_receive_amount.trim();
-                    if amount.is_empty()
-                        || amount == "0"
-                        || amount.parse::<f64>().unwrap_or(0.0) <= 0.0
-                    {
+                    if amount.is_empty() || amount == "0" || amount.parse::<f64>().unwrap_or(0.0) <= 0.0 {
                         self.lightning_receive_error = "Please enter an amount.".to_string();
                     } else {
                         self.lightning_receive_error.clear();
@@ -7106,10 +7476,7 @@ impl UserApp {
                 }
                 if !self.lightning_receive_error.is_empty() {
                     ui.add_space(5.0);
-                    ui.label(
-                        RichText::new(&self.lightning_receive_error)
-                            .color(theme::DANGER_HOVER),
-                    );
+                    ui.label(RichText::new(&self.lightning_receive_error).color(theme::DANGER_HOVER));
                 }
             }
         });
@@ -7188,7 +7555,7 @@ impl UserApp {
     }
 
     fn show_buy_modal_ui(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Buy BTC")
+        egui::Window::new("USD → BTC")
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
@@ -7202,8 +7569,9 @@ impl UserApp {
                 ui.set_min_width(420.0);
                 ui.add_space(28.0);
 
-                // Check if we're on confirmation screen
-                if self.show_confirm_trade && self.pending_trade.is_some() {
+                if self.trade_success.is_some() {
+                    self.show_trade_success_screen(ui);
+                } else if self.show_confirm_trade && self.pending_trade.is_some() {
                     self.show_buy_confirm_screen(ui);
                 } else {
                     self.show_buy_amount_screen(ui);
@@ -7216,7 +7584,7 @@ impl UserApp {
     fn show_buy_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
-            RichText::new("Buy bitcoin")
+            RichText::new("USD → BTC")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -7235,14 +7603,23 @@ impl UserApp {
         );
         ui.add_space(20.0);
 
-        // Centered USD amount input
+        // Centered USD amount input — iOS-style rounded field
         ui.vertical_centered(|ui| {
-            let amount_edit = egui::TextEdit::singleline(&mut self.trade_amount_input)
-                .hint_text("0.00")
-                .font(egui::FontId::proportional(40.0))
-                .horizontal_align(egui::Align::Center)
-                .desired_width(260.0);
-            ui.add(amount_edit);
+            egui::Frame::new()
+                .fill(Color32::from_rgb(242, 242, 247))
+                .corner_radius(egui::CornerRadius::same(14))
+                .inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 10 })
+                .stroke(egui::Stroke::new(0.5, Color32::from_rgb(210, 210, 215)))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.trade_amount_input)
+                            .frame(false)
+                            .hint_text("0.00")
+                            .font(egui::FontId::proportional(40.0))
+                            .horizontal_align(egui::Align::Center)
+                            .desired_width(228.0),
+                    );
+                });
 
             // BTC equivalent below input
             if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
@@ -7362,6 +7739,7 @@ impl UserApp {
                 self.trade_error.clear();
                 self.pending_trade = None;
                 self.show_confirm_trade = false;
+                self.trade_success = None;
             }
         });
     }
@@ -7376,7 +7754,7 @@ impl UserApp {
 
         // Header
         ui.label(
-            RichText::new("Confirm purchase")
+            RichText::new("Confirm Order")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -7384,7 +7762,12 @@ impl UserApp {
         ui.add_space(20.0);
 
         // Order summary
-        ui.group(|ui| {
+        egui::Frame::new()
+            .fill(theme::CARD_FILL)
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD as u8))
+            .stroke(egui::Stroke::new(1.0, theme::CARD_STROKE))
+            .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 14 })
+            .show(ui, |ui| {
             ui.set_min_width(260.0);
 
             // Amount
@@ -7474,10 +7857,12 @@ impl UserApp {
         });
         if should_confirm {
             self.execute_buy(amount_usd);
-            self.show_buy_modal = false;
-            self.trade_amount_input.clear();
-            self.pending_trade = None;
-            self.show_confirm_trade = false;
+            if self.trade_error.is_empty() {
+                self.trade_success = Some(TradeAction::BuyBtc);
+                self.pending_trade = None;
+                self.show_confirm_trade = false;
+                self.trade_amount_input.clear();
+            }
         }
 
         ui.add_space(10.0);
@@ -7494,7 +7879,7 @@ impl UserApp {
     }
 
     fn show_sell_modal_ui(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Sell BTC")
+        egui::Window::new("BTC → USD")
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
@@ -7508,8 +7893,9 @@ impl UserApp {
                 ui.set_min_width(420.0);
                 ui.add_space(28.0);
 
-                // Check if we're on confirmation screen
-                if self.show_confirm_trade && self.pending_trade.is_some() {
+                if self.trade_success.is_some() {
+                    self.show_trade_success_screen(ui);
+                } else if self.show_confirm_trade && self.pending_trade.is_some() {
                     self.show_sell_confirm_screen(ui);
                 } else {
                     self.show_sell_amount_screen(ui);
@@ -7522,7 +7908,7 @@ impl UserApp {
     fn show_sell_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
-            RichText::new("Sell bitcoin")
+            RichText::new("BTC → USD")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -7551,14 +7937,23 @@ impl UserApp {
         );
         ui.add_space(20.0);
 
-        // Centered USD amount input
+        // Centered USD amount input — iOS-style rounded field
         ui.vertical_centered(|ui| {
-            let amount_edit = egui::TextEdit::singleline(&mut self.trade_amount_input)
-                .hint_text("0.00")
-                .font(egui::FontId::proportional(40.0))
-                .horizontal_align(egui::Align::Center)
-                .desired_width(260.0);
-            ui.add(amount_edit);
+            egui::Frame::new()
+                .fill(Color32::from_rgb(242, 242, 247))
+                .corner_radius(egui::CornerRadius::same(14))
+                .inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 10 })
+                .stroke(egui::Stroke::new(0.5, Color32::from_rgb(210, 210, 215)))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.trade_amount_input)
+                            .frame(false)
+                            .hint_text("0.00")
+                            .font(egui::FontId::proportional(40.0))
+                            .horizontal_align(egui::Align::Center)
+                            .desired_width(228.0),
+                    );
+                });
 
             // BTC equivalent below input
             if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
@@ -7674,6 +8069,7 @@ impl UserApp {
                 self.trade_error.clear();
                 self.pending_trade = None;
                 self.show_confirm_trade = false;
+                self.trade_success = None;
             }
         });
     }
@@ -7688,7 +8084,7 @@ impl UserApp {
 
         // Header
         ui.label(
-            RichText::new("Confirm sale")
+            RichText::new("Confirm Order")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -7696,12 +8092,17 @@ impl UserApp {
         ui.add_space(20.0);
 
         // Order summary
-        ui.group(|ui| {
+        egui::Frame::new()
+            .fill(theme::CARD_FILL)
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD as u8))
+            .stroke(egui::Stroke::new(1.0, theme::CARD_STROKE))
+            .inner_margin(egui::Margin { left: 16, right: 16, top: 14, bottom: 14 })
+            .show(ui, |ui| {
             ui.set_min_width(260.0);
 
             // You're selling
             ui.horizontal(|ui| {
-                ui.label(RichText::new("You're selling").color(Color32::DARK_GRAY));
+                ui.label(RichText::new("Converting").color(Color32::DARK_GRAY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!("{} BTC", Self::format_btc_spaced(btc_amount)))
@@ -7786,10 +8187,12 @@ impl UserApp {
         });
         if should_confirm {
             self.execute_sell(amount_usd);
-            self.show_sell_modal = false;
-            self.trade_amount_input.clear();
-            self.pending_trade = None;
-            self.show_confirm_trade = false;
+            if self.trade_error.is_empty() {
+                self.trade_success = Some(TradeAction::SellBtc);
+                self.pending_trade = None;
+                self.show_confirm_trade = false;
+                self.trade_amount_input.clear();
+            }
         }
 
         ui.add_space(10.0);
@@ -7801,6 +8204,42 @@ impl UserApp {
                 .clicked()
             {
                 self.show_confirm_trade = false;
+            }
+        });
+    }
+
+    fn show_trade_success_screen(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(16.0);
+            // Big green checkmark badge
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(80.0, 80.0), Sense::hover());
+            Self::paint_check_badge(ui.painter(), rect.center(), 80.0);
+            ui.add_space(20.0);
+            ui.label(
+                RichText::new("Order Submitted")
+                    .size(24.0)
+                    .color(Color32::BLACK)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Your order is pending confirmation.")
+                    .size(13.0)
+                    .color(theme::MUTED),
+            );
+            ui.add_space(32.0);
+            let done_btn = egui::Button::new(
+                RichText::new("Done").size(16.0).color(Color32::WHITE).strong(),
+            )
+            .fill(theme::IOS_GREEN)
+            .corner_radius(theme::RADIUS_PILL)
+            .min_size(egui::vec2(280.0, 50.0));
+            if ui.add(done_btn).clicked() {
+                self.show_buy_modal = false;
+                self.show_sell_modal = false;
+                self.trade_success = None;
+                self.trade_amount_input.clear();
+                self.trade_error.clear();
             }
         });
     }
@@ -7822,7 +8261,7 @@ impl UserApp {
                 .show(ctx, |ui| {
                     ui.label(RichText::new("Are you sure you want to close your wallet?").size(13.0).color(Color32::BLACK));
                     ui.add_space(5.0);
-                    ui.label(RichText::new("All funds will be sent to an on-chain address you control. Your trade and payment history will be preserved.").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("All funds will be sent to an onchain address you control. Your trade and payment history will be preserved.").size(12.0).color(Color32::DARK_GRAY));
                     ui.add_space(10.0);
 
                     // Show balance that will be received
@@ -7866,6 +8305,105 @@ impl UserApp {
             self.confirm_close_popup = false;
             self.cached_fee_rate = None;
             self.fee_rate_receiver = None;
+        }
+    }
+
+    fn show_restore_wallet_modal_ui(&mut self, ctx: &egui::Context) {
+        let mut do_restore = false;
+        let mut do_cancel = false;
+
+        let word_count = self.restore_seed_input
+            .split_whitespace()
+            .filter(|w| !w.is_empty())
+            .count();
+        let valid_count = word_count == 12 || word_count == 24;
+
+        egui::Window::new("Restore Wallet")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE).corner_radius(theme::RADIUS_LG))
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+
+                egui::Frame::new()
+                    .fill(theme::DANGER.gamma_multiply(0.08))
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin { left: 10, right: 10, top: 8, bottom: 8 })
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("⚠  This will replace your current wallet. Make sure you have backed up your existing seed words first.").size(12.0).color(theme::DANGER));
+                    });
+
+                ui.add_space(12.0);
+                ui.label(RichText::new("Paste your 12 or 24 seed words:").size(12.0).color(Color32::BLACK));
+                ui.add_space(6.0);
+
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(242, 242, 247))
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin { left: 10, right: 10, top: 8, bottom: 8 })
+                    .stroke(egui::Stroke::new(0.5, Color32::from_rgb(210, 210, 215)))
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.restore_seed_input)
+                                .frame(false)
+                                .hint_text("word1 word2 word3 …")
+                                .desired_width(300.0)
+                                .desired_rows(4),
+                        );
+                    });
+
+                ui.add_space(4.0);
+                let count_color = if valid_count { theme::SUCCESS } else { theme::MUTED };
+                ui.label(RichText::new(format!("{} words", word_count)).size(11.0).color(count_color));
+
+                if !self.restore_error.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&self.restore_error).size(11.0).color(theme::DANGER));
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    let restore_btn = egui::Button::new(RichText::new("Restore Wallet").color(Color32::WHITE).size(13.0))
+                        .fill(if valid_count { theme::DANGER_HOVER } else { theme::DANGER.gamma_multiply(0.4) })
+                        .corner_radius(theme::RADIUS_SM)
+                        .min_size(egui::vec2(130.0, 32.0));
+                    if ui.add(restore_btn).clicked() && valid_count {
+                        do_restore = true;
+                    }
+                    ui.add_space(8.0);
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                });
+            });
+
+        if do_cancel {
+            self.show_restore_modal = false;
+            self.restore_seed_input.clear();
+            self.restore_error.clear();
+        } else if do_restore {
+            let mnemonic_str = self.restore_seed_input.split_whitespace().collect::<Vec<_>>().join(" ");
+            match ldk_node::bip39::Mnemonic::from_str(&mnemonic_str) {
+                Err(e) => {
+                    self.restore_error = format!("Invalid seed phrase: {}", e);
+                }
+                Ok(_) => {
+                    let data_dir = get_user_data_dir();
+                    let _ = self.node.stop();
+                    for name in ["ldk_node_data.sqlite", "ldk_node_data.sqlite-wal", "ldk_node_data.sqlite-shm"] {
+                        std::fs::remove_file(data_dir.join(name)).ok();
+                    }
+                    if let Err(e) = std::fs::write(data_dir.join("seed_phrase"), &mnemonic_str) {
+                        self.restore_error = format!("Failed to save seed: {}", e);
+                        return;
+                    }
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(exe).spawn();
+                    }
+                    std::process::exit(0);
+                }
+            }
         }
     }
 
@@ -8153,16 +8691,7 @@ impl App for UserApp {
             }
         }
 
-        // Show onboarding only if no channels AND no funds at all (pending or on-chain)
-        // Don't override if user navigated to History tab
-        if self.current_tab == Tab::Home {
-            let balances = self.node.list_balances();
-            let has_any_funds = balances.total_lightning_balance_sats > 0
-                || !balances.pending_balances_from_channel_closures.is_empty()
-                || balances.total_onchain_balance_sats > 0;
-            self.show_onboarding =
-                self.node.list_channels().is_empty() && !self.waiting_for_payment && !has_any_funds;
-        }
+        self.show_onboarding = false;
 
         self.start_background_if_needed();
 
@@ -8186,7 +8715,7 @@ impl App for UserApp {
             self.trigger_fund_wallet = false;
             let has_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
             if has_channel {
-                // Channel exists — show on-chain deposit address (auto-splice handles the rest)
+                // Channel exists — show onchain deposit address (auto-splice handles the rest)
                 self.fund_tab = FundTab::Onchain;
                 if self.on_chain_address.is_empty() {
                     self.get_address();
@@ -8239,6 +8768,10 @@ impl App for UserApp {
                 self.trade_amount_input.clear();
                 self.trade_error.clear();
             }
+        }
+
+        if self.show_restore_modal {
+            self.show_restore_wallet_modal_ui(ctx);
         }
 
         // Detail modals for history rows
@@ -8371,15 +8904,43 @@ pub fn run() {
                     let mut visuals = egui::Visuals::light();
                     visuals.window_fill = theme::SURFACE;
                     visuals.panel_fill = theme::SURFACE;
-                    visuals.widgets.noninteractive.bg_fill = theme::SURFACE;
+                    // Global rounding — all windows, popups, groups get rounder corners
+                    visuals.window_corner_radius = egui::CornerRadius::same(theme::RADIUS_LG as u8);
+                    // Groups: soft fill + nearly invisible border instead of the hard gray box
+                    visuals.widgets.noninteractive.bg_fill = theme::CARD_FILL;
+                    visuals.widgets.noninteractive.bg_stroke =
+                        egui::Stroke::new(1.0, theme::CARD_STROKE);
+                    visuals.widgets.noninteractive.corner_radius =
+                        egui::CornerRadius::same(theme::RADIUS_MD as u8);
                     visuals.widgets.inactive.bg_fill = theme::SUBTLE_BG;
                     visuals.widgets.inactive.weak_bg_fill = theme::SUBTLE_BG;
+                    visuals.widgets.inactive.corner_radius =
+                        egui::CornerRadius::same(theme::RADIUS_MD as u8);
                     visuals.widgets.hovered.bg_fill = theme::SELECTED_BG;
                     visuals.widgets.hovered.weak_bg_fill = theme::SELECTED_BG;
+                    visuals.widgets.hovered.corner_radius =
+                        egui::CornerRadius::same(theme::RADIUS_MD as u8);
                     visuals.widgets.active.bg_fill = theme::BORDER;
                     visuals.widgets.active.weak_bg_fill = theme::BORDER;
+                    visuals.widgets.active.corner_radius =
+                        egui::CornerRadius::same(theme::RADIUS_MD as u8);
+                    visuals.widgets.open.corner_radius =
+                        egui::CornerRadius::same(theme::RADIUS_MD as u8);
                     visuals.selection.bg_fill = theme::PRIMARY;
                     visuals.selection.stroke.color = theme::TEXT_ON_PRIMARY;
+                    // Soften popup shadow
+                    visuals.popup_shadow = egui::epaint::Shadow {
+                        offset: [0, 4],
+                        blur: 20,
+                        spread: 0,
+                        color: Color32::from_black_alpha(28),
+                    };
+                    visuals.window_shadow = egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 32,
+                        spread: 0,
+                        color: Color32::from_black_alpha(32),
+                    };
                     cc.egui_ctx.set_visuals(visuals);
 
                     // Tighten the default spacing for a more refined feel.
