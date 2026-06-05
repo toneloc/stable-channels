@@ -48,7 +48,7 @@ final class KnownAddressDepositRecorder: DepositRecorder {
         }
         let ok = databaseService?.recordOnchainPaymentWithResolution(
             paymentId: deposit.depositId,
-            amountMsat: deposit.depositSats * 1000,
+            amountMsat: Int64(deposit.depositSats) * 1000,
             amountUSD: deposit.amountUSD,
             btcPrice: deposit.btcPrice,
             resolutionId: resolutionId
@@ -64,7 +64,9 @@ final class KnownAddressDepositRecorder: DepositRecorder {
 
 /// Records when no current receive address is known. Writes a completed
 /// payment row with no resolver; user can re-generate an address to see
-/// the on-chain link.
+/// the on-chain link. Returns `false` if the write fails so the caller
+/// can leave `prevOnchainSats` unchanged and retry on the next balance
+/// poll (matches `KnownAddressDepositRecorder` semantics).
 @MainActor
 final class UnknownAddressDepositRecorder: DepositRecorder {
     private let databaseService: DatabaseService?
@@ -74,16 +76,21 @@ final class UnknownAddressDepositRecorder: DepositRecorder {
     }
 
     func record(deposit: DepositRecordInput, address _: String?) -> Bool {
-        try? databaseService?.recordPayment(
-            paymentId: deposit.depositId,
-            paymentType: "onchain",
-            direction: "received",
-            amountMsat: deposit.depositSats * 1000,
-            amountUSD: deposit.amountUSD,
-            btcPrice: deposit.btcPrice,
-            counterparty: nil,
-            status: "completed"
-        )
-        return true
+        guard let databaseService else { return false }
+        do {
+            try databaseService.recordPayment(
+                paymentId: deposit.depositId,
+                paymentType: "onchain",
+                direction: "received",
+                amountMsat: UInt64(Int64(deposit.depositSats) * 1000),
+                amountUSD: deposit.amountUSD,
+                btcPrice: deposit.btcPrice,
+                counterparty: nil,
+                status: "completed"
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 }

@@ -9,7 +9,7 @@ struct OnchainTxidResolver {
 
     init(
         chainURLs: [String],
-        onResolved: @escaping OnTxidResolved,
+        onResolved: @escaping CloseTxidResolver.OnTxidResolved,
         urlSession: URLSession = .shared,
         maxAttempts: Int = 8,
         backoffSeconds: [UInt64] = [2, 8, 30, 60, 120, 300, 600, 900],

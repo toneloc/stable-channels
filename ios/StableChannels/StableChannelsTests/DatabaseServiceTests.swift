@@ -57,9 +57,11 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertTrue(ok)
 
-        let ops = service.fetchPendingOperations()
-        XCTAssertEqual(ops.count, 1)
-        let op = ops[0]
+        // fetchPendingOperations() filters by status='pending', so the
+        // resolved row is excluded. Use the PK lookup instead.
+        let op = service.fetchPendingOperation(opId: "close-xyz")
+        XCTAssertNotNil(op)
+        guard let op else { return }
         XCTAssertEqual(op.opId, "close-xyz")
         XCTAssertEqual(op.opType, "channel_close")
         XCTAssertEqual(op.fundingOutpointTxid, "cafebabe")

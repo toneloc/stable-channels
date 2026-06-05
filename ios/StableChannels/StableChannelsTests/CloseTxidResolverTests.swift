@@ -134,10 +134,13 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver()
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let ops = service.fetchPendingOperations()
-        XCTAssertEqual(ops.count, 1)
-        XCTAssertEqual(ops[0].status, "resolved")
-        XCTAssertEqual(ops[0].closingTxid, validTxid)
+        // PK lookup: fetchPendingOperations() filters by status='pending',
+        // so a resolved row is excluded.
+        let op = service.fetchPendingOperation(opId: "close-test")
+        XCTAssertNotNil(op)
+        guard let op else { return }
+        XCTAssertEqual(op.status, "resolved")
+        XCTAssertEqual(op.closingTxid, validTxid)
     }
 
     func testResolveExhaustsAttempts() async {
@@ -177,9 +180,11 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver(maxAttempts: 5, backoffSeconds: [0, 0, 0, 0])
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let ops = service.fetchPendingOperations()
-        XCTAssertEqual(ops[0].status, "resolved")
-        XCTAssertEqual(ops[0].closingTxid, validTxid)
+        let op = service.fetchPendingOperation(opId: "close-test")
+        XCTAssertNotNil(op)
+        guard let op else { return }
+        XCTAssertEqual(op.status, "resolved")
+        XCTAssertEqual(op.closingTxid, validTxid)
     }
 
     func testResolveValidatesTxidShape() async {
@@ -215,9 +220,11 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver(maxAttempts: 3, backoffSeconds: [0, 0])
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let ops = service.fetchPendingOperations()
-        XCTAssertEqual(ops[0].status, "resolved",
+        let op = service.fetchPendingOperation(opId: "close-test")
+        XCTAssertNotNil(op)
+        guard let op else { return }
+        XCTAssertEqual(op.status, "resolved",
                        "Resolver should fall back to the second chain URL")
-        XCTAssertEqual(ops[0].closingTxid, validTxid)
+        XCTAssertEqual(op.closingTxid, validTxid)
     }
 }

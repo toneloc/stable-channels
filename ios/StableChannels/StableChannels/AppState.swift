@@ -1405,7 +1405,7 @@ class AppState {
 
             let deposit = DepositRecordInput(
                 depositId: depositId,
-                depositSats: depositSats,
+                depositSats: Int64(depositSats),
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil
             )
