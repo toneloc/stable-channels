@@ -339,7 +339,7 @@ struct HomeView: View {
                 // 1. Splice-in in progress
                 pendingRow(kind: .sweep(txid: appState.spliceTxid))
             } else if appState.isChannelClosing {
-                if let closeTxid = appState.lastCloseTxid, !closeTxid.isEmpty {
+                if let closeTxid = appState.txidLinks.lastCloseTxid, !closeTxid.isEmpty {
                     pendingRow(kind: .close(txid: closeTxid))
                 } else {
                     pendingRow(kind: .closeNoLink)
@@ -367,7 +367,7 @@ struct HomeView: View {
                 if appState.isOpeningChannel, let fundingTx = appState.fundingTxid {
                     pendingRow(kind: .deposit(txid: fundingTx))
                 } else {
-                    pendingRow(kind: .onchainReceive(txid: appState.lastReceiveTxid))
+                    pendingRow(kind: .onchainReceive(txid: appState.txidLinks.lastReceiveTxid))
                 }
                 if !hasReadyChannel {
                     Text(String(

@@ -5,6 +5,11 @@ import Foundation
 /// `ResilientEsploraClient`. `databaseService` is per-call so the struct
 /// stays Sendable.
 struct CloseTxidResolver {
+    /// Shared callback for both `CloseTxidResolver` and `OnchainTxidResolver`.
+    /// `workId` is opId for close, `"res-\(resolutionId)"` for onchain-receive
+    /// (caller parses the prefix to recover the Int64).
+    typealias OnTxidResolved = @MainActor (_ workId: String, _ txid: String) async -> Void
+
     struct Config {
         let maxAttempts: Int
         let backoffSeconds: [UInt64]
@@ -25,11 +30,11 @@ struct CloseTxidResolver {
     }
 
     private let client: ResilientEsploraClient
-    private let onResolved: @Sendable (String, String) async -> Void
+    private let onResolved: OnTxidResolved
 
     init(
         chainURLs: [String],
-        onResolved: @escaping @Sendable (String, String) async -> Void,
+        onResolved: @escaping OnTxidResolved,
         urlSession: URLSession = .shared,
         config: Config? = nil
     ) {
@@ -52,11 +57,16 @@ struct CloseTxidResolver {
     }
 
     func resolve(opId: String, databaseService: DatabaseService) async {
-        guard let op = databaseService.fetchPendingOperation(opId: opId),
-              op.status == "pending",
-              let fundingTxid = op.fundingOutpointTxid,
-              let vout = op.fundingOutpointVout
-        else { return }
+        // Snapshot from DB on caller's actor; check happens before any Sendable hop.
+        let snapshot: (String, UInt32)? = await MainActor.run {
+            guard let op = databaseService.fetchPendingOperation(opId: opId),
+                  op.status == "pending",
+                  let fundingTxid = op.fundingOutpointTxid,
+                  let vout = op.fundingOutpointVout
+            else { return nil }
+            return (fundingTxid, vout)
+        }
+        guard let (fundingTxid, vout) = snapshot else { return }
 
         let onResolved = self.onResolved
         let parser: ResilientEsploraClient.ResultParser<String> = { data in
@@ -75,11 +85,14 @@ struct CloseTxidResolver {
             },
             resultParser: parser,
             onResolved: { txid in
-                databaseService.updatePendingOperation(
-                    opId: opId,
-                    closingTxid: txid,
-                    status: "resolved"
-                )
+                // databaseService is non-Sendable; hop to MainActor for the DB write.
+                await MainActor.run {
+                    databaseService.updatePendingOperation(
+                        opId: opId,
+                        closingTxid: txid,
+                        status: "resolved"
+                    )
+                }
                 await onResolved(opId, txid)
             }
         )
