@@ -53,19 +53,25 @@ fun BackupView(appState: AppState) {
                     showSeedWords = false
                     seedAuthError = null
                 } else {
-                    // Showing seed words — require biometric auth
-                    scope.launch {
-                        if (activity != null) {
-                            val authResult = BiometricService.authenticate(activity, "View seed phrase")
-                            if (authResult == BiometricService.AuthResult.SUCCESS) {
-                                showSeedWords = true
-                                seedAuthError = null
+                    val requireAuth = com.stablechannels.app.services.AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)
+                    if (requireAuth) {
+                        // Showing seed words — require biometric auth
+                        scope.launch {
+                            if (activity != null) {
+                                val authResult = BiometricService.authenticate(activity, "View seed phrase")
+                                if (authResult == BiometricService.AuthResult.SUCCESS) {
+                                    showSeedWords = true
+                                    seedAuthError = null
+                                } else {
+                                    seedAuthError = "Authentication required"
+                                }
                             } else {
                                 seedAuthError = "Authentication required"
                             }
-                        } else {
-                            seedAuthError = "Authentication required"
                         }
+                    } else {
+                        showSeedWords = true
+                        seedAuthError = null
                     }
                 }
             },
