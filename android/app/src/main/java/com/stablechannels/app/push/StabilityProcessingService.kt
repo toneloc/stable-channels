@@ -270,8 +270,7 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
 
         try {
-            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), ByteArray(0))
-            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), listOf(1.toUByte()))
+            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1))
             node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),
                 Constants.DEFAULT_LSP_PUBKEY,
