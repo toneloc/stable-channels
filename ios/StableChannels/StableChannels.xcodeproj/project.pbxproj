@@ -868,10 +868,10 @@
 		};
 		70EEE76071EE59F64A24FD4F /* XCRemoteSwiftPackageReference "ldk-node" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/lightningdevkit/ldk-node.git";
+			repositoryURL = "https://github.com/toneloc/ldk-node.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.7.0;
+				version = 0.7.5;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

@@ -97,24 +97,32 @@ class StabilityProcessingService : Service() {
             trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
             probingLiquidityLimitMultiplier = 3UL,
             anchorChannelsConfig = anchorConfig,
-            routeParameters = null
+            routeParameters = null,
+            torConfig = null,
+            hrnConfig = HumanReadableNamesConfig(
+                HrnResolverConfig.Dns(
+                    dnsServerAddress = "8.8.8.8:53",
+                    enableHrnResolutionService = false
+                )
+            )
         )
 
         val builder = Builder.fromConfig(config)
         builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
 
-        // If wallet uses mnemonic (seed_phrase), set it on the builder
-        if (seedPhraseFile.exists()) {
-            val words = seedPhraseFile.readText().trim()
-            if (words.isNotEmpty()) {
-                Log.d(TAG, "Using seed_phrase mnemonic")
-                builder.setEntropyBip39Mnemonic(words, null)
-            }
+        // Derive node entropy (entropy is now passed to build()): prefer the seed_phrase
+        // mnemonic if present, otherwise fall back to the existing keys_seed file.
+        val seedWords = if (seedPhraseFile.exists()) seedPhraseFile.readText().trim() else ""
+        val nodeEntropy = if (seedWords.isNotEmpty()) {
+            Log.d(TAG, "Using seed_phrase mnemonic")
+            NodeEntropy.fromBip39Mnemonic(seedWords, null)
+        } else {
+            NodeEntropy.fromSeedPath(keySeedFile.absolutePath)
         }
         // No RGS gossip (saves ~5s startup + ~8MB RAM)
         // No LSPS2 (not needed for stability payments)
 
-        val node = builder.build()
+        val node = builder.build(nodeEntropy)
         node.start()
 
         try {
@@ -262,6 +270,7 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
 
         try {
+            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), ByteArray(0))
             val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), listOf(1.toUByte()))
             node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),

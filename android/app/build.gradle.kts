@@ -45,8 +45,14 @@ android {
 }
 
 dependencies {
-    // LDK Node
-    implementation("org.lightningdevkit:ldk-node-android:0.7.0")
+    // LDK Node — toneloc/ldk-node fork (splice + close fixes, LDK 0.3), version 0.7.5.
+    // Pulled from the fork's GitHub release via the Ivy repo in settings.gradle.kts,
+    // mirroring how iOS pulls the xcframework through SwiftPM.
+    implementation("org.lightningdevkit:ldk-node-android:0.7.5@aar")
+    // The @aar dependency carries no POM, so its transitive deps are declared explicitly:
+    implementation("net.java.dev.jna:jna:5.12.0@aar") // loads libldk_node.so via JNA
+    implementation("org.slf4j:slf4j-api:1.7.30")
+    implementation("androidx.appcompat:appcompat:1.4.0")
 
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
