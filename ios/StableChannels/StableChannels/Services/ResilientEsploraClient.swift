@@ -24,7 +24,7 @@ struct ResilientEsploraClient {
             maxAttempts: Int = 5,
             backoffSeconds: [UInt64] = [1, 4, 16, 64, 256],
             timeout: TimeInterval = 5,
-            wallClockBudgetSeconds: TimeInterval = 420,
+            wallClockBudgetSeconds: TimeInterval = 900,
             onExhausted: (@Sendable () async -> Void)? = nil
         ) {
             precondition(!chainURLs.isEmpty, "ResilientEsploraClient needs at least one chain URL")

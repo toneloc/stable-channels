@@ -14,7 +14,7 @@ struct OnchainTxidResolver {
         maxAttempts: Int = 8,
         backoffSeconds: [UInt64] = [2, 8, 30, 60, 120, 300, 600, 900],
         esploraTimeout: TimeInterval = 8,
-        wallClockBudgetSeconds: TimeInterval = 420
+        wallClockBudgetSeconds: TimeInterval = 900
     ) {
         precondition(!chainURLs.isEmpty, "OnchainTxidResolver requires at least one chain URL")
         self.onResolved = onResolved

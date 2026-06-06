@@ -14,17 +14,20 @@ struct CloseTxidResolver {
         let maxAttempts: Int
         let backoffSeconds: [UInt64]
         let esploraTimeout: TimeInterval
+        let wallClockBudgetSeconds: TimeInterval
         let chainURLs: [String]
 
         init(
             maxAttempts: Int = 5,
             backoffSeconds: [UInt64] = [1, 4, 16, 64, 256],
             esploraTimeout: TimeInterval = 5,
+            wallClockBudgetSeconds: TimeInterval = 900,
             chainURLs: [String]
         ) {
             self.maxAttempts = maxAttempts
             self.backoffSeconds = backoffSeconds
             self.esploraTimeout = esploraTimeout
+            self.wallClockBudgetSeconds = wallClockBudgetSeconds
             self.chainURLs = chainURLs
         }
     }
@@ -47,7 +50,8 @@ struct CloseTxidResolver {
                 chainURLs: cfg.chainURLs,
                 maxAttempts: cfg.maxAttempts,
                 backoffSeconds: cfg.backoffSeconds,
-                timeout: cfg.esploraTimeout
+                timeout: cfg.esploraTimeout,
+                wallClockBudgetSeconds: cfg.wallClockBudgetSeconds
             )
         )
     }
