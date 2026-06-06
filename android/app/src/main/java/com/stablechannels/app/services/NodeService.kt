@@ -53,7 +53,14 @@ class NodeService(private val context: Context) {
             trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
             probingLiquidityLimitMultiplier = 3UL,
             anchorChannelsConfig = anchorConfig,
-            routeParameters = null
+            routeParameters = null,
+            torConfig = null,
+            hrnConfig = HumanReadableNamesConfig(
+                HrnResolverConfig.Dns(
+                    dnsServerAddress = "8.8.8.8:53",
+                    enableHrnResolutionService = false
+                )
+            )
         )
 
         val builder = Builder.fromConfig(config)
@@ -93,14 +100,17 @@ class NodeService(private val context: Context) {
             ""
         }
 
-        // Save mnemonic to file and set on builder
-        if (words.isNotEmpty()) {
+        // Save mnemonic to file and derive node entropy (entropy now passed to build()).
+        val nodeEntropy = if (words.isNotEmpty()) {
             seedPhrasePath.writeText(words)
             savedMnemonic = words
-            builder.setEntropyBip39Mnemonic(words, null)
+            NodeEntropy.fromBip39Mnemonic(words, null)
+        } else {
+            // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
+            NodeEntropy.fromSeedPath(keySeedPath.absolutePath)
         }
 
-        val ldkNode = builder.build()
+        val ldkNode = builder.build(nodeEntropy)
         ldkNode.start()
 
         node = ldkNode

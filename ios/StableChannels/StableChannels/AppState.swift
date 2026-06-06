@@ -741,7 +741,7 @@ class AppState {
                 customRecords: customRecords
             )
 
-        case .paymentSuccessful(let paymentId, let paymentHash, _, let feePaidMsat):
+        case .paymentSuccessful(let paymentId, let paymentHash, _, let feePaidMsat, _):
             handlePaymentSuccessful(
                 paymentId: paymentId,
                 paymentHash: paymentHash,
@@ -777,14 +777,14 @@ class AppState {
                 statusMessage = "Payment failed: \(reasonStr)"
             }
 
-        case .splicePending(let channelId, let userChannelId, _, let newFundingTxo):
+        case .spliceNegotiated(let channelId, let userChannelId, _, let newFundingTxo):
             handleSplicePending(
                 channelId: channelId,
                 userChannelId: userChannelId,
                 newFundingTxo: newFundingTxo
             )
 
-        case .spliceFailed(let channelId, let userChannelId, _, _):
+        case .spliceNegotiationFailed(let channelId, let userChannelId, _):
             isSweeping = false
             spliceTxid = nil
             sweepOnchainStart = 0
@@ -876,7 +876,7 @@ class AppState {
             guard tlv.typeNum == Constants.stableChannelTLVType else { continue }
 
             guard let parsed = TradeService.parseIncomingTLV(
-                data: tlv.value,
+                data: [UInt8](tlv.value),
                 expectedCounterparty: stableChannel.counterparty,
                 verifySignature: { [weak self] msg, sig, pubkey in
                     self?.nodeService.verifySignature(message: msg, signature: sig, pubkey: pubkey) ?? false

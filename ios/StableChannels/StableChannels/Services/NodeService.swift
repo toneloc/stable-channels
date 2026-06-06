@@ -51,6 +51,13 @@ class NodeService {
                 onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
                 lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
                 feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
+            ),
+            timeoutsConfig: SyncTimeoutsConfig(
+                onchainWalletSyncTimeoutSecs: 60,
+                lightningWalletSyncTimeoutSecs: 60,
+                feeRateCacheUpdateTimeoutSecs: 60,
+                txBroadcastTimeoutSecs: 30,
+                perRequestTimeoutSecs: 15
             )
         )
         builder.setChainSourceEsplora(serverUrl: esploraURL, config: syncConfig)
@@ -95,14 +102,18 @@ class NodeService {
             words = ""
         }
 
-        // Save mnemonic to file and set on builder
+        // Save mnemonic to file and derive node entropy (now passed to build()).
+        let nodeEntropy: NodeEntropy
         if !words.isEmpty {
             try words.write(toFile: seedPhrasePath.path, atomically: true, encoding: .utf8)
             self.savedMnemonic = words
-            builder.setEntropyBip39Mnemonic(mnemonic: words, passphrase: nil)
+            nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+        } else {
+            // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
+            nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
         }
 
-        let ldkNode = try builder.build()
+        let ldkNode = try builder.build(nodeEntropy: nodeEntropy)
         try ldkNode.start()
 
         self.node = ldkNode
@@ -286,7 +297,7 @@ class NodeService {
             amountMsat: amountMsat,
             description: .direct(description: description),
             expirySecs: Constants.invoiceExpirySecs,
-            maxLspFeeLimitMsat: nil
+            maxTotalLspFeeLimitMsat: nil
         )
     }
 
@@ -304,7 +315,7 @@ class NodeService {
 
     func sendAllOnchain(address: String) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
-        return try node.onchainPayment().sendAllToAddress(address: address, retainReserve: false, feeRate: nil)
+        return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: nil)
     }
 
     // MARK: - Balances

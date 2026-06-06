@@ -304,10 +304,10 @@ class AppState(private val context: Context) : ViewModel() {
                         ))
                     }
                 }
-                is Event.SplicePending -> {
+                is Event.SpliceNegotiated -> {
                     handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
                 }
-                is Event.SpliceFailed -> {
+                is Event.SpliceNegotiationFailed -> {
                     isSweeping = false
                     spliceTxid = null
                     pendingSplice = null

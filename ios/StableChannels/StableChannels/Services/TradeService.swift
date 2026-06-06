@@ -103,7 +103,7 @@ class TradeService {
 
         let tlv = CustomTlvRecord(
             typeNum: Constants.stableChannelTLVType,
-            value: Array(envelopeStr.utf8)
+            value: Data(envelopeStr.utf8)
         )
 
         // Send fee as payment amount (matches desktop: fee_msats.max(1))

@@ -142,13 +142,17 @@ class NotificationService: UNNotificationServiceExtension {
 
             let builder = Builder.fromConfig(config: config)
 
-            // If wallet uses mnemonic (seed_phrase), set it on the builder
+            // Derive node entropy (now passed to build()): prefer the seed_phrase
+            // mnemonic if present, else fall back to the existing keys_seed file.
+            let nodeEntropy: NodeEntropy
             if FileManager.default.fileExists(atPath: seedPhrasePath.path),
                let words = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
                .trimmingCharacters(in: .whitespacesAndNewlines),
                !words.isEmpty {
                 nseLog("Using seed_phrase mnemonic")
-                builder.setEntropyBip39Mnemonic(mnemonic: words, passphrase: nil)
+                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+            } else {
+                nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
             }
 
             // Relaxed sync intervals — NSE doesn't need frequent syncing
@@ -157,6 +161,13 @@ class NotificationService: UNNotificationServiceExtension {
                     onchainWalletSyncIntervalSecs: 600,
                     lightningWalletSyncIntervalSecs: 600,
                     feeRateCacheUpdateIntervalSecs: 3600
+                ),
+                timeoutsConfig: SyncTimeoutsConfig(
+                    onchainWalletSyncTimeoutSecs: 60,
+                    lightningWalletSyncTimeoutSecs: 60,
+                    feeRateCacheUpdateTimeoutSecs: 60,
+                    txBroadcastTimeoutSecs: 30,
+                    perRequestTimeoutSecs: 15
                 )
             )
             builder.setChainSourceEsplora(
@@ -176,7 +187,7 @@ class NotificationService: UNNotificationServiceExtension {
             let memUsage = Self.residentMemoryBytes()
             nseLog("DIAG: memory before build() = \(memUsage / 1024)KB")
 
-            let ldkNode = try builder.build()
+            let ldkNode = try builder.build(nodeEntropy: nodeEntropy)
 
             let memAfterBuild = Self.residentMemoryBytes()
             nseLog(
@@ -462,7 +473,7 @@ class NotificationService: UNNotificationServiceExtension {
 
         // 5. Send keysend with stability TLV marker
         do {
-            let tlvRecord = CustomTlvRecord(typeNum: Self.stableChannelTLVType, value: [1]) // marker byte
+            let tlvRecord = CustomTlvRecord(typeNum: Self.stableChannelTLVType, value: Data([1])) // marker byte
             let paymentId = try node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat: amountMsat,
                 nodeId: Self.lspPubkey,
