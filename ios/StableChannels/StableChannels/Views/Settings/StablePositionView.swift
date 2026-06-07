@@ -15,14 +15,14 @@ struct StablePositionView: View {
                         .fontWeight(.medium)
                 }
                 HStack {
-                    Text(String(localized: "label_backing_sats", defaultValue: "Backing Sats"))
+                    Text(String(localized: "label_backing_sats", defaultValue: "Backing BTC"))
                     Spacer()
-                    Text(appState.stableChannel.backingSats.satsFormatted)
+                    Text("\(appState.stableChannel.backingSats.btcSpacedFormatted) BTC")
                 }
                 HStack {
                     Text(String(localized: "label_native_btc", defaultValue: "Native BTC"))
                     Spacer()
-                    Text(appState.stableChannel.nativeChannelBTC.sats.satsFormatted)
+                    Text("\(appState.stableChannel.nativeChannelBTC.sats.btcSpacedFormatted) BTC")
                 }
 
                 if appState.btcPrice > 0 && appState.stableChannel.expectedUSD.amount > 0 {

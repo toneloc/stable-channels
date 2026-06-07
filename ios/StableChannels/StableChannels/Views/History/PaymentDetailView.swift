@@ -13,7 +13,7 @@ struct PaymentDetailView: View {
                             ? String(localized: "payment_received", defaultValue: "Received")
                             : String(localized: "payment_sent", defaultValue: "Sent"))
                     row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
-                    row(String(localized: "label_amount", defaultValue: "Amount"), "\(payment.amountSats) sats")
+                    row(String(localized: "label_amount", defaultValue: "Amount"), "\(payment.amountSats.btcSpacedFormatted) BTC")
                     if let usd = payment.amountUSD {
                         row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
                     }
@@ -80,7 +80,7 @@ struct PaymentDetailView: View {
         case "lightning": return String(localized: "payment_type_settlement", defaultValue: "Settlement")
         case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
         case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
-        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "On-chain")
+        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
         case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
         case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
         default: return payment.paymentType

@@ -752,8 +752,7 @@ class AppState {
             // Check if this is a pending trade payment
             if let pid = paymentId, let trade = pendingTradePayments.removeValue(forKey: "\(pid)") {
                 try? databaseService?.updateTradeStatus(trade.tradeDbId, status: "failed")
-                let verb = trade.action == "buy" ? "Buy" : "Sell"
-                statusMessage = "\(verb) trade failed"
+                statusMessage = "Order failed"
 
                 AuditService.log("TRADE_FAILED", data: [
                     "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
@@ -932,8 +931,7 @@ class AppState {
             refreshBalances()
             updateStableBalances()
 
-            let verb = trade.action == "buy" ? "Buy" : "Sell"
-            statusMessage = "\(verb) confirmed"
+            statusMessage = "Order confirmed"
 
             // Flash so user notices the confirmation
             paymentFlash = true
@@ -1239,7 +1237,7 @@ class AppState {
         guard !isOpeningChannel else { return }
         let spendable = nodeService.spendableOnchainSats()
         guard spendable > 10_000 else {
-            statusMessage = "Not enough on-chain funds"
+            statusMessage = "Not enough onchain funds"
             return
         }
 
@@ -1291,7 +1289,7 @@ class AppState {
         let feeReserve = feeRateSatVb * 250 // ~250 vbytes for splice tx (170 was too tight at low fees)
         let spendable = balances.spendableOnchainBalanceSats
         guard spendable > feeReserve else {
-            statusMessage = "Insufficient on-chain balance"
+            statusMessage = "Insufficient onchain balance"
             return
         }
         let sweepAmount = spendable - feeReserve

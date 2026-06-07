@@ -50,7 +50,7 @@ struct OnChainSendView: View {
                             title: String(localized: "success_splice_out", defaultValue: "Splice-out initiated!"),
                             detail: String(
                                 localized: "info_funds_arrive_onchain",
-                                defaultValue: "Funds will arrive on-chain after confirmation."
+                                defaultValue: "Funds will arrive onchain after confirmation."
                             ),
                             monospaced: false
                         )
@@ -65,7 +65,7 @@ struct OnChainSendView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .background(Color(.systemGroupedBackground))
-            .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send On-Chain"))
+            .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send Onchain"))
             .navigationBarTitleDisplayMode(.inline)
             .qrInputToolbar(text: $address, sanitize: QRCodeExtractor.sanitizeAddress)
         }

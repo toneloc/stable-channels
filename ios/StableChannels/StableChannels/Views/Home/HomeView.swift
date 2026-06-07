@@ -325,7 +325,7 @@ struct HomeView: View {
     private var savingsSection: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(String(localized: "label_on_chain", defaultValue: "On-chain"))
+                Text(String(localized: "label_on_chain", defaultValue: "Onchain"))
                     .font(.caption.bold())
                 Spacer()
                 Text(showBTC
@@ -344,12 +344,8 @@ struct HomeView: View {
             } else if hasReadyChannel && appState.spendableOnchainSats > 0 {
                 // 2. Channel + confirmed funds — offer to sweep
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(localized: "move_to_trading", defaultValue: "Move to Trading"))
-                            .font(.caption2)
-                        Text(String(localized: "and_spending_account", defaultValue: "and Spending Account"))
-                            .font(.caption2)
-                    }
+                    Text(String(localized: "move_to_trading", defaultValue: "Move to Lightning Account"))
+                        .font(.caption2)
                     .foregroundStyle(.secondary)
                     Spacer()
                     Button {

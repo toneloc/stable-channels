@@ -18,7 +18,7 @@ struct TradeDetailView: View {
                     )
                     row(
                         String(localized: "label_amount_btc", defaultValue: "Amount (BTC)"),
-                        String(format: "%.8f", trade.amountBTC)
+                        "\(UInt64(trade.amountBTC * Double(Constants.satsInBTC)).btcSpacedFormatted) BTC"
                     )
                     row(String(localized: "label_btc_price", defaultValue: "BTC Price"), trade.btcPrice.usdFormatted)
                     row(String(localized: "label_fee", defaultValue: "Fee"), trade.feeUSD.usdFormatted)

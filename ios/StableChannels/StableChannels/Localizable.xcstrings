@@ -95,7 +95,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "to Stable"
+            "value" : ""
           }
         }
       }
@@ -139,7 +139,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Authenticate to send on-chain"
+            "value" : "Authenticate to send onchain"
           }
         }
       }
@@ -150,7 +150,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Authenticate to confirm on-chain withdrawal"
+            "value" : "Authenticate to confirm onchain withdrawal"
           }
         }
       }
@@ -568,7 +568,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Swap"
+            "value" : "Move"
           }
         }
       }
@@ -1063,7 +1063,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Receive sats via Lightning or on-chain"
+            "value" : "Receive sats via Lightning or onchain"
           }
         }
       }
@@ -1121,7 +1121,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Funds arrive after 1 on-chain confirmation"
+            "value" : "Funds arrive after 1 onchain confirmation"
           }
         }
       }
@@ -1264,7 +1264,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Note: Funds require on-chain confirmation after splice completes."
+            "value" : "Note: Funds require onchain confirmation after splice completes."
           }
         }
       }
@@ -1869,7 +1869,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain"
+            "value" : "Onchain"
           }
         }
       }
@@ -1880,7 +1880,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain Address"
+            "value" : "Onchain Address"
           }
         }
       }
@@ -2166,7 +2166,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Send On-Chain"
+            "value" : "Send Onchain"
           }
         }
       }
@@ -2213,7 +2213,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Move to Stable"
+            "value" : "Move to Lightning Account"
           }
         }
       }
@@ -2301,7 +2301,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain"
+            "value" : "Onchain"
           }
         }
       }
@@ -2590,7 +2590,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain"
+            "value" : "Onchain"
           }
         }
       }
@@ -2868,7 +2868,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sweeping"
+            "value" : "Pending"
           }
         }
       }
@@ -3234,7 +3234,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain Receive"
+            "value" : "Onchain Receive"
           }
         }
       }
@@ -3311,7 +3311,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Send On-Chain"
+            "value" : "Send Onchain"
           }
         }
       }
@@ -3366,7 +3366,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain"
+            "value" : "Onchain"
           }
         }
       }

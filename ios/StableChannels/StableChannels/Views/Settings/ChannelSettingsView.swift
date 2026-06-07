@@ -90,7 +90,7 @@ struct ChannelSettingsView: View {
         } message: {
             Text(String(
                 localized: "alert_close_channel_message",
-                defaultValue: "This will cooperatively close the channel and sweep funds on-chain."
+                defaultValue: "This will cooperatively close the channel and sweep funds onchain."
             ))
         }
     }

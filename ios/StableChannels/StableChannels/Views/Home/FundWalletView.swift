@@ -37,7 +37,7 @@ struct FundWalletView: View {
             }
             .padding(32)
         }
-        .navigationTitle(String(localized: "title_on_chain_receive", defaultValue: "On-chain Receive"))
+        .navigationTitle(String(localized: "title_on_chain_receive", defaultValue: "Onchain Receive"))
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $showFullscreenQR) {
             if let uri = bitcoinURI,
