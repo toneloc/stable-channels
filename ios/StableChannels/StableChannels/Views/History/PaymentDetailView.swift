@@ -13,7 +13,10 @@ struct PaymentDetailView: View {
                             ? String(localized: "payment_received", defaultValue: "Received")
                             : String(localized: "payment_sent", defaultValue: "Sent"))
                     row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
-                    row(String(localized: "label_amount", defaultValue: "Amount"), "\(payment.amountSats.btcSpacedFormatted) BTC")
+                    row(
+                        String(localized: "label_amount", defaultValue: "Amount"),
+                        "\(payment.amountSats.btcSpacedFormatted) BTC"
+                    )
                     if let usd = payment.amountUSD {
                         row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
                     }
