@@ -8,6 +8,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.models.*
 import com.stablechannels.app.push.FCMService
 import com.stablechannels.app.push.StabilityProcessingService
+import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
@@ -486,6 +487,25 @@ class AppState(private val context: Context) : ViewModel() {
                 status = initialStatus,
                 txid = null
             )
+
+            // Start background resolver to find the close TX
+            val closeFundingTxid = fundingTxid
+            if (closeFundingTxid != null && databaseService != null) {
+                val resolver = CloseTxidResolver(
+                    chainURLs = listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL),
+                    onResolved = { _, txid ->
+                        Log.d("AppState", "Close TX resolved: $txid")
+                    }
+                )
+                viewModelScope.launch(Dispatchers.IO) {
+                    resolver.resolve(
+                        paymentId = paymentId,
+                        fundingTxid = closeFundingTxid,
+                        vout = 0,
+                        databaseService = databaseService!!
+                    )
+                }
+            }
 
             databaseService?.deleteChannel(sc.userChannelId)
             _stableChannel.value = StableChannel.DEFAULT
