@@ -466,8 +466,9 @@ class AppState(private val context: Context) : ViewModel() {
             // Record in payment history before clearing state
             // If user initiated close, mark pending until on-chain confirms.
             // If force-closed by counterparty, mark completed immediately.
-            val closeTxid = fundingTxid
-            val paymentId = closeTxid ?: channelId
+            // Use channelId as paymentId to avoid collision with splice txids.
+            // Set txid to null — the close txid is not available from LDK event.
+            val paymentId = channelId
             val initialStatus = if (isChannelClosing) {
                 pendingClosePaymentId = paymentId
                 "pending"
@@ -483,7 +484,7 @@ class AppState(private val context: Context) : ViewModel() {
                 btcPrice = if (price > 0) price else null,
                 counterparty = sc.counterparty.ifEmpty { null },
                 status = initialStatus,
-                txid = closeTxid
+                txid = null
             )
 
             databaseService?.deleteChannel(sc.userChannelId)
