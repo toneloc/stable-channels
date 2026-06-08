@@ -349,7 +349,7 @@ struct HomeView: View {
                 HStack {
                     Text(String(localized: "move_to_trading", defaultValue: "Move to Lightning Account"))
                         .font(.caption2)
-                    .foregroundStyle(.secondary)
+                        .foregroundStyle(.secondary)
                     Spacer()
                     Button {
                         appState.sweepToChannel()
