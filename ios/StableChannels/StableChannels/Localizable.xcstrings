@@ -1008,7 +1008,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "How much BTC?"
+            "value" : "How much BTC to convert to USD?"
           }
         }
       }
@@ -1019,7 +1019,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "How much USD?"
+            "value" : "How much USD to convert to BTC?"
           }
         }
       }
@@ -1566,17 +1566,6 @@
         }
       }
     },
-    "label_close_tx" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Close Tx"
-          }
-        }
-      }
-    },
     "label_channel_info" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -1584,6 +1573,17 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Channel Info"
+          }
+        }
+      }
+    },
+    "label_close_tx" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Close Tx"
           }
         }
       }
@@ -2752,28 +2752,6 @@
         }
       }
     },
-    "status_channel_opening" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Channel Opening"
-          }
-        }
-      }
-    },
-    "status_onchain_receiving" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Receiving on-chain..."
-          }
-        }
-      }
-    },
     "status_channel_closing" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2781,6 +2759,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Channel closing..."
+          }
+        }
+      }
+    },
+    "status_channel_opening" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Channel Opening"
           }
         }
       }
@@ -2803,6 +2792,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Collecting price data..."
+          }
+        }
+      }
+    },
+    "status_onchain_receiving" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Receiving on-chain..."
           }
         }
       }
