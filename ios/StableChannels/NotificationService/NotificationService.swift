@@ -703,6 +703,7 @@ class NotificationService: UNNotificationServiceExtension {
                     dollarsAbs
                 )
                 UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+                content.sound = .default
             case .failed, .missingChannelRow:
                 nseLog("Payment sent but DB persistence failed — durable guard will block resends")
                 content.title = "Payment Sent"
