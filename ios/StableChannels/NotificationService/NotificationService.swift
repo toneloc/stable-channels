@@ -1,6 +1,7 @@
 import UserNotifications
 import LDKNode
 import SQLite3
+import Darwin
 
 /// Notification Service Extension — starts a lightweight LDK node to handle
 /// stability payments while the main app is killed.
@@ -128,6 +129,30 @@ class NotificationService: UNNotificationServiceExtension {
             cleanup()
             contentHandler(content)
             return
+        }
+
+        // Acquire DB lock before any operations to prevent race with main app
+        let lockFile = container.appendingPathComponent("nse.db.lock")
+        var lockFD: Int32 = -1
+        lockFile.withUnsafeFileSystemRepresentation { path in
+            if let path {
+                lockFD = open(path, O_WRONLY | O_CREAT, 0o644)
+            }
+        }
+        if lockFD >= 0 {
+            if flock(lockFD, LOCK_EX) != 0 {
+                nseLog("FAILED: Can't acquire DB lock")
+                close(lockFD)
+                cleanup()
+                contentHandler(content)
+                return
+            }
+        }
+        defer {
+            if lockFD >= 0 {
+                flock(lockFD, LOCK_UN)
+                close(lockFD)
+            }
         }
 
         let dataDir = container
