@@ -132,7 +132,8 @@ class NotificationService: UNNotificationServiceExtension {
         }
 
         // Acquire DB lock before any operations to prevent race with main app
-        let lockFile = container.appendingPathComponent("nse.db.lock")
+        // Uses the same App Group lock file as DatabaseService (stablechannels.db.lock).
+        let lockFile = container.appendingPathComponent("stablechannels.db.lock")
         var lockFD: Int32 = -1
         lockFile.withUnsafeFileSystemRepresentation { path in
             if let path {

@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 struct PaymentPersistenceResult {
     let isNewPayment: Bool
@@ -9,14 +10,41 @@ struct PaymentPersistenceResult {
 /// SQLite database layer — port of src/db.rs
 /// Uses raw SQLite3 C API to avoid external dependencies initially.
 /// Can be migrated to GRDB later for convenience.
+///
+/// File-based lock (`stablechannels.db.lock` in the App Group container) is held
+/// for the process lifetime to serialize writes with the Notification Service
+/// Extension. Both sides must use the same path.
 class DatabaseService {
     private var db: OpaquePointer?
+    private var lockFD: Int32 = -1
 
     static let dbFilename = "stablechannels.db"
+    static let appGroup = "group.com.stablechannels.app"
+    static let lockFilename = "stablechannels.db.lock"
 
     init(dataDir: URL) throws {
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         let dbPath = dataDir.appendingPathComponent(Self.dbFilename).path
+
+        // Acquire shared DB lock in App Group container so NSE and main app
+        // don't race on the same SQLite file.
+        if let groupURL = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: Self.appGroup) {
+            let lockFile = groupURL.appendingPathComponent(Self.lockFilename)
+            lockFile.withUnsafeFileSystemRepresentation { path in
+                if let path {
+                    lockFD = open(path, O_WRONLY | O_CREAT, 0o644)
+                }
+            }
+            if lockFD >= 0 {
+                if flock(lockFD, LOCK_EX) != 0 {
+                    let err = errno
+                    close(lockFD)
+                    lockFD = -1
+                    NSLog("[DB] WARN: flock failed errno=\(err); proceeding without lock")
+                }
+            }
+        }
 
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else {
             throw DatabaseError.openFailed(String(cString: sqlite3_errmsg(db)))
@@ -30,6 +58,11 @@ class DatabaseService {
 
     deinit {
         sqlite3_close(db)
+        if lockFD >= 0 {
+            flock(lockFD, LOCK_UN)
+            close(lockFD)
+            lockFD = -1
+        }
     }
 
     // MARK: - Schema
