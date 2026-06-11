@@ -300,6 +300,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         btcPrice = if (price > 0) price else null,
                                         txid = txid, address = addr
                                     )
+                                    appState.refreshBalances()
                                     result = "Sent successfully."
                                     successTxid = txid
                                 }

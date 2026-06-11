@@ -144,10 +144,15 @@ fun ChannelView(appState: AppState) {
                 TextButton(onClick = {
                     showCloseConfirm = false
                     appState.isChannelClosing = true
+                    appState.setStatus("Closing channel...")
                     scope.launch(Dispatchers.IO) {
                         try {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
-                        } catch (_: Exception) {}
+                            appState.refreshBalances()
+                        } catch (e: Exception) {
+                            appState.setStatus("Close failed: ${e.message}")
+                            appState.isChannelClosing = false
+                        }
                     }
                 }) { Text("Close", color = MaterialTheme.colorScheme.error) }
             },
