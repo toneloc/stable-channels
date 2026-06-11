@@ -254,10 +254,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     btcPrice = btcPrice,
                     modifier = Modifier.padding(horizontal = 24.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
-                    onTradeRequest = { direction, amountUSD ->
+                    onTradeRequest = if (hasReadyChannel) { direction, amountUSD ->
                         prefillTradeAmount = amountUSD
                         if (direction == TradeDirection.BUY) showBuy = true else showSell = true
-                    }
+                    } else null
                 )
                 Spacer(Modifier.height(16.dp))
             }
@@ -386,8 +386,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, Color(0xFFF59E0B), Modifier.weight(1f), rotation = 45f) { showBuy = true }
-                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, Color(0xFF8B5CF6), Modifier.weight(1f), rotation = -45f) { showSell = true }
+                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, Color(0xFFF59E0B), Modifier.weight(1f), rotation = 45f, enabled = hasReadyChannel) { showBuy = true }
+                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, Color(0xFF8B5CF6), Modifier.weight(1f), rotation = -45f, enabled = hasReadyChannel) { showSell = true }
             }
 
             // Status capsule
@@ -444,15 +444,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, rotation: Float = 0f, pulse: Boolean = false, onClick: () -> Unit) {
+fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, rotation: Float = 0f, pulse: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     Box(modifier = modifier.height(56.dp).clip(RoundedCornerShape(12.dp))) {
         FilledTonalButton(
             onClick = onClick,
             modifier = Modifier.fillMaxSize(),
             shape = RoundedCornerShape(12.dp),
+            enabled = enabled,
             colors = ButtonDefaults.filledTonalButtonColors(
                 containerColor = color.copy(alpha = if (isSystemInDarkTheme()) 0.1f else 0.15f),
-                contentColor = color
+                contentColor = color,
+                disabledContainerColor = color.copy(alpha = 0.05f),
+                disabledContentColor = color.copy(alpha = 0.3f)
             )
         ) {
             Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp).rotate(rotation))
