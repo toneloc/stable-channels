@@ -140,8 +140,7 @@ actor FeeRateCache {
 }
 
 /// Public façade. Caller-friendly; defers to cache actor for all state.
-@MainActor
-final class FeeRateService {
+final class FeeRateService: Sendable {
     private let cache: FeeRateCache
 
     init(
@@ -167,5 +166,10 @@ final class FeeRateService {
 
     func invalidate() async {
         await cache.invalidate()
+    }
+
+    /// Test seam: inject a pre-built cache.
+    init(cache: FeeRateCache) {
+        self.cache = cache
     }
 }

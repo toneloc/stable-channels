@@ -142,14 +142,9 @@ final class FeeRateServiceTests: XCTestCase {
     func testFacade_delegatesToCache() async {
         let source = StubFeeRateSource(rate: 25)
         let cache = FeeRateCache(sources: [source], cacheTTL: .seconds(60), fallback: 2)
-        // Bypass real-world default sources by reaching inside the actor
-        // We can't substitute the actor's sources, so test the public ctor
-        // path: stub source via real public init is impossible, so instead
-        // sanity check that a real FeeRateService isMainActor and returns
-        // a non-zero value (network may be unavailable in test env → fallback).
-        let service = FeeRateService()
+        let service = FeeRateService(cache: cache)
         let rate = await service.currentRate()
-        XCTAssertGreaterThan(rate, 0, "Real service should at least return fallback on no network")
+        XCTAssertEqual(rate, 25, "Façade should delegate to injected cache")
     }
 }
 
