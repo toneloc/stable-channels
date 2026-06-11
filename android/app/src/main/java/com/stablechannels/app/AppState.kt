@@ -149,10 +149,8 @@ class AppState(private val context: Context) : ViewModel() {
                 loadChannelFromDB()
                 priceService.startAutoRefresh()
 
-                // Resolve best esplora endpoint in parallel
-                launch {
-                    chainUrl = resolveChainUrl()
-                }
+                // Resolve best esplora endpoint before starting node
+                chainUrl = resolveChainUrl()
 
                 // Subscribe to LDK events
                 launch { nodeService.events.collect { handleEvent(it) } }
