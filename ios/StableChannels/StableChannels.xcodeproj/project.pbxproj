@@ -37,6 +37,8 @@
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
 		49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E12FB6E52E00133509 /* BiometricService.swift */; };
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
+		49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */; };
+		49DAFB3C2FDB6587003BE0EB /* FeeRateServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
 		49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */; };
 		49E456822FCC596F00B0CA85 /* FullscreenQRZoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */; };
@@ -138,6 +140,8 @@
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
 		49D9C2E12FB6E52E00133509 /* BiometricService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricService.swift; sourceTree = "<group>"; };
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
+		49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateService.swift; sourceTree = "<group>"; };
+		49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateServiceTests.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
 		49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeUtility.swift; sourceTree = "<group>"; };
 		49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSettingsView.swift; sourceTree = "<group>"; };
@@ -254,6 +258,7 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
@@ -374,6 +379,7 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
+				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
@@ -505,6 +511,7 @@
 				499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */,
 				499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */,
 				499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */,
+				49DAFB3C2FDB6587003BE0EB /* FeeRateServiceTests.swift in Sources */,
 				49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
@@ -525,6 +532,7 @@
 				499DBE712FD2DACF003E89F9 /* ResilientEsploraClient.swift in Sources */,
 				499DBE722FD2DACF003E89F9 /* StaggeredTaskLauncher.swift in Sources */,
 				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
+				49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
