@@ -62,6 +62,7 @@ class AppState {
 
     let nodeService = NodeService()
     let priceService = PriceService()
+    let feeRateService = FeeRateService()
     var databaseService: DatabaseService?
     var tradeService: TradeService?
 
@@ -1473,70 +1474,64 @@ class AppState {
             statusMessage = "Sweep already in progress"
             return
         }
+        isSweeping = true
+        statusMessage = "Fetching fee rate..."
 
-        guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
-            statusMessage = "No ready channel"
-            return
+        Task { @MainActor in
+            guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
+                statusMessage = "No ready channel"
+                isSweeping = false
+                return
+            }
+            guard let balances = nodeService.balances() else {
+                statusMessage = "Could not read balances"
+                isSweeping = false
+                return
+            }
+
+            let feeRateSatVb = await feeRateService.currentRate()
+            let feeReserve = feeRateSatVb * 250
+            let spendable = balances.spendableOnchainBalanceSats
+            guard spendable > feeReserve else {
+                statusMessage = "Insufficient onchain balance"
+                isSweeping = false
+                return
+            }
+            let sweepAmount = spendable - feeReserve
+
+            do {
+                try nodeService.spliceIn(
+                    userChannelId: channel.userChannelId,
+                    counterpartyNodeId: channel.counterpartyNodeId,
+                    amountSats: sweepAmount
+                )
+                sweepOnchainStart = balances.totalOnchainBalanceSats
+                pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
+                statusMessage = "Moving \(sweepAmount) sats to channel..."
+
+                _ = try? databaseService?.recordPayment(
+                    paymentId: nil,
+                    paymentType: "splice_in",
+                    direction: "received",
+                    amountMsat: sweepAmount * 1000,
+                    amountUSD: nil,
+                    btcPrice: nil,
+                    counterparty: nil,
+                    status: "pending"
+                )
+
+                AuditService.log("SWEEP_TO_CHANNEL", data: [
+                    "amount_sats": "\(sweepAmount)",
+                    "fee_rate_sat_vb": "\(feeRateSatVb)"
+                ])
+            } catch {
+                statusMessage = "Sweep failed: \(error.localizedDescription)"
+                AuditService.log("SWEEP_FAILED", data: [
+                    "error": error.localizedDescription
+                ])
+                isSweeping = false
+            }
         }
-
-        guard let balances = nodeService.balances() else {
-            statusMessage = "Could not read balances"
-            return
-        }
-
-        let feeRateSatVb = fetchFeeRate() ?? 2
-        let feeReserve = feeRateSatVb * 250 // ~250 vbytes for splice tx (170 was too tight at low fees)
-        let spendable = balances.spendableOnchainBalanceSats
-        guard spendable > feeReserve else {
-            statusMessage = "Insufficient onchain balance"
-            return
-        }
-        let sweepAmount = spendable - feeReserve
-
-        do {
-            try nodeService.spliceIn(
-                userChannelId: channel.userChannelId,
-                counterpartyNodeId: channel.counterpartyNodeId,
-                amountSats: sweepAmount
-            )
-            isSweeping = true
-            sweepOnchainStart = balances.totalOnchainBalanceSats
-            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
-            statusMessage = "Moving \(sweepAmount) sats to channel..."
-
-            _ = try? databaseService?.recordPayment(
-                paymentId: nil,
-                paymentType: "splice_in",
-                direction: "received",
-                amountMsat: sweepAmount * 1000,
-                amountUSD: nil,
-                btcPrice: nil,
-                counterparty: nil,
-                status: "pending"
-            )
-
-            AuditService.log("SWEEP_TO_CHANNEL", data: [
-                "amount_sats": "\(sweepAmount)",
-                "fee_rate_sat_vb": "\(feeRateSatVb)"
-            ])
-        } catch {
-            statusMessage = "Sweep failed: \(error.localizedDescription)"
-            AuditService.log("SWEEP_FAILED", data: [
-                "error": error.localizedDescription
-            ])
-        }
-    }
-
-    /// Fetch fee rate (sat/vB) for 6-block target from esplora (with fallback).
-    private func fetchFeeRate() -> UInt64? {
-        for baseURL in [Constants.primaryChainURL, Constants.fallbackChainURL] {
-            guard let url = URL(string: "\(baseURL)/fee-estimates") else { continue }
-            guard let data = try? Data(contentsOf: url),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let rate = json["6"] as? Double else { continue }
-            return UInt64(rate.rounded(.up))
-        }
-        return nil
     }
 
     /// Test Blockstream connectivity; fall back to mempool.space if unreachable.
