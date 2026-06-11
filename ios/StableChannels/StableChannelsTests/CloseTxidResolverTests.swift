@@ -91,8 +91,7 @@ final class CloseTxidResolverTests: XCTestCase {
             maxAttempts: maxAttempts,
             backoffSeconds: backoffSeconds,
             esploraTimeout: 5,
-            chainURLs: chainURLs,
-            onResolved: onResolved
+            chainURLs: chainURLs
         )
         return CloseTxidResolver(
             chainURLs: chainURLs,

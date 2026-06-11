@@ -65,7 +65,8 @@ final class OnchainTxidResolverTests: XCTestCase {
         return OnchainTxidResolver(
             chainURLs: chainURLs,
             onResolved: { id, txid in
-                await captureBox.set(id: id, txid: txid)
+                let numId = Int64(id.split(separator: "-").last ?? "0") ?? 0
+                await captureBox.set(id: numId, txid: txid)
             },
             urlSession: session,
             maxAttempts: maxAttempts,
@@ -194,7 +195,8 @@ final class OnchainTxidResolverTests: XCTestCase {
         let resolver = OnchainTxidResolver(
             chainURLs: ["https://primary.local/api", "https://fallback.local/api"],
             onResolved: { id, txid in
-                await captureBox.set(id: id, txid: txid)
+                let numId = Int64(id.split(separator: "-").last ?? "0") ?? 0
+                await captureBox.set(id: numId, txid: txid)
             },
             urlSession: session,
             maxAttempts: 5,
