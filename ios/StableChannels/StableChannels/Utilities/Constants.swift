@@ -21,6 +21,14 @@ enum Constants {
     static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
     static let txExplorerURL = "https://mempool.space/tx"
 
+    static let feeRateBlockstreamURL = primaryChainURL
+    static let feeRateMempoolURL = "https://mempool.space"
+
+    // MARK: - Service Endpoints
+
+    static let lspPushRegisterURL = "https://stablechannels.com/api/register-push"
+    static let privacyPolicyURL = "https://stablechannels.com/privacy.html"
+
     static func txExplorerLink(for txid: String) -> URL? {
         URL(string: "\(txExplorerURL)/\(txid)")
     }
