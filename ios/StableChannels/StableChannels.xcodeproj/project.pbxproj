@@ -219,13 +219,13 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		2788439C4BA338889A92627F /* Models */ = {
+		2788439C4BA338889A92627F /* Domain */ = {
 			isa = PBXGroup;
 			children = (
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
 			);
-			path = Models;
+			path = Domain;
 			sourceTree = "<group>";
 		};
 		31211FC9AE7385C78EE0F5FF = {
@@ -238,19 +238,61 @@
 			);
 			sourceTree = "<group>";
 		};
-		674DEDB749CCE3FA348043D1 /* StableChannels */ = {
+		49FC3EEB2FDC8A9E0054CD38 /* App */ = {
 			isa = PBXGroup;
 			children = (
 				FFC40949E35E9317ACA30E35 /* AppState.swift */,
-				8811E90D4B2B5C5C51093A95 /* Assets.xcassets */,
-				6666E1947A119ECA89E2F4C2 /* Info.plist */,
-				24158DEF5FC6BF7AE004C56B /* StableChannels.entitlements */,
+				D62A82EA774DC10F10A6574A /* ContentView.swift */,
+				623F41D841B312F0C9AE01E6 /* MainTabView.swift */,
 				B785A33E02FD999CB62019AD /* StableChannelsApp.swift */,
-				2788439C4BA338889A92627F /* Models */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		49FC3EEC2FDC8B200054CD38 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
+				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
+				4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */,
+				4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */,
+				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
+				49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		49FC3EED2FDC8C060054CD38 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				49FC3EEE2FDC8C160054CD38 /* Themes */,
+				3B46630309755AE15EF291D4 /* HistoricalPrices.swift */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		49FC3EEE2FDC8C160054CD38 /* Themes */ = {
+			isa = PBXGroup;
+			children = (
+				49F0B0D92FC0EF3A003A3B89 /* Colors.swift */,
+			);
+			path = Themes;
+			sourceTree = "<group>";
+		};
+		674DEDB749CCE3FA348043D1 /* StableChannels */ = {
+			isa = PBXGroup;
+			children = (
+				24158DEF5FC6BF7AE004C56B /* StableChannels.entitlements */,
+				6666E1947A119ECA89E2F4C2 /* Info.plist */,
+				8811E90D4B2B5C5C51093A95 /* Assets.xcassets */,
+				49948C302FBB9DF900327290 /* Localizable.xcstrings */,
+				49FC3EEB2FDC8A9E0054CD38 /* App */,
+				49FC3EEC2FDC8B200054CD38 /* Components */,
+				2788439C4BA338889A92627F /* Domain */,
+				B94101FB9F6D7A28B1CA6C2C /* Features */,
+				49FC3EED2FDC8C060054CD38 /* Resources */,
 				7EE46C95963B6C9F86006346 /* Services */,
 				AD3E779FC98D09AA36FFCAE9 /* Utilities */,
-				B94101FB9F6D7A28B1CA6C2C /* Views */,
-				49948C302FBB9DF900327290 /* Localizable.xcstrings */,
 			);
 			path = StableChannels;
 			sourceTree = "<group>";
@@ -292,7 +334,6 @@
 				49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */,
 				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
 				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
-				49F0B0D92FC0EF3A003A3B89 /* Colors.swift */,
 				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
 				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
 				49F0B0DC2FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift */,
@@ -307,15 +348,8 @@
 			isa = PBXGroup;
 			children = (
 				496A44452FCD5845005AF12F /* InputSanitizer.swift */,
-				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
-				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
-				4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */,
-				4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */,
-				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
-				49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */,
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
-				3B46630309755AE15EF291D4 /* HistoricalPrices.swift */,
 			);
 			path = Utilities;
 			sourceTree = "<group>";
@@ -323,25 +357,23 @@
 		B907DB092675090848F24A96 /* NotificationService */ = {
 			isa = PBXGroup;
 			children = (
-				E9358B0D20BFCDFAF7128834 /* Info.plist */,
 				07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */,
+				E9358B0D20BFCDFAF7128834 /* Info.plist */,
 				6DCB92A88D9FEEAE6BF49737 /* NotificationService.swift */,
 			);
 			path = NotificationService;
 			sourceTree = "<group>";
 		};
-		B94101FB9F6D7A28B1CA6C2C /* Views */ = {
+		B94101FB9F6D7A28B1CA6C2C /* Features */ = {
 			isa = PBXGroup;
 			children = (
-				D62A82EA774DC10F10A6574A /* ContentView.swift */,
-				623F41D841B312F0C9AE01E6 /* MainTabView.swift */,
 				E6E0520C798AB1005E6A3B2E /* History */,
 				EC3EE79DFC487BD8FC094DF5 /* Home */,
 				9EB6CDA4F614F973AF602691 /* Settings */,
 				96D38BC9192A368BE07CCFC6 /* Trade */,
 				DD0CC2D41227228C216D4BE8 /* Transfer */,
 			);
-			path = Views;
+			path = Features;
 			sourceTree = "<group>";
 		};
 		DD0CC2D41227228C216D4BE8 /* Transfer */ = {
@@ -379,14 +411,14 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
-				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
-				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
-				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
-				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
+				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
+				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
+				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
+				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
 			);
 			path = StableChannelsTests;
 			sourceTree = "<group>";
