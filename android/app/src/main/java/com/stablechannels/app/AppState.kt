@@ -16,6 +16,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import okhttp3.Request
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.*
@@ -127,17 +128,15 @@ class AppState(private val context: Context) : ViewModel() {
     var cachedChartDaily: List<com.stablechannels.app.models.PriceRecord> = emptyList()
     var chartDataLoaded = false
 
-    private val httpClient = OkHttpClient()
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(6, TimeUnit.SECONDS)
+        .build()
 
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Use cached chain URL, resolve in background if stale
-                val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-                chainUrl = prefs.getString("cached_chain_url", null) ?: resolveChainUrl().also {
-                    prefs.edit().putString("cached_chain_url", it).apply()
-                }
-
                 databaseService = DatabaseService(context)
                 launch { databaseService?.seedHistoricalPrices() }
                 launch { backfillHourlyPrices() }
