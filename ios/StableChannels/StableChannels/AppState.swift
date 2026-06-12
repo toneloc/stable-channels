@@ -639,7 +639,7 @@ class AppState {
               !nodeService.nodeId.isEmpty else { return }
 
         let nodeId = nodeService.nodeId
-        guard let url = URL(string: "https://stablechannels.com/api/register-push") else { return }
+        guard let url = URL(string: Constants.lspPushRegisterURL) else { return }
 
         Task {
             var request = URLRequest(url: url)

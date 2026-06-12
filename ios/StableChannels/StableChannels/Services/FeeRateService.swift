@@ -146,11 +146,11 @@ final class FeeRateService: Sendable {
     init(
         sources: [FeeRateSource] = [
             BlockstreamFeeSource(
-                baseURL: URL(string: "https://blockstream.info/api")!,
+                baseURL: URL(string: Constants.feeRateBlockstreamURL)!,
                 timeout: 5
             ),
             MempoolV1FeeSource(
-                baseURL: URL(string: "https://mempool.space")!,
+                baseURL: URL(string: Constants.feeRateMempoolURL)!,
                 timeout: 5
             )
         ],

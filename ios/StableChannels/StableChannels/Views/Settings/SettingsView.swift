@@ -145,7 +145,7 @@ struct SettingsView: View {
                         )
                     }
                     Button {
-                        if let url = URL(string: "https://stablechannels.com/privacy.html") {
+                        if let url = URL(string: Constants.privacyPolicyURL) {
                             UIApplication.shared.open(url)
                         }
                     } label: {
