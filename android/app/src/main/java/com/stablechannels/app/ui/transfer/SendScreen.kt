@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.transfer
 import android.content.ContextWrapper
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import com.stablechannels.app.services.StabilityService
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -488,6 +489,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             actualMsat = manualAmountMsat
                                             paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
                                         }
+                                        // Deduct from native (BTC) first, then USD if needed
+                                        val actualSats = actualMsat / 1000
+                                        StabilityService.deductOutgoing(appState.stableChannel.value, actualSats, price)
                                         appState.databaseService?.recordPayment(
                                             paymentId = paymentId, paymentType = "lightning",
                                             direction = "sent", amountMsat = actualMsat,
