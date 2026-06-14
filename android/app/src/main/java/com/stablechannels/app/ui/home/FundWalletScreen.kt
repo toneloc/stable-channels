@@ -122,7 +122,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                         Icon(
                             imageVector = if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
                             contentDescription = "Copy Address",
-                            tint = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                            tint = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }

@@ -38,6 +38,7 @@ fun BackupView(appState: AppState) {
     var showRestore by remember { mutableStateOf(false) }
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
+    var isRestoring by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -203,9 +204,11 @@ fun BackupView(appState: AppState) {
     if (showRestore) {
         AlertDialog(
             onDismissRequest = {
-                showRestore = false
-                restoreMnemonic = ""
-                restoreError = null
+                if (!isRestoring) {
+                    showRestore = false
+                    restoreMnemonic = ""
+                    restoreError = null
+                }
             },
             title = { Text("Restore from Seed") },
             text = {
@@ -221,7 +224,8 @@ fun BackupView(appState: AppState) {
                         onValueChange = { restoreMnemonic = it },
                         label = { Text("word1 word2 word3 ...") },
                         modifier = Modifier.fillMaxWidth(),
-                        minLines = 3
+                        minLines = 3,
+                        enabled = !isRestoring
                     )
                     if (restoreError != null) {
                         Spacer(Modifier.height(8.dp))
@@ -230,6 +234,25 @@ fun BackupView(appState: AppState) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
+                    }
+                    if (isRestoring) {
+                        Spacer(Modifier.height(16.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Restoring wallet...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             },
@@ -242,11 +265,14 @@ fun BackupView(appState: AppState) {
                             restoreError = "Seed phrase must be 12 or 24 words"
                             return@TextButton
                         }
+                        isRestoring = true
+                        restoreError = null
                         scope.launch(Dispatchers.IO) {
                             try {
                                 appState.nodeService.stop()
                                 appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
                                 withContext(Dispatchers.Main) {
+                                    isRestoring = false
                                     showRestore = false
                                     restoreMnemonic = ""
                                     restoreError = null
@@ -254,20 +280,33 @@ fun BackupView(appState: AppState) {
                                 }
                             } catch (e: Exception) {
                                 withContext(Dispatchers.Main) {
+                                    isRestoring = false
                                     restoreError = e.message ?: "Restore failed"
                                 }
                             }
                         }
                     },
-                    enabled = restoreMnemonic.trim().isNotEmpty()
-                ) { Text("Restore") }
+                    enabled = restoreMnemonic.trim().isNotEmpty() && !isRestoring
+                ) {
+                    if (isRestoring) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Restore")
+                    }
+                }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showRestore = false
-                    restoreMnemonic = ""
-                    restoreError = null
-                }) { Text("Cancel") }
+                TextButton(
+                    onClick = {
+                        showRestore = false
+                        restoreMnemonic = ""
+                        restoreError = null
+                    },
+                    enabled = !isRestoring
+                ) { Text("Cancel") }
             }
         )
     }
