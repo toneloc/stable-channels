@@ -33,7 +33,7 @@ fun ChannelView(appState: AppState) {
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        if (channels.isNotEmpty()) {
+        if (channels.isNotEmpty() && !appState.isChannelClosing) {
             val ch = channels.first()
 
             // Status with colored dot
@@ -119,6 +119,30 @@ fun ChannelView(appState: AppState) {
                 ) {
                     Text("Close Channel")
                 }
+            }
+        } else if (appState.isChannelClosing) {
+            // Channel is closing — show status
+            Spacer(Modifier.height(32.dp))
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(48.dp),
+                    color = Color(0xFFF59E0B)
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Closing channel...",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Funds will be swept to your on-chain wallet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         } else {
             Text(

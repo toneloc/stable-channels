@@ -587,14 +587,25 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
             val price = priceService.currentPrice.value
-            val dedupId = "${System.currentTimeMillis() / 1000}_$depositSats"
-            databaseService?.recordPayment(
-                paymentId = dedupId, paymentType = "onchain", direction = "received",
-                amountMsat = depositSats * 1000,
-                amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
-                btcPrice = price
-            )
-            AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf("sats" to depositSats))
+
+            // Check for pending channel close (in-memory or DB) to avoid duplicate entries
+            val closeId = pendingClosePaymentId
+                ?: databaseService?.getPendingChannelClosePaymentId()
+            if (closeId != null) {
+                databaseService?.updatePaymentStatus(closeId, "completed")
+                pendingClosePaymentId = null
+                AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
+            } else {
+                // No pending close — record as new on-chain deposit
+                val dedupId = "${System.currentTimeMillis() / 1000}_$depositSats"
+                databaseService?.recordPayment(
+                    paymentId = dedupId, paymentType = "onchain", direction = "received",
+                    amountMsat = depositSats * 1000,
+                    amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
+                    btcPrice = price
+                )
+                AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf("sats" to depositSats))
+            }
             // Start faster polling until deposit confirms
             startPendingDepositPolling()
         }
@@ -721,12 +732,10 @@ class AppState(private val context: Context) : ViewModel() {
         _spendableOnchainSats.value = balances.spendableOnchainBalanceSats.toLong()
 
         // Clear closing flag once lightning balance fully resolves
+        // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
+        // handle it when the on-chain funds arrive
         if (isChannelClosing && lightning == 0L) {
             isChannelClosing = false
-            pendingClosePaymentId?.let {
-                databaseService?.updatePaymentStatus(it, "completed")
-                pendingClosePaymentId = null
-            }
         }
 
         _totalBalanceSats.value = when {
