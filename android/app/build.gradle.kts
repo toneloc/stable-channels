@@ -111,9 +111,6 @@ dependencies {
     // ML Kit Barcode Scanning
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
-    // WorkManager
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
-
     // Unit tests
     testImplementation("junit:junit:4.13.2")
 }
