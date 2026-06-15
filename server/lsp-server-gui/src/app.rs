@@ -17,9 +17,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceInRequest, SpliceOutRequest, SpontaneousSendRequest, UpdateChannelConfigRequest,
 	VerifySignatureRequest,
 };
-use sc_rest_client::sc_protos::stable::{
-	EditStableChannelRequest, GetPriceRequest, ListStableChannelsRequest, LogRequest,
-};
+use sc_rest_client::sc_protos::stable::{GetPriceRequest, ListStableChannelsRequest, LogRequest};
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
 };
@@ -32,6 +30,30 @@ use crate::state::{ActiveTab, AppState, ConnectionStatus, StatusMessage};
 use crate::task;
 use crate::ui;
 
+fn install_theme(ctx: &egui::Context) {
+    const AMBER: egui::Color32 = egui::Color32::from_rgb(0xF7, 0x93, 0x1A); // bitcoin orange
+    let mut visuals = egui::Visuals::dark();
+    visuals.selection.bg_fill = egui::Color32::from_rgb(0x4A, 0x39, 0x14);
+    visuals.selection.stroke = egui::Stroke::new(1.0, AMBER);
+    visuals.hyperlink_color = AMBER;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, AMBER);
+    visuals.widgets.hovered.expansion = 0.0;
+    visuals.widgets.active.expansion = 0.0;
+    let rounding = egui::Rounding::same(6.0);
+    visuals.widgets.noninteractive.rounding = rounding;
+    visuals.widgets.inactive.rounding = rounding;
+    visuals.widgets.hovered.rounding = rounding;
+    visuals.widgets.active.rounding = rounding;
+    visuals.window_rounding = egui::Rounding::same(8.0);
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    ctx.set_style(style);
+    ctx.set_pixels_per_point(1.1);
+}
+
 pub struct LspServerApp {
 	pub state: AppState,
 	#[cfg(not(target_arch = "wasm32"))]
@@ -39,9 +61,10 @@ pub struct LspServerApp {
 }
 
 impl LspServerApp {
-	pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+	pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+		install_theme(&cc.egui_ctx);
 		#[cfg(not(target_arch = "wasm32"))]
-		let state = {
+		let mut state = {
 			let mut state = AppState::default();
 			// Try to load config from file and populate connection settings
 			if let Some(gui_config) = config::find_and_load_config() {
@@ -57,7 +80,18 @@ impl LspServerApp {
 		};
 
 		#[cfg(target_arch = "wasm32")]
-		let state = AppState::default();
+		let mut state = AppState::default();
+
+		if let Some(storage) = cc.storage {
+			if let Some(u) = eframe::get_value::<crate::state::DisplayUnit>(storage, "display_unit") {
+				state.display_unit = u;
+			}
+		}
+
+		// First launch with no connection to auto-attempt: land on Settings so connecting is obvious.
+		if !state.auto_connect_pending {
+			state.active_tab = ActiveTab::Settings;
+		}
 
 		Self {
 			state,
@@ -98,6 +132,7 @@ impl LspServerApp {
 					self.fetch_node_info();
 					self.fetch_balances();
 					self.fetch_channels();
+					self.fetch_price();
 				},
 				Err(e) => {
 					self.state.connection_status = ConnectionStatus::Error(e.clone());
@@ -123,6 +158,7 @@ impl LspServerApp {
 					self.fetch_node_info();
 					self.fetch_balances();
 					self.fetch_channels();
+					self.fetch_price();
 				},
 				Err(e) => {
 					self.state.connection_status = ConnectionStatus::Error(e.clone());
@@ -139,7 +175,7 @@ impl LspServerApp {
 		self.state.balances = None;
 		self.state.channels = None;
 		self.state.payments = None;
-		self.state.status_message = Some(StatusMessage::success("Disconnected"));
+		self.state.status_message = Some(StatusMessage::error("Disconnected"));
 	}
 
 	/// Spawns an async task using the appropriate runtime for the platform
@@ -288,7 +324,7 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.onchain_send;
 			let address = form.address.trim().to_string();
-			let amount_sats = form.amount_sats.trim().parse::<u64>().ok();
+			let amount_sats = self.parse_amount_sats(&form.amount_sats);
 			let send_all = if form.send_all { Some(true) } else { None };
 			let fee_rate = form.fee_rate_sat_per_vb.trim().parse::<u64>().ok();
 
@@ -318,7 +354,7 @@ impl LspServerApp {
 		}
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.bolt11_receive;
-			let amount_msat = form.amount_msat.trim().parse::<u64>().ok();
+			let amount_msat = self.parse_amount_msat(&form.amount_msat);
 			let description = form.description.trim().to_string();
 			let expiry_secs = form.expiry_secs.trim().parse::<u32>().unwrap_or(86400);
 
@@ -351,7 +387,7 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.bolt11_send;
 			let invoice = form.invoice.trim().to_string();
-			let amount_msat = form.amount_msat.trim().parse::<u64>().ok();
+			let amount_msat = self.parse_amount_msat(&form.amount_msat);
 
 			if invoice.is_empty() {
 				self.state.status_message = Some(StatusMessage::error("Invoice is required"));
@@ -375,7 +411,7 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.bolt12_receive;
 			let description = form.description.trim().to_string();
-			let amount_msat = form.amount_msat.trim().parse::<u64>().ok();
+			let amount_msat = self.parse_amount_msat(&form.amount_msat);
 			let expiry_secs = form.expiry_secs.trim().parse::<u32>().ok();
 			let quantity = form.quantity.trim().parse::<u64>().ok();
 
@@ -406,7 +442,7 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.bolt12_send;
 			let offer = form.offer.trim().to_string();
-			let amount_msat = form.amount_msat.trim().parse::<u64>().ok();
+			let amount_msat = self.parse_amount_msat(&form.amount_msat);
 			let quantity = form.quantity.trim().parse::<u64>().ok();
 			let payer_note = if form.payer_note.trim().is_empty() {
 				None
@@ -443,16 +479,16 @@ impl LspServerApp {
 			let form = &self.state.forms.open_channel;
 			let node_pubkey = form.node_pubkey.trim().to_string();
 			let address = form.address.trim().to_string();
-			let channel_amount_sats = match form.channel_amount_sats.trim().parse::<u64>() {
-				Ok(v) => v,
-				Err(_) => {
+			let channel_amount_sats = match self.parse_amount_sats(&form.channel_amount_sats) {
+				Some(v) => v,
+				None => {
 					self.state.status_message =
 						Some(StatusMessage::error("Invalid channel amount"));
 					return;
 				},
 			};
 			let push_to_counterparty_msat =
-				form.push_to_counterparty_msat.trim().parse::<u64>().ok();
+				self.parse_amount_msat(&form.push_to_counterparty_msat);
 			let announce_channel = form.announce_channel;
 
 			let channel_config = build_channel_config(
@@ -552,9 +588,9 @@ impl LspServerApp {
 			let form = &self.state.forms.splice_in;
 			let user_channel_id = form.user_channel_id.trim().to_string();
 			let counterparty_node_id = form.counterparty_node_id.trim().to_string();
-			let splice_amount_sats = match form.splice_amount_sats.trim().parse::<u64>() {
-				Ok(v) => v,
-				Err(_) => {
+			let splice_amount_sats = match self.parse_amount_sats(&form.splice_amount_sats) {
+				Some(v) => v,
+				None => {
 					self.state.status_message = Some(StatusMessage::error("Invalid splice amount"));
 					return;
 				},
@@ -588,9 +624,9 @@ impl LspServerApp {
 			let form = &self.state.forms.splice_out;
 			let user_channel_id = form.user_channel_id.trim().to_string();
 			let counterparty_node_id = form.counterparty_node_id.trim().to_string();
-			let splice_amount_sats = match form.splice_amount_sats.trim().parse::<u64>() {
-				Ok(v) => v,
-				Err(_) => {
+			let splice_amount_sats = match self.parse_amount_sats(&form.splice_amount_sats) {
+				Some(v) => v,
+				None => {
 					self.state.status_message = Some(StatusMessage::error("Invalid splice amount"));
 					return;
 				},
@@ -717,36 +753,6 @@ impl LspServerApp {
 		}
 	}
 
-	pub fn edit_stable_channel(&mut self) {
-		if self.state.tasks.edit_stable_channel.is_some() {
-			return;
-		}
-		if let Some(client) = &self.state.client {
-			let form = &self.state.forms.edit_stable_channel;
-			let channel_id = form.channel_id.trim().to_string();
-			let expected_usd = form.expected_usd.trim().parse::<f64>().ok();
-			let note =
-				if form.note.trim().is_empty() { None } else { Some(form.note.trim().to_string()) };
-
-			if channel_id.is_empty() {
-				self.state.status_message = Some(StatusMessage::error("Channel ID is required"));
-				return;
-			}
-
-			let client = client.clone();
-			self.state.tasks.edit_stable_channel = Some(self.spawn_task(async move {
-				client
-					.edit_stable_channel(EditStableChannelRequest {
-						channel_id,
-						expected_usd,
-						note,
-					})
-					.await
-					.map_err(|e| e.to_string())
-			}));
-		}
-	}
-
 	pub fn disconnect_peer(&mut self, node_pubkey: String) {
 		if self.state.tasks.disconnect_peer.is_some() {
 			return;
@@ -768,9 +774,9 @@ impl LspServerApp {
 		}
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.spontaneous_send;
-			let amount_msat = match form.amount_msat.trim().parse::<u64>() {
-				Ok(v) => v,
-				Err(_) => {
+			let amount_msat = match self.parse_amount_msat(&form.amount_msat) {
+				Some(v) => v,
+				None => {
 					self.state.status_message = Some(StatusMessage::error("Invalid amount"));
 					return;
 				},
@@ -930,6 +936,53 @@ impl LspServerApp {
 		}
 	}
 
+	/// Shared connection gate: when not connected, render the "not connected" state (Open
+	/// Settings / Retry) and return true so the caller short-circuits. Returns false when connected.
+	pub fn render_disconnected_gate(&mut self, ui: &mut egui::Ui) -> bool {
+		if matches!(self.state.connection_status, ConnectionStatus::Connected) {
+			return false;
+		}
+		match ui::widgets::not_connected(ui, &self.state.connection_status, &self.state.server_url) {
+			ui::widgets::NotConnectedAction::OpenSettings => self.state.active_tab = ActiveTab::Settings,
+			ui::widgets::NotConnectedAction::Retry => self.connect(),
+			ui::widgets::NotConnectedAction::None => {},
+		}
+		true
+	}
+
+	pub fn fmt_sats(&self, sats: u64) -> String {
+		ui::format_amount_sats(sats, self.state.display_unit, self.state.price.as_ref().map(|p| p.price))
+	}
+	pub fn fmt_msat(&self, msat: u64) -> String {
+		ui::format_amount_msat(msat, self.state.display_unit, self.state.price.as_ref().map(|p| p.price))
+	}
+
+	fn price_value(&self) -> Option<f64> {
+		self.state.price.as_ref().map(|p| p.price)
+	}
+	/// Parse an amount the user typed in the active display unit into sats.
+	pub fn parse_amount_sats(&self, input: &str) -> Option<u64> {
+		ui::parse_amount_to_sats(input, self.state.display_unit, self.price_value())
+	}
+	/// Same, scaled to msats for the Lightning APIs.
+	pub fn parse_amount_msat(&self, input: &str) -> Option<u64> {
+		ui::parse_amount_to_msat(input, self.state.display_unit, self.price_value())
+	}
+	/// Preview line under an amount field: the sats that will actually be sent
+	/// (USD/BTC modes), or the ≈USD value (sats mode); None if unparseable.
+	pub fn amount_entry_preview(&self, input: &str) -> Option<String> {
+		let sats = self.parse_amount_sats(input)?;
+		match self.state.display_unit {
+			crate::state::DisplayUnit::Sats => match self.price_value() {
+				Some(p) if p > 0.0 => {
+					Some(format!("≈ {}", ui::format_amount_sats(sats, crate::state::DisplayUnit::Usd, self.price_value())))
+				},
+				_ => None,
+			},
+			_ => Some(format!("= {} sats", ui::format_sats(sats))),
+		}
+	}
+
 	fn poll_tasks(&mut self, _ctx: &egui::Context) {
 		macro_rules! poll_task {
 			($task:expr => |$val:ident| $handler:expr) => {
@@ -962,7 +1015,18 @@ impl LspServerApp {
 
 		poll_task!(self.state.tasks.payments => |v| {
 			self.state.payments_page_token = v.next_page_token.clone();
-			self.state.payments = Some(v);
+			if self.state.payments_appending {
+				// "Load More": append this page to the existing list (an empty page is a no-op).
+				if let Some(existing) = self.state.payments.as_mut() {
+					existing.payments.extend(v.payments);
+					existing.next_page_token = v.next_page_token;
+				} else {
+					self.state.payments = Some(v);
+				}
+			} else {
+				self.state.payments = Some(v);
+			}
+			self.state.payments_appending = false;
 		});
 
 		poll_task!(self.state.tasks.peers => |v| {
@@ -1064,22 +1128,27 @@ impl LspServerApp {
 			self.state.show_connect_peer_dialog = false;
 		});
 
-		poll_task!(self.state.tasks.get_price => |v| {
-			self.state.price = Some(v);
-		});
+		// The 5s price poll doubles as a connectivity heartbeat: a successful GetPrice means the
+		// LSP is reachable, an error means it is not — so the status badge reflects reality, not
+		// just whether the client object was built. Recovers automatically when the LSP returns.
+		if let Some(t) = &mut self.state.tasks.get_price {
+			if let Some(res) = t.try_take() {
+				self.state.tasks.get_price = None;
+				match res {
+					Ok(v) => {
+						self.state.price = Some(v);
+						self.state.connection_status = ConnectionStatus::Connected;
+					},
+					Err(e) => {
+						self.state.connection_status =
+							ConnectionStatus::Error(format!("LSP unreachable: {}", e));
+					},
+				}
+			}
+		}
 
 		poll_task!(self.state.tasks.list_stable_channels => |v| {
 			self.state.stable_channels = Some(v);
-		});
-
-		poll_task!(self.state.tasks.edit_stable_channel => |v| {
-			if v.ok {
-				self.state.status_message = Some(StatusMessage::success(v.status));
-			} else {
-				self.state.status_message = Some(StatusMessage::error(v.status));
-			}
-			self.state.forms.edit_stable_channel = Default::default();
-			self.fetch_stable_channels();
 		});
 
 		poll_task!(self.state.tasks.disconnect_peer => |_v| {
@@ -1152,6 +1221,10 @@ fn build_channel_config(fee_prop: &str, fee_base: &str, cltv: &str) -> Option<Ch
 }
 
 impl App for LspServerApp {
+	fn save(&mut self, storage: &mut dyn eframe::Storage) {
+		eframe::set_value(storage, "display_unit", &self.state.display_unit);
+	}
+
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
 		self.poll_tasks(ctx);
 
@@ -1161,41 +1234,59 @@ impl App for LspServerApp {
 			self.connect();
 		}
 
-		if self.state.tasks.any_pending() {
-			ctx.request_repaint_after(Duration::from_millis(100));
+		if self.state.client.is_some() && self.state.tasks.get_price.is_none() {
+			let now = ctx.input(|i| i.time);
+			if now - self.state.last_price_fetch > 5.0 {
+				self.state.last_price_fetch = now;
+				self.fetch_price();
+			}
+		}
+
+		// Keep repainting while connected so the periodic price refresh fires even when idle.
+		if self.state.client.is_some() {
+			ctx.request_repaint_after(Duration::from_secs(1));
 		}
 
 		egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
 			ui.horizontal(|ui| {
-				ui.heading("LSP Server GUI");
+				ui.heading("LSP Server");
 				ui.separator();
 				ui::connection::render_status(ui, &self.state);
+				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+					let mut unit = self.state.display_unit;
+					ui.selectable_value(&mut unit, crate::state::DisplayUnit::Sats, "Sats");
+					ui.selectable_value(&mut unit, crate::state::DisplayUnit::Btc, "BTC");
+					ui.selectable_value(&mut unit, crate::state::DisplayUnit::Usd, "USD");
+					self.state.display_unit = unit;
+					ui.separator();
+					match &self.state.price {
+						Some(p) if p.price > 0.0 => { ui.weak(format!("${:.0}/BTC", p.price)); }
+						_ => { ui.weak("price --"); }
+					}
+				});
 			});
 		});
 
-		egui::SidePanel::left("nav_panel").resizable(false).default_width(140.0).show(ctx, |ui| {
+		egui::SidePanel::left("nav_panel").resizable(true).default_width(160.0).show(ctx, |ui| {
+			egui::ScrollArea::vertical().show(ui, |ui| {
 			ui.add_space(10.0);
 			ui.heading("Navigation");
 			ui.separator();
 
-			let tabs = [
-				(ActiveTab::NodeInfo, "Node Info"),
-				(ActiveTab::Balances, "Balances"),
-				(ActiveTab::Channels, "Channels"),
-				(ActiveTab::Peers, "Peers"),
-				(ActiveTab::Payments, "Payments"),
-				(ActiveTab::ForwardedPayments, "Forwarded"),
-				(ActiveTab::Lightning, "Lightning"),
-				(ActiveTab::Onchain, "On-chain"),
-				(ActiveTab::StableChannels, "Stable"),
-				(ActiveTab::Tools, "Tools"),
-				(ActiveTab::NetworkGraph, "Graph"),
-				(ActiveTab::Logs, "Logs"),
+			let groups: [(&str, &[(ActiveTab, &str)]); 5] = [
+				("Overview", &[(ActiveTab::NodeInfo, "🏠 Node Info"), (ActiveTab::Balances, "💰 Balances")]),
+				("Lightning", &[(ActiveTab::Channels, "🔗 Channels"), (ActiveTab::StableChannels, "📈 Stable"), (ActiveTab::Peers, "👥 Peers"), (ActiveTab::Lightning, "⚡ Lightning"), (ActiveTab::Payments, "🧾 Payments"), (ActiveTab::ForwardedPayments, "↪ Forwarded")]),
+				("On-chain", &[(ActiveTab::Onchain, "⛓ On-chain")]),
+				("Network", &[(ActiveTab::NetworkGraph, "🌐 Graph")]),
+				("System", &[(ActiveTab::Tools, "🛠 Tools"), (ActiveTab::Logs, "📜 Logs"), (ActiveTab::Settings, "⚙ Settings")]),
 			];
-
-			for (tab, label) in tabs {
-				if ui.selectable_label(self.state.active_tab == tab, label).clicked() {
-					self.state.active_tab = tab;
+			for (section, items) in groups {
+				ui.add_space(6.0);
+				ui.label(egui::RichText::new(section).small().weak());
+				for (tab, label) in items {
+					if ui.selectable_label(self.state.active_tab == *tab, *label).clicked() {
+						self.state.active_tab = *tab;
+					}
 				}
 			}
 
@@ -1208,6 +1299,7 @@ impl App for LspServerApp {
 			ui.hyperlink_to("LDK Node", "https://docs.rs/ldk-node/latest/ldk_node/");
 			ui.hyperlink_to("Rust Lightning", "https://docs.rs/lightning/latest/lightning/");
 			ui.hyperlink_to("BDK", "https://docs.rs/bdk_wallet/latest/bdk_wallet/");
+			});
 		});
 
 		egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -1224,23 +1316,32 @@ impl App for LspServerApp {
 			});
 		});
 
-		egui::CentralPanel::default().show(ctx, |ui| match self.state.active_tab {
-			ActiveTab::NodeInfo => ui::node_info::render(ui, self),
-			ActiveTab::Balances => ui::balances::render(ui, self),
-			ActiveTab::Channels => ui::channels::render(ui, self),
-			ActiveTab::Peers => ui::peers::render(ui, self),
-			ActiveTab::Payments => ui::payments::render(ui, self),
-			ActiveTab::ForwardedPayments => ui::forwarded_payments::render(ui, self),
-			ActiveTab::Lightning => ui::lightning::render(ui, self),
-			ActiveTab::Onchain => ui::onchain::render(ui, self),
-			ActiveTab::StableChannels => ui::stable_channels::render(ui, self),
-			ActiveTab::Tools => ui::tools::render(ui, self),
-			ActiveTab::NetworkGraph => ui::network_graph::render(ui, self),
-			ActiveTab::Logs => ui::ldk_log::render(ui, self),
+		egui::CentralPanel::default().show(ctx, |ui| {
+			egui::ScrollArea::vertical().show(ui, |ui| match self.state.active_tab {
+				ActiveTab::NodeInfo => ui::node_info::render(ui, self),
+				ActiveTab::Balances => ui::balances::render(ui, self),
+				ActiveTab::Channels => ui::channels::render(ui, self),
+				ActiveTab::Peers => ui::peers::render(ui, self),
+				ActiveTab::Payments => ui::payments::render(ui, self),
+				ActiveTab::ForwardedPayments => ui::forwarded_payments::render(ui, self),
+				ActiveTab::Lightning => ui::lightning::render(ui, self),
+				ActiveTab::Onchain => ui::onchain::render(ui, self),
+				ActiveTab::StableChannels => ui::stable_channels::render(ui, self),
+				ActiveTab::Tools => ui::tools::render(ui, self),
+				ActiveTab::NetworkGraph => ui::network_graph::render(ui, self),
+				ActiveTab::Logs => ui::ldk_log::render(ui, self),
+				ActiveTab::Settings => ui::settings::render(ui, self),
+			});
 		});
 
 		ui::channels::render_dialogs(ctx, self);
 		ui::connection::render_load_config_dialog(ctx, self);
 		ui::payments::render_dialogs(ctx, self);
+
+		// A fetch spawned during this frame's render must schedule a near-term
+		// repaint, else its background result isn't polled until the next event.
+		if self.state.tasks.any_pending() {
+			ctx.request_repaint_after(Duration::from_millis(50));
+		}
 	}
 }

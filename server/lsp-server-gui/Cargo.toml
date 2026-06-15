@@ -21,7 +21,7 @@ bytes = "1.4.0"
 
 # Native-only dependencies
 tokio = { version = "1.38.0", features = ["rt-multi-thread", "sync"], optional = true }
-rfd = { version = "0.15", optional = true }
+rfd = { version = "0.15", optional = true, default-features = false, features = ["gtk3"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
@@ -35,4 +35,4 @@ log = { version = "0.4", optional = true }
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
