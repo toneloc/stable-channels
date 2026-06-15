@@ -11,7 +11,7 @@ ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev
 # ldk-node is pulled transitively by stable-channels but we need it as a direct
 # dep so we can name `ldk_node::lightning::ln::types::ChannelId` etc. in our
 # module path. The rev must match the root Cargo.toml.
-ldk-node          = { git = "https://github.com/lightningdevkit/ldk-node", rev = "16eaa6f46308965f501904506be3ceecd293f358" }
+ldk-node          = { git = "https://github.com/lightningdevkit/ldk-node", rev = "47dad6d909af0fbb53e76d07740c04df5abdde3b" }
 hex               = "0.4"
 
 # Async trait support for &dyn LdkServerCalls (stable Rust async-fn-in-trait
