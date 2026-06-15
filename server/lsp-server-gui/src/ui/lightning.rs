@@ -1,14 +1,13 @@
 use egui::Ui;
 
 use crate::app::LspServerApp;
-use crate::state::{ConnectionStatus, LightningTab};
+use crate::state::{LightningTab, StatusMessage};
 
 pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.heading("Lightning Payments");
 	ui.add_space(10.0);
 
-	if !matches!(app.state.connection_status, ConnectionStatus::Connected) {
-		ui.label("Connect to a server to use lightning payments.");
+	if app.render_disconnected_gate(ui) {
 		return;
 	}
 
@@ -68,6 +67,7 @@ fn render_bolt11_send(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.heading("Pay BOLT11 Invoice");
 		ui.add_space(5.0);
 
+		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt11_send;
 
 		ui.label("Invoice:");
@@ -80,22 +80,25 @@ fn render_bolt11_send(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.add_space(5.0);
 
 		egui::Grid::new("bolt11_send_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-			ui.label("Amount (msat, for zero-amount invoices):");
+			ui.label(format!("Amount ({}, for zero-amount invoices):", unit_label));
 			ui.text_edit_singleline(&mut form.amount_msat);
 			ui.end_row();
 		});
 
+		// preview: read field text locally to avoid borrow conflict with the &self method
+		let amt = app.state.forms.bolt11_send.amount_msat.clone();
+		if let Some(preview) = app.amount_entry_preview(&amt) {
+			ui.weak(preview);
+		}
+
 		ui.add_space(10.0);
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.bolt11_send.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Sending...");
-			} else if ui.button("Pay Invoice").clicked() {
-				app.send_bolt11();
-			}
-		});
+		let is_pending = app.state.tasks.bolt11_send.is_some();
+		if is_pending {
+			crate::ui::widgets::loading_row(ui, "Sending...");
+		} else if ui.button("Pay Invoice").clicked() {
+			app.send_bolt11();
+		}
 
 		if let Some(payment_id) = &app.state.last_payment_id {
 			ui.add_space(5.0);
@@ -115,10 +118,11 @@ fn render_bolt11_receive(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.heading("Generate BOLT11 Invoice");
 		ui.add_space(5.0);
 
+		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt11_receive;
 
 		egui::Grid::new("bolt11_receive_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-			ui.label("Amount (msat, optional):");
+			ui.label(format!("Amount ({}, optional):", unit_label));
 			ui.text_edit_singleline(&mut form.amount_msat);
 			ui.end_row();
 
@@ -131,19 +135,22 @@ fn render_bolt11_receive(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.end_row();
 		});
 
+		// preview: read field text locally to avoid borrow conflict with fmt_msat
+		let amt = app.state.forms.bolt11_receive.amount_msat.clone();
+		if let Some(preview) = app.amount_entry_preview(&amt) {
+			ui.weak(preview);
+		}
+
 		ui.add_space(10.0);
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.bolt11_receive.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Generating...");
-			} else if ui.button("Generate Invoice").clicked() {
-				app.generate_bolt11_invoice();
-			}
-		});
+		let is_pending = app.state.tasks.bolt11_receive.is_some();
+		if is_pending {
+			crate::ui::widgets::loading_row(ui, "Generating...");
+		} else if ui.button("Generate Invoice").clicked() {
+			app.generate_bolt11_invoice();
+		}
 
-		if let Some(invoice) = &app.state.generated_invoice {
+		if let Some(invoice) = &app.state.generated_invoice.clone() {
 			ui.add_space(10.0);
 			ui.separator();
 			ui.label("Generated Invoice:");
@@ -155,6 +162,7 @@ fn render_bolt11_receive(ui: &mut Ui, app: &mut LspServerApp) {
 			);
 			if ui.button("Copy Invoice").clicked() {
 				ui.output_mut(|o| o.copied_text = invoice.clone());
+				app.state.status_message = Some(StatusMessage::success("Copied"));
 			}
 		}
 	});
@@ -165,6 +173,7 @@ fn render_bolt12_send(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.heading("Pay BOLT12 Offer");
 		ui.add_space(5.0);
 
+		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt12_send;
 
 		ui.label("Offer:");
@@ -175,7 +184,7 @@ fn render_bolt12_send(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.add_space(5.0);
 
 		egui::Grid::new("bolt12_send_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-			ui.label("Amount (msat, optional):");
+			ui.label(format!("Amount ({}, optional):", unit_label));
 			ui.text_edit_singleline(&mut form.amount_msat);
 			ui.end_row();
 
@@ -188,17 +197,20 @@ fn render_bolt12_send(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.end_row();
 		});
 
+		// preview: read field text locally to avoid borrow conflict with fmt_msat
+		let amt = app.state.forms.bolt12_send.amount_msat.clone();
+		if let Some(preview) = app.amount_entry_preview(&amt) {
+			ui.weak(preview);
+		}
+
 		ui.add_space(10.0);
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.bolt12_send.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Sending...");
-			} else if ui.button("Pay Offer").clicked() {
-				app.send_bolt12();
-			}
-		});
+		let is_pending = app.state.tasks.bolt12_send.is_some();
+		if is_pending {
+			crate::ui::widgets::loading_row(ui, "Sending...");
+		} else if ui.button("Pay Offer").clicked() {
+			app.send_bolt12();
+		}
 
 		if let Some(payment_id) = &app.state.last_payment_id {
 			ui.add_space(5.0);
@@ -218,6 +230,7 @@ fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.heading("Generate BOLT12 Offer");
 		ui.add_space(5.0);
 
+		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt12_receive;
 
 		egui::Grid::new("bolt12_receive_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
@@ -225,7 +238,7 @@ fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.text_edit_singleline(&mut form.description);
 			ui.end_row();
 
-			ui.label("Amount (msat, optional):");
+			ui.label(format!("Amount ({}, optional):", unit_label));
 			ui.text_edit_singleline(&mut form.amount_msat);
 			ui.end_row();
 
@@ -238,19 +251,22 @@ fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.end_row();
 		});
 
+		// preview: read field text locally to avoid borrow conflict with fmt_msat
+		let amt = app.state.forms.bolt12_receive.amount_msat.clone();
+		if let Some(preview) = app.amount_entry_preview(&amt) {
+			ui.weak(preview);
+		}
+
 		ui.add_space(10.0);
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.bolt12_receive.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Generating...");
-			} else if ui.button("Generate Offer").clicked() {
-				app.generate_bolt12_offer();
-			}
-		});
+		let is_pending = app.state.tasks.bolt12_receive.is_some();
+		if is_pending {
+			crate::ui::widgets::loading_row(ui, "Generating...");
+		} else if ui.button("Generate Offer").clicked() {
+			app.generate_bolt12_offer();
+		}
 
-		if let Some(offer) = &app.state.generated_offer {
+		if let Some(offer) = &app.state.generated_offer.clone() {
 			ui.add_space(10.0);
 			ui.separator();
 			ui.label("Generated Offer:");
@@ -262,6 +278,7 @@ fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
 			);
 			if ui.button("Copy Offer").clicked() {
 				ui.output_mut(|o| o.copied_text = offer.clone());
+				app.state.status_message = Some(StatusMessage::success("Copied"));
 			}
 		}
 	});
@@ -272,6 +289,7 @@ fn render_spontaneous_send(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.heading("Spontaneous Payment (Keysend)");
 		ui.add_space(5.0);
 
+		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.spontaneous_send;
 
 		egui::Grid::new("spontaneous_send_grid").num_columns(2).spacing([10.0, 5.0]).show(
@@ -281,23 +299,26 @@ fn render_spontaneous_send(ui: &mut Ui, app: &mut LspServerApp) {
 				ui.text_edit_singleline(&mut form.node_id);
 				ui.end_row();
 
-				ui.label("Amount (msat):");
+				ui.label(format!("Amount ({}):", unit_label));
 				ui.text_edit_singleline(&mut form.amount_msat);
 				ui.end_row();
 			},
 		);
 
+		// preview: read field text locally to avoid borrow conflict with fmt_msat
+		let amt = app.state.forms.spontaneous_send.amount_msat.clone();
+		if let Some(preview) = app.amount_entry_preview(&amt) {
+			ui.weak(preview);
+		}
+
 		ui.add_space(10.0);
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.spontaneous_send.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Sending...");
-			} else if ui.button("Send Keysend").clicked() {
-				app.spontaneous_send();
-			}
-		});
+		let is_pending = app.state.tasks.spontaneous_send.is_some();
+		if is_pending {
+			crate::ui::widgets::loading_row(ui, "Sending...");
+		} else if ui.button("Send Keysend").clicked() {
+			app.spontaneous_send();
+		}
 
 		if let Some(payment_id) = &app.state.last_payment_id {
 			ui.add_space(5.0);

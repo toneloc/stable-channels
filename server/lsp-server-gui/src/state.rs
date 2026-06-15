@@ -17,9 +17,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceOutResponse, SpontaneousSendResponse, UpdateChannelConfigResponse,
 	VerifySignatureResponse,
 };
-use sc_rest_client::sc_protos::stable::{
-	EditStableChannelResponse, GetPriceResponse, ListStableChannelsResponse, LogResponse,
-};
+use sc_rest_client::sc_protos::stable::{GetPriceResponse, ListStableChannelsResponse, LogResponse};
 use sc_rest_client::ldk_server_grpc::types::PageToken;
 
 #[derive(Clone, PartialEq, Default)]
@@ -45,6 +43,15 @@ pub enum ActiveTab {
 	Tools,
 	NetworkGraph,
 	Logs,
+	Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum DisplayUnit {
+	#[default]
+	Usd,
+	Btc,
+	Sats,
 }
 
 #[derive(Default, Clone)]
@@ -125,13 +132,6 @@ pub struct ConnectPeerForm {
 	pub node_pubkey: String,
 	pub address: String,
 	pub persist: bool,
-}
-
-#[derive(Default, Clone)]
-pub struct EditStableChannelForm {
-	pub channel_id: String,
-	pub expected_usd: String,
-	pub note: String,
 }
 
 #[derive(Default, Clone)]
@@ -242,7 +242,6 @@ pub struct Forms {
 	pub update_channel_config: UpdateChannelConfigForm,
 	pub close_channel: CloseChannelForm,
 	pub connect_peer: ConnectPeerForm,
-	pub edit_stable_channel: EditStableChannelForm,
 	pub spontaneous_send: SpontaneousSendForm,
 	pub sign_message: SignMessageForm,
 	pub verify_signature: VerifySignatureForm,
@@ -320,7 +319,6 @@ pub struct AsyncTasks {
 	pub export_pathfinding_scores: Option<ChannelTaskHandle<ExportPathfindingScoresResponse>>,
 	pub get_price: Option<ChannelTaskHandle<GetPriceResponse>>,
 	pub list_stable_channels: Option<ChannelTaskHandle<ListStableChannelsResponse>>,
-	pub edit_stable_channel: Option<ChannelTaskHandle<EditStableChannelResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 }
 
@@ -358,7 +356,6 @@ impl Default for AsyncTasks {
 			export_pathfinding_scores: None,
 			get_price: None,
 			list_stable_channels: None,
-			edit_stable_channel: None,
 			ldk_log: None,
 		}
 	}
@@ -397,7 +394,6 @@ impl AsyncTasks {
 			|| self.export_pathfinding_scores.is_some()
 			|| self.get_price.is_some()
 			|| self.list_stable_channels.is_some()
-			|| self.edit_stable_channel.is_some()
 			|| self.ldk_log.is_some()
 	}
 }
@@ -426,6 +422,8 @@ pub struct AppState {
 	pub channels: Option<ListChannelsResponse>,
 	pub payments: Option<ListPaymentsResponse>,
 	pub payments_page_token: Option<PageToken>,
+	// True while a "Load More" fetch is in flight, so its result appends instead of replacing.
+	pub payments_appending: bool,
 	pub peers: Option<ListPeersResponse>,
 	pub forwarded_payments: Option<ListForwardedPaymentsResponse>,
 	pub forwarded_payments_page_token: Option<PageToken>,
@@ -449,6 +447,8 @@ pub struct AppState {
 	pub forms: Forms,
 
 	// UI state
+	pub display_unit: DisplayUnit,
+	pub last_price_fetch: f64,
 	pub auto_connect_pending: bool,
 	pub status_message: Option<StatusMessage>,
 	pub show_open_channel_dialog: bool,
@@ -513,6 +513,7 @@ impl Default for AppState {
 			channels: None,
 			payments: None,
 			payments_page_token: None,
+			payments_appending: false,
 			peers: None,
 			forwarded_payments: None,
 			forwarded_payments_page_token: None,
@@ -532,6 +533,8 @@ impl Default for AppState {
 
 			forms: Forms::default(),
 
+			display_unit: DisplayUnit::default(),
+			last_price_fetch: 0.0,
 			auto_connect_pending: false,
 			status_message: None,
 			show_open_channel_dialog: false,

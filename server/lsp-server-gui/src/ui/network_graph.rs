@@ -1,15 +1,13 @@
 use eframe::egui;
 
 use crate::app::LspServerApp;
-use crate::state::ConnectionStatus;
-use crate::ui::truncate_id;
+use crate::ui::widgets;
 
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 	ui.heading("Network Graph");
 	ui.add_space(10.0);
 
-	if !matches!(app.state.connection_status, ConnectionStatus::Connected) {
-		ui.label("Connect to a server to explore the network graph.");
+	if app.render_disconnected_gate(ui) {
 		return;
 	}
 
@@ -41,13 +39,31 @@ fn render_channels_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
 
 			if !resp.short_channel_ids.is_empty() {
 				ui.add_space(5.0);
+
+				// Filter box for scid list (temp memory, no AppState field)
+				let filter_id = ui.id().with("scid_filter");
+				let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
+				ui.horizontal(|ui| {
+					ui.label("Filter:");
+					ui.text_edit_singleline(&mut filter);
+				});
+				ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
+
 				let max_display = 100.min(resp.short_channel_ids.len());
+				// Apply filter to the already-capped slice
+				let visible: Vec<&u64> = resp.short_channel_ids
+					.iter()
+					.take(max_display)
+					.filter(|scid| filter.is_empty() || scid.to_string().contains(&filter))
+					.collect();
+
 				egui::Grid::new("graph_channels_list").striped(true).show(ui, |ui| {
 					ui.label(egui::RichText::new("Short Channel ID").strong());
 					ui.end_row();
 
-					for scid in resp.short_channel_ids.iter().take(max_display) {
-						ui.label(format!("{}", scid));
+					for scid in &visible {
+						let scid_str = scid.to_string();
+						widgets::id_with_copy(ui, &scid_str, &mut app.state.status_message);
 						ui.end_row();
 					}
 				});
@@ -85,34 +101,33 @@ fn render_channels_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		if let Some(resp) = &app.state.graph_channel_detail {
 			if let Some(ch) = &resp.channel {
 				ui.add_space(5.0);
+				// Pre-extract values before mixed borrows
+				let node_one = ch.node_one.clone();
+				let node_two = ch.node_two.clone();
+				let capacity = ch.capacity_sats;
+				let one_to_two = ch.one_to_two.clone();
+				let two_to_one = ch.two_to_one.clone();
+
+				let cap_str = capacity.map(|c| app.fmt_sats(c));
+
 				egui::Grid::new("graph_channel_detail").num_columns(2).spacing([10.0, 5.0]).show(
 					ui,
 					|ui| {
 						ui.label("Node One:");
-						ui.horizontal(|ui| {
-							ui.monospace(truncate_id(&ch.node_one, 8, 4));
-							if ui.small_button("Copy").clicked() {
-								ui.output_mut(|o| o.copied_text = ch.node_one.clone());
-							}
-						});
+						widgets::id_with_copy(ui, &node_one, &mut app.state.status_message);
 						ui.end_row();
 
 						ui.label("Node Two:");
-						ui.horizontal(|ui| {
-							ui.monospace(truncate_id(&ch.node_two, 8, 4));
-							if ui.small_button("Copy").clicked() {
-								ui.output_mut(|o| o.copied_text = ch.node_two.clone());
-							}
-						});
+						widgets::id_with_copy(ui, &node_two, &mut app.state.status_message);
 						ui.end_row();
 
-						if let Some(cap) = ch.capacity_sats {
+						if let Some(cap_fmt) = &cap_str {
 							ui.label("Capacity:");
-							ui.label(format!("{} sats", crate::ui::format_sats(cap)));
+							ui.label(format!("{} sats", cap_fmt));
 							ui.end_row();
 						}
 
-						if let Some(update) = &ch.one_to_two {
+						if let Some(update) = &one_to_two {
 							ui.label("1->2 Enabled:");
 							ui.label(if update.enabled { "Yes" } else { "No" });
 							ui.end_row();
@@ -127,7 +142,7 @@ fn render_channels_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
 							ui.end_row();
 						}
 
-						if let Some(update) = &ch.two_to_one {
+						if let Some(update) = &two_to_one {
 							ui.label("2->1 Enabled:");
 							ui.label(if update.enabled { "Yes" } else { "No" });
 							ui.end_row();
@@ -169,18 +184,31 @@ fn render_nodes_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
 
 			if !resp.node_ids.is_empty() {
 				ui.add_space(5.0);
+
+				// Filter box for node list (temp memory, no AppState field)
+				let filter_id = ui.id().with("node_filter");
+				let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
+				ui.horizontal(|ui| {
+					ui.label("Filter:");
+					ui.text_edit_singleline(&mut filter);
+				});
+				ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
+
 				let max_display = 100.min(resp.node_ids.len());
+				// Apply filter to the already-capped slice
+				let visible: Vec<&String> = resp.node_ids
+					.iter()
+					.take(max_display)
+					.filter(|id| filter.is_empty() || id.contains(&filter))
+					.collect();
+
 				egui::Grid::new("graph_nodes_list").striped(true).show(ui, |ui| {
 					ui.label(egui::RichText::new("Node ID").strong());
 					ui.end_row();
 
-					for node_id in resp.node_ids.iter().take(max_display) {
-						ui.horizontal(|ui| {
-							ui.monospace(truncate_id(node_id, 8, 4));
-							if ui.small_button("Copy").clicked() {
-								ui.output_mut(|o| o.copied_text = node_id.clone());
-							}
-						});
+					for node_id in &visible {
+						let node_id_str = node_id.to_string();
+						widgets::id_with_copy(ui, &node_id_str, &mut app.state.status_message);
 						ui.end_row();
 					}
 				});
@@ -232,7 +260,9 @@ fn render_nodes_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
 							ui.end_row();
 
 							ui.label("Last Update:");
-							ui.label(format!("{}", ann.last_update));
+							let ts = ann.last_update;
+							ui.label(format!("{}", ts))
+								.on_hover_text(format!("unix: {}", ts));
 							ui.end_row();
 
 							if !ann.addresses.is_empty() {

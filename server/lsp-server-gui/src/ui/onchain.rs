@@ -3,15 +3,14 @@ use egui::{ScrollArea, Ui};
 use web_sys::js_sys;
 
 use crate::app::LspServerApp;
-use crate::state::{ConnectionStatus, OnchainTab};
-use crate::ui::{format_sats, truncate_id};
+use crate::state::OnchainTab;
+use crate::ui::truncate_id;
 
 pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.heading("On-chain Transactions");
 	ui.add_space(10.0);
 
-	if !matches!(app.state.connection_status, ConnectionStatus::Connected) {
-		ui.label("Connect to a server to use on-chain transactions.");
+	if app.render_disconnected_gate(ui) {
 		return;
 	}
 
@@ -46,6 +45,11 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 		ui.heading("Send On-chain");
 		ui.add_space(5.0);
 
+		// Pre-read amount for preview so the &self method can borrow app without conflicting with form borrow
+		let unit_label = crate::ui::unit_label(app.state.display_unit);
+		let amt = app.state.forms.onchain_send.amount_sats.clone();
+		let preview_str = app.amount_entry_preview(&amt);
+
 		let form = &mut app.state.forms.onchain_send;
 
 		egui::Grid::new("onchain_send_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
@@ -53,8 +57,17 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.text_edit_singleline(&mut form.address);
 			ui.end_row();
 
-			ui.label("Amount (sats):");
+			ui.label(format!("Amount ({}):", unit_label));
 			ui.add_enabled(!form.send_all, egui::TextEdit::singleline(&mut form.amount_sats));
+			ui.end_row();
+
+			// Muted preview of the parsed sats amount
+			ui.label("");
+			if let Some(ref s) = preview_str {
+				ui.weak(s.as_str());
+			} else {
+				ui.label("");
+			}
 			ui.end_row();
 
 			ui.label("Send All:");
@@ -68,13 +81,30 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 
 		ui.add_space(10.0);
 
+		let send_all = app.state.forms.onchain_send.send_all;
+
 		ui.horizontal(|ui| {
 			let is_pending = app.state.tasks.onchain_send.is_some();
 			if is_pending {
 				ui.spinner();
 				ui.label("Sending...");
-			} else if ui.button("Send").clicked() {
-				app.send_onchain();
+			} else if send_all {
+				// Confirm gate for send-all: require a second checkbox before enabling
+				let id = ui.id().with("send_all_confirm");
+				let mut ok = ui.memory_mut(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
+				ui.checkbox(&mut ok, "I understand this sends my entire on-chain balance");
+				ui.memory_mut(|m| m.data.insert_temp(id, ok));
+				let btn = egui::Button::new(
+					egui::RichText::new("Send All").color(egui::Color32::WHITE),
+				)
+				.fill(egui::Color32::DARK_RED);
+				if ui.add_enabled(ok, btn).clicked() {
+					app.send_onchain();
+				}
+			} else {
+				if ui.button("Send").clicked() {
+					app.send_onchain();
+				}
 			}
 		});
 
@@ -129,6 +159,11 @@ fn render_history(ui: &mut Ui, app: &mut LspServerApp) {
 
 	// Show balances summary
 	if let Some(balances) = &app.state.balances {
+		// Pre-read into locals to avoid simultaneous borrows of app
+		let total = balances.total_onchain_balance_sats;
+		let spendable = balances.spendable_onchain_balance_sats;
+		let anchor = balances.total_anchor_channels_reserve_sats;
+
 		ui.group(|ui| {
 			ui.label("Wallet Summary");
 			ui.add_space(5.0);
@@ -136,22 +171,16 @@ fn render_history(ui: &mut Ui, app: &mut LspServerApp) {
 				ui,
 				|ui| {
 					ui.label("Total Balance:");
-					ui.label(format!("{} sats", format_sats(balances.total_onchain_balance_sats)));
+					ui.label(app.fmt_sats(total));
 					ui.end_row();
 
 					ui.label("Spendable:");
-					ui.label(format!(
-						"{} sats",
-						format_sats(balances.spendable_onchain_balance_sats)
-					));
+					ui.label(app.fmt_sats(spendable));
 					ui.end_row();
 
-					if balances.total_anchor_channels_reserve_sats > 0 {
+					if anchor > 0 {
 						ui.label("Anchor Reserve:");
-						ui.label(format!(
-							"{} sats",
-							format_sats(balances.total_anchor_channels_reserve_sats)
-						));
+						ui.label(app.fmt_sats(anchor));
 						ui.end_row();
 					}
 				},
@@ -162,81 +191,84 @@ fn render_history(ui: &mut Ui, app: &mut LspServerApp) {
 
 		// Show pending sweeps if any
 		if !balances.pending_balances_from_channel_closures.is_empty() {
+			// Pre-collect sweep data to avoid holding the balances borrow into render_pending_sweep
+			let sweeps: Vec<_> = balances
+				.pending_balances_from_channel_closures
+				.iter()
+				.filter_map(|s| s.balance_type.clone())
+				.collect();
+
 			ui.group(|ui| {
 				ui.label("Pending Sweeps");
 				ui.add_space(5.0);
-				for sweep in &balances.pending_balances_from_channel_closures {
-					if let Some(balance_type) = &sweep.balance_type {
-						render_pending_sweep(ui, balance_type);
-						ui.add_space(3.0);
-					}
+				for balance_type in &sweeps {
+					render_pending_sweep(ui, app, balance_type);
+					ui.add_space(3.0);
 				}
 			});
 			ui.add_space(10.0);
 		}
 	}
 
-	// Note about transaction history
-	ui.group(|ui| {
+	// Neutral informational callout — not an error, so use Frame::group not error_banner
+	egui::Frame::group(ui.style()).show(ui, |ui| {
 		ui.label(egui::RichText::new("Transaction History").strong());
 		ui.add_space(5.0);
-		ui.label("Full on-chain transaction history is not yet available.");
-		ui.label(
-			egui::RichText::new(
-				"ldk-node does not currently expose BDK wallet transaction history.",
-			)
-			.small()
-			.color(egui::Color32::GRAY),
+		ui.weak("Full on-chain transaction history is not yet available.");
+		ui.weak(
+			"ldk-node does not currently expose BDK wallet transaction history.",
 		);
-
-		if let Some(txid) = &app.state.last_txid {
-			ui.add_space(10.0);
-			ui.separator();
-			ui.horizontal(|ui| {
-				ui.label("Last Sent TXID:");
-				ui.monospace(truncate_id(txid, 8, 8));
-				if ui.small_button("Copy").clicked() {
-					ui.output_mut(|o| o.copied_text = txid.clone());
-				}
-			});
-		}
 	});
+
+	if let Some(txid) = &app.state.last_txid {
+		ui.add_space(10.0);
+		ui.separator();
+		ui.horizontal(|ui| {
+			ui.label("Last Sent TXID:");
+			ui.monospace(truncate_id(txid, 8, 8));
+			if ui.small_button("Copy").clicked() {
+				ui.output_mut(|o| o.copied_text = txid.clone());
+			}
+		});
+	}
 }
 
 fn render_pending_sweep(
 	ui: &mut Ui,
+	app: &mut LspServerApp,
 	balance_type: &sc_rest_client::ldk_server_grpc::types::pending_sweep_balance::BalanceType,
 ) {
 	use sc_rest_client::ldk_server_grpc::types::pending_sweep_balance::BalanceType;
 
 	match balance_type {
 		BalanceType::PendingBroadcast(b) => {
+			let amt = app.fmt_sats(b.amount_satoshis);
 			ui.horizontal(|ui| {
 				ui.colored_label(egui::Color32::YELLOW, "Pending Broadcast");
-				ui.label(format!("{} sats", format_sats(b.amount_satoshis)));
+				ui.label(format!("{} sats", amt));
 			});
 		},
 		BalanceType::BroadcastAwaitingConfirmation(b) => {
+			let amt = app.fmt_sats(b.amount_satoshis);
+			let txid = b.latest_spending_txid.clone();
 			ui.horizontal(|ui| {
 				ui.colored_label(egui::Color32::YELLOW, "Awaiting Confirmation");
-				ui.label(format!("{} sats", format_sats(b.amount_satoshis)));
+				ui.label(format!("{} sats", amt));
 			});
 			ui.horizontal(|ui| {
 				ui.label("TXID:");
-				ui.monospace(truncate_id(&b.latest_spending_txid, 8, 8));
+				ui.monospace(truncate_id(&txid, 8, 8));
 				if ui.small_button("Copy").clicked() {
-					ui.output_mut(|o| o.copied_text = b.latest_spending_txid.clone());
+					ui.output_mut(|o| o.copied_text = txid.clone());
 				}
 			});
 		},
 		BalanceType::AwaitingThresholdConfirmations(b) => {
+			let amt = app.fmt_sats(b.amount_satoshis);
+			let height = b.confirmation_height;
 			ui.horizontal(|ui| {
 				ui.colored_label(egui::Color32::GREEN, "Awaiting Threshold");
-				ui.label(format!(
-					"{} sats (height {})",
-					format_sats(b.amount_satoshis),
-					b.confirmation_height
-				));
+				ui.label(format!("{} sats (height {})", amt, height));
 			});
 		},
 	}
@@ -319,7 +351,7 @@ fn render_history_table(ui: &mut Ui, app: &mut LspServerApp) {
 
 							// Amount
 							if let Some(amount) = payment.amount_msat {
-								ui.label(format!("{} sats", format_sats(amount / 1000)));
+								ui.label(app.fmt_sats(amount / 1000));
 							} else {
 								ui.label("-");
 							}

@@ -1,8 +1,8 @@
 use eframe::egui;
-use egui::{RichText, ScrollArea};
+use egui::{Color32, RichText, ScrollArea};
 
 use crate::app::LspServerApp;
-use crate::ui::{format_sats, truncate_id};
+use crate::ui::widgets;
 
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 	ui.heading("Stable Channels");
@@ -30,19 +30,46 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 
 	ui.add_space(10.0);
 
-	// Stable channels table
-	match &app.state.stable_channels {
-		Some(resp) if !resp.channels.is_empty() => {
+	// Pre-extract row data so &app.state.stable_channels borrow is released
+	// before we call app.fmt_sats and widgets::id_with_copy below.
+	struct StableRow {
+		channel_id: String,
+		counterparty: String,
+		expected_usd: f64,
+		backing_sats: u64,
+		latest_price: f64,
+		is_stable_receiver: bool,
+		note: String,
+	}
+
+	let rows: Option<Vec<StableRow>> = app.state.stable_channels.as_ref().map(|resp| {
+		resp.channels
+			.iter()
+			.map(|ch| StableRow {
+				channel_id: ch.channel_id.clone(),
+				counterparty: ch.counterparty.clone(),
+				expected_usd: ch.expected_usd,
+				backing_sats: ch.expected_msats / 1000,
+				latest_price: ch.latest_price,
+				is_stable_receiver: ch.is_stable_receiver,
+				note: ch.note.clone(),
+			})
+			.collect()
+	});
+
+	match rows {
+		Some(ref rows) if !rows.is_empty() => {
 			ScrollArea::both().max_height(300.0).show(ui, |ui| {
-				egui::Grid::new("stable_channels_table").striped(true).min_col_width(60.0).show(
-					ui,
-					|ui| {
+				egui::Grid::new("stable_channels_table")
+					.striped(true)
+					.min_col_width(60.0)
+					.show(ui, |ui| {
 						// Headers
 						for h in [
 							"Channel ID",
 							"Counterparty",
 							"Stable $",
-							"Backing Sats",
+							"Backing",
 							"Price",
 							"Role",
 							"Note",
@@ -51,51 +78,48 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						}
 						ui.end_row();
 
-						// Rows
-						for ch in &resp.channels {
-							// Channel ID (truncated + copy)
-							ui.horizontal(|ui| {
-								ui.label(
-									RichText::new(truncate_id(&ch.channel_id, 8, 4)).monospace(),
-								);
-								if ui.small_button("Copy").clicked() {
-									ui.output_mut(|o| o.copied_text = ch.channel_id.clone());
-								}
-							});
-
-							// Counterparty (truncated)
-							ui.label(
-								RichText::new(truncate_id(&ch.counterparty, 8, 4)).monospace(),
+						for row in rows {
+							// Channel ID — monospace truncated + copy-to-clipboard
+							widgets::id_with_copy(
+								ui,
+								&row.channel_id,
+								&mut app.state.status_message,
 							);
 
-							// Expected USD - green highlight
+							// Counterparty — truncated + copy
+							widgets::id_with_copy(
+								ui,
+								&row.counterparty,
+								&mut app.state.status_message,
+							);
+
+							// Expected USD — green, always dollars (USD target)
 							ui.label(
-								RichText::new(format!("${:.2}", ch.expected_usd))
-									.color(egui::Color32::from_rgb(34, 139, 34))
+								RichText::new(format!("${:.2}", row.expected_usd))
+									.color(Color32::from_rgb(34, 139, 34))
 									.strong(),
 							);
 
-							// Backing sats
-							ui.label(format_sats(ch.expected_msats / 1000));
+							// Backing sats — unit-aware via app.fmt_sats
+							ui.label(app.fmt_sats(row.backing_sats));
 
-							// Latest price
-							ui.label(format!("${:.0}", ch.latest_price));
+							// Latest price — always dollars (it is a BTC/USD price)
+							ui.label(format!("${:.0}", row.latest_price));
 
-							// Role
-							let role = if ch.is_stable_receiver { "Receiver" } else { "Provider" };
-							ui.label(role);
+							// Role — status pill
+							let (role_text, role_color) = if row.is_stable_receiver {
+								("Receiver", Color32::from_rgb(0xF7, 0x93, 0x1A))
+							} else {
+								("Provider", Color32::from_rgb(0x5B, 0x9B, 0xD5))
+							};
+							widgets::status_pill(ui, role_text, role_color);
 
 							// Note
-							ui.label(if ch.note.is_empty() {
-								"---".to_string()
-							} else {
-								ch.note.clone()
-							});
+							ui.label(if row.note.is_empty() { "---" } else { &row.note });
 
 							ui.end_row();
 						}
-					},
-				);
+					});
 			});
 		},
 		Some(_) => {
@@ -106,37 +130,4 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		},
 	}
 
-	ui.add_space(15.0);
-	ui.separator();
-	ui.add_space(5.0);
-
-	// Edit form
-	ui.heading("Edit Stable Channel");
-	ui.add_space(5.0);
-
-	let form = &mut app.state.forms.edit_stable_channel;
-
-	ui.horizontal(|ui| {
-		ui.label("Channel ID:");
-		ui.text_edit_singleline(&mut form.channel_id);
-	});
-
-	ui.horizontal(|ui| {
-		ui.label("Target USD:");
-		ui.text_edit_singleline(&mut form.expected_usd);
-	});
-
-	ui.horizontal(|ui| {
-		ui.label("Note:");
-		ui.text_edit_singleline(&mut form.note);
-	});
-
-	ui.add_space(5.0);
-
-	let is_loading = app.state.tasks.edit_stable_channel.is_some();
-	ui.add_enabled_ui(!is_loading, |ui| {
-		if ui.button("Submit").clicked() {
-			app.edit_stable_channel();
-		}
-	});
 }

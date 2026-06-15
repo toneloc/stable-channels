@@ -4,15 +4,27 @@ use hex::DisplayHex;
 use web_sys::js_sys;
 
 use crate::app::LspServerApp;
-use crate::state::ConnectionStatus;
-use crate::ui::{format_msat, truncate_id};
+use crate::ui::truncate_id;
+use crate::ui::widgets;
+
+// Per-row snapshot extracted from state.payments so the state borrow is released
+// before app.fmt_msat / status_pill run in the grid body (see channels.rs).
+struct PaymentRow {
+	id: String,
+	hash: String,
+	type_label: String,
+	amount_msat: Option<u64>,
+	fee_paid_msat: Option<u64>,
+	direction: i32,
+	status: i32,
+	timestamp: u64,
+}
 
 pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.heading("Payments");
 	ui.add_space(10.0);
 
-	if !matches!(app.state.connection_status, ConnectionStatus::Connected) {
-		ui.label("Connect to a server to view payments.");
+	if app.render_disconnected_gate(ui) {
 		return;
 	}
 
@@ -23,9 +35,11 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 		} else {
 			if ui.button("Refresh").clicked() {
 				app.state.payments_page_token = None;
+				app.state.payments_appending = false;
 				app.fetch_payments();
 			}
 			if app.state.payments_page_token.is_some() && ui.button("Load More").clicked() {
+				app.state.payments_appending = true;
 				app.fetch_payments();
 			}
 		}
@@ -33,91 +47,176 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 
 	ui.add_space(10.0);
 
+	let loading = app.state.tasks.payments.is_some();
+
 	// Track which payment details button was clicked
 	let mut clicked_payment_id: Option<String> = None;
 
-	if let Some(payments_response) = &app.state.payments {
-		let payments = &payments_response.payments;
-		if payments.is_empty() {
-			ui.label("No payments found.");
+	// Pre-extract per-row data into locals so the &app.state.payments borrow is
+	// released before app.fmt_msat / status_pill below; never mutate the underlying list.
+	let rows: Option<(Vec<PaymentRow>, bool)> = app.state.payments.as_ref().map(|resp| {
+		let rows = resp
+			.payments
+			.iter()
+			.map(|p| PaymentRow {
+				id: p.id.clone(),
+				hash: p.kind.as_ref().map(payment_hash).unwrap_or_default(),
+				type_label: p
+					.kind
+					.as_ref()
+					.map(|k| format_payment_kind(k))
+					.unwrap_or_else(|| "Unknown".to_string()),
+				amount_msat: p.amount_msat,
+				fee_paid_msat: p.fee_paid_msat,
+				direction: p.direction,
+				status: p.status,
+				timestamp: p.latest_update_timestamp,
+			})
+			.collect();
+		(rows, resp.next_page_token.is_some())
+	});
+
+	if let Some((rows, more_available)) = rows {
+		if rows.is_empty() {
+			if !loading {
+				ui.label("No payments found.");
+			}
 		} else {
-			ui.label(format!("{} payment(s)", payments.len()));
+			let total = rows.len();
+
+			// Filter + sort controls live in egui temp memory (not persisted).
+			let filter_id = ui.id().with("pay_filter");
+			let status_id = ui.id().with("pay_status");
+			let dir_id = ui.id().with("pay_dir");
+			let sort_id = ui.id().with("pay_sort");
+
+			let mut filter =
+				ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
+			// status filter: -1 = all, else 0/1/2 like payment.status
+			let mut status_filter =
+				ui.memory_mut(|m| m.data.get_temp::<i32>(status_id).unwrap_or(-1));
+			// direction filter: -1 = all, else 0/1 like payment.direction
+			let mut dir_filter = ui.memory_mut(|m| m.data.get_temp::<i32>(dir_id).unwrap_or(-1));
+			// sort key: (column, descending) where 0 = Amount, 1 = Date
+			let mut sort =
+				ui.memory_mut(|m| m.data.get_temp::<(u8, bool)>(sort_id).unwrap_or((1, true)));
+
+			ui.horizontal(|ui| {
+				ui.label("Filter:");
+				ui.add(egui::TextEdit::singleline(&mut filter).hint_text("id or hash"));
+				egui::ComboBox::from_id_salt(status_id)
+					.selected_text(status_label(status_filter))
+					.show_ui(ui, |ui| {
+						ui.selectable_value(&mut status_filter, -1, "All statuses");
+						ui.selectable_value(&mut status_filter, 0, "Pending");
+						ui.selectable_value(&mut status_filter, 1, "Succeeded");
+						ui.selectable_value(&mut status_filter, 2, "Failed");
+					});
+				egui::ComboBox::from_id_salt(dir_id)
+					.selected_text(direction_label(dir_filter))
+					.show_ui(ui, |ui| {
+						ui.selectable_value(&mut dir_filter, -1, "All directions");
+						ui.selectable_value(&mut dir_filter, 0, "Inbound");
+						ui.selectable_value(&mut dir_filter, 1, "Outbound");
+					});
+			});
+
+			// Build the rendered view by filtering indices into the loaded rows.
+			let needle = filter.trim().to_lowercase();
+			let mut view: Vec<usize> = (0..rows.len())
+				.filter(|&i| {
+					let r = &rows[i];
+					let matches_text = needle.is_empty()
+						|| r.id.to_lowercase().contains(&needle)
+						|| r.hash.to_lowercase().contains(&needle);
+					let matches_status = status_filter < 0 || r.status == status_filter;
+					let matches_dir = dir_filter < 0 || r.direction == dir_filter;
+					matches_text && matches_status && matches_dir
+				})
+				.collect();
+
+			// Sort the view (purely a display ordering; underlying list untouched).
+			view.sort_by(|&a, &b| {
+				let (ra, rb) = (&rows[a], &rows[b]);
+				let ord = match sort.0 {
+					0 => ra.amount_msat.unwrap_or(0).cmp(&rb.amount_msat.unwrap_or(0)),
+					_ => ra.timestamp.cmp(&rb.timestamp),
+				};
+				if sort.1 {
+					ord.reverse()
+				} else {
+					ord
+				}
+			});
+
+			ui.label(format!("{}/{} payment(s)", view.len(), total));
 			ui.add_space(5.0);
 
 			ScrollArea::both().max_height(500.0).show(ui, |ui| {
 				egui::Grid::new("payments_grid").striped(true).min_col_width(80.0).show(ui, |ui| {
-					// Header
+					// Header (Amount/Date are clickable sort toggles)
 					ui.strong("Payment ID");
 					ui.strong("Type");
-					ui.strong("Amount");
+					if ui.button(sort_header("Amount", &sort, 0)).clicked() {
+						sort = (0, if sort.0 == 0 { !sort.1 } else { true });
+					}
 					ui.strong("Fee");
 					ui.strong("Direction");
 					ui.strong("Status");
-					ui.strong("Timestamp");
+					if ui.button(sort_header("Timestamp", &sort, 1)).clicked() {
+						sort = (1, if sort.0 == 1 { !sort.1 } else { true });
+					}
 					ui.strong(""); // Details column
 					ui.end_row();
 
-					for payment in payments {
+					for &i in &view {
+						let row = &rows[i];
+
 						// Payment ID
 						ui.horizontal(|ui| {
-							ui.monospace(truncate_id(&payment.id, 5, 4));
+							ui.monospace(truncate_id(&row.id, 5, 4));
 							if ui.small_button("Copy").clicked() {
-								ui.output_mut(|o| o.copied_text = payment.id.clone());
+								ui.output_mut(|o| o.copied_text = row.id.clone());
 							}
 						});
 
 						// Type
-						let payment_type = payment
-							.kind
-							.as_ref()
-							.map(|k| format_payment_kind(k))
-							.unwrap_or_else(|| "Unknown".to_string());
-						ui.label(payment_type);
+						ui.label(&row.type_label);
 
-						// Amount
-						if let Some(amount) = payment.amount_msat {
-							ui.label(format_msat(amount));
-						} else {
-							ui.label("-");
-						}
+						// Amount (unit-aware, right-aligned)
+						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+							match row.amount_msat {
+								Some(amount) => ui.monospace(app.fmt_msat(amount)),
+								None => ui.monospace("-"),
+							}
+						});
 
-						// Fee
-						if let Some(fee) = payment.fee_paid_msat {
-							ui.label(format_msat(fee));
-						} else {
-							ui.label("-");
-						}
+						// Fee (unit-aware, right-aligned)
+						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+							match row.fee_paid_msat {
+								Some(fee) => ui.monospace(app.fmt_msat(fee)),
+								None => ui.monospace("-"),
+							}
+						});
 
-						// Direction (0 = Inbound, 1 = Outbound)
-						let direction = match payment.direction {
-							0 => "Inbound",
-							1 => "Outbound",
-							_ => "Unknown",
-						};
-						ui.label(direction);
-
-						// Status (0 = Pending, 1 = Succeeded, 2 = Failed)
-						match payment.status {
-							0 => {
-								ui.colored_label(egui::Color32::YELLOW, "Pending");
-							},
-							1 => {
-								ui.colored_label(egui::Color32::GREEN, "Succeeded");
-							},
-							2 => {
-								ui.colored_label(egui::Color32::RED, "Failed");
-							},
-							_ => {
-								ui.label("Unknown");
-							},
+						// Direction badge (0 = Inbound, 1 = Outbound)
+						match row.direction {
+							0 => widgets::status_pill(ui, "⬇ In", egui::Color32::LIGHT_BLUE),
+							1 => widgets::status_pill(ui, "⬆ Out", egui::Color32::GOLD),
+							_ => widgets::status_pill(ui, "Unknown", egui::Color32::GRAY),
 						};
 
-						// Timestamp
-						ui.label(format_timestamp(payment.latest_update_timestamp));
+						// Status pill (0 = Pending, 1 = Succeeded, 2 = Failed)
+						let (status_text, status_color) = status_style(row.status);
+						widgets::status_pill(ui, status_text, status_color);
+
+						// Timestamp (relative text, exact epoch on hover)
+						ui.label(format_timestamp(row.timestamp))
+							.on_hover_text(format!("unix: {}", row.timestamp));
 
 						// Details button - track click without modifying app state yet
 						if ui.small_button("Details").clicked() {
-							clicked_payment_id = Some(payment.id.clone());
+							clicked_payment_id = Some(row.id.clone());
 						}
 
 						ui.end_row();
@@ -125,13 +224,23 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 				});
 			});
 
-			if payments_response.next_page_token.is_some() {
+			if more_available {
 				ui.add_space(5.0);
 				ui.label("More payments available. Click 'Load More' to fetch.");
 			}
+
+			// Persist the control state back into temp memory.
+			ui.memory_mut(|m| {
+				m.data.insert_temp(filter_id, filter);
+				m.data.insert_temp(status_id, status_filter);
+				m.data.insert_temp(dir_id, dir_filter);
+				m.data.insert_temp(sort_id, sort);
+			});
 		}
 	} else {
-		ui.label("No payment data available. Click Refresh to fetch.");
+		if !loading {
+			ui.label("No payment data available. Click Refresh to fetch.");
+		}
 	}
 
 	// Handle the Details button click outside the borrow
@@ -140,6 +249,57 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 		app.state.payment_details = None;
 		app.state.show_payment_details_dialog = true;
 		app.fetch_payment_details(payment_id);
+	}
+}
+
+// Color/text mapping for the status pill (same colors as the old colored_label).
+fn status_style(status: i32) -> (&'static str, egui::Color32) {
+	match status {
+		0 => ("Pending", egui::Color32::YELLOW),
+		1 => ("Succeeded", egui::Color32::GREEN),
+		2 => ("Failed", egui::Color32::RED),
+		_ => ("Unknown", egui::Color32::GRAY),
+	}
+}
+
+fn status_label(filter: i32) -> &'static str {
+	match filter {
+		0 => "Pending",
+		1 => "Succeeded",
+		2 => "Failed",
+		_ => "All statuses",
+	}
+}
+
+fn direction_label(filter: i32) -> &'static str {
+	match filter {
+		0 => "Inbound",
+		1 => "Outbound",
+		_ => "All directions",
+	}
+}
+
+// Header label with a sort-direction arrow when this column is the active sort key.
+fn sort_header(label: &str, sort: &(u8, bool), col: u8) -> String {
+	if sort.0 == col {
+		format!("{} {}", label, if sort.1 { "⬇" } else { "⬆" })
+	} else {
+		label.to_string()
+	}
+}
+
+// Best-effort payment hash string for substring filtering (empty if none).
+fn payment_hash(kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind) -> String {
+	use sc_rest_client::ldk_server_grpc::types::payment_kind::Kind;
+
+	match &kind.kind {
+		Some(Kind::Onchain(o)) => o.txid.clone(),
+		Some(Kind::Bolt11(b)) => b.hash.clone(),
+		Some(Kind::Bolt11Jit(j)) => j.hash.clone(),
+		Some(Kind::Bolt12Offer(o)) => o.hash.clone().unwrap_or_default(),
+		Some(Kind::Bolt12Refund(r)) => r.hash.clone().unwrap_or_default(),
+		Some(Kind::Spontaneous(s)) => s.hash.clone(),
+		None => String::new(),
 	}
 }
 
@@ -197,6 +357,33 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 		.resizable(true)
 		.default_width(500.0)
 		.show(ctx, |ui| {
+			// Pre-format unit-aware amounts so the &app.state.payment_details borrow
+			// below doesn't conflict with app.fmt_msat (which borrows &app.state).
+			let amount_str = app
+				.state
+				.payment_details
+				.as_ref()
+				.and_then(|r| r.payment.as_ref())
+				.and_then(|p| p.amount_msat)
+				.map(|a| app.fmt_msat(a))
+				.unwrap_or_else(|| "-".to_string());
+			let fee_str = app
+				.state
+				.payment_details
+				.as_ref()
+				.and_then(|r| r.payment.as_ref())
+				.and_then(|p| p.fee_paid_msat)
+				.map(|f| app.fmt_msat(f))
+				.unwrap_or_else(|| "-".to_string());
+			let lsp_fee_str = app
+				.state
+				.payment_details
+				.as_ref()
+				.and_then(|r| r.payment.as_ref())
+				.and_then(|p| p.kind.as_ref())
+				.and_then(jit_max_total_fee_msat)
+				.map(|m| app.fmt_msat(m));
+
 			if app.state.tasks.payment_details.is_some() {
 				ui.horizontal(|ui| {
 					ui.spinner();
@@ -229,22 +416,14 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 								ui.label(payment_type);
 								ui.end_row();
 
-								// Amount
+								// Amount (unit-aware, pre-formatted above)
 								ui.strong("Amount:");
-								if let Some(amount) = payment.amount_msat {
-									ui.label(format_msat(amount));
-								} else {
-									ui.label("-");
-								}
+								ui.label(&amount_str);
 								ui.end_row();
 
-								// Fee
+								// Fee (unit-aware, pre-formatted above)
 								ui.strong("Fee Paid:");
-								if let Some(fee) = payment.fee_paid_msat {
-									ui.label(format_msat(fee));
-								} else {
-									ui.label("-");
-								}
+								ui.label(&fee_str);
 								ui.end_row();
 
 								// Direction
@@ -257,24 +436,24 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 								ui.label(direction);
 								ui.end_row();
 
-								// Status
+								// Status pill (same colors as the table)
 								ui.strong("Status:");
-								match payment.status {
-									0 => ui.colored_label(egui::Color32::YELLOW, "Pending"),
-									1 => ui.colored_label(egui::Color32::GREEN, "Succeeded"),
-									2 => ui.colored_label(egui::Color32::RED, "Failed"),
-									_ => ui.label("Unknown"),
-								};
+								let (status_text, status_color) = status_style(payment.status);
+								widgets::status_pill(ui, status_text, status_color);
 								ui.end_row();
 
-								// Timestamp
+								// Timestamp (relative text, exact epoch on hover)
 								ui.strong("Last Updated:");
-								ui.label(format_timestamp(payment.latest_update_timestamp));
+								ui.label(format_timestamp(payment.latest_update_timestamp))
+									.on_hover_text(format!(
+										"unix: {}",
+										payment.latest_update_timestamp
+									));
 								ui.end_row();
 
 								// Kind-specific details
 								if let Some(kind) = &payment.kind {
-									render_payment_kind_details(ui, kind);
+									render_payment_kind_details(ui, kind, &lsp_fee_str);
 								}
 							});
 					});
@@ -296,8 +475,22 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 		});
 }
 
+// Extract the BOLT11-JIT LSP max-total opening fee (msat) for unit-aware formatting.
+fn jit_max_total_fee_msat(
+	kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind,
+) -> Option<u64> {
+	use sc_rest_client::ldk_server_grpc::types::payment_kind::Kind;
+	match &kind.kind {
+		Some(Kind::Bolt11Jit(jit)) => {
+			jit.lsp_fee_limits.as_ref().and_then(|f| f.max_total_opening_fee_msat)
+		},
+		_ => None,
+	}
+}
+
 fn render_payment_kind_details(
 	ui: &mut egui::Ui, kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind,
+	lsp_fee_str: &Option<String>,
 ) {
 	use sc_rest_client::ldk_server_grpc::types::payment_kind::Kind;
 
@@ -375,9 +568,9 @@ fn render_payment_kind_details(
 			}
 
 			if let Some(lsp_fee) = jit.lsp_fee_limits.as_ref() {
-				if let Some(max_total) = lsp_fee.max_total_opening_fee_msat {
+				if let Some(fee_str) = lsp_fee_str {
 					ui.strong("LSP Max Total Fee:");
-					ui.label(format_msat(max_total));
+					ui.label(fee_str);
 					ui.end_row();
 				}
 				if let Some(max_proportional) = lsp_fee.max_proportional_opening_fee_ppm_msat {

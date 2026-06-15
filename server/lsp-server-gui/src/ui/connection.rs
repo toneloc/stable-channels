@@ -9,16 +9,18 @@ use crate::state::ChainSourceForm;
 use crate::state::{AppState, ConnectionStatus, StatusMessage};
 
 pub fn render_status(ui: &mut Ui, state: &AppState) {
-	match &state.connection_status {
-		ConnectionStatus::Disconnected => {
-			ui.colored_label(egui::Color32::GRAY, "Disconnected");
-		},
-		ConnectionStatus::Connected => {
-			ui.colored_label(egui::Color32::GREEN, "Connected");
-		},
-		ConnectionStatus::Error(e) => {
-			ui.colored_label(egui::Color32::RED, format!("Error: {}", e));
-		},
+	let (color, text) = match &state.connection_status {
+		ConnectionStatus::Disconnected => (egui::Color32::GRAY, "Disconnected".to_string()),
+		ConnectionStatus::Connected => (egui::Color32::GREEN, "Connected".to_string()),
+		ConnectionStatus::Error(_) => (egui::Color32::RED, "Error".to_string()),
+	};
+	ui.colored_label(color, "●");
+	ui.label(&text);
+	if matches!(state.connection_status, ConnectionStatus::Connected) {
+		ui.weak(format!("· {}", state.server_url));
+	}
+	if let ConnectionStatus::Error(e) = &state.connection_status {
+		ui.label("·").on_hover_text(e.clone());
 	}
 }
 

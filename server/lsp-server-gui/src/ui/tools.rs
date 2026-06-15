@@ -1,14 +1,13 @@
 use eframe::egui;
 
 use crate::app::LspServerApp;
-use crate::state::ConnectionStatus;
+use crate::ui::widgets;
 
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 	ui.heading("Tools");
 	ui.add_space(10.0);
 
-	if !matches!(app.state.connection_status, ConnectionStatus::Connected) {
-		ui.label("Connect to a server to use tools.");
+	if app.render_disconnected_gate(ui) {
 		return;
 	}
 
@@ -49,14 +48,17 @@ fn render_sign_message(ui: &mut egui::Ui, app: &mut LspServerApp) {
 			ui.add_space(10.0);
 			ui.separator();
 			ui.label("Signature:");
+			// Pre-extract to avoid borrow conflict between TextEdit and copy button
+			let sig_clone = signature.clone();
 			ui.add(
-				egui::TextEdit::multiline(&mut signature.as_str())
+				egui::TextEdit::multiline(&mut sig_clone.as_str())
 					.desired_rows(2)
 					.desired_width(f32::INFINITY)
 					.interactive(false),
 			);
 			if ui.button("Copy Signature").clicked() {
-				ui.output_mut(|o| o.copied_text = signature.clone());
+				ui.output_mut(|o| o.copied_text = sig_clone.clone());
+				app.state.status_message = Some(crate::state::StatusMessage::success("Copied"));
 			}
 		}
 	});
@@ -84,7 +86,10 @@ fn render_export_pathfinding_scores(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		if let Some(result) = &app.state.export_scores_result {
 			ui.add_space(10.0);
 			ui.separator();
-			ui.label(format!("Scores data: {} bytes", result.scores.len()));
+			let n = result.scores.len();
+			ui.horizontal(|ui| {
+				widgets::status_pill(ui, &format!("Exported {} bytes", n), egui::Color32::GREEN);
+			});
 		}
 	});
 }
@@ -128,11 +133,13 @@ fn render_verify_signature(ui: &mut egui::Ui, app: &mut LspServerApp) {
 
 		if let Some(valid) = &app.state.verify_result {
 			ui.add_space(5.0);
-			if *valid {
-				ui.colored_label(egui::Color32::GREEN, "Signature is VALID");
-			} else {
-				ui.colored_label(egui::Color32::RED, "Signature is INVALID");
-			}
+			ui.horizontal(|ui| {
+				if *valid {
+					widgets::status_pill(ui, "VALID", egui::Color32::GREEN);
+				} else {
+					widgets::status_pill(ui, "INVALID", egui::Color32::RED);
+				}
+			});
 		}
 	});
 }
