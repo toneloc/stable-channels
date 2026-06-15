@@ -70,6 +70,8 @@ pub struct StableChannelManager {
     pub stable_channels: Vec<StableChannel>,
     db: Arc<Database>,
     data_dir: PathBuf,
+    /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
+    spend_debounce: std::collections::HashMap<u128, u8>,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -89,6 +91,7 @@ impl StableChannelManager {
             stable_channels: Vec::new(),
             db,
             data_dir,
+            spend_debounce: std::collections::HashMap::new(),
         }
     }
 
@@ -239,6 +242,9 @@ impl StableChannelManager {
                 format!("{}", sc.user_channel_id) != user_channel_id
             }
         });
+        if let Some(t) = target {
+            self.spend_debounce.remove(&t);
+        }
         if let Err(e) = self.db.mark_channel_closed(&user_channel_id) {
             tracing::error!(
                 "[stable] handle_channel_closed: db.mark_channel_closed failed for {}: {}",
@@ -512,6 +518,10 @@ impl StableChannelManager {
         let dollar_threshold = stable_channels::constants::STABILITY_THRESHOLD_USD;
         let cooldown = stable_channels::constants::STABILITY_PAYMENT_COOLDOWN_SECS as i64;
 
+        // (uid, new_expected_usd, counterparty_hex) for backstop SYNCs sent after the iter_mut borrow ends.
+        let mut backstop_syncs: Vec<(u128, f64, String)> = Vec::new();
+        const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
+
         for sc in self.stable_channels.iter_mut() {
             if sc.expected_usd.0 < 0.01 {
                 continue;
@@ -527,6 +537,46 @@ impl StableChannelManager {
             sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
             sc.latest_price = btc_price;
 
+            // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced since outbound_capacity excludes in-flight HTLCs.
+            let uid = sc.user_channel_id;
+            if their_sats < sc.backing_sats {
+                let count = {
+                    let cnt = self.spend_debounce.entry(uid).or_insert(0);
+                    *cnt = cnt.saturating_add(1);
+                    *cnt
+                };
+                if count >= BACKSTOP_DEBOUNCE_TICKS {
+                    self.spend_debounce.remove(&uid);
+                    if let Some(usd_deducted) =
+                        stable_channels::stable::reconcile_outgoing(sc, btc_price)
+                    {
+                        stable_channels::audit::audit_event(
+                            "BACKSTOP_STABLE_DEDUCTED",
+                            serde_json::json!({
+                                "user_channel_id": format!("{}", uid),
+                                "their_sats": their_sats,
+                                "usd_deducted": usd_deducted,
+                                "new_expected_usd": sc.expected_usd.0,
+                                "new_backing_sats": sc.backing_sats,
+                            }),
+                        );
+                        if let Err(e) = self.db.save_channel(
+                            &c.channel_id,
+                            &format!("{}", uid),
+                            sc.expected_usd.0,
+                            sc.backing_sats,
+                            sc.native_sats,
+                            sc.note.as_deref(),
+                        ) {
+                            tracing::error!("[stable] backstop save_channel failed: {}", e);
+                        }
+                        backstop_syncs.push((uid, sc.expected_usd.0, sc.counterparty.to_string()));
+                    }
+                }
+            } else {
+                self.spend_debounce.remove(&uid);
+            }
+
             let stable_usd_value = if sc.backing_sats > 0 {
                 (sc.backing_sats as f64 / 100_000_000.0) * btc_price
             } else {
@@ -539,6 +589,16 @@ impl StableChannelManager {
             if percent_from_par < percent_threshold
                 || dollars_from_par < dollar_threshold
             {
+                continue;
+            }
+            if sc.risk_level > stable_channels::constants::MAX_RISK_LEVEL {
+                stable_channels::audit::audit_event(
+                    "STABILITY_SKIP_HIGH_RISK",
+                    serde_json::json!({
+                        "user_channel_id": format!("{}", sc.user_channel_id),
+                        "risk_level": sc.risk_level,
+                    }),
+                );
                 continue;
             }
             if now - sc.last_stability_payment < cooldown {
@@ -641,6 +701,10 @@ impl StableChannelManager {
                     }),
                 );
             }
+        }
+
+        for (uid, expected_usd, counterparty) in backstop_syncs {
+            self.send_sync_message(ldk, uid, expected_usd, &counterparty).await;
         }
     }
 
@@ -1023,8 +1087,9 @@ impl StableChannelManager {
         let their_sats = chan.channel_value_sats.saturating_sub(our_sats);
         let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price).0;
         let new_expected = payload.expected_usd;
-        // Cannot stabilize more than the user holds. Residual drift self-heals via the tick.
-        if new_expected > receiver_usd {
+        // Epsilon absorbs f64 boundary rounding so a spend-driven push landing at ~receiver_usd is admitted; residual drift self-heals.
+        let ceiling = receiver_usd + stable_channels::constants::STABILITY_THRESHOLD_USD;
+        if new_expected > ceiling {
             stable_channels::audit::audit_event(
                 "TRADE_EXCEEDS_BALANCE",
                 serde_json::json!({ "requested_usd": new_expected, "receiver_usd": receiver_usd }),
@@ -1752,6 +1817,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_tick_skips_high_risk_channel() {
+        let mut mgr = make_manager();
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, 0, 50_000, 100_000.0);
+        mgr.stable_channels[0].risk_level = stable_channels::constants::MAX_RISK_LEVEL + 1;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // Price drops 20% -> would normally pay lsp_to_user; high risk must skip.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert!(
+            fake.sends.lock().unwrap().is_empty(),
+            "a channel above MAX_RISK_LEVEL must not trigger a stability send"
+        );
+    }
+
+    #[tokio::test]
+    async fn backstop_deducts_and_syncs_after_two_low_ticks() {
+        let mut mgr = make_manager();
+        // expected $10 -> backing 10_000; receiver 50_000 (native 40_000) at $100k.
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // Live balance dropped to 5_000 (< backing 10_000): a spend the forwarded event missed.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+        )]);
+
+        // Tick 1: debounce only.
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "tick 1 must not deduct");
+        assert!(fake.sends.lock().unwrap().is_empty(), "tick 1 must not SYNC");
+
+        // Tick 2: act.
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        let exp = mgr.stable_channels[0].expected_usd.0;
+        assert!((exp - 5.0).abs() < 0.01, "tick 2 must deduct ~$5 (10_000-5_000 sats), got {}", exp);
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1, "tick 2 must send exactly one SYNC");
+        assert_eq!(sends[0].custom_tlvs.len(), 1, "SYNC must carry exactly one stable TLV");
+        assert_eq!(
+            sends[0].custom_tlvs[0].type_num,
+            stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+            "SYNC TLV must be the stable-channel type",
+        );
+    }
+
+    #[tokio::test]
+    async fn backstop_single_tick_dip_does_not_deduct() {
+        let mut mgr = make_manager();
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // Tick 1: transient dip to 5_000 (in-flight outbound HTLC; outbound_capacity excludes it).
+        let dip = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+        )]);
+        mgr.run_tick(&dip as &dyn LdkServerCalls, &push, 100_000.0).await;
+        // Tick 2: balance restored to 50_000 (HTLC resolved without spending stable).
+        let restored = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.run_tick(&restored as &dyn LdkServerCalls, &push, 100_000.0).await;
+
+        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a transient dip must not deduct");
+        assert!(restored.sends.lock().unwrap().is_empty(), "no SYNC for a transient dip");
+    }
+
+    #[tokio::test]
+    async fn backstop_noop_when_balance_healthy() {
+        let mut mgr = make_manager();
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // Healthy: their 50_000 >= backing 10_000.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
+        assert!(fake.sends.lock().unwrap().is_empty(), "no backstop action when healthy");
+    }
+
+    #[tokio::test]
     async fn reconcile_hydrates_channel_with_decimal_user_channel_id() {
         let mut mgr = make_manager();
         // Persist a row whose user_channel_id is the realistic decimal form.
@@ -1929,6 +2084,27 @@ mod tests {
         mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 0.0).abs() < 1e-6); // unchanged
+    }
+
+    #[tokio::test]
+    async fn trade_admits_at_balance_boundary_within_epsilon() {
+        let mut mgr = make_manager();
+        // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+
+        // A wallet-push lands at receiver_usd plus a sub-epsilon overshoot (independent f64 paths).
+        let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD / 2.0;
+        let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
+        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert!(
+            (mgr.stable_channels[0].expected_usd.0 - target).abs() < 1e-6,
+            "a target within epsilon of the balance must be admitted, got {}",
+            mgr.stable_channels[0].expected_usd.0
+        );
     }
 
     #[tokio::test]
