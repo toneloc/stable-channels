@@ -52,6 +52,14 @@ class AppState(private val context: Context) : ViewModel() {
     private val _statusMessage = MutableStateFlow("")
     val statusMessage: StateFlow<String> = _statusMessage
 
+    // Track last payment result for SendScreen UI updates
+    private val _lastPaymentResult = MutableStateFlow<String?>(null)
+    val lastPaymentResult: StateFlow<String?> = _lastPaymentResult
+
+    fun clearLastPaymentResult() {
+        _lastPaymentResult.value = null
+    }
+
     private val _lightningBalanceSats: MutableStateFlow<Long>
     val lightningBalanceSats: StateFlow<Long> get() = _lightningBalanceSats
 
@@ -295,6 +303,7 @@ class AppState(private val context: Context) : ViewModel() {
                         }
                         val reason = event.reason?.toString() ?: "unknown"
                         _statusMessage.value = "Payment failed: $reason"
+                        _lastPaymentResult.value = "Payment failed: $reason"
                         AuditService.log("PAYMENT_FAILED", mapOf(
                             "payment_id" to (pid ?: ""),
                             "payment_hash" to (event.paymentHash ?: ""),
@@ -421,7 +430,9 @@ class AppState(private val context: Context) : ViewModel() {
                 }
             }
             saveChannelToDB()
-            _statusMessage.value = if (displayVal != null) "Payment sent: $displayVal" else "Payment confirmed"
+            val successMsg = if (displayVal != null) "Payment sent: $displayVal" else "Payment confirmed"
+            _statusMessage.value = successMsg
+            _lastPaymentResult.value = successMsg
         }
     }
 

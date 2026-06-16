@@ -68,6 +68,24 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
+    val lastPaymentResult by appState.lastPaymentResult.collectAsState()
+
+    // Watch for payment success or failure while result screen is showing
+    LaunchedEffect(lastPaymentResult, result) {
+        if (result != null && lastPaymentResult != null) {
+            when {
+                lastPaymentResult!!.startsWith("Payment failed") -> {
+                    result = null
+                    error = lastPaymentResult
+                    appState.clearLastPaymentResult()
+                }
+                lastPaymentResult!!.startsWith("Payment sent") || lastPaymentResult!!.startsWith("Payment confirmed") -> {
+                    result = lastPaymentResult
+                    appState.clearLastPaymentResult()
+                }
+            }
+        }
+    }
 
     val inputType = remember(input) {
         val lower = input.trim().lowercase()
@@ -275,14 +293,27 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
         if (result != null) {
             Spacer(Modifier.height(40.dp))
-            Icon(
-                imageVector = Icons.Filled.CheckCircle,
-                contentDescription = "Success",
-                tint = Color(0xFF10B981),
-                modifier = Modifier.size(64.dp)
-            )
+            val isSending = result!!.startsWith("Sending")
+            if (isSending) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(64.dp),
+                    color = Color(0xFFF59E0B),
+                    strokeWidth = 4.dp
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = "Success",
+                    tint = Color(0xFF10B981),
+                    modifier = Modifier.size(64.dp)
+                )
+            }
             Spacer(Modifier.height(16.dp))
-            Text("Sent!", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                text = if (isSending) "Sending..." else "Sent!",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold
+            )
             Spacer(Modifier.height(12.dp))
             Card(
                 colors = CardDefaults.cardColors(
@@ -494,7 +525,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             amountUSD = if (price > 0) (actualMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price else null,
                                             btcPrice = if (price > 0) price else null
                                         )
-                                        result = "Payment sent"
+                                        result = "Sending payment..."
                                     }
                                     InputType.BOLT12 -> {
                                         val sats = manualAmountSats
