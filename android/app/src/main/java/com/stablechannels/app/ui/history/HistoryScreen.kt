@@ -152,6 +152,8 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                         }
                     }
+                    // Bottom padding for nav bar
+                    item { Spacer(Modifier.height(80.dp)) }
                 }
             }
         }
