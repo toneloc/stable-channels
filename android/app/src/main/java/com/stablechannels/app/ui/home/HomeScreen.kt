@@ -77,6 +77,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
     var showBTC by remember { mutableStateOf(false) }
 
+    // Auto-dismiss receive sheet when payment arrives
+    val scrollState = rememberScrollState()
+    LaunchedEffect(isFlashing) {
+        if (isFlashing && showReceive) {
+            showReceive = false
+            scrollState.animateScrollTo(0)
+        }
+    }
+
     val context = LocalContext.current
     var notificationsEnabled by remember { mutableStateOf(true) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -134,7 +143,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -206,18 +215,22 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
                 Spacer(Modifier.height(4.dp))
                 if (showBTC) {
-                    Text(
+                    RollingDigitText(
                         text = totalSats.btcSpacedFormatted() + " BTC",
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        style = MaterialTheme.typography.headlineLarge.copy(
+                            fontSize = 32.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
                     )
                 } else {
                     if (btcPrice > 0) {
-                        Text(
+                        RollingDigitText(
                             text = totalUSD.usdFormatted(),
-                            fontSize = 36.sp,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.headlineLarge.copy(
+                                fontSize = 36.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         )
                     } else if (totalSats > 0) {
                         Text(
@@ -397,6 +410,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     message = statusMessage
                 )
             }
+            // Bottom padding for nav bar
+            Spacer(Modifier.height(80.dp))
         }
     }
 
