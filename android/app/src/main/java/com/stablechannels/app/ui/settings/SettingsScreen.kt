@@ -303,6 +303,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
     if (showCloseConfirm) {
         AlertDialog(
             onDismissRequest = { showCloseConfirm = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
             title = { Text("Close Channel?") },
             text = { Text("This will close your Lightning channel and return funds on-chain. Are you sure?") },
             confirmButton = {
@@ -330,6 +332,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 restoreMnemonic = ""
                 restoreError = null
             },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
             title = { Text("Restore from Seed") },
             text = {
                 Column {
@@ -400,6 +404,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         val words = appState.nodeService.savedMnemonic
         AlertDialog(
             onDismissRequest = { showClipboardWarning = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
             title = { Text("Copy Seed Phrase?") },
             text = { Text("Clipboard contents may be readable by other apps. Are you sure you want to copy your seed phrase?") },
             confirmButton = {
