@@ -162,6 +162,8 @@ fun ChannelView(appState: AppState) {
     if (showCloseConfirm) {
         AlertDialog(
             onDismissRequest = { showCloseConfirm = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
             title = { Text("Close Channel?") },
             text = { Text("This will cooperatively close the channel and sweep funds on-chain.") },
             confirmButton = {

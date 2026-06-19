@@ -5,6 +5,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -100,12 +102,45 @@ fun BackupView(appState: AppState) {
                     color = Color(0xFFD97706)
                 )
                 Spacer(Modifier.height(12.dp))
-                words.split(" ").forEachIndexed { index, word ->
-                    Text(
-                        "${index + 1}. $word",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                val wordList = words.split(" ")
+                val columns = 3
+                val rows = (wordList.size + columns - 1) / columns
+                for (row in 0 until rows) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (col in 0 until columns) {
+                            val index = row * columns + col
+                            if (index < wordList.size) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "${index + 1}.",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.width(24.dp)
+                                        )
+                                        Text(
+                                            wordList[index],
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+                                }
+                            } else {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    if (row < rows - 1) Spacer(Modifier.height(6.dp))
                 }
                 Spacer(Modifier.height(12.dp))
                 var copied by remember { mutableStateOf(false) }
@@ -210,22 +245,48 @@ fun BackupView(appState: AppState) {
                     restoreError = null
                 }
             },
-            title = { Text("Restore from Seed") },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            title = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Restore,
+                        contentDescription = "Restore",
+                        tint = Color(0xFFF59E0B),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Restore from Seed",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
             text = {
                 Column {
                     Text(
                         "Enter your 12 or 24-word seed phrase to restore a wallet.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(16.dp))
                     OutlinedTextField(
                         value = restoreMnemonic,
                         onValueChange = { restoreMnemonic = it },
                         label = { Text("word1 word2 word3 ...") },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 3,
-                        enabled = !isRestoring
+                        enabled = !isRestoring,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        shape = RoundedCornerShape(12.dp)
                     )
                     if (restoreError != null) {
                         Spacer(Modifier.height(8.dp))
