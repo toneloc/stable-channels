@@ -452,6 +452,7 @@ impl StableChannelManager {
     pub async fn handle_payment_received(
         &mut self,
         custom_records: Vec<CustomTlvRecord>,
+        payment_id: Option<String>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -478,7 +479,20 @@ impl StableChannelManager {
                 serde_json::json!({ "tlv": stable_channels::constants::STABLE_CHANNEL_TLV_TYPE }),
             );
             let raw = raw.to_string();
-            self.handle_trade_message(&raw, ldk, btc_price).await;
+            if crate::messages::parse_envelope(&raw).is_some() {
+                if let Some(pid) = payment_id.as_deref() {
+                    if let Err(e) = self.db.record_settlement(pid, "sync") {
+                        tracing::error!("[stable] record_settlement (inbound sync) failed: {}", e);
+                    }
+                }
+                self.handle_trade_message(&raw, ldk, btc_price).await;
+            } else {
+                if let Some(pid) = payment_id.as_deref() {
+                    if let Err(e) = self.db.record_settlement(pid, "stability") {
+                        tracing::error!("[stable] record_settlement (inbound stability) failed: {}", e);
+                    }
+                }
+            }
             return;
         }
         // No stable TLV: plain payment, balance catch-up handled by run_tick + reconcile_from_grpc.
@@ -628,6 +642,16 @@ impl StableChannelManager {
                     let note_for_db = sc.note.clone();
                     match ldk.spontaneous_send(send_req).await {
                         Ok(resp) => {
+                            if !resp.payment_id.is_empty() {
+                                if let Err(e) =
+                                    self.db.record_settlement(&resp.payment_id, "stability")
+                                {
+                                    tracing::error!(
+                                        "[stable] record_settlement (stability) failed: {}",
+                                        e
+                                    );
+                                }
+                            }
                             sc.last_stability_payment = now;
                             // Reset backing_sats to equilibrium so the next tick doesn't re-pay the same drift forever. Native is recomputed on the next balance refresh.
                             sc.backing_sats =
@@ -748,13 +772,23 @@ impl StableChannelManager {
             }],
         };
         match ldk.spontaneous_send(req).await {
-            Ok(_) => stable_channels::audit::audit_event(
-                "SYNC_MESSAGE_SENT",
-                serde_json::json!({
-                    "user_channel_id": format!("{}", user_channel_id),
-                    "expected_usd": expected_usd,
-                }),
-            ),
+            Ok(resp) => {
+                if !resp.payment_id.is_empty() {
+                    if let Err(e) = self.db.record_settlement(&resp.payment_id, "sync") {
+                        tracing::error!(
+                            "[stable] record_settlement (outbound sync) failed: {}",
+                            e
+                        );
+                    }
+                }
+                stable_channels::audit::audit_event(
+                    "SYNC_MESSAGE_SENT",
+                    serde_json::json!({
+                        "user_channel_id": format!("{}", user_channel_id),
+                        "expected_usd": expected_usd,
+                    }),
+                );
+            },
             Err(e) => stable_channels::audit::audit_event(
                 "SYNC_MESSAGE_FAILED",
                 serde_json::json!({
@@ -1475,9 +1509,13 @@ mod tests {
             type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
             value: env.into_bytes().into(),
         }];
-        mgr.handle_payment_received(records, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.handle_payment_received(records, Some("pay_test_1".to_string()), &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 8.0).abs() < 1e-6);
+        assert_eq!(
+            mgr.db.list_settlements().unwrap(),
+            vec![("pay_test_1".to_string(), "sync".to_string())]
+        );
     }
 
     #[tokio::test]
@@ -1486,9 +1524,33 @@ mod tests {
         let fake = FakeLdkServer::new(vec![]);
         seed_channel(&mut mgr, 1u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 5.0, 5_000, 45_000, 50_000, 100_000.0);
 
-        mgr.handle_payment_received(vec![], &fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.handle_payment_received(vec![], None, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6); // untouched
+        assert!(mgr.db.list_settlements().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn payment_received_marker_records_settlement() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+
+        let records = vec![CustomTlvRecord {
+            type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+            value: vec![1u8].into(),
+        }];
+        let before = mgr.stable_channels[0].expected_usd.0;
+        mgr.handle_payment_received(records, Some("pay_settlement_1".to_string()), &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        // the 1-byte marker is not an envelope, so it records stability and applies no trade
+        assert_eq!(
+            mgr.db.list_settlements().unwrap(),
+            vec![("pay_settlement_1".to_string(), "stability".to_string())]
+        );
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, before);
     }
 
     // Seed a stable channel: 100k value, 50k user side, $10 at $100k/BTC, giving backing 10k + native 40k.

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::collections::HashMap;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -17,7 +18,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceOutResponse, SpontaneousSendResponse, UpdateChannelConfigResponse,
 	VerifySignatureResponse,
 };
-use sc_rest_client::sc_protos::stable::{GetPriceResponse, ListStableChannelsResponse, LogResponse};
+use sc_rest_client::sc_protos::stable::{GetPriceResponse, ListSettlementPaymentsResponse, ListStableChannelsResponse, LogResponse};
 use sc_rest_client::ldk_server_grpc::types::PageToken;
 
 #[derive(Clone, PartialEq, Default)]
@@ -52,6 +53,24 @@ pub enum DisplayUnit {
 	Usd,
 	Btc,
 	Sats,
+}
+
+/// Stable-channel settlement classification recorded by the daemon, keyed by payment_id.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SettlementKind {
+	Stability,
+	Sync,
+}
+
+impl SettlementKind {
+	/// Parse the daemon's `kind` string; unknown strings are ignored.
+	pub fn parse(s: &str) -> Option<Self> {
+		match s {
+			"stability" => Some(Self::Stability),
+			"sync" => Some(Self::Sync),
+			_ => None,
+		}
+	}
 }
 
 #[derive(Default, Clone)]
@@ -319,6 +338,7 @@ pub struct AsyncTasks {
 	pub export_pathfinding_scores: Option<ChannelTaskHandle<ExportPathfindingScoresResponse>>,
 	pub get_price: Option<ChannelTaskHandle<GetPriceResponse>>,
 	pub list_stable_channels: Option<ChannelTaskHandle<ListStableChannelsResponse>>,
+	pub list_settlement_payments: Option<ChannelTaskHandle<ListSettlementPaymentsResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 }
 
@@ -356,6 +376,7 @@ impl Default for AsyncTasks {
 			export_pathfinding_scores: None,
 			get_price: None,
 			list_stable_channels: None,
+			list_settlement_payments: None,
 			ldk_log: None,
 		}
 	}
@@ -394,6 +415,7 @@ impl AsyncTasks {
 			|| self.export_pathfinding_scores.is_some()
 			|| self.get_price.is_some()
 			|| self.list_stable_channels.is_some()
+			|| self.list_settlement_payments.is_some()
 			|| self.ldk_log.is_some()
 	}
 }
@@ -430,6 +452,8 @@ pub struct AppState {
 	pub payment_details: Option<GetPaymentDetailsResponse>,
 	pub price: Option<GetPriceResponse>,
 	pub stable_channels: Option<ListStableChannelsResponse>,
+	// payment_id (hex) -> settlement classification, fetched alongside payments.
+	pub settlement_kinds: Option<HashMap<String, SettlementKind>>,
 	pub ldk_log: Option<LogResponse>,
 
 	// Operation results
@@ -520,6 +544,7 @@ impl Default for AppState {
 			payment_details: None,
 			price: None,
 			stable_channels: None,
+			settlement_kinds: None,
 			ldk_log: None,
 
 			onchain_address: None,

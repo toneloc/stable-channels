@@ -13,6 +13,7 @@ struct PaymentRow {
 	id: String,
 	hash: String,
 	type_label: String,
+	settlement_kind: Option<crate::state::SettlementKind>,
 	amount_msat: Option<u64>,
 	fee_paid_msat: Option<u64>,
 	direction: i32,
@@ -54,6 +55,7 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 
 	// Pre-extract per-row data into locals so the &app.state.payments borrow is
 	// released before app.fmt_msat / status_pill below; never mutate the underlying list.
+	let settlement_kinds = app.state.settlement_kinds.as_ref();
 	let rows: Option<(Vec<PaymentRow>, bool)> = app.state.payments.as_ref().map(|resp| {
 		let rows = resp
 			.payments
@@ -66,6 +68,7 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 					.as_ref()
 					.map(|k| format_payment_kind(k))
 					.unwrap_or_else(|| "Unknown".to_string()),
+				settlement_kind: settlement_kinds.and_then(|m| m.get(&p.id).copied()),
 				amount_msat: p.amount_msat,
 				fee_paid_msat: p.fee_paid_msat,
 				direction: p.direction,
@@ -180,8 +183,8 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 							}
 						});
 
-						// Type
-						ui.label(&row.type_label);
+						// Type — settlement keysends override the generic label
+						ui.label(payment_type_label_str(&row.type_label, row.settlement_kind));
 
 						// Amount (unit-aware, right-aligned)
 						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -314,6 +317,15 @@ fn format_payment_kind(kind: &sc_rest_client::ldk_server_grpc::types::PaymentKin
 		Some(Kind::Bolt12Refund(_)) => "BOLT12 Refund".to_string(),
 		Some(Kind::Spontaneous(_)) => "Spontaneous".to_string(),
 		None => "Unknown".to_string(),
+	}
+}
+
+/// Grid display wrapper: the kind label is precomputed into `type_label`; apply only the override.
+fn payment_type_label_str(type_label: &str, settlement: Option<crate::state::SettlementKind>) -> String {
+	match settlement {
+		Some(crate::state::SettlementKind::Stability) => "Stability".to_string(),
+		Some(crate::state::SettlementKind::Sync) => "Sync".to_string(),
+		None => type_label.to_string(),
 	}
 }
 
@@ -695,5 +707,22 @@ fn render_payment_kind_details(
 			}
 		},
 		None => {},
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::state::SettlementKind;
+
+	#[test]
+	fn settlement_overrides_label() {
+		assert_eq!(payment_type_label_str("Spontaneous", Some(SettlementKind::Stability)), "Stability");
+		assert_eq!(payment_type_label_str("Spontaneous", Some(SettlementKind::Sync)), "Sync");
+	}
+
+	#[test]
+	fn non_settlement_passes_through() {
+		assert_eq!(payment_type_label_str("Spontaneous", None), "Spontaneous");
 	}
 }

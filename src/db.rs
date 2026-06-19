@@ -218,6 +218,16 @@ impl Database {
             [],
         )?;
 
+        // Settlement payments - records stable-channel settlement keysends by payment_id + kind
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settlement_payments (
+                payment_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                recorded_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -861,6 +871,27 @@ impl Database {
 
         rows.collect()
     }
+
+    /// Record a settlement keysend by payment_id + kind ("stability"/"sync"). INSERT OR IGNORE so a duplicate id is a no-op.
+    pub fn record_settlement(&self, payment_id: &str, kind: &str) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO settlement_payments (payment_id, kind)
+             VALUES (?1, ?2)",
+            params![payment_id, kind],
+        )?;
+        Ok(())
+    }
+
+    /// List recorded settlements as (payment_id, kind) pairs, oldest first.
+    pub fn list_settlements(&self) -> SqliteResult<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id, kind FROM settlement_payments ORDER BY recorded_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
 }
 
 // =============================================================================
@@ -952,6 +983,18 @@ mod tests {
     fn test_open_in_memory() {
         let db = Database::open_in_memory().unwrap();
         assert!(db.conn.lock().is_ok());
+    }
+
+    #[test]
+    fn test_record_and_list_settlements() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_settlement("pay_a", "stability").unwrap();
+        db.record_settlement("pay_b", "sync").unwrap();
+        db.record_settlement("pay_a", "stability").unwrap(); // duplicate is a no-op
+        let list = db.list_settlements().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.contains(&("pay_a".to_string(), "stability".to_string())));
+        assert!(list.contains(&("pay_b".to_string(), "sync".to_string())));
     }
 
     #[test]

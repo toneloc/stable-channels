@@ -464,7 +464,11 @@ pub fn check_stability(
     }
 
     let amt = USD::to_msats(dollars_from_par, sc.latest_price);
-    match node.spontaneous_payment().send(amt, sc.counterparty, None) {
+    let marker = ldk_node::CustomTlvRecord {
+        type_num: crate::constants::STABLE_CHANNEL_TLV_TYPE,
+        value: vec![1u8],
+    };
+    match node.spontaneous_payment().send_with_custom_tlvs(amt, sc.counterparty, None, vec![marker]) {
         Ok(payment_id) => {
             sc.payment_made = true;
             sc.last_stability_payment = now;

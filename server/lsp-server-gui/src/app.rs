@@ -17,7 +17,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceInRequest, SpliceOutRequest, SpontaneousSendRequest, UpdateChannelConfigRequest,
 	VerifySignatureRequest,
 };
-use sc_rest_client::sc_protos::stable::{GetPriceRequest, ListStableChannelsRequest, LogRequest};
+use sc_rest_client::sc_protos::stable::{GetPriceRequest, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest};
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
 };
@@ -247,6 +247,7 @@ impl LspServerApp {
 					.map_err(|e| e.to_string())
 			}));
 		}
+		self.fetch_settlement_payments();
 	}
 
 	pub fn fetch_peers(&mut self) {
@@ -753,6 +754,21 @@ impl LspServerApp {
 		}
 	}
 
+	pub fn fetch_settlement_payments(&mut self) {
+		if self.state.tasks.list_settlement_payments.is_some() {
+			return;
+		}
+		if let Some(client) = &self.state.client {
+			let client = client.clone();
+			self.state.tasks.list_settlement_payments = Some(self.spawn_task(async move {
+				client
+					.list_settlement_payments(ListSettlementPaymentsRequest {})
+					.await
+					.map_err(|e| e.to_string())
+			}));
+		}
+	}
+
 	pub fn disconnect_peer(&mut self, node_pubkey: String) {
 		if self.state.tasks.disconnect_peer.is_some() {
 			return;
@@ -1149,6 +1165,17 @@ impl LspServerApp {
 
 		poll_task!(self.state.tasks.list_stable_channels => |v| {
 			self.state.stable_channels = Some(v);
+		});
+
+		poll_task!(self.state.tasks.list_settlement_payments => |v| {
+			self.state.settlement_kinds = Some(
+				v.settlements
+					.into_iter()
+					.filter_map(|p| {
+						crate::state::SettlementKind::parse(&p.kind).map(|k| (p.payment_id, k))
+					})
+					.collect(),
+			);
 		});
 
 		poll_task!(self.state.tasks.disconnect_peer => |_v| {
