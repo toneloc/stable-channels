@@ -69,6 +69,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val isSyncing by appState.isSyncing.collectAsState()
     val isFlashing by appState.paymentFlash.collectAsState()
+    val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var showReceive by remember { mutableStateOf(false) }
@@ -323,6 +324,26 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             // 1. Splice-in in progress
                             Spacer(Modifier.height(8.dp))
                             PendingRow("Swap pending...", appState.spliceTxid, context)
+                        } else if (isChannelClosing) {
+                            // 2. Channel closing
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    Icons.Default.Warning,
+                                    contentDescription = "Closing",
+                                    tint = Color(0xFFF59E0B),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "Channel closing — funds will arrive on-chain",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             Spacer(Modifier.height(8.dp))

@@ -103,7 +103,11 @@ class AppState(private val context: Context) : ViewModel() {
     private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
     var pendingSplice: PendingSplice? = null
-    var isChannelClosing = false
+    private val _isChannelClosing = MutableStateFlow(false)
+    val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
+    var isChannelClosing: Boolean
+        get() = _isChannelClosing.value
+        set(value) { _isChannelClosing.value = value }
     var pendingClosePaymentId: String? = null
     var spliceTxid: String? = null
     var fundingTxid: String? = null
