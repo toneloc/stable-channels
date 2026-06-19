@@ -69,7 +69,9 @@ async fn dispatch(
             }
         },
         Some(EventVariant::PaymentReceived(e)) => {
-            mgr.handle_payment_received(e.custom_records, ldk, btc_price).await;
+            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            mgr.handle_payment_received(e.custom_records, payment_id, ldk, btc_price)
+                .await;
         },
         Some(EventVariant::PaymentForwarded(e)) => {
             if let Some(fp) = e.forwarded_payment {
