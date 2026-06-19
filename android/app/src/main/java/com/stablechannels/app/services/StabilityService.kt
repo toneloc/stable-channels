@@ -84,11 +84,12 @@ object StabilityService {
             return StabilityCheckResult(StabilityAction.STABLE, 0.0, 0.0, targetUSD, 0.0)
         }
 
-        val stableUSDValue = if (sc.backingSats > 0) {
-            (sc.backingSats.toDouble() / Constants.SATS_IN_BTC) * price
-        } else {
-            sc.stableReceiverUSD.amount
+        // No backing means no stable position — nothing to drift
+        if (sc.backingSats == 0L) {
+            return StabilityCheckResult(StabilityAction.STABLE, 0.0, 0.0, targetUSD, 0.0)
         }
+
+        val stableUSDValue = (sc.backingSats.toDouble() / Constants.SATS_IN_BTC) * price
 
         val dollarsFromPar = stableUSDValue - targetUSD
         val percentFromPar = if (targetUSD > 0) abs(dollarsFromPar / targetUSD) * 100.0 else 0.0
