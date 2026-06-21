@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
+import com.stablechannels.app.services.KeystoreEncryptionService
 import com.stablechannels.app.util.Constants
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -72,9 +73,12 @@ class StabilityProcessingService : Service() {
 
         val dataDir = Constants.userDataDir(this)
         val keySeedFile = File(dataDir, "keys_seed")
-        val seedPhraseFile = File(dataDir, "seed_phrase")
-        if (!keySeedFile.exists() && !seedPhraseFile.exists()) {
-            Log.w(TAG, "No seed file (checked keys_seed and seed_phrase), skipping")
+
+        // Read seed: tries seed_encrypted (Keystore AES-GCM) first, then
+        // legacy seed_phrase plaintext. Returns null only for keys_seed-only wallets.
+        val seedWords = KeystoreEncryptionService.readSeed(this)
+        if (seedWords == null && !keySeedFile.exists()) {
+            Log.w(TAG, "No seed found (checked seed_encrypted, seed_phrase, keys_seed), skipping")
             return
         }
 
@@ -110,11 +114,10 @@ class StabilityProcessingService : Service() {
         val builder = Builder.fromConfig(config)
         builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
 
-        // Derive node entropy (entropy is now passed to build()): prefer the seed_phrase
-        // mnemonic if present, otherwise fall back to the existing keys_seed file.
-        val seedWords = if (seedPhraseFile.exists()) seedPhraseFile.readText().trim() else ""
-        val nodeEntropy = if (seedWords.isNotEmpty()) {
-            Log.d(TAG, "Using seed_phrase mnemonic")
+        // Derive node entropy: prefer mnemonic (encrypted or plaintext legacy),
+        // fall back to raw keys_seed file for pre-mnemonic wallets.
+        val nodeEntropy = if (!seedWords.isNullOrEmpty()) {
+            Log.d(TAG, "Using mnemonic for node entropy")
             NodeEntropy.fromBip39Mnemonic(seedWords, null)
         } else {
             NodeEntropy.fromSeedPath(keySeedFile.absolutePath)
