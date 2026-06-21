@@ -126,12 +126,12 @@ enum StabilityService {
     static func checkStabilityAction(_ sc: StableChannel, price: Double) -> StabilityCheckResult {
         let targetUSD = sc.expectedUSD.amount
 
-        let stableUSDValue: Double
-        if sc.backingSats > 0 {
-            stableUSDValue = Double(sc.backingSats) / 100_000_000.0 * price
-        } else {
-            stableUSDValue = sc.stableReceiverUSD.amount
+        // No backing means no stable position — nothing to drift.
+        guard sc.backingSats > 0 else {
+            return StabilityCheckResult(action: .stable, percentFromPar: 0.0, stableUSDValue: 0.0, targetUSD: targetUSD, dollarsFromPar: 0.0)
         }
+
+        let stableUSDValue = Double(sc.backingSats) / 100_000_000.0 * price
 
         let dollarsFromPar = stableUSDValue - targetUSD
         let percentFromPar = targetUSD > 0.0 ? abs(dollarsFromPar / targetUSD) * 100.0 : 0.0
