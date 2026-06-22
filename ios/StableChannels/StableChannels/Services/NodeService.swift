@@ -3,6 +3,8 @@ import LDKNode
 
 @Observable
 class NodeService {
+    static let shared = NodeService()
+
     private(set) var node: Node?
     private(set) var isRunning = false
     private(set) var nodeId: String = ""
