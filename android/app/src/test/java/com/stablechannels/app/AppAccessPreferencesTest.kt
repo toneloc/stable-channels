@@ -87,8 +87,15 @@ class AppAccessPreferencesTest {
     // ---------------------------------------------------------------------------
 
     @Test
-    fun `seed phrase viewing always requires auth`() {
-        assertTrue(AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase())
+    fun `seed phrase viewing requires auth if security settings enabled`() {
+        assertTrue(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = true, paymentConfirmationEnabled = false))
+        assertTrue(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = false, paymentConfirmationEnabled = true))
+        assertTrue(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = true, paymentConfirmationEnabled = true))
+        assertFalse(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = false, paymentConfirmationEnabled = false))
+    }
+
+    private fun shouldRequireAuthForSeedPhrasePure(appUnlockEnabled: Boolean, paymentConfirmationEnabled: Boolean): Boolean {
+        return appUnlockEnabled || paymentConfirmationEnabled
     }
 
     // ---------------------------------------------------------------------------
