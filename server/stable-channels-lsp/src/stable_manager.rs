@@ -1112,6 +1112,22 @@ impl StableChannelManager {
             serde_json::json!({ "channel_id": chan.channel_id }),
         );
 
+        // Replay protection: reject a signed trade with a stale `ts`; ts==0 means an un-upgraded wallet (no timestamp yet) — accepted until all wallets sign one.
+        const TRADE_SIG_WINDOW_SECS: u64 = 300;
+        if payload.ts != 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now.abs_diff(payload.ts) > TRADE_SIG_WINDOW_SECS {
+                stable_channels::audit::audit_event(
+                    "TRADE_STALE",
+                    serde_json::json!({ "ts": payload.ts, "now": now, "channel_id": chan.channel_id }),
+                );
+                return;
+            }
+        }
+
         let Some(target_uid) = parse_user_channel_id(&chan.user_channel_id) else {
             stable_channels::audit::audit_event("TRADE_CHANNEL_UID_UNPARSEABLE", serde_json::json!({}));
             return;
@@ -2106,6 +2122,30 @@ mod tests {
         serde_json::json!({ "payload": payload, "signature": "wallet-sig" }).to_string()
     }
 
+    fn trade_envelope_with_ts(
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        ts: u64,
+    ) -> String {
+        let payload = serde_json::json!({
+            "type": "TRADE_V1",
+            "channel_id": channel_id,
+            "user_channel_id": user_channel_id,
+            "expected_usd": expected_usd,
+            "ts": ts,
+        })
+        .to_string();
+        serde_json::json!({ "payload": payload, "signature": "wallet-sig" }).to_string()
+    }
+
+    fn test_unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
     #[tokio::test]
     async fn trade_applies_valid_target() {
         let mut mgr = make_manager();
@@ -2179,6 +2219,41 @@ mod tests {
         mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6); // unchanged
+    }
+
+    #[tokio::test]
+    async fn trade_rejects_stale_ts() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+
+        // A captured signed trade replayed a day later must be rejected (replay protection).
+        let stale = test_unix_now() - 86_400;
+        let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, stale);
+        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert!(
+            (mgr.stable_channels[0].expected_usd.0 - 0.0).abs() < 1e-6,
+            "a stale signed trade must be rejected, got {}",
+            mgr.stable_channels[0].expected_usd.0
+        );
+    }
+
+    #[tokio::test]
+    async fn trade_accepts_fresh_ts() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+
+        // A trade signed just now is within the window and applies normally.
+        let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, test_unix_now());
+        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a fresh signed trade must apply");
     }
 
     #[tokio::test]
