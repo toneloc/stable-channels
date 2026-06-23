@@ -60,7 +60,7 @@ class AppState {
 
     // MARK: - Services
 
-    let nodeService = NodeService()
+    let nodeService = NodeService.shared
     let priceService = PriceService()
     let feeRateService = FeeRateService()
     var databaseService: DatabaseService?
