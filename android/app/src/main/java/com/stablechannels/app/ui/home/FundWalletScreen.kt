@@ -2,6 +2,7 @@ package com.stablechannels.app.ui.home
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -97,7 +98,12 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        clipboardManager.setText(AnnotatedString(addr))
+                        isCopied = true
+                    }
             ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
@@ -129,9 +135,13 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
             }
             Spacer(Modifier.height(12.dp))
             Text(
-                text = if (isCopied) "Address Copied!" else "Tap copy icon to copy address",
+                text = if (isCopied) "Address Copied!" else "Tap here to copy address",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.clickable {
+                    clipboardManager.setText(AnnotatedString(addr))
+                    isCopied = true
+                }
             )
         } else {
             Box(Modifier.height(300.dp), contentAlignment = Alignment.Center) {
