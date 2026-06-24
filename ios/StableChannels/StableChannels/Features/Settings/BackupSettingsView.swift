@@ -310,213 +310,23 @@ struct BackupSettingsView: View {
         }
     }
 
-    private var icloudSection: some View {
-        Section {
-            if backupService.backupExists {
-                icloudBackupEnabledSection
-            } else {
-                icloudBackupDisabledSection
-            }
-        } header: {
-            Text(String(localized: "section_icloud_backup", defaultValue: "iCloud"))
-        }
-    }
-
     private var supportBannerSection: some View {
         Section {
-            HStack(spacing: 14) {
-                supportIconBadge
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(localized: "recovery_banner_title", defaultValue: "Need Help?"))
-                        .font(.subheadline)
-                        .fontWeight(.bold)
-                        .foregroundStyle(.primary)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(String(
-                            localized: "recovery_banner_text_prefix",
-                            defaultValue: "Please email"
-                        ))
-                            + Text(" ")
-                            + Text("support@stablechannels.com")
-                            .foregroundStyle(.blue)
-                            .underline()
-                            + Text(" ")
-                            + Text(String(
-                                localized: "recovery_banner_text_suffix",
-                                defaultValue: "for wallet recovery assistance."
-                            ))
-                    }
-                    .font(.caption)
-                    .foregroundStyle(Color(uiColor: .label).opacity(0.7))
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(.orange, lineWidth: 1)
-                    )
-            )
+            BackupSettingsSupportBanner()
         }
     }
 
-    private var supportIconBadge: some View {
-        ZStack {
-            Circle()
-                .fill(.orange)
-                .frame(width: 44, height: 44)
-                .shadow(color: .orange.opacity(0.3), radius: 8, x: 0, y: 4)
-            Image(systemName: "questionmark.circle.fill")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-    }
-
-    private var icloudBackupEnabledSection: some View {
-        Group {
-            HStack {
-                Label(
-                    String(localized: "icloud_backup", defaultValue: "iCloud Backup"),
-                    systemImage: "icloud.fill"
-                )
-                .foregroundStyle(.blue)
-                Spacer()
-                Text(String(localized: "enabled", defaultValue: "Enabled"))
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            }
-
-            if let lastBackup = backupService.lastBackupDate {
-                HStack {
-                    Text(String(localized: "last_backup", defaultValue: "Last backup"))
-                    Spacer()
-                    Text(lastBackup, style: .relative)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Button {
-                Task { await backupNow() }
-            } label: {
-                HStack {
-                    Image(systemName: showBackupSuccess ? "checkmark.circle.fill" : "arrow.clockwise")
-                        .foregroundStyle(showBackupSuccess ? .green : .blue)
-                    Text(showBackupSuccess
-                        ? "Backup complete"
-                        : String(localized: "backup_now", defaultValue: "Backup Now"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-
-            if let error = backupError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            Button {
-                showingExportSheet = true
-            } label: {
-                HStack {
-                    Image(systemName: "square.and.arrow.up.on.square")
-                        .foregroundStyle(.green)
-                    Text(String(localized: "export_to_files", defaultValue: "Export to Files"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-
-            Button(role: .destructive) {
-                showingDeleteConfirmation = true
-            } label: {
-                HStack {
-                    Image(systemName: "trash.fill")
-                        .foregroundStyle(.red)
-                    Text(String(localized: "delete_backup", defaultValue: "Delete Backup"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Button {
-                showingRestoreSheet = true
-            } label: {
-                HStack {
-                    Image(systemName: "icloud.and.arrow.down.fill")
-                        .foregroundStyle(.blue)
-                    Text(String(localized: "restore_backup", defaultValue: "Restore Backup"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-        }
-    }
-
-    private var icloudBackupDisabledSection: some View {
-        Group {
-            Button {
-                showingBackupPrompt = true
-            } label: {
-                HStack {
-                    Image(systemName: "icloud.and.arrow.up.fill")
-                        .foregroundStyle(.blue)
-                    Text(String(localized: "button_enable_icloud_backup", defaultValue: "Backup to iCloud"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-
-            Button {
-                showingRestoreSheet = true
-            } label: {
-                HStack {
-                    Image(systemName: "icloud.and.arrow.down.fill")
-                        .foregroundStyle(.blue)
-                    Text(String(localized: "button_restore_icloud", defaultValue: "Restore from iCloud"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-
-            Button {
-                showingImportSheet = true
-            } label: {
-                HStack {
-                    Image(systemName: "square.and.arrow.down.on.square")
-                        .foregroundStyle(.green)
-                    Text(String(localized: "button_import_backup", defaultValue: "Import from File"))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .foregroundStyle(.primary)
-        }
+    private var icloudSection: some View {
+        BackupSettingsICloudSection(
+            backupService: backupService,
+            showingBackupPrompt: $showingBackupPrompt,
+            showingExportSheet: $showingExportSheet,
+            showingImportSheet: $showingImportSheet,
+            showingDeleteConfirmation: $showingDeleteConfirmation,
+            showingRestoreSheet: $showingRestoreSheet,
+            showBackupSuccess: $showBackupSuccess,
+            backupError: $backupError,
+            onBackupNow: { await backupNow() }
+        )
     }
 }

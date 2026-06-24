@@ -15,6 +15,7 @@
 		1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95055FDBC76859CB74803660 /* HomeView.swift */; };
 		1A972F89DB503A5171D1525C /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFF3730F0DCCB9662892DE /* KeychainService.swift */; };
 		1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */; };
+		1D8B3096714E8844A43983C3 /* BackupSettingsSupportBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6CCC9964D2DE178082DA884 /* BackupSettingsSupportBanner.swift */; };
 		2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD425F9D6479B95B2258FCAE /* Extensions.swift */; };
 		2C4A664F5F0343319A539889 /* BackupModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */; };
 		2FA17E14D9F4E24E05FF09E3 /* CryptoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB7BB840EC5C451056C5C21D /* CryptoService.swift */; };
@@ -56,6 +57,7 @@
 		49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */; };
 		49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */; };
 		49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */; };
+		4BF29DF506BBCCD9FC1ECE0B /* BackupSettingsICloudSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F00B7A06F34D2BF8A066A6 /* BackupSettingsICloudSection.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
@@ -187,6 +189,7 @@
 		95055FDBC76859CB74803660 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		955C6E8D6DB076A3B20A6F46 /* SellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SellView.swift; sourceTree = "<group>"; };
 		A2BA7D52F62DF17EFF532635 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A6CCC9964D2DE178082DA884 /* BackupSettingsSupportBanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = BackupSettingsSupportBanner.swift; path = StableChannels/Features/Settings/BackupSettingsSupportBanner.swift; sourceTree = "<group>"; };
 		AAE0551124703F8BAA9C44C0 /* StableChannels.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StableChannels.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupModels.swift; sourceTree = "<group>"; };
 		AD425F9D6479B95B2258FCAE /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
@@ -201,6 +204,7 @@
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
 		DF383D962C3260EA8D14692A /* StabilityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityService.swift; sourceTree = "<group>"; };
 		E2CB01DD108B12E75FFEAB11 /* BuyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuyView.swift; sourceTree = "<group>"; };
+		E3F00B7A06F34D2BF8A066A6 /* BackupSettingsICloudSection.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = BackupSettingsICloudSection.swift; path = StableChannels/Features/Settings/BackupSettingsICloudSection.swift; sourceTree = "<group>"; };
 		E6EF4DE5A43647E46CAAD52B /* TradeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeService.swift; sourceTree = "<group>"; };
 		E9358B0D20BFCDFAF7128834 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarView.swift; sourceTree = "<group>"; };
@@ -258,6 +262,8 @@
 				674DEDB749CCE3FA348043D1 /* StableChannels */,
 				F11CF0F21D3319E86AF791B6 /* StableChannelsTests */,
 				052E4A6FC61BFB06E0A2A974 /* Products */,
+				A6CCC9964D2DE178082DA884 /* BackupSettingsSupportBanner.swift */,
+				E3F00B7A06F34D2BF8A066A6 /* BackupSettingsICloudSection.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -652,6 +658,8 @@
 				C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */,
 				9EBF713364DF88022CB4F1D0 /* RestoreSeedSheet.swift in Sources */,
 				10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */,
+				1D8B3096714E8844A43983C3 /* BackupSettingsSupportBanner.swift in Sources */,
+				4BF29DF506BBCCD9FC1ECE0B /* BackupSettingsICloudSection.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
