@@ -112,22 +112,6 @@ impl LspRestClient {
 		Ok(Self { base_url, client, api_key, use_relative_urls: true })
 	}
 
-	/// Constructs a [`LspRestClient`] without requiring a TLS certificate.
-	///
-	/// This is useful for WASM targets where the browser handles TLS, or for
-	/// development environments where certificate verification is handled differently.
-	pub fn new_without_cert(base_url: String, api_key: String) -> Result<Self, String> {
-		let client =
-			Client::builder().build().map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-
-		#[cfg(target_arch = "wasm32")]
-		let use_relative_urls = true;
-		#[cfg(not(target_arch = "wasm32"))]
-		let use_relative_urls = false;
-
-		Ok(Self { base_url, client, api_key, use_relative_urls })
-	}
-
 	/// Builds the full URL for an API endpoint.
 	fn build_url(&self, path: &str) -> String {
 		if self.use_relative_urls {
