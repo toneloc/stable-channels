@@ -19,6 +19,9 @@ final class CloudBackupService {
 
     init(nodeService: NodeService) {
         self.nodeService = nodeService
+    }
+
+    func initialize() {
         Task { await checkAccountStatus() }
     }
 

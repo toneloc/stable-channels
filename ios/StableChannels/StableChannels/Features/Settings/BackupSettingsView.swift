@@ -23,6 +23,8 @@ struct BackupSettingsView: View {
     @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.maxWordCount)
     @State private var isWordFieldsReadOnly = false
     @State private var isImportingSeed = false
+    @State private var clipboardClearTask: Task<Void, Never>?
+    @State private var clipboardFadeTask: Task<Void, Never>?
 
     // MARK: - Computed Properties
 
@@ -58,19 +60,26 @@ struct BackupSettingsView: View {
 
     private func copySeedToClipboard() {
         guard let words = appState.nodeService.savedMnemonic else { return }
+        clipboardClearTask?.cancel()
+        clipboardFadeTask?.cancel()
         UIPasteboard.general.string = words
         withAnimation { copiedSeed = true }
 
-        Task {
+        clipboardClearTask = Task {
             try? await Task.sleep(for: .seconds(SeedConstants.clipboardClearSeconds))
             if UIPasteboard.general.string == words {
                 UIPasteboard.general.string = ""
             }
         }
-        Task {
+        clipboardFadeTask = Task {
             try? await Task.sleep(for: .seconds(2))
             withAnimation { self.copiedSeed = false }
         }
+    }
+
+    private func cancelClipboardTasks() {
+        clipboardClearTask?.cancel()
+        clipboardFadeTask?.cancel()
     }
 
     private func backupNow() async {
@@ -106,6 +115,7 @@ struct BackupSettingsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle(String(localized: "title_backup", defaultValue: "Backup"))
         .navigationBarTitleDisplayMode(.inline)
+        .onDisappear { cancelClipboardTasks() }
         .sheet(isPresented: $showRestore) {
             RestoreSeedSheet(
                 restoreMnemonic: $restoreMnemonic,
@@ -115,7 +125,6 @@ struct BackupSettingsView: View {
                 isRestoring: $isRestoring,
                 restoreError: $restoreError,
                 wordCount: detectedWordCount,
-                restoreValid: restoreValid,
                 onCancel: { cancelRestore() }
             )
         }
