@@ -11,8 +11,12 @@ struct RestoreSeedSheet: View {
     @Binding var isRestoring: Bool
     @Binding var restoreError: String?
     let wordCount: Int
-    let restoreValid: Bool
     let onCancel: () -> Void
+
+    private var restoreValid: Bool {
+        let filledCount = wordFields.filter { !$0.isEmpty }.count
+        return filledCount == SeedConstants.wordCount12 || filledCount == SeedConstants.wordCount24
+    }
 
     var body: some View {
         NavigationStack {
@@ -157,19 +161,15 @@ struct RestoreSeedSheet: View {
                 esploraURL: appState.chainURL,
                 mnemonic: input
             )
-            await MainActor.run {
-                restoreMnemonic = ""
-                wordFields = Array(repeating: "", count: SeedConstants.maxWordCount)
-                isWordFieldsReadOnly = false
-                appState.refreshBalances()
-                isRestoring = false
-                dismiss()
-            }
+            restoreMnemonic = ""
+            wordFields = Array(repeating: "", count: SeedConstants.maxWordCount)
+            isWordFieldsReadOnly = false
+            appState.refreshBalances()
+            isRestoring = false
+            dismiss()
         } catch {
-            await MainActor.run {
-                restoreError = String(localized: "error_restore_failed") + error.localizedDescription
-                isRestoring = false
-            }
+            restoreError = String(localized: "error_restore_failed") + error.localizedDescription
+            isRestoring = false
         }
     }
 }
