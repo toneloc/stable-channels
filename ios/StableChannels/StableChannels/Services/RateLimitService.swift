@@ -65,35 +65,3 @@ final class RateLimitService {
         lockedUntil = nil
     }
 }
-
-enum BackupError: Error, LocalizedError {
-    case iCloudNotSignedIn
-    case keychainUnavailable
-    case keyNotFound
-    case exportFailed(String)
-    case importFailed(String)
-    case invalidFormat
-    case checksumMismatch
-    case wrongPassphrase(attemptsRemaining: Int)
-    case rateLimitExceeded(remainingSeconds: Int)
-    case backupCorrupted
-    case migrationNotSupported
-    case invalidPassphrase
-
-    var errorDescription: String? {
-        switch self {
-        case .iCloudNotSignedIn: return "Sign in to iCloud to enable backup"
-        case .keychainUnavailable: return "iCloud Keychain unavailable"
-        case .keyNotFound: return "Backup encryption key not found"
-        case .exportFailed(let msg): return "Export failed: \(msg)"
-        case .importFailed(let msg): return "Import failed: \(msg)"
-        case .invalidFormat: return "Invalid backup file format"
-        case .checksumMismatch: return "Backup file is corrupted"
-        case .wrongPassphrase(let remaining): return "Wrong passphrase. \(remaining) attempts remaining"
-        case .rateLimitExceeded(let secs): return "Too many attempts. Try again in \(secs) seconds"
-        case .backupCorrupted: return "Backup is corrupted"
-        case .migrationNotSupported: return "Backup version not supported"
-        case .invalidPassphrase: return "Invalid passphrase"
-        }
-    }
-}

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct RestoreBackupSheet: View {
+    let backupService: any BackupServiceProtocol
     let onRestore: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -134,7 +135,7 @@ struct RestoreBackupSheet: View {
         errorMessage = nil
 
         do {
-            let backup = try await CloudBackupService.shared.restoreFromCloud()
+            let backup = try await backupService.restoreFromCloud()
             onRestore(backup.mnemonic)
             showSuccess = true
             try await Task.sleep(for: .seconds(1.5))

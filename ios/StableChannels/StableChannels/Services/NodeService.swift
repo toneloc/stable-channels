@@ -1,8 +1,17 @@
 import Foundation
 import LDKNode
 
+protocol NodeServiceProtocol {
+    var node: Node? { get }
+    var isRunning: Bool { get }
+    var nodeId: String { get }
+    var channels: [ChannelDetails] { get }
+    var savedMnemonic: String? { get }
+    func start(network: Network, esploraURL: String, mnemonic: String) async throws
+}
+
 @Observable
-class NodeService {
+class NodeService: NodeServiceProtocol {
     static let shared = NodeService()
 
     private(set) var node: Node?

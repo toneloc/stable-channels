@@ -129,7 +129,7 @@ struct BackupSettingsView: View {
             )
         }
         .sheet(isPresented: $showingBackupPrompt) {
-            BackupPromptView()
+            BackupPromptView(backupService: backupService)
         }
         .onChange(of: showingBackupPrompt) { _, newValue in
             if !newValue {
@@ -137,7 +137,7 @@ struct BackupSettingsView: View {
             }
         }
         .sheet(isPresented: $showingRestoreSheet) {
-            RestoreBackupSheet { mnemonic in
+            RestoreBackupSheet(backupService: backupService) { mnemonic in
                 importMnemonic(mnemonic)
             }
         }
