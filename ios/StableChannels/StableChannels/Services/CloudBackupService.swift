@@ -19,6 +19,7 @@ final class CloudBackupService: BackupServiceProtocol {
     private let nodeService: NodeServiceProtocol
 
     private(set) var backupExists: Bool = false
+    private(set) var hasLocalBackup: Bool = UserDefaults.standard.bool(forKey: "backupEnabled")
     private(set) var syncStatus: SyncStatus = .idle
     private(set) var iCloudAvailable: Bool = false
 
@@ -38,9 +39,42 @@ final class CloudBackupService: BackupServiceProtocol {
             let status = try await container.accountStatus()
             iCloudAvailable = status == .available
             syncStatus = status == .available ? .idle : .iCloudNotAvailable
+
+            if iCloudAvailable {
+                await detectExistingBackup()
+            }
         } catch {
             iCloudAvailable = false
             syncStatus = .notSupported
+        }
+    }
+
+    private func detectExistingBackup() async {
+        let container = CKContainer.default()
+        let db = container.privateCloudDatabase
+        let recordID = CKRecord.ID(recordName: recordIDName)
+
+        do {
+            let record = try await db.record(for: recordID)
+            backupExists = true
+            if let timestamp = record["timestamp"] as? Date {
+                lastBackupDate = timestamp
+            }
+        } catch {
+            // Record does not exist or network failure
+        }
+    }
+
+    func checkRemoteBackupExists() async -> Bool {
+        let container = CKContainer.default()
+        let db = container.privateCloudDatabase
+        let recordID = CKRecord.ID(recordName: recordIDName)
+
+        do {
+            _ = try await db.record(for: recordID)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -93,6 +127,8 @@ final class CloudBackupService: BackupServiceProtocol {
         try await db.save(record)
 
         backupExists = true
+        UserDefaults.standard.set(true, forKey: "backupEnabled")
+        hasLocalBackup = true
         lastBackupDate = Date()
         syncStatus = .synced
     }
@@ -133,7 +169,7 @@ final class CloudBackupService: BackupServiceProtocol {
 
         let backup = try CryptoService.decrypt(data: encryptedData, key: key)
         backupExists = true
-        syncStatus = .synced
+        syncStatus = .idle
 
         return BackupFile(
             metadata: BackupMetadata(
@@ -151,8 +187,6 @@ final class CloudBackupService: BackupServiceProtocol {
     // MARK: - Delete
 
     func deleteBackup() async throws {
-        keychain.deleteKey()
-
         if iCloudAvailable {
             let container = CKContainer.default()
             let db = container.privateCloudDatabase
@@ -162,7 +196,11 @@ final class CloudBackupService: BackupServiceProtocol {
             } catch let ckError as CKError where ckError.code == .unknownItem {}
         }
 
+        keychain.deleteKey()
+
         backupExists = false
+        UserDefaults.standard.set(false, forKey: "backupEnabled")
+        hasLocalBackup = false
         lastBackupDate = nil
         syncStatus = .idle
     }
@@ -180,5 +218,12 @@ final class CloudBackupService: BackupServiceProtocol {
     var lastBackupDate: Date? {
         get { UserDefaults.standard.object(forKey: "lastBackupDate") as? Date }
         set { UserDefaults.standard.set(newValue, forKey: "lastBackupDate") }
+    }
+
+    func markLocalBackupAsEnabled() {
+        backupExists = true
+        UserDefaults.standard.set(true, forKey: "backupEnabled")
+        hasLocalBackup = true
+        syncStatus = .synced
     }
 }

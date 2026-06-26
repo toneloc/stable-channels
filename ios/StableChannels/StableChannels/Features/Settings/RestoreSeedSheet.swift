@@ -10,8 +10,12 @@ struct RestoreSeedSheet: View {
     @Binding var isImportingSeed: Bool
     @Binding var isRestoring: Bool
     @Binding var restoreError: String?
-    let wordCount: Int
     let onCancel: () -> Void
+    let onSuccess: () -> Void
+
+    private var wordCount: Int {
+        MnemonicUtils.detectWordCount(restoreMnemonic)
+    }
 
     private var restoreValid: Bool {
         let filledCount = wordFields.filter { !$0.isEmpty }.count
@@ -166,6 +170,7 @@ struct RestoreSeedSheet: View {
             isWordFieldsReadOnly = false
             appState.refreshBalances()
             isRestoring = false
+            onSuccess()
             dismiss()
         } catch {
             restoreError = String(localized: "error_restore_failed") + error.localizedDescription

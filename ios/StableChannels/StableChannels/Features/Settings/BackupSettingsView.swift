@@ -2,17 +2,16 @@ import SwiftUI
 
 struct BackupSettingsView: View {
     @Environment(AppState.self) private var appState
-    private let backupService = CloudBackupService.shared
+    let backupService: any BackupServiceProtocol
 
     // MARK: - UI State
 
     @State private var showSeedWords = false
     @State private var showRestore = false
     @State private var restoreMnemonic = ""
+    @State private var restoreSourceIsCloud = false
     @State private var isRestoring = false
     @State private var restoreError: String?
-    @State private var copiedSeed = false
-    @State private var showCopyWarning = false
     @State private var showingBackupPrompt = false
     @State private var showingExportSheet = false
     @State private var showingImportSheet = false
@@ -23,14 +22,10 @@ struct BackupSettingsView: View {
     @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.maxWordCount)
     @State private var isWordFieldsReadOnly = false
     @State private var isImportingSeed = false
-    @State private var clipboardClearTask: Task<Void, Never>?
-    @State private var clipboardFadeTask: Task<Void, Never>?
+    @State private var showingOverwriteAlert = false
+    @State private var isCheckingRemote = false
 
     // MARK: - Computed Properties
-
-    private var detectedWordCount: Int {
-        MnemonicUtils.detectWordCount(restoreMnemonic)
-    }
 
     private var restoreValid: Bool {
         let filledCount = wordFields.filter { !$0.isEmpty }.count
@@ -49,8 +44,9 @@ struct BackupSettingsView: View {
         isWordFieldsReadOnly = false
     }
 
-    private func importMnemonic(_ mnemonic: String) {
+    private func importMnemonic(_ mnemonic: String, fromCloud: Bool = false) {
         isImportingSeed = true
+        restoreSourceIsCloud = fromCloud
         restoreMnemonic = ""
         wordFields = MnemonicUtils.wordsToFields(MnemonicUtils.parseMnemonic(mnemonic))
         isWordFieldsReadOnly = true
@@ -58,32 +54,19 @@ struct BackupSettingsView: View {
         showRestore = true
     }
 
-    private func copySeedToClipboard() {
-        guard let words = appState.nodeService.savedMnemonic else { return }
-        clipboardClearTask?.cancel()
-        clipboardFadeTask?.cancel()
-        UIPasteboard.general.string = words
-        withAnimation { copiedSeed = true }
-
-        clipboardClearTask = Task {
-            try? await Task.sleep(for: .seconds(SeedConstants.clipboardClearSeconds))
-            if UIPasteboard.general.string == words {
-                UIPasteboard.general.string = ""
-            }
-        }
-        clipboardFadeTask = Task {
-            try? await Task.sleep(for: .seconds(2))
-            withAnimation { self.copiedSeed = false }
-        }
-    }
-
-    private func cancelClipboardTasks() {
-        clipboardClearTask?.cancel()
-        clipboardFadeTask?.cancel()
-    }
-
     private func backupNow() async {
         guard appState.nodeService.savedMnemonic != nil else { return }
+        isCheckingRemote = true
+        let exists = await backupService.checkRemoteBackupExists()
+        isCheckingRemote = false
+        if exists {
+            showingOverwriteAlert = true
+        } else {
+            await executeBackup()
+        }
+    }
+
+    private func executeBackup() async {
         backupError = nil
         do {
             try await backupService.saveBackupToCloud()
@@ -115,7 +98,6 @@ struct BackupSettingsView: View {
         .listStyle(.insetGrouped)
         .navigationTitle(String(localized: "title_backup", defaultValue: "Backup"))
         .navigationBarTitleDisplayMode(.inline)
-        .onDisappear { cancelClipboardTasks() }
         .sheet(isPresented: $showRestore) {
             RestoreSeedSheet(
                 restoreMnemonic: $restoreMnemonic,
@@ -124,8 +106,12 @@ struct BackupSettingsView: View {
                 isImportingSeed: $isImportingSeed,
                 isRestoring: $isRestoring,
                 restoreError: $restoreError,
-                wordCount: detectedWordCount,
-                onCancel: { cancelRestore() }
+                onCancel: { cancelRestore() },
+                onSuccess: {
+                    if restoreSourceIsCloud {
+                        backupService.markLocalBackupAsEnabled()
+                    }
+                }
             )
         }
         .sheet(isPresented: $showingBackupPrompt) {
@@ -138,7 +124,7 @@ struct BackupSettingsView: View {
         }
         .sheet(isPresented: $showingRestoreSheet) {
             RestoreBackupSheet(backupService: backupService) { mnemonic in
-                importMnemonic(mnemonic)
+                importMnemonic(mnemonic, fromCloud: true)
             }
         }
         .sheet(isPresented: $showingExportSheet) {
@@ -156,6 +142,9 @@ struct BackupSettingsView: View {
             }
         } message: {
             Text("You'll need your seed phrase to restore. This cannot be undone.")
+        }
+        .nativeTimerAlert(isPresented: $showingOverwriteAlert, title: "Overwrite Existing Backup?") {
+            await executeBackup()
         }
     }
 
@@ -181,7 +170,7 @@ struct BackupSettingsView: View {
             .foregroundStyle(.primary)
 
             if showSeedWords, let words = appState.nodeService.savedMnemonic, !words.isEmpty {
-                seedWordsDisplay(words: words)
+                SeedDisplayView(words: words)
             }
         } header: {
             Text(String(localized: "section_backup_seed", defaultValue: "Backup"))
@@ -191,106 +180,6 @@ struct BackupSettingsView: View {
                 defaultValue: "Write these words down and store them safely. Anyone with these words can access your funds."
             ))
         }
-    }
-
-    private func seedWordsDisplay(words: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(String(localized: "warning_seed", defaultValue: "Never share your seed words"))
-                    .font(.caption.bold())
-                    .foregroundStyle(.orange)
-            }
-
-            let wordList = words.split(separator: " ").map(String.init)
-            LazyVGrid(columns: [
-                GridItem(.flexible()),
-                GridItem(.flexible()),
-                GridItem(.flexible())
-            ], spacing: 6) {
-                ForEach(Array(wordList.enumerated()), id: \.offset) { index, word in
-                    HStack(spacing: 4) {
-                        Text("\(index + 1).")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18, alignment: .trailing)
-                        Text(word)
-                            .font(.system(.caption, design: .monospaced))
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-            }
-
-            if !copiedSeed && !showCopyWarning {
-                Button {
-                    showCopyWarning = true
-                } label: {
-                    HStack {
-                        Image(systemName: "doc.on.doc")
-                        Text(String(localized: "button_copy_seed", defaultValue: "Copy to Clipboard"))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-            }
-
-            if copiedSeed {
-                HStack {
-                    Image(systemName: "checkmark")
-                    Text(String(localized: "button_copied", defaultValue: "Copied"))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(Color.green.opacity(0.15))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-
-            if showCopyWarning {
-                VStack(spacing: 8) {
-                    Text(String(localized: "warning_copy_seed_title", defaultValue: "Copy Seed Words?"))
-                        .font(.caption.bold())
-
-                    Text(String(
-                        localized: "warning_copy_seed_message",
-                        defaultValue: "Clipboard is shared with other apps."
-                    ))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-
-                    HStack(spacing: 12) {
-                        Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
-                            showCopyWarning = false
-                        }
-                        .font(.caption)
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        Button(String(localized: "button_copy_anyway", defaultValue: "Copy Anyway")) {
-                            copySeedToClipboard()
-                            showCopyWarning = false
-                        }
-                        .font(.caption)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity)
-                .background(Color(uiColor: .tertiarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .transition(.opacity.combined(with: .scale(scale: 0.95)))
-            }
-        }
-        .padding(.vertical, 4)
-        .animation(.easeInOut(duration: 0.2), value: showCopyWarning)
     }
 
     private var restoreSection: some View {
@@ -335,6 +224,7 @@ struct BackupSettingsView: View {
             showingRestoreSheet: $showingRestoreSheet,
             showBackupSuccess: $showBackupSuccess,
             backupError: $backupError,
+            isCheckingRemote: $isCheckingRemote,
             onBackupNow: { await backupNow() }
         )
     }
