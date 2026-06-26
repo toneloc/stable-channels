@@ -15,7 +15,6 @@
 		1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95055FDBC76859CB74803660 /* HomeView.swift */; };
 		1A972F89DB503A5171D1525C /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFF3730F0DCCB9662892DE /* KeychainService.swift */; };
 		1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */; };
-		1D8B3096714E8844A43983C3 /* BackupSettingsSupportBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6CCC9964D2DE178082DA884 /* BackupSettingsSupportBanner.swift */; };
 		2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD425F9D6479B95B2258FCAE /* Extensions.swift */; };
 		2C4A664F5F0343319A539889 /* BackupModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */; };
 		2FA17E14D9F4E24E05FF09E3 /* CryptoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB7BB840EC5C451056C5C21D /* CryptoService.swift */; };
@@ -48,6 +47,10 @@
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
 		49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */; };
 		49E456822FCC596F00B0CA85 /* FullscreenQRZoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */; };
+		49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4D8A02FED848F002AF338 /* BackupError.swift */; };
+		49E4D8A32FED84B7002AF338 /* BackupServiceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */; };
+		49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4D8A52FED9FF3002AF338 /* BackupSettingsSupportBanner.swift */; };
+		49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4D8A42FED9FF3002AF338 /* BackupSettingsICloudSection.swift */; };
 		49F0B0DE2FC0EF3A003A3B89 /* BackupSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */; };
 		49F0B0DF2FC0EF3A003A3B89 /* ChannelSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */; };
 		49F0B0E02FC0EF3A003A3B89 /* NodeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */; };
@@ -57,7 +60,6 @@
 		49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */; };
 		49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */; };
 		49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */; };
-		4BF29DF506BBCCD9FC1ECE0B /* BackupSettingsICloudSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F00B7A06F34D2BF8A066A6 /* BackupSettingsICloudSection.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
@@ -157,6 +159,10 @@
 		49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateServiceTests.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
 		49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeUtility.swift; sourceTree = "<group>"; };
+		49E4D8A02FED848F002AF338 /* BackupError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupError.swift; sourceTree = "<group>"; };
+		49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupServiceProtocol.swift; sourceTree = "<group>"; };
+		49E4D8A42FED9FF3002AF338 /* BackupSettingsICloudSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSettingsICloudSection.swift; sourceTree = "<group>"; };
+		49E4D8A52FED9FF3002AF338 /* BackupSettingsSupportBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSettingsSupportBanner.swift; sourceTree = "<group>"; };
 		49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSettingsView.swift; sourceTree = "<group>"; };
 		49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettingsView.swift; sourceTree = "<group>"; };
 		49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSettingsView.swift; sourceTree = "<group>"; };
@@ -189,7 +195,6 @@
 		95055FDBC76859CB74803660 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		955C6E8D6DB076A3B20A6F46 /* SellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SellView.swift; sourceTree = "<group>"; };
 		A2BA7D52F62DF17EFF532635 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
-		A6CCC9964D2DE178082DA884 /* BackupSettingsSupportBanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = BackupSettingsSupportBanner.swift; path = StableChannels/Features/Settings/BackupSettingsSupportBanner.swift; sourceTree = "<group>"; };
 		AAE0551124703F8BAA9C44C0 /* StableChannels.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StableChannels.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupModels.swift; sourceTree = "<group>"; };
 		AD425F9D6479B95B2258FCAE /* Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extensions.swift; sourceTree = "<group>"; };
@@ -204,7 +209,6 @@
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
 		DF383D962C3260EA8D14692A /* StabilityService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityService.swift; sourceTree = "<group>"; };
 		E2CB01DD108B12E75FFEAB11 /* BuyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuyView.swift; sourceTree = "<group>"; };
-		E3F00B7A06F34D2BF8A066A6 /* BackupSettingsICloudSection.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = BackupSettingsICloudSection.swift; path = StableChannels/Features/Settings/BackupSettingsICloudSection.swift; sourceTree = "<group>"; };
 		E6EF4DE5A43647E46CAAD52B /* TradeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeService.swift; sourceTree = "<group>"; };
 		E9358B0D20BFCDFAF7128834 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarView.swift; sourceTree = "<group>"; };
@@ -248,9 +252,9 @@
 		2788439C4BA338889A92627F /* Domain */ = {
 			isa = PBXGroup;
 			children = (
+				ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
-				ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */,
 			);
 			path = Domain;
 			sourceTree = "<group>";
@@ -262,8 +266,6 @@
 				674DEDB749CCE3FA348043D1 /* StableChannels */,
 				F11CF0F21D3319E86AF791B6 /* StableChannelsTests */,
 				052E4A6FC61BFB06E0A2A974 /* Products */,
-				A6CCC9964D2DE178082DA884 /* BackupSettingsSupportBanner.swift */,
-				E3F00B7A06F34D2BF8A066A6 /* BackupSettingsICloudSection.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -281,12 +283,12 @@
 		49FC3EEC2FDC8B200054CD38 /* Components */ = {
 			isa = PBXGroup;
 			children = (
-				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
-				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
-				4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */,
-				4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */,
 				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
+				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
 				49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */,
+				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
+				4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */,
+				4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -294,8 +296,8 @@
 		49FC3EED2FDC8C060054CD38 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				49FC3EEE2FDC8C160054CD38 /* Themes */,
 				3B46630309755AE15EF291D4 /* HistoricalPrices.swift */,
+				49FC3EEE2FDC8C160054CD38 /* Themes */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -329,24 +331,26 @@
 		7EE46C95963B6C9F86006346 /* Services */ = {
 			isa = PBXGroup;
 			children = (
-				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
-				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
-				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
-				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
-				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
-				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
-				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
-				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
-				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
-				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
-				0446A88D1E083A380EDC5436 /* PriceService.swift */,
-				DF383D962C3260EA8D14692A /* StabilityService.swift */,
-				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
+				49E4D8A02FED848F002AF338 /* BackupError.swift */,
+				49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */,
+				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
+				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */,
 				CB7BB840EC5C451056C5C21D /* CryptoService.swift */,
+				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
+				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
+				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
+				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
+				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
+				0446A88D1E083A380EDC5436 /* PriceService.swift */,
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
+				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
+				DF383D962C3260EA8D14692A /* StabilityService.swift */,
+				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
+				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
+				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -364,20 +368,22 @@
 			isa = PBXGroup;
 			children = (
 				49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */,
+				49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */,
 				49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */,
+				6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */,
+				49E4D8A42FED9FF3002AF338 /* BackupSettingsICloudSection.swift */,
+				49E4D8A52FED9FF3002AF338 /* BackupSettingsSupportBanner.swift */,
 				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
 				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
+				BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */,
 				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
 				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
 				49F0B0DC2FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift */,
-				49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */,
-				49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */,
-				7DB261201C1C656BAAED5283 /* SettingsView.swift */,
-				6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */,
-				BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */,
 				F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */,
 				55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */,
 				88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */,
+				7DB261201C1C656BAAED5283 /* SettingsView.swift */,
+				49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -385,9 +391,9 @@
 		AD3E779FC98D09AA36FFCAE9 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
-				496A44452FCD5845005AF12F /* InputSanitizer.swift */,
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
+				496A44452FCD5845005AF12F /* InputSanitizer.swift */,
 				82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */,
 			);
 			path = Utilities;
@@ -595,8 +601,11 @@
 			files = (
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
+				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
+				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
 				581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */,
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
+				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
 				499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */,
@@ -645,6 +654,7 @@
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
+				49E4D8A32FED84B7002AF338 /* BackupServiceProtocol.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,
 				6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */,
 				2C4A664F5F0343319A539889 /* BackupModels.swift in Sources */,
@@ -658,8 +668,6 @@
 				C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */,
 				9EBF713364DF88022CB4F1D0 /* RestoreSeedSheet.swift in Sources */,
 				10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */,
-				1D8B3096714E8844A43983C3 /* BackupSettingsSupportBanner.swift in Sources */,
-				4BF29DF506BBCCD9FC1ECE0B /* BackupSettingsICloudSection.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

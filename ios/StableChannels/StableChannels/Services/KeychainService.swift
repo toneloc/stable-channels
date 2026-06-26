@@ -1,6 +1,20 @@
 import Foundation
 import Security
 
+enum KeychainError: Error, LocalizedError {
+    case accessDenied
+    case keyNotFound
+    case keychainUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .accessDenied: return "Access denied"
+        case .keyNotFound: return "Key not found"
+        case .keychainUnavailable: return "Keychain unavailable"
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class KeychainService {
@@ -30,7 +44,7 @@ final class KeychainService {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
         guard status == errSecSuccess, let keyData = result as? Data else {
-            throw BackupError.keyNotFound
+            throw KeychainError.keyNotFound
         }
         return keyData
     }
@@ -63,7 +77,7 @@ final class KeychainService {
         var bytes = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, count, &bytes)
         guard status == errSecSuccess else {
-            throw BackupError.keychainUnavailable
+            throw KeychainError.keychainUnavailable
         }
         return Data(bytes)
     }
@@ -90,7 +104,7 @@ final class KeychainService {
 
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
-            throw BackupError.keychainUnavailable
+            throw KeychainError.keychainUnavailable
         }
     }
 }

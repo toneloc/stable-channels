@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct BackupPromptView: View {
+    let backupService: any BackupServiceProtocol
+
     @Environment(\.dismiss) private var dismiss
     @State private var errorMessage: String?
     @State private var isAuthenticating = false
@@ -142,16 +144,16 @@ struct BackupPromptView: View {
         isAuthenticating = true
         errorMessage = nil
 
-        await CloudBackupService.shared.checkAccountStatus()
+        await backupService.checkAccountStatus()
 
-        if !CloudBackupService.shared.iCloudAvailable {
+        if !backupService.iCloudAvailable {
             errorMessage = "Sign in to iCloud to enable backup"
             isAuthenticating = false
             return
         }
 
         do {
-            try await CloudBackupService.shared.generateAndStoreKey()
+            try await backupService.generateAndStoreKey()
             showSuccess = true
             UserDefaults.standard.set(true, forKey: "backupEnabled")
             UserDefaults.standard.set(true, forKey: "backupPromptDismissed")

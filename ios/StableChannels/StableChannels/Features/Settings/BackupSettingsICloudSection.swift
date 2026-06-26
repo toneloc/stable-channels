@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct BackupSettingsICloudSection: View {
-    let backupService: CloudBackupService
+    let backupService: any BackupServiceProtocol
     @Binding var showingBackupPrompt: Bool
     @Binding var showingExportSheet: Bool
     @Binding var showingImportSheet: Bool

@@ -1,37 +1,33 @@
 import Foundation
 import CloudKit
 import CryptoKit
+import LDKNode
 
 @MainActor
 @Observable
-final class CloudBackupService {
-    static let shared = CloudBackupService(nodeService: NodeService.shared)
+final class CloudBackupService: BackupServiceProtocol {
+    static let shared: BackupServiceProtocol = {
+        let service = CloudBackupService(nodeService: NodeService.shared)
+        service.initialize()
+        return service
+    }()
 
     private let recordType = "SeedBackup"
     private let recordIDName = "latestSeedBackup"
 
     private let keychain = KeychainService.shared
-    private let nodeService: NodeService
+    private let nodeService: NodeServiceProtocol
 
     private(set) var backupExists: Bool = false
     private(set) var syncStatus: SyncStatus = .idle
     private(set) var iCloudAvailable: Bool = false
 
-    init(nodeService: NodeService) {
+    init(nodeService: NodeServiceProtocol) {
         self.nodeService = nodeService
     }
 
     func initialize() {
         Task { await checkAccountStatus() }
-    }
-
-    enum SyncStatus: Equatable {
-        case idle
-        case syncing
-        case synced
-        case error(String)
-        case iCloudNotAvailable
-        case notSupported
     }
 
     // MARK: - iCloud Account
@@ -70,7 +66,7 @@ final class CloudBackupService {
 
         guard let mnemonic = getMnemonic() else {
             syncStatus = .error("No mnemonic available")
-            throw BackupError.keychainUnavailable
+            throw KeychainError.keychainUnavailable
         }
 
         let keyData = try keychain.loadKey()
@@ -139,7 +135,6 @@ final class CloudBackupService {
         backupExists = true
         syncStatus = .synced
 
-        // Return with CloudKit-specific data merged
         return BackupFile(
             metadata: BackupMetadata(
                 version: backup.metadata.version,
