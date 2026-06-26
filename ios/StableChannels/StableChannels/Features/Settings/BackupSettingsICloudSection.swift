@@ -9,11 +9,12 @@ struct BackupSettingsICloudSection: View {
     @Binding var showingRestoreSheet: Bool
     @Binding var showBackupSuccess: Bool
     @Binding var backupError: String?
+    @Binding var isCheckingRemote: Bool
     let onBackupNow: () async -> Void
 
     var body: some View {
         Section {
-            if backupService.backupExists {
+            if backupService.hasLocalBackup {
                 icloudBackupEnabledSection
             } else {
                 icloudBackupDisabledSection
@@ -51,8 +52,12 @@ struct BackupSettingsICloudSection: View {
                 Task { await onBackupNow() }
             } label: {
                 HStack {
-                    Image(systemName: showBackupSuccess ? "checkmark.circle.fill" : "arrow.clockwise")
-                        .foregroundStyle(showBackupSuccess ? .green : .blue)
+                    if isCheckingRemote {
+                        ProgressView()
+                    } else {
+                        Image(systemName: showBackupSuccess ? "checkmark.circle.fill" : "arrow.clockwise")
+                            .foregroundStyle(showBackupSuccess ? .green : .blue)
+                    }
                     Text(showBackupSuccess
                         ? "Backup complete"
                         : String(localized: "backup_now", defaultValue: "Backup Now"))

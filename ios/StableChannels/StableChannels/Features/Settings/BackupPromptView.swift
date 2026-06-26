@@ -7,12 +7,22 @@ struct BackupPromptView: View {
     @State private var errorMessage: String?
     @State private var isAuthenticating = false
     @State private var showSuccess = false
+    @State private var showingOverwriteAlert = false
 
     @ViewBuilder
     private var prominentButton: some View {
         if #available(iOS 26.0, *) {
             Button {
-                Task { await enableBackup() }
+                Task {
+                    isAuthenticating = true
+                    let exists = await backupService.checkRemoteBackupExists()
+                    isAuthenticating = false
+                    if exists {
+                        showingOverwriteAlert = true
+                    } else {
+                        await enableBackup()
+                    }
+                }
             } label: {
                 HStack(spacing: 8) {
                     if isAuthenticating {
@@ -30,7 +40,16 @@ struct BackupPromptView: View {
             .disabled(isAuthenticating)
         } else {
             Button {
-                Task { await enableBackup() }
+                Task {
+                    isAuthenticating = true
+                    let exists = await backupService.checkRemoteBackupExists()
+                    isAuthenticating = false
+                    if exists {
+                        showingOverwriteAlert = true
+                    } else {
+                        await enableBackup()
+                    }
+                }
             } label: {
                 HStack(spacing: 8) {
                     if isAuthenticating {
@@ -124,6 +143,9 @@ struct BackupPromptView: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled()
+        }
+        .nativeTimerAlert(isPresented: $showingOverwriteAlert, title: "Overwrite Existing Backup?") {
+            await enableBackup()
         }
     }
 

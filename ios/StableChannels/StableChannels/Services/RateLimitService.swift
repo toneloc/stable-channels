@@ -30,7 +30,13 @@ final class RateLimitService {
 
     var isLocked: Bool {
         guard let until = lockedUntil else { return false }
-        return Date() < until
+        if Date() < until {
+            return true
+        }
+        // Lockout expired - reset attempts for a fresh session
+        attempts = 0
+        lockedUntil = nil
+        return false
     }
 
     var lockoutRemainingSeconds: Int {

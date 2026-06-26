@@ -37,6 +37,8 @@
 		499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */; };
 		499DBE7B2FD2F06F003E89F9 /* TxidLinkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */; };
 		499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */; };
+		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
+		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -150,6 +152,8 @@
 		499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncherTests.swift; sourceTree = "<group>"; };
 		499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepositRecorder.swift; sourceTree = "<group>"; };
 		499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidLinkStore.swift; sourceTree = "<group>"; };
+		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
+		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -376,11 +380,13 @@
 				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
 				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
 				BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */,
+				49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */,
 				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
 				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
 				49F0B0DC2FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift */,
 				F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */,
 				55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */,
+				49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */,
 				88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */,
 				7DB261201C1C656BAAED5283 /* SettingsView.swift */,
 				49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */,
@@ -603,6 +609,8 @@
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
 				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
+				49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */,
+				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */,
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,
