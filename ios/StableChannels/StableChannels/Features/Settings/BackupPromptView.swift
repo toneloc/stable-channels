@@ -9,84 +9,19 @@ struct BackupPromptView: View {
     @State private var showSuccess = false
     @State private var showingOverwriteAlert = false
 
-    @ViewBuilder
-    private var prominentButton: some View {
-        if #available(iOS 26.0, *) {
-            Button {
-                Task {
-                    isAuthenticating = true
-                    let exists = await backupService.checkRemoteBackupExists()
-                    isAuthenticating = false
-                    if exists {
-                        showingOverwriteAlert = true
-                    } else {
-                        await enableBackup()
-                    }
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    if isAuthenticating {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "icloud.and.arrow.up")
-                    }
-                    Text(String(localized: "enable_icloud_backup", defaultValue: "Enable iCloud Backup"))
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-            }
-            .buttonStyle(.glassProminent)
-            .disabled(isAuthenticating)
-        } else {
-            Button {
-                Task {
-                    isAuthenticating = true
-                    let exists = await backupService.checkRemoteBackupExists()
-                    isAuthenticating = false
-                    if exists {
-                        showingOverwriteAlert = true
-                    } else {
-                        await enableBackup()
-                    }
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    if isAuthenticating {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "icloud.and.arrow.up")
-                    }
-                    Text(String(localized: "enable_icloud_backup", defaultValue: "Enable iCloud Backup"))
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .background(.blue)
-                .foregroundStyle(.white)
-                .clipShape(.rect(cornerRadius: 12))
-            }
-            .disabled(isAuthenticating)
-        }
-    }
-
     var body: some View {
         NavigationStack {
             VStack(spacing: 32) {
                 Spacer()
 
-                // Icon with soft glow
                 Image(systemName: "icloud.fill")
                     .font(.system(size: 80))
                     .foregroundStyle(.blue)
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 8)
 
-                // Title
                 Text(String(localized: "icloud_backup_title", defaultValue: "iCloud Seed Backup"))
                     .font(.title.bold())
-                    .foregroundStyle(.primary)
 
-                // Subtitle
                 Text(String(
                     localized: "icloud_backup_description",
                     defaultValue: "Protect your wallet with encrypted cloud backup."
@@ -96,7 +31,6 @@ struct BackupPromptView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
-                // Feature list
                 VStack(alignment: .leading, spacing: 16) {
                     featureRow(icon: "lock.shield.fill", text: "Encrypted backup to your iCloud")
                     featureRow(icon: "iphone.gen3", text: "Sync across all your devices")
@@ -107,7 +41,6 @@ struct BackupPromptView: View {
 
                 Spacer()
 
-                // Success state
                 if showSuccess {
                     VStack(spacing: 8) {
                         Image(systemName: "checkmark.circle.fill")
@@ -120,9 +53,24 @@ struct BackupPromptView: View {
                     .padding(.vertical, 16)
                 }
 
-                // Buttons
                 VStack(spacing: 16) {
-                    prominentButton
+                    Button {
+                        Task { await handleEnableTap() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if isAuthenticating {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "icloud.and.arrow.up")
+                            }
+                            Text(String(localized: "enable_icloud_backup", defaultValue: "Enable iCloud Backup"))
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAuthenticating)
 
                     if let error = errorMessage {
                         Text(error)
@@ -157,8 +105,18 @@ struct BackupPromptView: View {
                 .frame(width: 24)
             Text(text)
                 .font(.subheadline)
-                .foregroundStyle(.primary)
             Spacer()
+        }
+    }
+
+    private func handleEnableTap() async {
+        isAuthenticating = true
+        let exists = await backupService.checkRemoteBackupExists()
+        isAuthenticating = false
+        if exists {
+            showingOverwriteAlert = true
+        } else {
+            await enableBackup()
         }
     }
 
