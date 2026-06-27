@@ -31,6 +31,8 @@ struct RestoreBackupSheet: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
+                icloudWarningBanner
+
                 VStack(alignment: .leading, spacing: 16) {
                     featureRow(icon: "key.fill", text: "AES-256 encrypted backup")
                     featureRow(icon: "arrow.clockwise", text: "Sync latest version")
@@ -87,47 +89,53 @@ struct RestoreBackupSheet: View {
         }
     }
 
-    @ViewBuilder
     private var restoreButton: some View {
-        if #available(iOS 26.0, *) {
-            Button {
-                Task { await performRestore() }
-            } label: {
-                HStack(spacing: 8) {
-                    if isRestoring {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "arrow.down.circle")
-                    }
-                    Text(String(localized: "restore_action", defaultValue: "Restore Wallet"))
-                        .fontWeight(.semibold)
+        Button {
+            Task { await performRestore() }
+        } label: {
+            HStack(spacing: 8) {
+                if isRestoring {
+                    ProgressView()
+                } else {
+                    Image(systemName: "arrow.down.circle")
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
+                Text(String(localized: "restore_action", defaultValue: "Restore Wallet"))
+                    .fontWeight(.semibold)
             }
-            .buttonStyle(.glassProminent)
-            .disabled(isRestoring)
-        } else {
-            Button {
-                Task { await performRestore() }
-            } label: {
-                HStack(spacing: 8) {
-                    if isRestoring {
-                        ProgressView()
-                    } else {
-                        Image(systemName: "arrow.down.circle")
-                    }
-                    Text(String(localized: "restore_action", defaultValue: "Restore Wallet"))
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 16)
-                .background(.blue)
-                .foregroundStyle(.white)
-                .clipShape(.rect(cornerRadius: 12))
-            }
-            .disabled(isRestoring)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
         }
+        .buttonStyle(.borderedProminent)
+        .disabled(isRestoring)
+    }
+
+    private var icloudWarningBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Partial Recovery Warning")
+                    .font(.headline)
+                Spacer()
+            }
+
+            Text(
+                "This backup contains only your seed phrase. Lightning channel state is NOT included. On-chain funds will be restored, but Lightning funds may be lost."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Text("Contact support@stablechannels.com if you need help recovering Lightning funds.")
+                .font(.caption)
+                .foregroundStyle(.blue)
+                .fontWeight(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding()
+        .background(.orange.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 24)
     }
 
     private func performRestore() async {

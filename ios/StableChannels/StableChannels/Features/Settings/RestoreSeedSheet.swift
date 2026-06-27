@@ -96,13 +96,15 @@ struct RestoreSeedSheet: View {
     // MARK: - Subviews
 
     private var headerSection: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "arrow.uturn.backward.circle.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.orange)
 
             Text(String(localized: "title_restore_seed", defaultValue: "Restore from Seed"))
                 .font(.title2.bold())
+
+            warningBanner
 
             Text(String(
                 localized: "instruction_restore",
@@ -112,6 +114,34 @@ struct RestoreSeedSheet: View {
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
         }
+    }
+
+    private var warningBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Partial Recovery Warning")
+                    .font(.headline)
+                Spacer()
+            }
+
+            Text(
+                "This recovery will restore on-chain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Text("Please withdraw all BTC before proceeding. Existing wallet data will be completely overwritten.")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fontWeight(.semibold)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding()
+        .background(.orange.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var seedTextField: some View {

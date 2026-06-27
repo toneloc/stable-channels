@@ -151,7 +151,7 @@ final class CloudBackupService: BackupServiceProtocol {
             record = try await db.record(for: recordID)
         } catch let ckError as CKError where ckError.code == .unknownItem {
             syncStatus = .error("Backup not found")
-            throw BackupError.backupCorrupted
+            throw BackupError.backupNotFound
         }
 
         guard let encryptedData = record["encryptedData"] as? Data,

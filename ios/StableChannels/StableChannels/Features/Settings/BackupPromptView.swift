@@ -39,6 +39,8 @@ struct BackupPromptView: View {
                 .padding(.horizontal, 32)
                 .padding(.top, 8)
 
+                enableBackupWarning
+
                 Spacer()
 
                 if showSuccess {
@@ -90,7 +92,6 @@ struct BackupPromptView: View {
                 .padding(.bottom, 24)
             }
             .navigationBarTitleDisplayMode(.inline)
-            .interactiveDismissDisabled()
         }
         .nativeTimerAlert(isPresented: $showingOverwriteAlert, title: "Overwrite Existing Backup?") {
             await enableBackup()
@@ -107,6 +108,35 @@ struct BackupPromptView: View {
                 .font(.subheadline)
             Spacer()
         }
+    }
+
+    private var enableBackupWarning: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Important")
+                    .font(.headline)
+                Spacer()
+            }
+
+            Text(
+                "This backup contains only your seed phrase. Lightning channel state is NOT included. If you need to recover, you may lose access to any Lightning funds."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Text("Please withdraw Lightning funds before proceeding if you plan to use this backup for recovery.")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fontWeight(.medium)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding()
+        .background(.orange.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 24)
     }
 
     private func handleEnableTap() async {
