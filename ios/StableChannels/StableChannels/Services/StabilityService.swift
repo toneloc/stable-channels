@@ -128,7 +128,13 @@ enum StabilityService {
 
         // No backing means no stable position — nothing to drift.
         guard sc.backingSats > 0 else {
-            return StabilityCheckResult(action: .stable, percentFromPar: 0.0, stableUSDValue: 0.0, targetUSD: targetUSD, dollarsFromPar: 0.0)
+            return StabilityCheckResult(
+                action: .stable,
+                percentFromPar: 0.0,
+                stableUSDValue: 0.0,
+                targetUSD: targetUSD,
+                dollarsFromPar: 0.0
+            )
         }
 
         let stableUSDValue = Double(sc.backingSats) / 100_000_000.0 * price
