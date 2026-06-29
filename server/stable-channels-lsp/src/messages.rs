@@ -22,6 +22,9 @@ pub struct TradePayload {
     #[serde(default)]
     pub user_channel_id: Option<String>,
     pub expected_usd: f64,
+    /// Unix seconds the wallet signed at; 0 if absent (un-upgraded wallet). Drives replay freshness.
+    #[serde(default)]
+    pub ts: u64,
 }
 
 /// RegisterPush signed body. Field declaration order IS the canonical serialization order;
