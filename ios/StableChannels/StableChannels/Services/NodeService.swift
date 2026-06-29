@@ -1,6 +1,13 @@
 import Foundation
 import LDKNode
 
+/// Passed in notification userInfo so the handler can veto the eventHandled() call.
+/// NotificationCenter.post() is synchronous on MainActor, so all observers run
+/// before NodeService checks shouldAck — no race condition.
+final class EventAckToken {
+    var shouldAck = true
+}
+
 @Observable
 class NodeService {
     private(set) var node: Node?
@@ -158,12 +165,16 @@ class NodeService {
                 if Task.isCancelled { break }
 
                 await MainActor.run {
+                    let token = EventAckToken()
                     NotificationCenter.default.post(
                         name: .ldkEventReceived,
-                        object: event
+                        object: event,
+                        userInfo: ["ackToken": token]
                     )
+                    if token.shouldAck {
+                        try? node.eventHandled()
+                    }
                 }
-                try? node.eventHandled()
             }
         }
     }

@@ -758,11 +758,12 @@ class AppState {
             queue: .main
         ) { [weak self] notification in
             guard let self, let event = notification.object as? Event else { return }
-            self.handleEvent(event)
+            let ackToken = notification.userInfo?["ackToken"] as? EventAckToken
+            self.handleEvent(event, ackToken: ackToken)
         }
     }
 
-    private func handleEvent(_ event: Event) {
+    private func handleEvent(_ event: Event, ackToken: EventAckToken? = nil) {
         switch event {
         case .channelPending(let channelId, let userChannelId, _, let counterpartyNodeId, let fundingTxo):
             if stableChannel.userChannelId.isEmpty {
@@ -815,7 +816,8 @@ class AppState {
                 paymentId: paymentId,
                 amountMsat: amountMsat,
                 paymentHash: paymentHash,
-                customRecords: customRecords
+                customRecords: customRecords,
+                ackToken: ackToken
             )
 
         case .paymentSuccessful(let paymentId, let paymentHash, _, let feePaidMsat, _):
@@ -890,7 +892,8 @@ class AppState {
         paymentId: PaymentId?,
         amountMsat: UInt64,
         paymentHash: PaymentHash,
-        customRecords: [CustomTlvRecord]
+        customRecords: [CustomTlvRecord],
+        ackToken: EventAckToken? = nil
     ) {
         let paymentHashStr = "\(paymentHash)"
         let paymentIdStr = paymentId.map { "\($0)" } ?? paymentHashStr
@@ -916,17 +919,24 @@ class AppState {
         let newBacking: UInt64? = isStabilityPayment ? stableChannel.backingSats + amountMsat / 1000 : nil
 
         // Atomically insert payment row and update backing sats in one SQLite transaction.
-        let isNewPayment = (try? databaseService?.recordPaymentAndMaybeUpdateBacking(
-            paymentId: paymentIdStr,
-            paymentType: paymentType,
-            direction: "received",
-            amountMsat: amountMsat,
-            amountUSD: amountUSD,
-            btcPrice: price > 0 ? price : nil,
-            status: "completed",
-            userChannelId: isStabilityPayment ? stableChannel.userChannelId : nil,
-            newBackingSats: newBacking
-        )) == true
+        // On DB failure, veto the ack so LDK re-delivers the event.
+        let isNewPayment: Bool
+        do {
+            isNewPayment = (try databaseService?.recordPaymentAndMaybeUpdateBacking(
+                paymentId: paymentIdStr,
+                paymentType: paymentType,
+                direction: "received",
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: price > 0 ? price : nil,
+                status: "completed",
+                userChannelId: isStabilityPayment ? stableChannel.userChannelId : nil,
+                newBackingSats: newBacking
+            )) == true
+        } catch {
+            ackToken?.shouldAck = false
+            return
+        }
 
         refreshBalances()
         updateStableBalances()

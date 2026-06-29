@@ -257,7 +257,7 @@ class NotificationService: UNNotificationServiceExtension {
         let timeout: TimeInterval = 22 // Leave ~8s for cleanup + notification delivery
         var received = false
 
-        while Date().timeIntervalSince(startTime) < timeout {
+        eventLoop: while Date().timeIntervalSince(startTime) < timeout {
             if let event = node.nextEvent() {
                 nseLog("Event: \(event)")
                 switch event {
@@ -267,7 +267,11 @@ class NotificationService: UNNotificationServiceExtension {
                     let price = Self.fetchBTCPrice()
                     if isStabilityPayment {
                         let amountSats = amountMsat / 1000
-                        let newBacking = readChannelState(dbPath: dbPath).map { $0.backingSats + amountSats }
+                        guard let channelState = readChannelState(dbPath: dbPath) else {
+                            nseLog("Cannot read channel state for stability payment — not acknowledging, LDK will retry")
+                            break eventLoop  // don't ack; fall to pending_push_payment path
+                        }
+                        let newBacking = channelState.backingSats + amountSats
                         let result = recordPaymentAndMaybeUpdateBackingInDB(
                             dbPath: dbPath, paymentId: payId, paymentType: "stability",
                             direction: "received", amountMsat: amountMsat, btcPrice: price,
@@ -306,7 +310,7 @@ class NotificationService: UNNotificationServiceExtension {
                 default:
                     try? node.eventHandled()
                 }
-                if received { break }
+                if received { break eventLoop }
             }
             Thread.sleep(forTimeInterval: 0.5)
         }
@@ -671,8 +675,10 @@ class NotificationService: UNNotificationServiceExtension {
             }
             sqlite3_bind_int64(updateStmt, 1, Int64(backing))
             let stepRc = sqlite3_step(updateStmt)
+            let changedRows = sqlite3_changes(db)
             sqlite3_finalize(updateStmt)
-            guard stepRc == SQLITE_DONE else {
+            guard stepRc == SQLITE_DONE, changedRows == 1 else {
+                nseLog("recordPaymentAndMaybeBacking: UPDATE affected \(changedRows) rows, expected 1 — rolling back")
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .failed
             }

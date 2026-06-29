@@ -164,8 +164,14 @@ class AppState(private val context: Context) : ViewModel() {
                 // Resolve best esplora endpoint before starting node
                 chainUrl = resolveChainUrl()
 
-                // Subscribe to LDK events
-                launch { nodeService.events.collect { handleEvent(it) } }
+                // Subscribe to LDK events. handleEvent() runs synchronously in the collect
+                // lambda so emit() serializes events (extraBufferCapacity=0 in NodeService).
+                launch {
+                    nodeService.events.collect { event ->
+                        try { handleEvent(event) }
+                        catch (e: Exception) { Log.e("AppState", "Event handler threw", e) }
+                    }
+                }
 
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
                 val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
@@ -243,92 +249,89 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handleEvent(event: Event) {
-        viewModelScope.launch {
-            when (event) {
-                is Event.ChannelPending -> {
-                    val sc = _stableChannel.value.copy()
-                    sc.userChannelId = event.userChannelId
-                    _stableChannel.value = sc
-                    fundingTxid = event.fundingTxo.txid
-                    refreshBalances()
-                    AuditService.log("CHANNEL_PENDING", mapOf(
-                        "channel_id" to event.channelId,
-                        "user_channel_id" to event.userChannelId,
-                        "funding_txid" to event.fundingTxo.txid
-                    ))
-                }
-                is Event.ChannelReady -> {
-                    val sc = _stableChannel.value.copy()
-                    // Detect splice: same userChannelId, different channelId
-                    val isSplice = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
-                    sc.channelId = event.channelId
-                    if (isSplice) {
-                        isSweeping = false
-                        spliceTxid = null
-                        val price = priceService.currentPrice.value
-                        val result = StabilityService.reconcileOutgoing(sc, price)
-                        val reconciled = result.first
-                        if (result.second != null) {
-                            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
-                        }
-                        _stableChannel.value = reconciled
-                    } else {
-                        _stableChannel.value = sc
-                    }
-                    refreshBalances()
-                    saveChannelToDB()
-                    AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
-                }
-                is Event.PaymentReceived -> {
-                    handlePaymentReceived(
-                        event.paymentId, event.amountMsat.toLong(),
-                        event.paymentHash, event.customRecords
-                    )
-                }
-                is Event.PaymentSuccessful -> {
-                    handlePaymentSuccessful(
-                        event.paymentId, event.paymentHash,
-                        event.feePaidMsat?.toLong()
-                    )
-                }
-                is Event.PaymentFailed -> {
-                    val pid = event.paymentId
-                    val curPending = _pendingTradePayments.value
-                    if (pid != null && curPending.containsKey(pid)) {
-                        val ptp = curPending[pid]!!
-                        _pendingTradePayments.value = curPending - pid
-                        databaseService?.updateTradeStatus(ptp.tradeDbId, "failed")
-                        val verb = if (ptp.action == "buy") "Buy" else "Sell"
-                        _statusMessage.value = "$verb trade failed"
-                        AuditService.log("TRADE_PAYMENT_FAILED", mapOf("payment_id" to pid))
-                    } else {
-                        if (pid != null) {
-                            databaseService?.updatePaymentStatus(pid, "failed")
-                        }
-                        val reason = event.reason?.toString() ?: "unknown"
-                        _statusMessage.value = "Payment failed: $reason"
-                        _lastPaymentResult.value = "Payment failed: $reason"
-                        AuditService.log("PAYMENT_FAILED", mapOf(
-                            "payment_id" to (pid ?: ""),
-                            "payment_hash" to (event.paymentHash ?: ""),
-                            "reason" to reason
-                        ))
-                    }
-                }
-                is Event.SpliceNegotiated -> {
-                    handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
-                }
-                is Event.SpliceNegotiationFailed -> {
+        when (event) {
+            is Event.ChannelPending -> {
+                val sc = _stableChannel.value.copy()
+                sc.userChannelId = event.userChannelId
+                _stableChannel.value = sc
+                fundingTxid = event.fundingTxo.txid
+                refreshBalances()
+                AuditService.log("CHANNEL_PENDING", mapOf(
+                    "channel_id" to event.channelId,
+                    "user_channel_id" to event.userChannelId,
+                    "funding_txid" to event.fundingTxo.txid
+                ))
+            }
+            is Event.ChannelReady -> {
+                val sc = _stableChannel.value.copy()
+                val isSplice = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
+                sc.channelId = event.channelId
+                if (isSplice) {
                     isSweeping = false
                     spliceTxid = null
-                    pendingSplice = null
-                    AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
+                    val price = priceService.currentPrice.value
+                    val result = StabilityService.reconcileOutgoing(sc, price)
+                    val reconciled = result.first
+                    if (result.second != null) {
+                        reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+                    }
+                    _stableChannel.value = reconciled
+                } else {
+                    _stableChannel.value = sc
                 }
-                is Event.ChannelClosed -> {
-                    handleChannelClosed(event.channelId, event.userChannelId, event.reason?.toString())
-                }
-                else -> {}
+                refreshBalances()
+                saveChannelToDB()
+                AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
             }
+            is Event.PaymentReceived -> {
+                handlePaymentReceived(
+                    event.paymentId, event.amountMsat.toLong(),
+                    event.paymentHash, event.customRecords
+                )
+            }
+            is Event.PaymentSuccessful -> {
+                handlePaymentSuccessful(
+                    event.paymentId, event.paymentHash,
+                    event.feePaidMsat?.toLong()
+                )
+            }
+            is Event.PaymentFailed -> {
+                val pid = event.paymentId
+                val curPending = _pendingTradePayments.value
+                if (pid != null && curPending.containsKey(pid)) {
+                    val ptp = curPending[pid]!!
+                    _pendingTradePayments.value = curPending - pid
+                    databaseService?.updateTradeStatus(ptp.tradeDbId, "failed")
+                    val verb = if (ptp.action == "buy") "Buy" else "Sell"
+                    _statusMessage.value = "$verb trade failed"
+                    AuditService.log("TRADE_PAYMENT_FAILED", mapOf("payment_id" to pid))
+                } else {
+                    if (pid != null) {
+                        databaseService?.updatePaymentStatus(pid, "failed")
+                    }
+                    val reason = event.reason?.toString() ?: "unknown"
+                    _statusMessage.value = "Payment failed: $reason"
+                    _lastPaymentResult.value = "Payment failed: $reason"
+                    AuditService.log("PAYMENT_FAILED", mapOf(
+                        "payment_id" to (pid ?: ""),
+                        "payment_hash" to (event.paymentHash ?: ""),
+                        "reason" to reason
+                    ))
+                }
+            }
+            is Event.SpliceNegotiated -> {
+                handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
+            }
+            is Event.SpliceNegotiationFailed -> {
+                isSweeping = false
+                spliceTxid = null
+                pendingSplice = null
+                AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
+            }
+            is Event.ChannelClosed -> {
+                handleChannelClosed(event.channelId, event.userChannelId, event.reason?.toString())
+            }
+            else -> {}
         }
     }
 

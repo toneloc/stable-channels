@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -37,7 +38,9 @@ class NodeService(private val context: Context) {
     private var eventJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 64)
+    // RENDEZVOUS: emit() suspends while the collector's lambda is running, so the event loop
+    // can't call nextEventAsync() for a new event until the current one is fully processed.
+    private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 0, onBufferOverflow = BufferOverflow.SUSPEND)
     val events: SharedFlow<Event> = _events
 
     fun start(network: Network, esploraURL: String, mnemonic: String?) {
@@ -150,7 +153,13 @@ class NodeService(private val context: Context) {
             val n = node ?: return@launch
             while (true) {
                 val event = n.nextEventAsync()
+                // With extraBufferCapacity=0 + SUSPEND, emit() suspends while the collector's
+                // lambda is actively running. event2's emit() won't unblock until event1's
+                // lambda returns — serializing all event processing.
                 _events.emit(event)
+                // Ack after emit() returns: the previous event's lambda has finished,
+                // and the current event's lambda has just been handed off. This is a much
+                // smaller window than acking before emit() (the old behavior).
                 n.eventHandled()
             }
         }
