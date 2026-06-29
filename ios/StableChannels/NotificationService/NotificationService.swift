@@ -292,6 +292,11 @@ class NotificationService: UNNotificationServiceExtension {
                 amountMsat: amountMsatTotal,
                 btcPrice: price
             )
+            if let channelState = readChannelState(dbPath: dbPath) {
+                let newBacking = channelState.backingSats + amountSats
+                updateBackingSatsInDB(dbPath: dbPath, backingSats: newBacking)
+                nseLog("Updated backingSats: \(channelState.backingSats) + \(amountSats) = \(newBacking)")
+            }
             UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
         } else {
             content.title = "Payment Pending"

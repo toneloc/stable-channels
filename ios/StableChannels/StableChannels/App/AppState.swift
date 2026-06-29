@@ -929,6 +929,9 @@ class AppState {
         // Update balances and reconcile incoming
         refreshBalances()
         updateStableBalances()
+        if isStabilityPayment {
+            stableChannel.backingSats += amountMsat / 1000
+        }
         StabilityService.reconcileIncoming(&stableChannel)
         saveChannelToDB()
 

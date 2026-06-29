@@ -163,6 +163,13 @@ class StabilityProcessingService : Service() {
                             dbPath, null, "stability", "received",
                             event.amountMsat.toLong(), price
                         )
+                        val amountSats = event.amountMsat.toLong() / 1000
+                        val channelState = loadChannelStateFromDB()
+                        if (channelState != null) {
+                            val newBacking = channelState.backingSats + amountSats
+                            updateBackingSatsInDB(dbPath, newBacking)
+                            Log.d(TAG, "Updated backingSats: ${channelState.backingSats} + $amountSats = $newBacking")
+                        }
                         return
                     }
                     else -> node.eventHandled()

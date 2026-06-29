@@ -423,6 +423,7 @@ impl UserApp {
         };
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
+        builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/v2/snapshot".to_string());
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
             .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
@@ -2363,9 +2364,14 @@ impl UserApp {
                         );
 
                         self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
+                        let is_stability_payment = custom_records.iter()
+                            .any(|tlv| tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]);
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
                             update_balances(&self.node, &mut sc);
+                            if is_stability_payment {
+                                sc.backing_sats += amount_msat / 1000;
+                            }
                             stable::reconcile_incoming(&mut sc);
                         }
                         self.save_channel_settings();
