@@ -158,19 +158,32 @@ class StabilityProcessingService : Service() {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
                         node.eventHandled()
-                        val price = fetchMedianPrice()
-                        recordPaymentInDB(
-                            dbPath, null, "stability", "received",
-                            event.amountMsat.toLong(), price
-                        )
-                        val amountSats = event.amountMsat.toLong() / 1000
-                        val channelState = loadChannelStateFromDB()
-                        if (channelState != null) {
-                            val newBacking = channelState.backingSats + amountSats
-                            updateBackingSatsInDB(dbPath, newBacking)
-                            Log.d(TAG, "Updated backingSats: ${channelState.backingSats} + $amountSats = $newBacking")
+                        val isStabilityPayment = event.customRecords.any {
+                            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1))
                         }
-                        return
+                        val price = fetchMedianPrice()
+                        if (isStabilityPayment) {
+                            val isNewPayment = recordPaymentInDB(
+                                dbPath, null, "stability", "received",
+                                event.amountMsat.toLong(), price
+                            )
+                            if (isNewPayment) {
+                                val amountSats = event.amountMsat.toLong() / 1000
+                                val channelState = loadChannelStateFromDB()
+                                if (channelState != null) {
+                                    val newBacking = channelState.backingSats + amountSats
+                                    updateBackingSatsInDB(dbPath, newBacking)
+                                    Log.d(TAG, "Updated backingSats: ${channelState.backingSats} + $amountSats = $newBacking")
+                                }
+                            }
+                            return
+                        } else {
+                            Log.d(TAG, "Non-stability payment received, recording as lightning and continuing to poll")
+                            recordPaymentInDB(
+                                dbPath, null, "lightning", "received",
+                                event.amountMsat.toLong(), price
+                            )
+                        }
                     }
                     else -> node.eventHandled()
                 }
@@ -406,8 +419,8 @@ class StabilityProcessingService : Service() {
         direction: String,
         amountMsat: Long,
         btcPrice: Double
-    ) {
-        try {
+    ): Boolean {
+        return try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
 
             // Dedup: skip if payment_id already exists
@@ -421,7 +434,7 @@ class StabilityProcessingService : Service() {
                 if (exists) {
                     db.close()
                     Log.d(TAG, "recordPayment: already exists, skipping")
-                    return
+                    return false
                 }
             }
 
@@ -436,8 +449,10 @@ class StabilityProcessingService : Service() {
             )
             Log.d(TAG, "recordPayment: saved $direction $amountMsat msat (${"%.2f".format(amountUsd)} USD)")
             db.close()
+            true
         } catch (e: Exception) {
             Log.e(TAG, "recordPayment failed", e)
+            false
         }
     }
 

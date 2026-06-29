@@ -310,14 +310,14 @@ class DatabaseService {
         status: String,
         txid: String? = nil,
         address: String? = nil
-    ) throws -> Int64 {
+    ) throws -> Bool {
         // Dedup: skip if a payment with this payment_id already exists
         if let pid = paymentId, !pid.isEmpty {
             let existing = try query(
                 "SELECT id FROM payments WHERE payment_id = ?",
                 params: [.text(pid)]
             )
-            if !existing.isEmpty { return existing[0][0] as? Int64 ?? 0 }
+            if !existing.isEmpty { return false }
         }
 
         let sql = """
@@ -334,7 +334,7 @@ class DatabaseService {
             txid.map { .text($0) } ?? .null,
             address.map { .text($0) } ?? .null
         ])
-        return Int64(sqlite3_last_insert_rowid(db))
+        return true
     }
 
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {

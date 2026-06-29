@@ -258,12 +258,17 @@ class NotificationService: UNNotificationServiceExtension {
             if let event = node.nextEvent() {
                 nseLog("Event: \(event)")
                 switch event {
-                case .paymentReceived(let paymentId, _, let amountMsat, _):
-                    amountMsatTotal = amountMsat
-                    paymentIdStr = paymentId.map { "\($0)" }
-                    nseLog("Payment received: \(amountMsat / 1000) sats")
+                case .paymentReceived(let paymentId, _, let amountMsat, let customRecords):
                     try? node.eventHandled()
-                    received = true
+                    let isStabilityPayment = customRecords.contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
+                    if isStabilityPayment {
+                        amountMsatTotal = amountMsat
+                        paymentIdStr = paymentId.map { "\($0)" }
+                        nseLog("Stability payment received: \(amountMsat / 1000) sats")
+                        received = true
+                    } else {
+                        nseLog("Non-stability payment received (\(amountMsat / 1000) sats), continuing to poll")
+                    }
                 default:
                     try? node.eventHandled()
                 }
@@ -284,7 +289,7 @@ class NotificationService: UNNotificationServiceExtension {
                 content.body = "\(amountSats) sats received"
             }
             let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
-            recordPaymentInDB(
+            let isNewPayment = recordPaymentInDB(
                 dbPath: dbPath,
                 paymentId: paymentIdStr,
                 paymentType: "stability",
@@ -292,7 +297,7 @@ class NotificationService: UNNotificationServiceExtension {
                 amountMsat: amountMsatTotal,
                 btcPrice: price
             )
-            if let channelState = readChannelState(dbPath: dbPath) {
+            if isNewPayment, let channelState = readChannelState(dbPath: dbPath) {
                 let newBacking = channelState.backingSats + amountSats
                 updateBackingSatsInDB(dbPath: dbPath, backingSats: newBacking)
                 nseLog("Updated backingSats: \(channelState.backingSats) + \(amountSats) = \(newBacking)")
@@ -527,6 +532,7 @@ class NotificationService: UNNotificationServiceExtension {
 
     /// Write a payment record to stablechannels.db so the main app's history is complete.
     /// Uses INSERT with dedup on payment_id (matches DatabaseService.recordPayment schema).
+    @discardableResult
     private func recordPaymentInDB(
         dbPath: String,
         paymentId: String?,
@@ -534,11 +540,11 @@ class NotificationService: UNNotificationServiceExtension {
         direction: String,
         amountMsat: UInt64,
         btcPrice: Double
-    ) {
+    ) -> Bool {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
             nseLog("recordPayment: SQLite open failed")
-            return
+            return false
         }
         defer { sqlite3_close(db) }
 
@@ -551,7 +557,7 @@ class NotificationService: UNNotificationServiceExtension {
                 if sqlite3_step(checkStmt) == SQLITE_ROW {
                     sqlite3_finalize(checkStmt)
                     nseLog("recordPayment: already exists, skipping")
-                    return
+                    return false
                 }
                 sqlite3_finalize(checkStmt)
             }
@@ -566,7 +572,7 @@ class NotificationService: UNNotificationServiceExtension {
         """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             nseLog("recordPayment: prepare failed")
-            return
+            return false
         }
         defer { sqlite3_finalize(stmt) }
 
@@ -583,8 +589,10 @@ class NotificationService: UNNotificationServiceExtension {
 
         if sqlite3_step(stmt) == SQLITE_DONE {
             nseLog("recordPayment: saved \(direction) \(amountMsat) msat ($\(String(format: "%.2f", amountUSD)))")
+            return true
         } else {
             nseLog("recordPayment: insert failed")
+            return false
         }
     }
 

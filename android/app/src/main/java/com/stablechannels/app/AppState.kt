@@ -341,16 +341,16 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val price = priceService.currentPrice.value
-        val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() }
+        val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1)) }
         val paymentType = if (isStabilityPayment) "stability" else "lightning"
-        databaseService?.recordPayment(
+        val isNewPayment = (databaseService?.recordPayment(
             paymentId = paymentId, paymentType = paymentType, direction = "received",
             amountMsat = amountMsat, amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
             btcPrice = price, counterparty = _stableChannel.value.counterparty
-        )
+        ) ?: -1L) >= 0L
         refreshBalances()
         updateStableBalances()
-        if (isStabilityPayment) {
+        if (isStabilityPayment && isNewPayment) {
             _stableChannel.value = _stableChannel.value.copy(
                 backingSats = _stableChannel.value.backingSats + (amountMsat / 1000)
             )

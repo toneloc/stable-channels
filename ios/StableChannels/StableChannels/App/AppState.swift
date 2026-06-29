@@ -912,10 +912,10 @@ class AppState {
         // Record in DB (dedup by paymentIdStr)
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
-        let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType }
+        let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
         let paymentType = isStabilityPayment ? "stability" : "lightning"
 
-        _ = try? databaseService?.recordPayment(
+        let isNewPayment = (try? databaseService?.recordPayment(
             paymentId: paymentIdStr,
             paymentType: paymentType,
             direction: "received",
@@ -924,12 +924,12 @@ class AppState {
             btcPrice: price > 0 ? price : nil,
             counterparty: nil,
             status: "completed"
-        )
+        )) == true
 
         // Update balances and reconcile incoming
         refreshBalances()
         updateStableBalances()
-        if isStabilityPayment {
+        if isStabilityPayment && isNewPayment {
             stableChannel.backingSats += amountMsat / 1000
         }
         StabilityService.reconcileIncoming(&stableChannel)
