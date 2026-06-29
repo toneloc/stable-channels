@@ -20,6 +20,10 @@ class NotificationService: UNNotificationServiceExtension {
     private var bestAttemptContent: UNMutableNotificationContent?
     private var node: Node?
 
+    private enum PaymentInsertResult {
+        case inserted, duplicate, failed
+    }
+
     // MARK: - Logging
 
     private func nseLog(_ msg: String) {
@@ -264,30 +268,40 @@ class NotificationService: UNNotificationServiceExtension {
                     if isStabilityPayment {
                         let amountSats = amountMsat / 1000
                         let newBacking = readChannelState(dbPath: dbPath).map { $0.backingSats + amountSats }
-                        let isNew = recordPaymentAndMaybeUpdateBackingInDB(
+                        let result = recordPaymentAndMaybeUpdateBackingInDB(
                             dbPath: dbPath, paymentId: payId, paymentType: "stability",
                             direction: "received", amountMsat: amountMsat, btcPrice: price,
                             newBackingSats: newBacking
                         )
-                        try? node.eventHandled()
-                        if price > 0 {
-                            let usd = Double(amountSats) / Self.satsInBTC * price
-                            content.title = "Stability Payment Received"
-                            content.body = String(format: "$%.2f received", usd)
-                        } else {
-                            content.title = "Stability Payment Received"
-                            content.body = "\(amountSats) sats received"
+                        switch result {
+                        case .inserted, .duplicate:
+                            try? node.eventHandled()
+                            if price > 0 {
+                                let usd = Double(amountSats) / Self.satsInBTC * price
+                                content.title = "Stability Payment Received"
+                                content.body = String(format: "$%.2f received", usd)
+                            } else {
+                                content.title = "Stability Payment Received"
+                                content.body = "\(amountSats) sats received"
+                            }
+                            if result == .inserted { nseLog("Updated backingSats + \(amountSats) = \(String(describing: newBacking))") }
+                            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+                            received = true
+                        case .failed:
+                            nseLog("DB write failed for stability payment — not acknowledging, LDK will retry")
                         }
-                        if isNew { nseLog("Updated backingSats + \(amountSats) = \(String(describing: newBacking))") }
-                        UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
-                        received = true
                     } else {
-                        _ = recordPaymentInDB(
+                        let result = recordPaymentInDB(
                             dbPath: dbPath, paymentId: payId, paymentType: "lightning",
                             direction: "received", amountMsat: amountMsat, btcPrice: price
                         )
-                        try? node.eventHandled()
-                        nseLog("Non-stability payment recorded (\(amountMsat / 1000) sats), continuing to poll")
+                        switch result {
+                        case .inserted, .duplicate:
+                            try? node.eventHandled()
+                        case .failed:
+                            nseLog("DB write failed for non-stability payment — not acknowledging")
+                        }
+                        nseLog("Non-stability payment (\(amountMsat / 1000) sats), continuing to poll")
                     }
                 default:
                     try? node.eventHandled()
@@ -534,11 +548,11 @@ class NotificationService: UNNotificationServiceExtension {
         direction: String,
         amountMsat: UInt64,
         btcPrice: Double
-    ) -> Bool {
+    ) -> PaymentInsertResult {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
             nseLog("recordPayment: SQLite open failed")
-            return false
+            return .failed
         }
         defer { sqlite3_close(db) }
 
@@ -551,7 +565,7 @@ class NotificationService: UNNotificationServiceExtension {
                 if sqlite3_step(checkStmt) == SQLITE_ROW {
                     sqlite3_finalize(checkStmt)
                     nseLog("recordPayment: already exists, skipping")
-                    return false
+                    return .duplicate
                 }
                 sqlite3_finalize(checkStmt)
             }
@@ -566,7 +580,7 @@ class NotificationService: UNNotificationServiceExtension {
         """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             nseLog("recordPayment: prepare failed")
-            return false
+            return .failed
         }
         defer { sqlite3_finalize(stmt) }
 
@@ -583,16 +597,15 @@ class NotificationService: UNNotificationServiceExtension {
 
         if sqlite3_step(stmt) == SQLITE_DONE {
             nseLog("recordPayment: saved \(direction) \(amountMsat) msat ($\(String(format: "%.2f", amountUSD)))")
-            return true
+            return .inserted
         } else {
             nseLog("recordPayment: insert failed")
-            return false
+            return .failed
         }
     }
 
     /// Insert a payment and atomically update channel backing sats in one SQLite transaction.
-    /// Returns true if the payment was new (inserted), false if it was a duplicate.
-    @discardableResult
+    /// BEGIN IMMEDIATE is acquired first so the dedup check and INSERT are atomic cross-process.
     private func recordPaymentAndMaybeUpdateBackingInDB(
         dbPath: String,
         paymentId: String?,
@@ -601,15 +614,20 @@ class NotificationService: UNNotificationServiceExtension {
         amountMsat: UInt64,
         btcPrice: Double,
         newBackingSats: UInt64?
-    ) -> Bool {
+    ) -> PaymentInsertResult {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
             nseLog("recordPaymentAndMaybeBacking: open failed")
-            return false
+            return .failed
         }
         defer { sqlite3_close(db) }
 
-        // Dedup check before acquiring the write lock
+        // Acquire write lock first — dedup check runs while holding it, eliminating cross-process races.
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            nseLog("recordPaymentAndMaybeBacking: BEGIN failed")
+            return .failed
+        }
+
         if let pid = paymentId, !pid.isEmpty {
             var checkStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, "SELECT id FROM payments WHERE payment_id = ?", -1, &checkStmt, nil) == SQLITE_OK {
@@ -617,15 +635,11 @@ class NotificationService: UNNotificationServiceExtension {
                 let alreadyExists = sqlite3_step(checkStmt) == SQLITE_ROW
                 sqlite3_finalize(checkStmt)
                 if alreadyExists {
+                    sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                     nseLog("recordPaymentAndMaybeBacking: already exists, skipping")
-                    return false
+                    return .duplicate
                 }
             }
-        }
-
-        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
-            nseLog("recordPaymentAndMaybeBacking: BEGIN failed")
-            return false
         }
 
         let amountUSD = btcPrice > 0 ? (Double(amountMsat) / 1000.0 / Self.satsInBTC) * btcPrice : 0.0
@@ -633,7 +647,7 @@ class NotificationService: UNNotificationServiceExtension {
         let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')"
         guard sqlite3_prepare_v2(db, insertSql, -1, &stmt, nil) == SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            return false
+            return .failed
         }
         if let pid = paymentId { sqlite3_bind_text(stmt, 1, (pid as NSString).utf8String, -1, nil) } else { sqlite3_bind_null(stmt, 1) }
         sqlite3_bind_text(stmt, 2, (paymentType as NSString).utf8String, -1, nil)
@@ -644,7 +658,7 @@ class NotificationService: UNNotificationServiceExtension {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             sqlite3_finalize(stmt)
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            return false
+            return .failed
         }
         sqlite3_finalize(stmt)
 
@@ -653,23 +667,23 @@ class NotificationService: UNNotificationServiceExtension {
             var updateStmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                return false
+                return .failed
             }
             sqlite3_bind_int64(updateStmt, 1, Int64(backing))
             let stepRc = sqlite3_step(updateStmt)
             sqlite3_finalize(updateStmt)
             guard stepRc == SQLITE_DONE else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                return false
+                return .failed
             }
         }
 
         guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-            return false
+            return .failed
         }
         nseLog("recordPaymentAndMaybeBacking: saved \(direction) \(amountMsat) msat (\(String(format: "%.2f", amountUSD)) USD)")
-        return true
+        return .inserted
     }
 
     private func updateBackingSatsInDB(dbPath: String, backingSats: UInt64) {

@@ -21,6 +21,8 @@ import kotlin.math.roundToLong
 
 class StabilityProcessingService : Service() {
 
+    private enum class InsertResult { INSERTED, DUPLICATE, FAILED }
+
     companion object {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
@@ -166,22 +168,31 @@ class StabilityProcessingService : Service() {
                             val amountSats = event.amountMsat.toLong() / 1000
                             val channelState = loadChannelStateFromDB()
                             val newBacking = channelState?.let { it.backingSats + amountSats }
-                            val isNew = recordPaymentAtomicInDB(
+                            val result = recordPaymentAtomicInDB(
                                 dbPath, paymentId, "stability", "received",
                                 event.amountMsat.toLong(), price, newBacking
                             )
-                            node.eventHandled()
-                            if (isNew && newBacking != null) {
-                                Log.d(TAG, "Updated backingSats: ${channelState?.backingSats} + $amountSats = $newBacking")
+                            when (result) {
+                                InsertResult.INSERTED, InsertResult.DUPLICATE -> {
+                                    node.eventHandled()
+                                    if (result == InsertResult.INSERTED && newBacking != null) {
+                                        Log.d(TAG, "Updated backingSats: ${channelState?.backingSats} + $amountSats = $newBacking")
+                                    }
+                                }
+                                InsertResult.FAILED ->
+                                    Log.e(TAG, "DB write failed for stability payment — not acknowledging, LDK will retry")
                             }
                             return
                         } else {
                             Log.d(TAG, "Non-stability payment received, recording as lightning and continuing to poll")
-                            recordPaymentAtomicInDB(
+                            val result = recordPaymentAtomicInDB(
                                 dbPath, paymentId, "lightning", "received",
                                 event.amountMsat.toLong(), price, null
                             )
-                            node.eventHandled()
+                            when (result) {
+                                InsertResult.INSERTED, InsertResult.DUPLICATE -> node.eventHandled()
+                                InsertResult.FAILED -> Log.e(TAG, "DB write failed for non-stability payment — not acknowledging")
+                            }
                         }
                     }
                     else -> node.eventHandled()
@@ -194,7 +205,7 @@ class StabilityProcessingService : Service() {
     }
 
     /** Insert a payment and optionally update channel backing sats in one SQLite transaction.
-     *  Returns true if the payment was new (inserted), false if it was a duplicate. */
+     *  beginTransaction() (EXCLUSIVE) is called first so the dedup check and INSERT are atomic cross-process. */
     private fun recordPaymentAtomicInDB(
         dbPath: String,
         paymentId: String?,
@@ -203,21 +214,20 @@ class StabilityProcessingService : Service() {
         amountMsat: Long,
         btcPrice: Double,
         newBackingSats: Long?
-    ): Boolean {
+    ): InsertResult {
         return try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-            // Dedup check before acquiring the write lock
-            if (!paymentId.isNullOrEmpty()) {
-                val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
-                val exists = cursor.use { it.moveToFirst() }
-                if (exists) {
-                    db.close()
-                    Log.d(TAG, "recordPaymentAtomicInDB: already exists, skipping")
-                    return false
-                }
-            }
+            // Acquire exclusive write lock first — dedup check runs while holding it.
             db.beginTransaction()
             try {
+                if (!paymentId.isNullOrEmpty()) {
+                    val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                    val exists = cursor.use { it.moveToFirst() }
+                    if (exists) {
+                        Log.d(TAG, "recordPaymentAtomicInDB: already exists, skipping")
+                        return InsertResult.DUPLICATE
+                    }
+                }
                 val amountUsd = if (btcPrice > 0) (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * btcPrice else 0.0
                 db.execSQL(
                     "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')",
@@ -231,14 +241,14 @@ class StabilityProcessingService : Service() {
                 }
                 db.setTransactionSuccessful()
                 Log.d(TAG, "recordPaymentAtomicInDB: saved $direction $amountMsat msat")
-                true
+                InsertResult.INSERTED
             } finally {
                 db.endTransaction()
                 db.close()
             }
         } catch (e: Exception) {
             Log.e(TAG, "recordPaymentAtomicInDB failed", e)
-            false
+            InsertResult.FAILED
         }
     }
 
@@ -257,9 +267,11 @@ class StabilityProcessingService : Service() {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
                         if (price <= 0) price = fetchMedianPrice()
                         val pid = event.paymentId ?: event.paymentHash
-                        recordPaymentAtomicInDB(dbPath, pid, "lightning", "received", event.amountMsat.toLong(), price, null)
-                        node.eventHandled()
-                        received = true
+                        val result = recordPaymentAtomicInDB(dbPath, pid, "lightning", "received", event.amountMsat.toLong(), price, null)
+                        when (result) {
+                            InsertResult.INSERTED, InsertResult.DUPLICATE -> { node.eventHandled(); received = true }
+                            InsertResult.FAILED -> Log.e(TAG, "DB write failed for incoming payment — not acknowledging")
+                        }
                         // Keep polling — there might be more payments
                     }
                     else -> node.eventHandled()

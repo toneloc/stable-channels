@@ -2112,6 +2112,7 @@ impl UserApp {
 
     fn process_events(&mut self) {
         while let Some(event) = self.node.next_event() {
+            let mut ack = true;
             match event {
                 Event::ChannelReady {
                     channel_id,
@@ -2329,15 +2330,16 @@ impl UserApp {
                             } else {
                                 None
                             };
-                            let ptype = if sc.expected_usd.0 > 0.0 { "stability" } else { "lightning" };
+                            let ptype = if is_stability_payment { "stability" } else { "lightning" };
                             let ucid = format!("{}", sc.user_channel_id);
                             let backing = sc.backing_sats;
                             (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid, backing)
                         };
                         let new_backing = is_stability_payment.then(|| current_backing + amount_msat / 1000);
                         // Atomically insert payment and update backing in one transaction.
-                        // Returns false for duplicates (replays) — still update balances but skip mutation.
-                        let is_new = self.db.record_payment_and_maybe_update_backing(
+                        // Ok(true)=inserted, Ok(false)=duplicate → acknowledge.
+                        // Err → transient failure, do not acknowledge so LDK re-delivers.
+                        let db_result = self.db.record_payment_and_maybe_update_backing(
                             Some(&payment_hash_str),
                             payment_type,
                             "received",
@@ -2347,7 +2349,11 @@ impl UserApp {
                             "completed",
                             is_stability_payment.then(|| user_channel_id_str.as_str()),
                             new_backing,
-                        ).unwrap_or(false);
+                        );
+                        if db_result.is_err() {
+                            ack = false;
+                        }
+                        let is_new = db_result.unwrap_or(false);
 
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
@@ -2746,7 +2752,7 @@ impl UserApp {
                 }
             }
 
-            let _ = self.node.event_handled();
+            if ack { let _ = self.node.event_handled(); }
         }
     }
 
