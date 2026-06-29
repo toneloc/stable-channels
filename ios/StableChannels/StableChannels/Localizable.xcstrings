@@ -684,9 +684,6 @@
         }
       }
     },
-    "Contact support@stablechannels.com if you need help recovering Lightning funds." : {
-
-    },
     "custody_self" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1256,6 +1253,9 @@
           }
         }
       }
+    },
+    "for questions or assistance." : {
+
     },
     "header_amount" : {
       "extractionState" : "manual",
@@ -2908,10 +2908,10 @@
         }
       }
     },
-    "Please withdraw all BTC before proceeding. Existing wallet data will be completely overwritten." : {
+    "Please email" : {
 
     },
-    "Please withdraw Lightning funds before proceeding if you plan to use this backup for recovery." : {
+    "Please withdraw all BTC before proceeding. Existing wallet data will be completely overwritten." : {
 
     },
     "Price" : {
@@ -3015,6 +3015,9 @@
           }
         }
       }
+    },
+    "Restoring from iCloud will erase your existing wallet and all funds. Please withdraw all Bitcoin before proceeding." : {
+
     },
     "section_about" : {
       "extractionState" : "manual",
@@ -3682,10 +3685,7 @@
         }
       }
     },
-    "This backup contains only your seed phrase. Lightning channel state is NOT included. If you need to recover, you may lose access to any Lightning funds." : {
-
-    },
-    "This backup contains only your seed phrase. Lightning channel state is NOT included. On-chain funds will be restored, but Lightning funds may be lost." : {
+    "This backup contains your seed phrase. Lightning channel state is NOT included." : {
 
     },
     "This recovery will restore on-chain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close." : {

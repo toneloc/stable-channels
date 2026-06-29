@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct RestoreBackupSheet: View {
     let backupService: any BackupServiceProtocol
@@ -31,8 +32,6 @@ struct RestoreBackupSheet: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
-                icloudWarningBanner
-
                 VStack(alignment: .leading, spacing: 16) {
                     featureRow(icon: "key.fill", text: "AES-256 encrypted backup")
                     featureRow(icon: "arrow.clockwise", text: "Sync latest version")
@@ -41,7 +40,7 @@ struct RestoreBackupSheet: View {
                 .padding(.horizontal, 32)
                 .padding(.top, 8)
 
-                Spacer()
+                icloudWarningBanner
 
                 if showSuccess {
                     VStack(spacing: 8) {
@@ -63,16 +62,9 @@ struct RestoreBackupSheet: View {
                         .foregroundStyle(.red)
                         .padding(.horizontal, 24)
                 }
-
-                Spacer()
             }
             .padding()
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
         }
     }
 
@@ -110,32 +102,52 @@ struct RestoreBackupSheet: View {
     }
 
     private var icloudWarningBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text("Partial Recovery Warning")
-                    .font(.headline)
-                Spacer()
-            }
+        HStack(spacing: 14) {
+            supportIconBadge
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Important")
+                    .font(.subheadline)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.primary)
 
-            Text(
-                "This backup contains only your seed phrase. Lightning channel state is NOT included. On-chain funds will be restored, but Lightning funds may be lost."
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-
-            Text("Contact support@stablechannels.com if you need help recovering Lightning funds.")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(
+                        "Restoring from iCloud will erase your existing wallet and all funds. Please withdraw all Bitcoin before proceeding."
+                    )
+                        + Text(" ")
+                        + Text("support@stablechannels.com")
+                        .foregroundStyle(.blue)
+                        .underline()
+                        + Text(" ")
+                        + Text("for questions or assistance.")
+                }
                 .font(.caption)
-                .foregroundStyle(.blue)
-                .fontWeight(.medium)
-                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(Color(uiColor: .label).opacity(0.7))
+            }
+            Spacer()
         }
-        .padding()
-        .background(.orange.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(.red, lineWidth: 1)
+                )
+        )
+    }
+
+    private var supportIconBadge: some View {
+        ZStack {
+            Circle()
+                .fill(.red)
+                .frame(width: 44, height: 44)
+                .shadow(color: .red.opacity(0.3), radius: 8, x: 0, y: 4)
+            Image(systemName: "questionmark.circle.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+        }
     }
 
     private func performRestore() async {
