@@ -705,6 +705,64 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
+    /// Returns Ok(true) if the payment was new, Ok(false) if it was a duplicate.
+    pub fn record_payment_and_maybe_update_backing(
+        &self,
+        payment_id: Option<&str>,
+        payment_type: &str,
+        direction: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
+        status: &str,
+        user_channel_id: Option<&str>,
+        new_backing_sats: Option<u64>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        // Dedup check while holding the lock to prevent races
+        if let Some(pid) = payment_id {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1",
+                    params![pid],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if exists {
+                return Ok(false);
+            }
+        }
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<()> = (|| {
+            conn.execute(
+                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    payment_id, payment_type, direction,
+                    amount_msat as i64, amount_usd, btc_price, status
+                ],
+            )?;
+            if let (Some(ucid), Some(backing)) = (user_channel_id, new_backing_sats) {
+                conn.execute(
+                    "UPDATE channels SET stable_sats = ?1, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?2",
+                    params![backing as i64, ucid],
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(true)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Update payment status (pending -> completed/failed) and optionally set fee
     pub fn update_payment_status(
         &self,

@@ -2318,24 +2318,10 @@ impl UserApp {
                             update_balances(&self.node, &mut sc);
                         }
                         self.update_balances();
-                    } else if self.db.payment_exists(&payment_hash_str).unwrap_or(false) {
-                        // Already recorded, just update balances silently
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                        }
-                        self.update_balances();
                     } else {
-                        audit_event(
-                            "PAYMENT_RECEIVED",
-                            json!({
-                                "amount_msat": amount_msat,
-                                "payment_hash": payment_hash_str
-                            }),
-                        );
-
-                        // Record payment in database
-                        let (amount_usd, btc_price, payment_type) = {
+                        let is_stability_payment = custom_records.iter()
+                            .any(|tlv| tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]);
+                        let (amount_usd, btc_price, payment_type, user_channel_id_str, current_backing) = {
                             let sc = self.stable_channel.lock().unwrap();
                             let price = sc.latest_price;
                             let usd = if price > 0.0 {
@@ -2343,50 +2329,56 @@ impl UserApp {
                             } else {
                                 None
                             };
-                            let ptype = if sc.expected_usd.0 > 0.0 {
-                                "stability"
-                            } else {
-                                "lightning"
-                            };
-                            (usd, if price > 0.0 { Some(price) } else { None }, ptype)
+                            let ptype = if sc.expected_usd.0 > 0.0 { "stability" } else { "lightning" };
+                            let ucid = format!("{}", sc.user_channel_id);
+                            let backing = sc.backing_sats;
+                            (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid, backing)
                         };
-                        let _ = self.db.record_payment(
+                        let new_backing = is_stability_payment.then(|| current_backing + amount_msat / 1000);
+                        // Atomically insert payment and update backing in one transaction.
+                        // Returns false for duplicates (replays) — still update balances but skip mutation.
+                        let is_new = self.db.record_payment_and_maybe_update_backing(
                             Some(&payment_hash_str),
                             payment_type,
                             "received",
                             amount_msat,
                             amount_usd,
                             btc_price,
-                            None,
                             "completed",
-                            None,
-                            None,
-                        );
+                            is_stability_payment.then(|| user_channel_id_str.as_str()),
+                            new_backing,
+                        ).unwrap_or(false);
 
-                        self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
-                        let is_stability_payment = custom_records.iter()
-                            .any(|tlv| tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]);
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
                             update_balances(&self.node, &mut sc);
-                            if is_stability_payment {
-                                sc.backing_sats += amount_msat / 1000;
+                            if is_new && is_stability_payment {
+                                sc.backing_sats = new_backing.unwrap();
                             }
                             stable::reconcile_incoming(&mut sc);
                         }
                         self.save_channel_settings();
-                        self.update_balances(); // Update UI immediately
-                        self.show_onboarding = false;
-                        self.waiting_for_payment = false;
+                        self.update_balances();
 
-                        // Show toast notification
-                        let sats = amount_msat / 1000;
-                        let toast_msg = if let Some(usd) = amount_usd {
-                            format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
-                        } else {
-                            format!("Received {}", Self::format_sats_as_btc(sats))
-                        };
-                        self.show_toast(&toast_msg, "+");
+                        if is_new {
+                            audit_event(
+                                "PAYMENT_RECEIVED",
+                                json!({
+                                    "amount_msat": amount_msat,
+                                    "payment_hash": payment_hash_str
+                                }),
+                            );
+                            self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
+                            self.show_onboarding = false;
+                            self.waiting_for_payment = false;
+                            let sats = amount_msat / 1000;
+                            let toast_msg = if let Some(usd) = amount_usd {
+                                format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
+                            } else {
+                                format!("Received {}", Self::format_sats_as_btc(sats))
+                            };
+                            self.show_toast(&toast_msg, "+");
+                        }
                     }
                 }
 

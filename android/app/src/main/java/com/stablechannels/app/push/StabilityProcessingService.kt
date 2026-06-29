@@ -157,32 +157,31 @@ class StabilityProcessingService : Service() {
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
-                        node.eventHandled()
                         val isStabilityPayment = event.customRecords.any {
                             it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1))
                         }
+                        val paymentId = event.paymentId ?: event.paymentHash
                         val price = fetchMedianPrice()
                         if (isStabilityPayment) {
-                            val isNewPayment = recordPaymentInDB(
-                                dbPath, null, "stability", "received",
-                                event.amountMsat.toLong(), price
+                            val amountSats = event.amountMsat.toLong() / 1000
+                            val channelState = loadChannelStateFromDB()
+                            val newBacking = channelState?.let { it.backingSats + amountSats }
+                            val isNew = recordPaymentAtomicInDB(
+                                dbPath, paymentId, "stability", "received",
+                                event.amountMsat.toLong(), price, newBacking
                             )
-                            if (isNewPayment) {
-                                val amountSats = event.amountMsat.toLong() / 1000
-                                val channelState = loadChannelStateFromDB()
-                                if (channelState != null) {
-                                    val newBacking = channelState.backingSats + amountSats
-                                    updateBackingSatsInDB(dbPath, newBacking)
-                                    Log.d(TAG, "Updated backingSats: ${channelState.backingSats} + $amountSats = $newBacking")
-                                }
+                            node.eventHandled()
+                            if (isNew && newBacking != null) {
+                                Log.d(TAG, "Updated backingSats: ${channelState?.backingSats} + $amountSats = $newBacking")
                             }
                             return
                         } else {
                             Log.d(TAG, "Non-stability payment received, recording as lightning and continuing to poll")
-                            recordPaymentInDB(
-                                dbPath, null, "lightning", "received",
-                                event.amountMsat.toLong(), price
+                            recordPaymentAtomicInDB(
+                                dbPath, paymentId, "lightning", "received",
+                                event.amountMsat.toLong(), price, null
                             )
+                            node.eventHandled()
                         }
                     }
                     else -> node.eventHandled()
@@ -192,6 +191,55 @@ class StabilityProcessingService : Service() {
             }
         }
         Log.d(TAG, "Poll timeout — no payment received")
+    }
+
+    /** Insert a payment and optionally update channel backing sats in one SQLite transaction.
+     *  Returns true if the payment was new (inserted), false if it was a duplicate. */
+    private fun recordPaymentAtomicInDB(
+        dbPath: String,
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: Long,
+        btcPrice: Double,
+        newBackingSats: Long?
+    ): Boolean {
+        return try {
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+            // Dedup check before acquiring the write lock
+            if (!paymentId.isNullOrEmpty()) {
+                val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                val exists = cursor.use { it.moveToFirst() }
+                if (exists) {
+                    db.close()
+                    Log.d(TAG, "recordPaymentAtomicInDB: already exists, skipping")
+                    return false
+                }
+            }
+            db.beginTransaction()
+            try {
+                val amountUsd = if (btcPrice > 0) (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * btcPrice else 0.0
+                db.execSQL(
+                    "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')",
+                    arrayOf(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
+                )
+                if (newBackingSats != null) {
+                    db.execSQL(
+                        "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)",
+                        arrayOf(newBackingSats)
+                    )
+                }
+                db.setTransactionSuccessful()
+                Log.d(TAG, "recordPaymentAtomicInDB: saved $direction $amountMsat msat")
+                true
+            } finally {
+                db.endTransaction()
+                db.close()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "recordPaymentAtomicInDB failed", e)
+            false
+        }
     }
 
     private fun handleIncomingPayment(node: Node, dbPath: String) {
@@ -207,12 +255,10 @@ class StabilityProcessingService : Service() {
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
-                        node.eventHandled()
                         if (price <= 0) price = fetchMedianPrice()
-                        recordPaymentInDB(
-                            dbPath, null, "lightning", "received",
-                            event.amountMsat.toLong(), price
-                        )
+                        val pid = event.paymentId ?: event.paymentHash
+                        recordPaymentAtomicInDB(dbPath, pid, "lightning", "received", event.amountMsat.toLong(), price, null)
+                        node.eventHandled()
                         received = true
                         // Keep polling — there might be more payments
                     }

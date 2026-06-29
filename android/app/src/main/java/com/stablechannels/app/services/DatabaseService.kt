@@ -233,6 +233,52 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return writableDatabase.insert("payments", null, cv)
     }
 
+    /** Insert a payment and atomically update channel backing sats in one SQLite transaction.
+     *  Returns true if the payment was new (inserted), false if it was a duplicate. */
+    fun recordPaymentAndMaybeUpdateBacking(
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: Long,
+        amountUSD: Double? = null,
+        btcPrice: Double? = null,
+        counterparty: String? = null,
+        userChannelId: String? = null,
+        newBackingSats: Long? = null
+    ): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            // Dedup check inside the transaction
+            if (!paymentId.isNullOrEmpty()) {
+                val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                val exists = cursor.use { it.moveToFirst() }
+                if (exists) return false
+            }
+            val cv = ContentValues().apply {
+                put("payment_id", paymentId)
+                put("payment_type", paymentType)
+                put("direction", direction)
+                put("amount_msat", amountMsat)
+                put("amount_usd", amountUSD)
+                put("btc_price", btcPrice)
+                put("counterparty", counterparty)
+                put("status", "completed")
+            }
+            db.insertOrThrow("payments", null, cv)
+            if (userChannelId != null && newBackingSats != null) {
+                db.execSQL(
+                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?",
+                    arrayOf(newBackingSats, userChannelId)
+                )
+            }
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun getRecentPayments(limit: Int = 50): List<PaymentRecord> {
         val cursor = readableDatabase.rawQuery(
             "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments ORDER BY created_at DESC LIMIT ?",

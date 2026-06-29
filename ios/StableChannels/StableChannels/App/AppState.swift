@@ -909,28 +909,29 @@ class AppState {
             "payment_hash": paymentHashStr
         ])
 
-        // Record in DB (dedup by paymentIdStr)
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
         let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
         let paymentType = isStabilityPayment ? "stability" : "lightning"
+        let newBacking: UInt64? = isStabilityPayment ? stableChannel.backingSats + amountMsat / 1000 : nil
 
-        let isNewPayment = (try? databaseService?.recordPayment(
+        // Atomically insert payment row and update backing sats in one SQLite transaction.
+        let isNewPayment = (try? databaseService?.recordPaymentAndMaybeUpdateBacking(
             paymentId: paymentIdStr,
             paymentType: paymentType,
             direction: "received",
             amountMsat: amountMsat,
             amountUSD: amountUSD,
             btcPrice: price > 0 ? price : nil,
-            counterparty: nil,
-            status: "completed"
+            status: "completed",
+            userChannelId: isStabilityPayment ? stableChannel.userChannelId : nil,
+            newBackingSats: newBacking
         )) == true
 
-        // Update balances and reconcile incoming
         refreshBalances()
         updateStableBalances()
-        if isStabilityPayment && isNewPayment {
-            stableChannel.backingSats += amountMsat / 1000
+        if isNewPayment && isStabilityPayment, let backing = newBacking {
+            stableChannel.backingSats = backing
         }
         StabilityService.reconcileIncoming(&stableChannel)
         saveChannelToDB()

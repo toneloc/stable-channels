@@ -343,17 +343,21 @@ class AppState(private val context: Context) : ViewModel() {
         val price = priceService.currentPrice.value
         val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1)) }
         val paymentType = if (isStabilityPayment) "stability" else "lightning"
-        val isNewPayment = (databaseService?.recordPayment(
+        val sc0 = _stableChannel.value
+        val newBacking: Long? = if (isStabilityPayment) sc0.backingSats + (amountMsat / 1000) else null
+        // Atomically insert payment row and update backing sats in one SQLite transaction.
+        val isNewPayment = databaseService?.recordPaymentAndMaybeUpdateBacking(
             paymentId = paymentId, paymentType = paymentType, direction = "received",
-            amountMsat = amountMsat, amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-            btcPrice = price, counterparty = _stableChannel.value.counterparty
-        ) ?: -1L) >= 0L
+            amountMsat = amountMsat,
+            amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
+            btcPrice = price, counterparty = sc0.counterparty,
+            userChannelId = if (isStabilityPayment) sc0.userChannelId.ifEmpty { null } else null,
+            newBackingSats = newBacking
+        ) ?: false
         refreshBalances()
         updateStableBalances()
-        if (isStabilityPayment && isNewPayment) {
-            _stableChannel.value = _stableChannel.value.copy(
-                backingSats = _stableChannel.value.backingSats + (amountMsat / 1000)
-            )
+        if (isNewPayment && isStabilityPayment && newBacking != null) {
+            _stableChannel.value = _stableChannel.value.copy(backingSats = newBacking)
         }
         val sc = StabilityService.reconcileIncoming(_stableChannel.value)
         _stableChannel.value = sc

@@ -337,6 +337,52 @@ class DatabaseService {
         return true
     }
 
+    /// Insert a payment and atomically update channel backing sats in one SQLite transaction.
+    /// Returns true if the payment was new (i.e. actually inserted), false if it was a duplicate.
+    func recordPaymentAndMaybeUpdateBacking(
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        status: String,
+        userChannelId: String?,
+        newBackingSats: UInt64?
+    ) throws -> Bool {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            if let pid = paymentId, !pid.isEmpty {
+                let existing = try query("SELECT id FROM payments WHERE payment_id = ?", params: [.text(pid)])
+                if !existing.isEmpty {
+                    try execute("ROLLBACK")
+                    return false
+                }
+            }
+            try execute(
+                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params: [
+                    paymentId.map { .text($0) } ?? .null,
+                    .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
+                    amountUSD.map { .real($0) } ?? .null,
+                    btcPrice.map { .real($0) } ?? .null,
+                    .text(status)
+                ]
+            )
+            if let ucid = userChannelId, let backing = newBackingSats {
+                try execute(
+                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
+                    params: [.integer(Int64(backing)), .text(ucid)]
+                )
+            }
+            try execute("COMMIT")
+            return true
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {
         let sql = """
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
