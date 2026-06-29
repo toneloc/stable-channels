@@ -634,7 +634,11 @@ impl StableChannelManager {
                         amount_msat,
                         node_id: sc.counterparty.to_string(),
                         route_parameters: None,
-                        custom_tlvs: vec![],
+                        // Tag as a stability payment so receiving clients can identify it.
+                        custom_tlvs: vec![CustomTlvRecord {
+                            type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+                            value: vec![1u8].into(),
+                        }],
                     };
                     let channel_id_clone = c.channel_id.clone();
                     let user_channel_id_clone = c.user_channel_id.clone();
