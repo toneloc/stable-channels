@@ -23,6 +23,8 @@ import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
 
+    private lateinit var appState: AppState
+
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
 
@@ -35,6 +37,8 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermission()
+
+        appState = AppState(applicationContext)
 
         // Lock on launch if app unlock is enabled
         if (AppAccessPreferencesManager.isAppUnlockEnabled(this)) {
@@ -50,7 +54,7 @@ class MainActivity : FragmentActivity() {
                     if (isLocked) {
                         AuthLockOverlay()
                     } else {
-                        ContentView()
+                        ContentView(appState)
                     }
                 }
             }
@@ -60,20 +64,28 @@ class MainActivity : FragmentActivity() {
     override fun onPause() {
         super.onPause()
         lastBackgroundedTime = System.currentTimeMillis()
+        appState.stopNodeForBackground()
     }
 
     override fun onResume() {
         super.onResume()
         if (isFirstResume) {
             isFirstResume = false
+            appState.restartNodeFromForeground()
             return
         }
+        appState.restartNodeFromForeground()
         if (AppAccessPreferencesManager.isAppUnlockEnabled(this)) {
             val elapsed = System.currentTimeMillis() - lastBackgroundedTime
             if (elapsed > 5000L) {
                 isLocked = true
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appState.stop()
     }
 
     @Composable
