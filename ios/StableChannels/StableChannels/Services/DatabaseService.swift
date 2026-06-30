@@ -374,6 +374,9 @@ class DatabaseService {
                     "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
                     params: [.integer(Int64(backing)), .text(ucid)]
                 )
+                if sqlite3_changes(db) == 0 {
+                    throw DatabaseError.executeFailed("backing UPDATE matched 0 rows for user_channel_id=\(ucid)")
+                }
             }
             try execute("COMMIT")
             return true

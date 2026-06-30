@@ -267,10 +267,13 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             db.insertOrThrow("payments", null, cv)
             if (userChannelId != null && newBackingSats != null) {
-                db.execSQL(
-                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?",
-                    arrayOf(newBackingSats, userChannelId)
+                val stmt = db.compileStatement(
+                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
                 )
+                stmt.bindLong(1, newBackingSats)
+                stmt.bindString(2, userChannelId)
+                val rows = stmt.executeUpdateDelete()
+                if (rows == 0) throw Exception("backing UPDATE matched 0 rows for user_channel_id=$userChannelId")
             }
             db.setTransactionSuccessful()
             return true

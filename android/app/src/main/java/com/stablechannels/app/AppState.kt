@@ -164,12 +164,13 @@ class AppState(private val context: Context) : ViewModel() {
                 // Resolve best esplora endpoint before starting node
                 chainUrl = resolveChainUrl()
 
-                // Subscribe to LDK events. handleEvent() runs synchronously in the collect
-                // lambda so emit() serializes events (extraBufferCapacity=0 in NodeService).
+                // Consume LDK events. Each event carries a CompletableDeferred; completing it
+                // unblocks NodeService so it can call n.eventHandled() and fetch the next event.
                 launch {
-                    nodeService.events.collect { event ->
+                    for ((event, ack) in nodeService.eventChannel) {
                         try { handleEvent(event) }
                         catch (e: Exception) { Log.e("AppState", "Event handler threw", e) }
+                        finally { ack.complete(Unit) }
                     }
                 }
 

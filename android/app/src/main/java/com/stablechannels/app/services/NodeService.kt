@@ -3,14 +3,14 @@ package com.stablechannels.app.services
 import android.content.Context
 import android.util.Log
 import com.stablechannels.app.util.Constants
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -38,10 +38,10 @@ class NodeService(private val context: Context) {
     private var eventJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    // RENDEZVOUS: emit() suspends while the collector's lambda is running, so the event loop
-    // can't call nextEventAsync() for a new event until the current one is fully processed.
-    private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 0, onBufferOverflow = BufferOverflow.SUSPEND)
-    val events: SharedFlow<Event> = _events
+    // Each event is paired with a CompletableDeferred. The event loop awaits the deferred
+    // before calling n.eventHandled(), ensuring ack happens after processing completes.
+    private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Unit>>>(Channel.RENDEZVOUS)
+    val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Unit>>> = _eventChannel
 
     fun start(network: Network, esploraURL: String, mnemonic: String?) {
         val dataDir = Constants.userDataDir(context)
@@ -153,14 +153,10 @@ class NodeService(private val context: Context) {
             val n = node ?: return@launch
             while (true) {
                 val event = n.nextEventAsync()
-                // With extraBufferCapacity=0 + SUSPEND, emit() suspends while the collector's
-                // lambda is actively running. event2's emit() won't unblock until event1's
-                // lambda returns — serializing all event processing.
-                _events.emit(event)
-                // Ack after emit() returns: the previous event's lambda has finished,
-                // and the current event's lambda has just been handed off. This is a much
-                // smaller window than acking before emit() (the old behavior).
-                n.eventHandled()
+                val ack = CompletableDeferred<Unit>()
+                _eventChannel.send(Pair(event, ack))  // suspends until AppState receives
+                ack.await()                            // suspends until AppState completes handling
+                n.eventHandled()                       // called only after processing is done
             }
         }
     }

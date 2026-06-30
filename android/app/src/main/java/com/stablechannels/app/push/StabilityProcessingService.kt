@@ -23,6 +23,10 @@ class StabilityProcessingService : Service() {
 
     private enum class InsertResult { INSERTED, DUPLICATE, FAILED }
 
+    /** Thrown when a stability payment DB write fails permanently; the polling catch re-throws
+     *  this so it escapes handleLspToUser and reaches onStartCommand's flagPendingPayment path. */
+    private class BackingUpdateFailed(msg: String) : Exception(msg)
+
     companion object {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
@@ -167,7 +171,7 @@ class StabilityProcessingService : Service() {
                         if (isStabilityPayment) {
                             val amountSats = event.amountMsat.toLong() / 1000
                             val channelState = loadChannelStateFromDB()
-                                ?: throw Exception("Cannot read channel state for stability payment — not acknowledging, LDK will retry")
+                                ?: throw BackingUpdateFailed("Cannot read channel state for stability payment — not acknowledging, LDK will retry")
                             val newBacking = channelState.backingSats + amountSats
                             val result = recordPaymentAtomicInDB(
                                 dbPath, paymentId, "stability", "received",
@@ -181,7 +185,7 @@ class StabilityProcessingService : Service() {
                                     }
                                 }
                                 InsertResult.FAILED ->
-                                    throw Exception("DB write failed for stability payment — not acknowledging, LDK will retry")
+                                    throw BackingUpdateFailed("DB write failed for stability payment — not acknowledging, LDK will retry")
                             }
                             return
                         } else {
@@ -198,7 +202,8 @@ class StabilityProcessingService : Service() {
                     }
                     else -> node.eventHandled()
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is BackingUpdateFailed) throw e  // permanent; let onStartCommand flag for retry
                 Thread.sleep(500)
             }
         }
