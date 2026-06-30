@@ -169,7 +169,8 @@ class AppState(private val context: Context) : ViewModel() {
 
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
                 val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
-                if (seedFile.exists() || seedPhraseFile.exists()) {
+                val seedEncryptedFile = File(Constants.userDataDir(context), "seed_encrypted")
+                if (seedFile.exists() || seedPhraseFile.exists() || seedEncryptedFile.exists()) {
                     val hasCachedChannel = _stableChannel.value.userChannelId.isNotEmpty()
                     if (hasCachedChannel) {
                         _phase.value = Phase.WALLET
@@ -181,6 +182,9 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
+                    // Migrate plaintext seed → Keystore-encrypted seed now that the node
+                    // is confirmed working. Safe to call repeatedly — skips if already done.
+                    KeystoreEncryptionService.migrateFromPlaintext(context)
                     refreshBalances()
                     detectOnchainDeposit()
                     // Restore fundingTxid
@@ -204,6 +208,8 @@ class AppState(private val context: Context) : ViewModel() {
                     _phase.value = Phase.SYNCING
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
+                    // Migrate (encrypts the newly written seed_phrase on first launch)
+                    KeystoreEncryptionService.migrateFromPlaintext(context)
                     refreshBalances()
                     reregisterPushTokenIfNeeded()
                     startStabilityTimer()
@@ -225,6 +231,8 @@ class AppState(private val context: Context) : ViewModel() {
                 _phase.value = Phase.SYNCING
                 nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
                 _phase.value = Phase.WALLET
+                // Migrate the new plaintext seed to Keystore-encrypted storage immediately
+                KeystoreEncryptionService.migrateFromPlaintext(context)
                 refreshBalances()
                 reregisterPushTokenIfNeeded()
                 startStabilityTimer()

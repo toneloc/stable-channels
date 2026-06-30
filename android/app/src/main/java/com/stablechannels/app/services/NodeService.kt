@@ -28,9 +28,8 @@ class NodeService(private val context: Context) {
     var channels: List<ChannelDetails> = emptyList()
         private set
     var savedMnemonic: String? = run {
-        // Pre-load saved mnemonic from disk so it's available immediately
-        val file = File(Constants.userDataDir(context), "seed_phrase")
-        if (file.exists()) file.readText().trim().ifEmpty { null } else null
+        // Pre-load saved mnemonic — try encrypted storage first, then plaintext legacy
+        KeystoreEncryptionService.readSeed(context)
     }
         private set
 
@@ -84,29 +83,35 @@ class NodeService(private val context: Context) {
             null
         )
 
-        val seedPhrasePath = File(Constants.userDataDir(context), "seed_phrase")
         val keySeedPath = File(Constants.userDataDir(context), "keys_seed")
+        val encryptedSeedFile = File(Constants.userDataDir(context), "seed_encrypted")
+        val plaintextSeedFile = File(Constants.userDataDir(context), "seed_phrase")
 
         // Determine which mnemonic to use
         val words: String = if (mnemonic != null) {
             // Restore — wipe ALL wallet data so new seed takes effect
             wipeWalletData(context)
             mnemonic.trim()
-        } else if (seedPhrasePath.exists()) {
-            // Existing wallet — re-read saved mnemonic
-            seedPhrasePath.readText().trim()
-        } else if (!keySeedPath.exists()) {
-            // Truly new wallet — no seed_phrase, no keys_seed
-            wipeWalletData(context)
-            generateEntropyMnemonic(null)
         } else {
-            // Pre-upgrade wallet with only keys_seed, no mnemonic available
-            ""
+            // Try reading the existing seed (encrypted first, then plaintext legacy)
+            KeystoreEncryptionService.readSeed(context)
+                ?: if (!keySeedPath.exists()) {
+                    // Truly new wallet — no seed_phrase, no keys_seed, no seed_encrypted
+                    wipeWalletData(context)
+                    generateEntropyMnemonic(null)
+                } else {
+                    // Pre-upgrade wallet with only keys_seed, no mnemonic available
+                    ""
+                }
         }
 
-        // Save mnemonic to file and derive node entropy (entropy now passed to build()).
+        // Save mnemonic and derive node entropy.
+        // Only write plaintext seed_phrase if seed_encrypted doesn't exist yet
+        // (avoids reverting an already-migrated wallet back to plaintext).
         val nodeEntropy = if (words.isNotEmpty()) {
-            seedPhrasePath.writeText(words)
+            if (!encryptedSeedFile.exists()) {
+                plaintextSeedFile.writeText(words)
+            }
             savedMnemonic = words
             NodeEntropy.fromBip39Mnemonic(words, null)
         } else {
@@ -277,10 +282,12 @@ class NodeService(private val context: Context) {
             listOf(
                 "keys_seed",
                 "seed_phrase",
+                "seed_encrypted",
                 "ldk_node_data.sqlite",
                 "ldk_node_data.sqlite-wal",
                 "ldk_node_data.sqlite-shm",
             ).forEach { File(dir, it).delete() }
+            KeystoreEncryptionService.deleteKey()
         }
     }
 

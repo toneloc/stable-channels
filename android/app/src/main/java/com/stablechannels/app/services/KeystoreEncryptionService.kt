@@ -265,7 +265,12 @@ object KeystoreEncryptionService {
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
-            .setUserAuthenticationRequired(true)
+        // NOTE: We intentionally do NOT call setUserAuthenticationRequired(true) here.
+        // The StabilityProcessingService runs as a background ForegroundService and
+        // cannot show a biometric prompt — adding auth binding would cause it to crash
+        // silently when trying to decrypt the seed. The Android Keystore hardware
+        // (TEE / StrongBox) already prevents the AES key from being extracted from the
+        // device, which is the meaningful security upgrade over plaintext storage.
 
         if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             specBuilder.setIsStrongBoxBacked(true)
@@ -273,5 +278,53 @@ object KeystoreEncryptionService {
 
         keyGenerator.init(specBuilder.build())
         return keyGenerator.generateKey()
+    }
+
+    // -------------------------------------------------------------------------
+    // Convenience: read the seed, transparently handling both encrypted and
+    // legacy-plaintext storage. Every caller (NodeService, StabilityProcessingService)
+    // should use this instead of touching the files directly.
+    // -------------------------------------------------------------------------
+
+    /**
+     * Reads the wallet seed mnemonic from disk.
+     *
+     * Priority:
+     *  1. `seed_encrypted` — AES-256-GCM blob protected by the Android Keystore.
+     *  2. `seed_phrase`    — Legacy plaintext file (present on unencrypted wallets
+     *                        or before the first migration completes).
+     *
+     * Returns the trimmed mnemonic string, or `null` if neither file exists
+     * (new wallet, or keys_seed-only legacy wallet).
+     */
+    fun readSeed(context: Context): String? {
+        val dataDir = Constants.userDataDir(context)
+        val encryptedFile = File(dataDir, ENCRYPTED_FILE_NAME)
+        val plaintextFile = File(dataDir, PLAINTEXT_FILE_NAME)
+
+        // 1. Try encrypted file
+        if (encryptedFile.exists()) {
+            return try {
+                val blob = EncryptedBlob.fromByteArray(encryptedFile.readBytes())
+                val decrypted = decrypt(blob)
+                String(decrypted, Charsets.UTF_8).trim().ifEmpty { null }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to decrypt seed — falling back to plaintext", e)
+                // Fall through to plaintext fallback
+                null
+            }
+        }
+
+        // 2. Fall back to legacy plaintext file
+        if (plaintextFile.exists()) {
+            return try {
+                plaintextFile.readText().trim().ifEmpty { null }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to read plaintext seed", e)
+                null
+            }
+        }
+
+        return null
     }
 }
