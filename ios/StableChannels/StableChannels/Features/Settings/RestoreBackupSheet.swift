@@ -42,6 +42,8 @@ struct RestoreBackupSheet: View {
 
                 icloudWarningBanner
 
+                Spacer()
+
                 if showSuccess {
                     VStack(spacing: 8) {
                         Image(systemName: "checkmark.circle.fill")
@@ -52,19 +54,22 @@ struct RestoreBackupSheet: View {
                             .foregroundStyle(.green)
                     }
                     .padding(.vertical, 16)
-                } else {
-                    restoreButton
                 }
 
-                if let error = errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 24)
+                VStack(spacing: 16) {
+                    restoreButton
+
+                    if let error = errorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
             }
-            .padding()
             .navigationBarTitleDisplayMode(.inline)
+            .padding()
         }
     }
 
@@ -76,7 +81,6 @@ struct RestoreBackupSheet: View {
                 .frame(width: 24)
             Text(text)
                 .font(.subheadline)
-                .foregroundStyle(.primary)
             Spacer()
         }
     }
