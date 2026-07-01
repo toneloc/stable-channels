@@ -2350,40 +2350,51 @@ impl UserApp {
                             is_stability_payment.then(|| user_channel_id_str.as_str()),
                             new_backing,
                         );
-                        if db_result.is_err() {
-                            ack = false;
-                        }
-                        let is_new = db_result.unwrap_or(false);
+                        match db_result {
+                            Ok(is_new) => {
+                                {
+                                    let mut sc = self.stable_channel.lock().unwrap();
+                                    update_balances(&self.node, &mut sc);
+                                    if is_new && is_stability_payment {
+                                        sc.backing_sats = new_backing.unwrap();
+                                    }
+                                    stable::reconcile_incoming(&mut sc);
+                                }
+                                self.save_channel_settings();
+                                self.update_balances();
 
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                            if is_new && is_stability_payment {
-                                sc.backing_sats = new_backing.unwrap();
+                                if is_new {
+                                    audit_event(
+                                        "PAYMENT_RECEIVED",
+                                        json!({
+                                            "amount_msat": amount_msat,
+                                            "payment_hash": payment_hash_str
+                                        }),
+                                    );
+                                    self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
+                                    self.show_onboarding = false;
+                                    self.waiting_for_payment = false;
+                                    let sats = amount_msat / 1000;
+                                    let toast_msg = if let Some(usd) = amount_usd {
+                                        format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
+                                    } else {
+                                        format!("Received {}", Self::format_sats_as_btc(sats))
+                                    };
+                                    self.show_toast(&toast_msg, "+");
+                                }
                             }
-                            stable::reconcile_incoming(&mut sc);
-                        }
-                        self.save_channel_settings();
-                        self.update_balances();
-
-                        if is_new {
-                            audit_event(
-                                "PAYMENT_RECEIVED",
-                                json!({
-                                    "amount_msat": amount_msat,
-                                    "payment_hash": payment_hash_str
-                                }),
-                            );
-                            self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
-                            self.show_onboarding = false;
-                            self.waiting_for_payment = false;
-                            let sats = amount_msat / 1000;
-                            let toast_msg = if let Some(usd) = amount_usd {
-                                format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
-                            } else {
-                                format!("Received {}", Self::format_sats_as_btc(sats))
-                            };
-                            self.show_toast(&toast_msg, "+");
+                            Err(e) => {
+                                ack = false;
+                                audit_event(
+                                    "PAYMENT_PERSIST_FAILED",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "error": e.to_string(),
+                                    }),
+                                );
+                                self.status_message =
+                                    "Payment received but could not be saved; retrying".to_string();
+                            }
                         }
                     }
                 }
@@ -2752,7 +2763,13 @@ impl UserApp {
                 }
             }
 
-            if ack { let _ = self.node.event_handled(); }
+            if ack {
+                let _ = self.node.event_handled();
+            } else {
+                // LDK returns the same queue-front event until it is acknowledged.
+                // Exit this processing pass so a transient DB failure cannot spin forever.
+                break;
+            }
         }
     }
 

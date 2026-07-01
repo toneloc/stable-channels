@@ -160,20 +160,26 @@ class NodeService {
         eventTask?.cancel()
         eventTask = Task { [weak self] in
             guard let self, let node = self.node else { return }
+            var retryDelayNanoseconds: UInt64 = 1_000_000_000
             while !Task.isCancelled {
                 let event = await node.nextEventAsync()
                 if Task.isCancelled { break }
 
-                await MainActor.run {
+                let shouldAck = await MainActor.run {
                     let token = EventAckToken()
                     NotificationCenter.default.post(
                         name: .ldkEventReceived,
                         object: event,
                         userInfo: ["ackToken": token]
                     )
-                    if token.shouldAck {
-                        try? node.eventHandled()
-                    }
+                    return token.shouldAck
+                }
+                if shouldAck {
+                    try? node.eventHandled()
+                    retryDelayNanoseconds = 1_000_000_000
+                } else {
+                    try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                    retryDelayNanoseconds = min(retryDelayNanoseconds * 2, 30_000_000_000)
                 }
             }
         }

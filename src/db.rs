@@ -743,11 +743,16 @@ impl Database {
                     amount_msat as i64, amount_usd, btc_price, status
                 ],
             )?;
-            if let (Some(ucid), Some(backing)) = (user_channel_id, new_backing_sats) {
-                conn.execute(
+            if let Some(backing) = new_backing_sats {
+                // user_channel_id must be set when a backing update is requested.
+                let ucid = user_channel_id.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                let rows = conn.execute(
                     "UPDATE channels SET stable_sats = ?1, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?2",
                     params![backing as i64, ucid],
                 )?;
+                if rows != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
             }
             Ok(())
         })();

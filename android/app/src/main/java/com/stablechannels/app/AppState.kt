@@ -168,9 +168,15 @@ class AppState(private val context: Context) : ViewModel() {
                 // unblocks NodeService so it can call n.eventHandled() and fetch the next event.
                 launch {
                     for ((event, ack) in nodeService.eventChannel) {
-                        try { handleEvent(event) }
-                        catch (e: Exception) { Log.e("AppState", "Event handler threw", e) }
-                        finally { ack.complete(Unit) }
+                        var succeeded = false
+                        try {
+                            handleEvent(event)
+                            succeeded = true
+                        } catch (e: Exception) {
+                            Log.e("AppState", "Event handler threw — not acknowledging", e)
+                        } finally {
+                            ack.complete(succeeded)
+                        }
                     }
                 }
 
@@ -348,16 +354,23 @@ class AppState(private val context: Context) : ViewModel() {
         val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1)) }
         val paymentType = if (isStabilityPayment) "stability" else "lightning"
         val sc0 = _stableChannel.value
+        // Always use paymentHash as fallback so dedup check runs even when paymentId is null.
+        val effectiveId = paymentId ?: paymentHash
+        val userChannelId = if (isStabilityPayment) sc0.userChannelId.ifEmpty { null } else null
+        if (isStabilityPayment && userChannelId == null) {
+            throw Exception("Stability payment received but userChannelId is empty — cannot update backing, not acknowledging")
+        }
         val newBacking: Long? = if (isStabilityPayment) sc0.backingSats + (amountMsat / 1000) else null
         // Atomically insert payment row and update backing sats in one SQLite transaction.
+        // Throws on DB failure — propagates to the collector which gates ack on success.
         val isNewPayment = databaseService?.recordPaymentAndMaybeUpdateBacking(
-            paymentId = paymentId, paymentType = paymentType, direction = "received",
+            paymentId = effectiveId, paymentType = paymentType, direction = "received",
             amountMsat = amountMsat,
             amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
             btcPrice = price, counterparty = sc0.counterparty,
-            userChannelId = if (isStabilityPayment) sc0.userChannelId.ifEmpty { null } else null,
+            userChannelId = userChannelId,
             newBackingSats = newBacking
-        ) ?: false
+        ) ?: throw Exception("DB service unavailable")
         refreshBalances()
         updateStableBalances()
         if (isNewPayment && isStabilityPayment && newBacking != null) {

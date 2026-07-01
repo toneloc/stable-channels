@@ -40,8 +40,9 @@ class NodeService(private val context: Context) {
 
     // Each event is paired with a CompletableDeferred. The event loop awaits the deferred
     // before calling n.eventHandled(), ensuring ack happens after processing completes.
-    private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Unit>>>(Channel.RENDEZVOUS)
-    val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Unit>>> = _eventChannel
+    // Boolean deferred: true = call n.eventHandled(); false = skip (LDK will retry this event).
+    private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Boolean>>>(Channel.RENDEZVOUS)
+    val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Boolean>>> = _eventChannel
 
     fun start(network: Network, esploraURL: String, mnemonic: String?) {
         val dataDir = Constants.userDataDir(context)
@@ -151,12 +152,19 @@ class NodeService(private val context: Context) {
     private fun startEventLoop() {
         eventJob = scope.launch {
             val n = node ?: return@launch
+            var retryDelayMs = 1_000L
             while (true) {
                 val event = n.nextEventAsync()
-                val ack = CompletableDeferred<Unit>()
+                val ack = CompletableDeferred<Boolean>()
                 _eventChannel.send(Pair(event, ack))  // suspends until AppState receives
-                ack.await()                            // suspends until AppState completes handling
-                n.eventHandled()                       // called only after processing is done
+                if (ack.await()) {
+                    n.eventHandled()
+                    retryDelayMs = 1_000L
+                } else {
+                    Log.w("NodeService", "Event processing failed; retrying in ${retryDelayMs}ms")
+                    delay(retryDelayMs)
+                    retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000L)
+                }
             }
         }
     }
