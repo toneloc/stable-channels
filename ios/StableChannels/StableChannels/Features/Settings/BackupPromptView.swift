@@ -42,6 +42,8 @@ struct BackupPromptView: View {
 
                 enableBackupWarning
 
+                Spacer()
+
                 if showSuccess {
                     VStack(spacing: 8) {
                         Image(systemName: "checkmark.circle.fill")
