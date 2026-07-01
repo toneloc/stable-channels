@@ -987,6 +987,11 @@ class AppState {
         StabilityService.reconcileIncoming(&stableChannel)
         saveChannelToDB(preserveBacking: isStabilityPayment)
 
+        // Only announce genuinely new receipts. A re-delivered/duplicate event dedups to
+        // isNewPayment == false; announcing it would overwrite the banner with a stale amount
+        // (recomputed at the current price), which is exactly the "reverted to $0.57" bug.
+        guard persistence.isNewPayment else { return }
+
         if let usd = amountUSD {
             statusMessage = "Received \(usd.usdFormatted)"
         } else {
