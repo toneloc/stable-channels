@@ -480,6 +480,9 @@ class AppState {
         cancelBackgroundStop()
         await waitForNSE()
         loadChannelFromDB()
+        // Payments received while backgrounded are recorded by the NSE, not the foreground
+        // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
+        refreshLatestPaymentStatus()
         if nodeService.isRunning {
             print("[App] Node still running (grace period), restoring gossip + reconnecting")
             restoreGossipToDB()
@@ -505,6 +508,20 @@ class AppState {
             await processPendingPushPayment()
         } catch {
             print("[App] Node restart failed: \(error)")
+        }
+    }
+
+    /// Set the home banner from the newest recorded payment. Payments received while the app was
+    /// backgrounded are persisted by the NSE, so the foreground event loop never sees them and
+    /// `statusMessage` would otherwise stay frozen on the last foreground-processed payment.
+    private func refreshLatestPaymentStatus() {
+        guard let db = databaseService,
+              let recent = try? db.getRecentPayments(limit: 10),
+              let latest = recent.first(where: { $0.direction == "received" }) else { return }
+        if let usd = latest.amountUSD {
+            statusMessage = "Received \(usd.usdFormatted)"
+        } else {
+            statusMessage = "Received \(latest.amountSats.btcSpacedFormatted) BTC"
         }
     }
 
