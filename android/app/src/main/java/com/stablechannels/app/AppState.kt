@@ -439,6 +439,8 @@ class AppState(private val context: Context) : ViewModel() {
             triggerPaymentFlash()
             AuditService.log("TRADE_COMPLETED", mapOf("payment_id" to paymentId, "action" to ptp.action))
         } else {
+            if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
+
             refreshBalances()
             updateStableBalances()
             val price = priceService.currentPrice.value
@@ -471,6 +473,65 @@ class AppState(private val context: Context) : ViewModel() {
             _statusMessage.value = successMsg
             _lastPaymentResult.value = successMsg
         }
+    }
+
+    private fun handleStabilityPaymentSuccessful(paymentId: String?, feePaidMsat: Long?): Boolean {
+        val pending = FCMService.getPendingOutgoingStabilityPayment(context)
+        if (pending != null) {
+            if (pending.paymentId.isEmpty()) {
+                // The send outcome is known to be unsafe to reinterpret generically. Leave the
+                // marker unresolved and avoid flushing in-memory backing through the normal
+                // outgoing-payment path.
+                FCMService.flagPendingPayment(context)
+                if (!paymentId.isNullOrEmpty()) {
+                    databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+                }
+                saveChannelToDB(preserveBacking = true)
+                _statusMessage.value = "Payment confirmed; syncing stability payment"
+                _lastPaymentResult.value = _statusMessage.value
+                return true
+            }
+
+            val matchesPendingStabilityPayment = !paymentId.isNullOrEmpty() && pending.paymentId == paymentId
+            val reconciled = reconcilePendingOutgoingStabilityPayment()
+            if (matchesPendingStabilityPayment) {
+                if (reconciled) {
+                    databaseService?.updatePaymentStatus(paymentId!!, "completed", feePaidMsat ?: 0)
+                    refreshBalances()
+                    updateStableBalances()
+                    _statusMessage.value = "Payment confirmed"
+                    _lastPaymentResult.value = "Payment confirmed"
+                } else {
+                    FCMService.flagPendingPayment(context)
+                    saveChannelToDB(preserveBacking = true)
+                    _statusMessage.value = "Payment confirmed; syncing stability payment"
+                    _lastPaymentResult.value = _statusMessage.value
+                }
+                return true
+            }
+
+            if (!reconciled) {
+                if (!paymentId.isNullOrEmpty()) {
+                    databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+                }
+                saveChannelToDB(preserveBacking = true)
+                _statusMessage.value = "Payment confirmed; syncing stability payment"
+                _lastPaymentResult.value = _statusMessage.value
+                return true
+            }
+        }
+
+        val isRecordedStabilityPayment = !paymentId.isNullOrEmpty() &&
+            (databaseService?.isOutgoingStabilityPayment(paymentId) == true)
+        if (!isRecordedStabilityPayment) return false
+
+        databaseService?.updatePaymentStatus(paymentId!!, "completed", feePaidMsat ?: 0)
+        refreshBalances()
+        updateStableBalances()
+        saveChannelToDB(preserveBacking = true)
+        _statusMessage.value = "Payment confirmed"
+        _lastPaymentResult.value = "Payment confirmed"
+        return true
     }
 
     private fun handleSplicePending(channelId: String, userChannelId: String, newFundingTxo: String) {
@@ -663,10 +724,7 @@ class AppState(private val context: Context) : ViewModel() {
             } catch (e: Exception) {
                 // The send already succeeded. Keep the durable marker and block all later sends
                 // until the payment row and backing delta can be committed together.
-                _stableChannel.value = sc.copy(
-                    lastStabilityPayment = now,
-                    backingSats = (sc.backingSats - amountMsat / 1000).coerceAtLeast(0)
-                )
+                _stableChannel.value = sc.copy(lastStabilityPayment = now)
                 FCMService.flagPendingPayment(context)
                 AuditService.log(
                     "STABILITY_PAYMENT_PERSISTENCE_FAILED",

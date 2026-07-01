@@ -384,6 +384,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
     }
 
+    fun isOutgoingStabilityPayment(paymentId: String): Boolean {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
+            arrayOf(paymentId)
+        )
+        return cursor.use { it.moveToFirst() }
+    }
+
     fun updatePaymentTxid(paymentId: String, txid: String) {
         val cv = ContentValues().apply {
             put("txid", txid)

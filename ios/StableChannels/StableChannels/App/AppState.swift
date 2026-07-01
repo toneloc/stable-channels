@@ -1056,6 +1056,10 @@ class AppState {
             return
         }
 
+        if handleStabilityPaymentSuccessful(paymentId: paymentId, feePaidMsat: feePaidMsat) {
+            return
+        }
+
         // Normal (non-trade) outgoing payment
         refreshBalances()
         updateStableBalances()
@@ -1093,6 +1097,91 @@ class AppState {
             "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
         ])
         statusMessage = "Payment confirmed"
+    }
+
+    private func handleStabilityPaymentSuccessful(
+        paymentId: PaymentId?,
+        feePaidMsat: UInt64?
+    ) -> Bool {
+        let paymentIdString = paymentId.map { "\($0)" }
+        if let pending = loadPendingOutgoingStabilityPayment() {
+            if pending.paymentId.isEmpty {
+                // The send outcome is known to be unsafe to reinterpret generically. Leave the
+                // marker unresolved and avoid flushing in-memory backing through the normal
+                // outgoing-payment path.
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(true, forKey: "pending_push_payment")
+                if let paymentIdString {
+                    try? databaseService?.updatePaymentStatus(
+                        paymentId: paymentIdString,
+                        status: "completed",
+                        feeMsat: feePaidMsat
+                    )
+                }
+                saveChannelToDB(preserveBacking: true)
+                statusMessage = "Payment confirmed; syncing stability payment"
+                return true
+            }
+
+            let matchesPendingStabilityPayment = paymentIdString.map { $0 == pending.paymentId } ?? false
+            let reconciled = reconcilePendingOutgoingStabilityPayment(
+                status: matchesPendingStabilityPayment ? "completed" : "pending"
+            )
+            if matchesPendingStabilityPayment {
+                if reconciled {
+                    if let paymentIdString {
+                        try? databaseService?.updatePaymentStatus(
+                            paymentId: paymentIdString,
+                            status: "completed",
+                            feeMsat: feePaidMsat
+                        )
+                    }
+                    refreshBalances()
+                    updateStableBalances()
+                    statusMessage = "Payment confirmed"
+                } else {
+                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .set(true, forKey: "pending_push_payment")
+                    saveChannelToDB(preserveBacking: true)
+                    statusMessage = "Payment confirmed; syncing stability payment"
+                }
+                return true
+            }
+
+            if !reconciled {
+                if let paymentIdString {
+                    try? databaseService?.updatePaymentStatus(
+                        paymentId: paymentIdString,
+                        status: "completed",
+                        feeMsat: feePaidMsat
+                    )
+                }
+                saveChannelToDB(preserveBacking: true)
+                statusMessage = "Payment confirmed; syncing stability payment"
+                return true
+            }
+        }
+
+        guard let paymentIdString else { return false }
+        let isRecordedStabilityPayment: Bool
+        if let databaseService {
+            isRecordedStabilityPayment =
+                (try? databaseService.isOutgoingStabilityPayment(paymentId: paymentIdString)) == true
+        } else {
+            isRecordedStabilityPayment = false
+        }
+        guard isRecordedStabilityPayment else { return false }
+
+        try? databaseService?.updatePaymentStatus(
+            paymentId: paymentIdString,
+            status: "completed",
+            feeMsat: feePaidMsat
+        )
+        refreshBalances()
+        updateStableBalances()
+        saveChannelToDB(preserveBacking: true)
+        statusMessage = "Payment confirmed"
+        return true
     }
 
     // MARK: - Channel Closed
@@ -1437,9 +1526,6 @@ class AppState {
             // until the payment row and backing delta can be committed together.
             stableChannel.lastStabilityPayment = now
             stableChannel.paymentMade = true
-            stableChannel.backingSats = stableChannel.backingSats > amountMsat / 1000
-                ? stableChannel.backingSats - amountMsat / 1000
-                : 0
             shared?.set(true, forKey: "pending_push_payment")
             AuditService.log("STABILITY_PAYMENT_PERSISTENCE_FAILED", data: [
                 "error": error.localizedDescription
@@ -1482,7 +1568,7 @@ class AppState {
         shared?.synchronize()
     }
 
-    private func reconcilePendingOutgoingStabilityPayment() -> Bool {
+    private func reconcilePendingOutgoingStabilityPayment(status: String = "pending") -> Bool {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         guard shared?.object(forKey: Self.pendingOutgoingPaymentKey) != nil else { return true }
         guard let pending = loadPendingOutgoingStabilityPayment(),
@@ -1511,7 +1597,7 @@ class AppState {
                 amountMsat: pending.amountMsat,
                 amountUSD: amountUSD,
                 btcPrice: pending.btcPrice > 0 ? pending.btcPrice : nil,
-                status: "pending",
+                status: status,
                 userChannelId: stableChannel.userChannelId,
                 backingDeltaSats: -Int64(pending.amountMsat / 1000)
             )

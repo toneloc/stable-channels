@@ -537,6 +537,14 @@ class DatabaseService {
         }
     }
 
+    func isOutgoingStabilityPayment(paymentId: String) throws -> Bool {
+        let rows = try query(
+            "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
+            params: [.text(paymentId)]
+        )
+        return !rows.isEmpty
+    }
+
     // MARK: - Pending Operations
 
     @discardableResult
