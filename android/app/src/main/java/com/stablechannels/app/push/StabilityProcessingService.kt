@@ -174,7 +174,8 @@ class StabilityProcessingService : Service() {
                             val amountSats = event.amountMsat.toLong() / 1000
                             val result = recordPaymentAtomicInDB(
                                 dbPath, paymentId, "stability", "received",
-                                event.amountMsat.toLong(), price, amountSats
+                                event.amountMsat.toLong(), price, amountSats,
+                                userChannelId = activeUserChannelId()
                             )
                             when (result) {
                                 InsertResult.INSERTED, InsertResult.DUPLICATE -> {
@@ -231,7 +232,8 @@ class StabilityProcessingService : Service() {
         direction: String,
         amountMsat: Long,
         btcPrice: Double,
-        backingDeltaSats: Long?
+        backingDeltaSats: Long?,
+        userChannelId: String? = null
     ): InsertResult {
         return try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
@@ -254,11 +256,17 @@ class StabilityProcessingService : Service() {
                     arrayOf<Any?>(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
                 )
                 if (backingDeltaSats != null) {
+                    // Target the backing UPDATE by the explicit user_channel_id — never by recency —
+                    // so a push-triggered payment can't credit/debit the wrong channel row.
+                    if (userChannelId.isNullOrEmpty()) {
+                        throw Exception("Backing delta requested without user_channel_id — rolling back")
+                    }
                     val updateStmt = db.compileStatement(
-                        "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s','now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1) AND stable_sats + ? >= 0"
+                        "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s','now') WHERE user_channel_id = ? AND stable_sats + ? >= 0"
                     )
                     updateStmt.bindLong(1, backingDeltaSats)
-                    updateStmt.bindLong(2, backingDeltaSats)
+                    updateStmt.bindString(2, userChannelId)
+                    updateStmt.bindLong(3, backingDeltaSats)
                     val rowsAffected = updateStmt.executeUpdateDelete()
                     if (rowsAffected != 1) {
                         throw Exception("Backing UPDATE affected $rowsAffected rows, expected 1 — rolling back")
@@ -420,7 +428,8 @@ class StabilityProcessingService : Service() {
             val amountSats = amountMsat / 1000
             val result = recordPaymentAtomicInDB(
                 dbPath, paymentIdString, "stability", "sent",
-                amountMsat, price, -amountSats
+                amountMsat, price, -amountSats,
+                userChannelId = channelState.userChannelId
             )
             if (result == InsertResult.FAILED) {
                 throw BackingUpdateFailed(
@@ -449,7 +458,8 @@ class StabilityProcessingService : Service() {
         val amountSats = pending.amountMsat / 1000
         val result = recordPaymentAtomicInDB(
             dbPath, pending.paymentId, "stability", "sent",
-            pending.amountMsat, pending.btcPrice, -amountSats
+            pending.amountMsat, pending.btcPrice, -amountSats,
+            userChannelId = activeUserChannelId()
         )
         if (result == InsertResult.FAILED) {
             throw BackingUpdateFailed(
@@ -465,7 +475,8 @@ class StabilityProcessingService : Service() {
         val receiverSats: Long,
         val nativeSats: Long,
         val backingSats: Long,
-        val latestPrice: Double
+        val latestPrice: Double,
+        val userChannelId: String
     )
 
     private fun loadChannelStateFromDB(): ChannelState? {
@@ -475,8 +486,9 @@ class StabilityProcessingService : Service() {
         return try {
             val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
-                // Deterministic fallback row when multiple channels exist.
-                "SELECT expected_usd, receiver_sats, latest_price, stable_sats FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
+                // Pick the single active channel deterministically. The user_channel_id it returns is
+                // the stable key every backing UPDATE targets by — the write never re-selects by recency.
+                "SELECT expected_usd, receiver_sats, latest_price, stable_sats, user_channel_id FROM channels WHERE user_channel_id IS NOT NULL AND user_channel_id != '' ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -486,7 +498,8 @@ class StabilityProcessingService : Service() {
                         receiverSats = it.getLong(1),
                         nativeSats = 0,  // not in DB schema, computed at runtime
                         backingSats = it.getLong(3),
-                        latestPrice = it.getDouble(2)
+                        latestPrice = it.getDouble(2),
+                        userChannelId = it.getString(4)
                     )
                 } else null
             }
@@ -497,6 +510,11 @@ class StabilityProcessingService : Service() {
             null
         }
     }
+
+    /** Resolve the single active channel's user_channel_id — the stable key backing UPDATEs target.
+     *  Returns null when no channel row exists, in which case a backing update must fail (not guess). */
+    private fun activeUserChannelId(): String? =
+        loadChannelStateFromDB()?.userChannelId?.takeIf { it.isNotEmpty() }
 
     private fun fetchMedianPrice(): Double {
         val feeds = listOf(

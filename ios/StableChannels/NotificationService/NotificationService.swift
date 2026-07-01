@@ -278,7 +278,8 @@ class NotificationService: UNNotificationServiceExtension {
                         let result = recordPaymentAndMaybeUpdateBackingInDB(
                             dbPath: dbPath, paymentId: payId, paymentType: "stability",
                             direction: "received", amountMsat: amountMsat, btcPrice: price,
-                            backingDeltaSats: Int64(amountSats)
+                            backingDeltaSats: Int64(amountSats),
+                            userChannelId: activeUserChannelId(dbPath: dbPath)
                         )
                         switch result {
                         case .inserted, .duplicate:
@@ -366,7 +367,8 @@ class NotificationService: UNNotificationServiceExtension {
                             direction: "received",
                             amountMsat: amountMsat,
                             btcPrice: price,
-                            backingDeltaSats: Int64(amountMsat / 1000)
+                            backingDeltaSats: Int64(amountMsat / 1000),
+                            userChannelId: activeUserChannelId(dbPath: dbPath)
                         )
                     } else {
                         result = recordPaymentAndMaybeUpdateBackingInDB(
@@ -589,7 +591,8 @@ class NotificationService: UNNotificationServiceExtension {
                 direction: "sent",
                 amountMsat: amountMsat,
                 btcPrice: price,
-                backingDeltaSats: -Int64(amountSats)
+                backingDeltaSats: -Int64(amountSats),
+                userChannelId: channelState.userChannelId
             )
             switch persistence {
             case .inserted, .duplicate:
@@ -663,7 +666,8 @@ class NotificationService: UNNotificationServiceExtension {
             direction: "sent",
             amountMsat: pending.amountMsat,
             btcPrice: pending.btcPrice,
-            backingDeltaSats: -Int64(pending.amountMsat / 1000)
+            backingDeltaSats: -Int64(pending.amountMsat / 1000),
+            userChannelId: activeUserChannelId(dbPath: dbPath)
         )
         switch result {
         case .inserted, .duplicate:
@@ -687,7 +691,8 @@ class NotificationService: UNNotificationServiceExtension {
         direction: String,
         amountMsat: UInt64,
         btcPrice: Double,
-        backingDeltaSats: Int64?
+        backingDeltaSats: Int64?,
+        userChannelId: String? = nil
     ) -> PaymentInsertResult {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
@@ -737,14 +742,22 @@ class NotificationService: UNNotificationServiceExtension {
         sqlite3_finalize(stmt)
 
         if let delta = backingDeltaSats {
-            let updateSql = "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1) AND stable_sats + ? >= 0"
+            // Target the backing UPDATE by the explicit user_channel_id — never by recency —
+            // so a push-triggered payment can't credit/debit the wrong channel row.
+            guard let ucid = userChannelId, !ucid.isEmpty else {
+                nseLog("recordPaymentAndMaybeBacking: backing delta requested without user_channel_id — rolling back")
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
+            let updateSql = "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ? AND stable_sats + ? >= 0"
             var updateStmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .failed
             }
             sqlite3_bind_int64(updateStmt, 1, delta)
-            sqlite3_bind_int64(updateStmt, 2, delta)
+            sqlite3_bind_text(updateStmt, 2, (ucid as NSString).utf8String, -1, nil)
+            sqlite3_bind_int64(updateStmt, 3, delta)
             let stepRc = sqlite3_step(updateStmt)
             let changedRows = sqlite3_changes(db)
             sqlite3_finalize(updateStmt)
@@ -771,6 +784,7 @@ class NotificationService: UNNotificationServiceExtension {
         let nativeSats: UInt64
         let receiverSats: UInt64
         let latestPrice: Double
+        let userChannelId: String
     }
 
     /// Read channel state directly from SQLite using C API (no DatabaseService dependency).
@@ -783,11 +797,12 @@ class NotificationService: UNNotificationServiceExtension {
         defer { sqlite3_close(db) }
 
         var stmt: OpaquePointer?
-        /// Avoid nondeterministic row selection when multiple rows exist.
-        /// Uses latest updated row as a stable fallback (not “active channel” semantics).
+        /// Pick the single active channel deterministically. The returned user_channel_id is the
+        /// stable key every backing UPDATE targets by — the write never re-selects by recency.
         let sql = """
-            SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats
+            SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats, user_channel_id
             FROM channels
+            WHERE user_channel_id IS NOT NULL AND user_channel_id != ''
             ORDER BY updated_at DESC, channel_id DESC
             LIMIT 1
         """
@@ -807,14 +822,23 @@ class NotificationService: UNNotificationServiceExtension {
         let receiverSats = UInt64(sqlite3_column_int64(stmt, 2))
         let latestPrice = sqlite3_column_double(stmt, 3)
         let nativeSats = UInt64(sqlite3_column_int64(stmt, 4))
+        let userChannelId = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
 
         return ChannelState(
             expectedUSD: expectedUSD,
             backingSats: backingSats,
             nativeSats: nativeSats,
             receiverSats: receiverSats,
-            latestPrice: latestPrice
+            latestPrice: latestPrice,
+            userChannelId: userChannelId
         )
+    }
+
+    /// Resolve the single active channel's user_channel_id — the stable key backing UPDATEs target.
+    /// Returns nil when no channel row exists, in which case a backing update must fail (not guess).
+    private func activeUserChannelId(dbPath: String) -> String? {
+        guard let ucid = readChannelState(dbPath: dbPath)?.userChannelId, !ucid.isEmpty else { return nil }
+        return ucid
     }
 
     // MARK: - Price Fetch
