@@ -287,9 +287,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         backingDeltaSats: Long? = null
     ): PaymentPersistenceResult {
         val db = writableDatabase
-        db.beginTransaction()
+        // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT, preventing
+        // a TOCTOU race where two processes both read "not exists" then both INSERT.
+        db.execSQL("BEGIN IMMEDIATE")
         try {
-            // Dedup check inside the transaction
+            // Dedup check inside the write lock
             if (!paymentId.isNullOrEmpty()) {
                 val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
                 val exists = cursor.use { it.moveToFirst() }
@@ -302,6 +304,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     } else {
                         null
                     }
+                    db.execSQL("ROLLBACK")
                     return PaymentPersistenceResult(false, backing)
                 }
             }
@@ -321,10 +324,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 val ucid = userChannelId
                     ?: throw IllegalStateException("userChannelId required for backing update")
                 val stmt = db.compileStatement(
-                    "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+                    "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s','now') WHERE user_channel_id = ? AND stable_sats + ? >= 0"
                 )
                 stmt.bindLong(1, backingDeltaSats)
                 stmt.bindString(2, ucid)
+                stmt.bindLong(3, backingDeltaSats)
                 val rows = stmt.executeUpdateDelete()
                 if (rows != 1) {
                     throw IllegalStateException(
@@ -334,10 +338,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 resultingBacking = readBackingSats(db, ucid)
                     ?: throw IllegalStateException("No channel row for user_channel_id=$ucid")
             }
-            db.setTransactionSuccessful()
+            db.execSQL("COMMIT")
             return PaymentPersistenceResult(true, resultingBacking)
-        } finally {
-            db.endTransaction()
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
         }
     }
 

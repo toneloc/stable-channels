@@ -72,6 +72,52 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertEqual(second.backingSats, 1_150)
 
+        let outgoing = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-outgoing",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 200_000,
+            amountUSD: 2,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: -200
+        )
+        XCTAssertTrue(outgoing.isNewPayment)
+        XCTAssertEqual(outgoing.backingSats, 950)
+
+        let outgoingReplay = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-outgoing",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 200_000,
+            amountUSD: 2,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: -200
+        )
+        XCTAssertFalse(outgoingReplay.isNewPayment)
+        XCTAssertEqual(outgoingReplay.backingSats, 950)
+
+        XCTAssertThrowsError(
+            try service.recordPaymentAndMaybeUpdateBacking(
+                paymentId: "payment-too-large",
+                paymentType: "stability",
+                direction: "sent",
+                amountMsat: 2_000_000,
+                amountUSD: 20,
+                btcPrice: 100_000,
+                status: "pending",
+                userChannelId: "user-channel-1",
+                backingDeltaSats: -2_000
+            )
+        )
+        let afterRejectedDebit = try XCTUnwrap(
+            service.loadChannel(userChannelId: "user-channel-1")
+        )
+        XCTAssertEqual(afterRejectedDebit.backingSats, 950)
+
         try service.saveChannelPreservingBacking(
             channelId: "channel-1",
             userChannelId: "user-channel-1",
@@ -79,7 +125,7 @@ final class DatabaseServiceTests: XCTestCase {
             note: "metadata-only"
         )
         let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
-        XCTAssertEqual(stored.backingSats, 1_150)
+        XCTAssertEqual(stored.backingSats, 950)
         XCTAssertEqual(stored.expectedUSD, 125)
     }
 

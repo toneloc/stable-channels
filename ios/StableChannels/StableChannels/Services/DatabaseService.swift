@@ -384,7 +384,7 @@ class DatabaseService {
         btcPrice: Double?,
         status: String,
         userChannelId: String?,
-        backingDeltaSats: UInt64?
+        backingDeltaSats: Int64?
     ) throws -> PaymentPersistenceResult {
         try execute("BEGIN IMMEDIATE")
         do {
@@ -415,8 +415,8 @@ class DatabaseService {
                     throw DatabaseError.executeFailed("userChannelId required for backing update")
                 }
                 try execute(
-                    "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
-                    params: [.integer(Int64(delta)), .text(ucid)]
+                    "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ? AND stable_sats + ? >= 0",
+                    params: [.integer(delta), .text(ucid), .integer(delta)]
                 )
                 let changedRows = sqlite3_changes(db)
                 if changedRows != 1 {

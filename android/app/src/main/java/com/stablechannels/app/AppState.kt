@@ -590,6 +590,8 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun runStabilityCheck() {
+        if (!reconcilePendingOutgoingStabilityPayment()) return
+
         refreshBalances()
         updateStableBalances()
         val sc = _stableChannel.value
@@ -612,24 +614,110 @@ class AppState(private val context: Context) : ViewModel() {
             val amountMsat = USD(abs(result.dollarsFromPar)).toMsats(price)
             if (amountMsat == 0L) return
 
-            try {
-                val paymentId = nodeService.sendKeysend(amountMsat, sc.counterparty)
-                // Reset backingSats to equilibrium — accounts payment against stable pool.
-                // Server does the same reset, so they stay in sync.
-                val newBacking = if (price > 0) (sc.expectedUSD.amount / price * Constants.SATS_IN_BTC).toLong() else sc.backingSats
-                val updated = sc.copy(lastStabilityPayment = now, backingSats = newBacking)
-                _stableChannel.value = updated
+            if (!FCMService.savePendingOutgoingStabilityPayment(context, "", amountMsat, price)) {
+                AuditService.log("STABILITY_PAYMENT_FAILED", mapOf("error" to "could_not_persist_send_guard"))
+                return
+            }
 
-                databaseService?.recordPayment(
-                    paymentId = paymentId, paymentType = "stability", direction = "sent",
+            val paymentId = try {
+                nodeService.sendKeysend(amountMsat, sc.counterparty)
+            } catch (e: Exception) {
+                FCMService.clearPendingOutgoingStabilityPayment(context)
+                AuditService.log("STABILITY_PAYMENT_FAILED", mapOf("error" to (e.message ?: "")))
+                return
+            }
+
+            val paymentIdString = paymentId.toString()
+            val guardSaved = FCMService.savePendingOutgoingStabilityPayment(
+                context, paymentIdString, amountMsat, price
+            )
+            FCMService.getPrefs(context).edit().putLong("bg_last_stability_sent", now).commit()
+            if (!guardSaved) {
+                FCMService.flagPendingPayment(context)
+                AuditService.log(
+                    "STABILITY_PAYMENT_PERSISTENCE_FAILED",
+                    mapOf("error" to "payment_sent_but_id_guard_update_failed")
+                )
+                return
+            }
+
+            try {
+                val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
+                    paymentId = paymentIdString,
+                    paymentType = "stability",
+                    direction = "sent",
                     amountMsat = amountMsat,
                     amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-                    btcPrice = price, counterparty = sc.counterparty
-                )
+                    btcPrice = price,
+                    counterparty = sc.counterparty,
+                    userChannelId = sc.userChannelId,
+                    backingDeltaSats = -(amountMsat / 1000)
+                ) ?: throw IllegalStateException("DB service unavailable")
+                val backing = persistence.backingSats
+                    ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
+                val updated = sc.copy(lastStabilityPayment = now, backingSats = backing)
+                _stableChannel.value = updated
+                saveChannelToDB(preserveBacking = true)
+                FCMService.clearPendingOutgoingStabilityPayment(context)
                 AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
             } catch (e: Exception) {
-                AuditService.log("STABILITY_PAYMENT_FAILED", mapOf("error" to (e.message ?: "")))
+                // The send already succeeded. Keep the durable marker and block all later sends
+                // until the payment row and backing delta can be committed together.
+                _stableChannel.value = sc.copy(
+                    lastStabilityPayment = now,
+                    backingSats = (sc.backingSats - amountMsat / 1000).coerceAtLeast(0)
+                )
+                FCMService.flagPendingPayment(context)
+                AuditService.log(
+                    "STABILITY_PAYMENT_PERSISTENCE_FAILED",
+                    mapOf("error" to (e.message ?: ""))
+                )
             }
+        }
+    }
+
+    private fun reconcilePendingOutgoingStabilityPayment(): Boolean {
+        val pending = FCMService.getPendingOutgoingStabilityPayment(context) ?: return true
+        if (pending.paymentId.isEmpty() || pending.amountMsat <= 0 || pending.btcPrice <= 0) {
+            FCMService.flagPendingPayment(context)
+            AuditService.log(
+                "STABILITY_PAYMENT_RECONCILE_BLOCKED",
+                mapOf("error" to "unresolved_send_marker")
+            )
+            return false
+        }
+
+        val sc = _stableChannel.value
+        if (sc.userChannelId.isEmpty()) {
+            FCMService.flagPendingPayment(context)
+            return false
+        }
+
+        return try {
+            val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
+                paymentId = pending.paymentId,
+                paymentType = "stability",
+                direction = "sent",
+                amountMsat = pending.amountMsat,
+                amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.btcPrice,
+                btcPrice = pending.btcPrice,
+                counterparty = sc.counterparty,
+                userChannelId = sc.userChannelId,
+                backingDeltaSats = -(pending.amountMsat / 1000)
+            ) ?: throw IllegalStateException("DB service unavailable")
+            val backing = persistence.backingSats
+                ?: throw IllegalStateException("DB did not return backing during outgoing reconciliation")
+            _stableChannel.value = sc.copy(backingSats = backing)
+            saveChannelToDB(preserveBacking = true)
+            FCMService.clearPendingOutgoingStabilityPayment(context)
+            true
+        } catch (e: Exception) {
+            FCMService.flagPendingPayment(context)
+            AuditService.log(
+                "STABILITY_PAYMENT_RECONCILE_FAILED",
+                mapOf("error" to (e.message ?: ""))
+            )
+            false
         }
     }
 
