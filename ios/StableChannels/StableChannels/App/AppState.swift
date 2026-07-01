@@ -116,7 +116,15 @@ class AppState {
 
     private var eventObserver: NSObjectProtocol?
     private var stabilityTimer: Task<Void, Never>?
+    private var heartbeatTimer: Task<Void, Never>?
     private(set) var chainURL: String = Constants.primaryChainURL
+    private static let pendingOutgoingPaymentKey = "pending_outgoing_stability_payment"
+
+    private struct PendingOutgoingStabilityPayment {
+        let paymentId: String
+        let amountMsat: UInt64
+        let btcPrice: Double
+    }
 
     // Auto-sweep state
     private(set) var isSweeping = false
@@ -387,7 +395,7 @@ class AppState {
         while shared?.bool(forKey: "nse_processing") == true {
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             waited += 1
-            if waited >= 10 { break } // timeout after 10 seconds
+            if waited >= 30 { break } // NSE has an approximately 30-second execution window
         }
         if waited > 0 {
             AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
@@ -397,6 +405,8 @@ class AppState {
     func stop() {
         stabilityTimer?.cancel()
         stabilityTimer = nil
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         if let observer = eventObserver {
             NotificationCenter.default.removeObserver(observer)
             eventObserver = nil
@@ -452,6 +462,8 @@ class AppState {
         print("[App] Stopping node for background")
         stabilityTimer?.cancel()
         stabilityTimer = nil
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -466,6 +478,11 @@ class AppState {
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
         cancelBackgroundStop()
+        await waitForNSE()
+        loadChannelFromDB()
+        // Payments received while backgrounded are recorded by the NSE, not the foreground
+        // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
+        refreshLatestPaymentStatus()
         if nodeService.isRunning {
             print("[App] Node still running (grace period), restoring gossip + reconnecting")
             restoreGossipToDB()
@@ -475,7 +492,6 @@ class AppState {
             return
         }
         print("[App] Restarting node from foreground")
-        await waitForNSE()
         restoreGossipToDB()
         do {
             try await nodeService.start(
@@ -485,7 +501,6 @@ class AppState {
             )
             refreshBalances()
             updateStableBalances()
-            // Reconcile backingSats — NSE may have received payments while backgrounded
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
             reregisterPushTokenIfNeeded()
@@ -493,6 +508,20 @@ class AppState {
             await processPendingPushPayment()
         } catch {
             print("[App] Node restart failed: \(error)")
+        }
+    }
+
+    /// Set the home banner from the newest recorded payment. Payments received while the app was
+    /// backgrounded are persisted by the NSE, so the foreground event loop never sees them and
+    /// `statusMessage` would otherwise stay frozen on the last foreground-processed payment.
+    private func refreshLatestPaymentStatus() {
+        guard let db = databaseService,
+              let recent = try? db.getRecentPayments(limit: 10),
+              let latest = recent.first(where: { $0.direction == "received" }) else { return }
+        if let usd = latest.amountUSD {
+            statusMessage = "Received \(usd.usdFormatted)"
+        } else {
+            statusMessage = "Received \(latest.amountSats.btcSpacedFormatted) BTC"
         }
     }
 
@@ -682,6 +711,10 @@ class AppState {
         guard shared?.bool(forKey: "pending_push_payment") == true else { return }
 
         print("[Push] Processing pending push payment from NSE flag")
+        guard reconcilePendingOutgoingStabilityPayment() else {
+            shared?.set(true, forKey: "pending_push_payment")
+            return
+        }
 
         // Reconnect to LSP so pending payment can be received
         do {
@@ -758,11 +791,12 @@ class AppState {
             queue: .main
         ) { [weak self] notification in
             guard let self, let event = notification.object as? Event else { return }
-            self.handleEvent(event)
+            let ackToken = notification.userInfo?["ackToken"] as? EventAckToken
+            self.handleEvent(event, ackToken: ackToken)
         }
     }
 
-    private func handleEvent(_ event: Event) {
+    private func handleEvent(_ event: Event, ackToken: EventAckToken? = nil) {
         switch event {
         case .channelPending(let channelId, let userChannelId, _, let counterpartyNodeId, let fundingTxo):
             if stableChannel.userChannelId.isEmpty {
@@ -815,7 +849,8 @@ class AppState {
                 paymentId: paymentId,
                 amountMsat: amountMsat,
                 paymentHash: paymentHash,
-                customRecords: customRecords
+                customRecords: customRecords,
+                ackToken: ackToken
             )
 
         case .paymentSuccessful(let paymentId, let paymentHash, _, let feePaidMsat, _):
@@ -890,7 +925,8 @@ class AppState {
         paymentId: PaymentId?,
         amountMsat: UInt64,
         paymentHash: PaymentHash,
-        customRecords: [CustomTlvRecord]
+        customRecords: [CustomTlvRecord],
+        ackToken: EventAckToken? = nil
     ) {
         let paymentHashStr = "\(paymentHash)"
         let paymentIdStr = paymentId.map { "\($0)" } ?? paymentHashStr
@@ -909,28 +945,52 @@ class AppState {
             "payment_hash": paymentHashStr
         ])
 
-        // Record in DB (dedup by paymentIdStr)
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
-        let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType }
+        let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
         let paymentType = isStabilityPayment ? "stability" : "lightning"
+        let backingDelta: Int64? = isStabilityPayment ? Int64(amountMsat / 1000) : nil
 
-        _ = try? databaseService?.recordPayment(
-            paymentId: paymentIdStr,
-            paymentType: paymentType,
-            direction: "received",
-            amountMsat: amountMsat,
-            amountUSD: amountUSD,
-            btcPrice: price > 0 ? price : nil,
-            counterparty: nil,
-            status: "completed"
-        )
+        // Atomically insert payment row and increment backing sats in one SQLite transaction.
+        // On DB failure, veto the ack so LDK re-delivers the event.
+        let persistence: PaymentPersistenceResult
+        do {
+            guard let databaseService else {
+                ackToken?.shouldAck = false
+                return
+            }
+            persistence = try databaseService.recordPaymentAndMaybeUpdateBacking(
+                paymentId: paymentIdStr,
+                paymentType: paymentType,
+                direction: "received",
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: price > 0 ? price : nil,
+                status: "completed",
+                userChannelId: isStabilityPayment ? stableChannel.userChannelId : nil,
+                backingDeltaSats: backingDelta
+            )
+        } catch {
+            ackToken?.shouldAck = false
+            return
+        }
 
-        // Update balances and reconcile incoming
         refreshBalances()
         updateStableBalances()
+        if isStabilityPayment {
+            guard let backing = persistence.backingSats else {
+                ackToken?.shouldAck = false
+                return
+            }
+            stableChannel.backingSats = backing
+        }
         StabilityService.reconcileIncoming(&stableChannel)
-        saveChannelToDB()
+        saveChannelToDB(preserveBacking: isStabilityPayment)
+
+        // Only announce genuinely new receipts. A re-delivered/duplicate event dedups to
+        // isNewPayment == false; announcing it would overwrite the banner with a stale amount
+        // (recomputed at the current price), which is exactly the "reverted to $0.57" bug.
+        guard persistence.isNewPayment else { return }
 
         if let usd = amountUSD {
             statusMessage = "Received \(usd.usdFormatted)"
@@ -1018,6 +1078,10 @@ class AppState {
             return
         }
 
+        if handleStabilityPaymentSuccessful(paymentId: paymentId, feePaidMsat: feePaidMsat) {
+            return
+        }
+
         // Normal (non-trade) outgoing payment
         refreshBalances()
         updateStableBalances()
@@ -1055,6 +1119,91 @@ class AppState {
             "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
         ])
         statusMessage = "Payment confirmed"
+    }
+
+    private func handleStabilityPaymentSuccessful(
+        paymentId: PaymentId?,
+        feePaidMsat: UInt64?
+    ) -> Bool {
+        let paymentIdString = paymentId.map { "\($0)" }
+        if let pending = loadPendingOutgoingStabilityPayment() {
+            if pending.paymentId.isEmpty {
+                // The send outcome is known to be unsafe to reinterpret generically. Leave the
+                // marker unresolved and avoid flushing in-memory backing through the normal
+                // outgoing-payment path.
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(true, forKey: "pending_push_payment")
+                if let paymentIdString {
+                    try? databaseService?.updatePaymentStatus(
+                        paymentId: paymentIdString,
+                        status: "completed",
+                        feeMsat: feePaidMsat
+                    )
+                }
+                saveChannelToDB(preserveBacking: true)
+                statusMessage = "Payment confirmed; syncing stability payment"
+                return true
+            }
+
+            let matchesPendingStabilityPayment = paymentIdString.map { $0 == pending.paymentId } ?? false
+            let reconciled = reconcilePendingOutgoingStabilityPayment(
+                status: matchesPendingStabilityPayment ? "completed" : "pending"
+            )
+            if matchesPendingStabilityPayment {
+                if reconciled {
+                    if let paymentIdString {
+                        try? databaseService?.updatePaymentStatus(
+                            paymentId: paymentIdString,
+                            status: "completed",
+                            feeMsat: feePaidMsat
+                        )
+                    }
+                    refreshBalances()
+                    updateStableBalances()
+                    statusMessage = "Payment confirmed"
+                } else {
+                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .set(true, forKey: "pending_push_payment")
+                    saveChannelToDB(preserveBacking: true)
+                    statusMessage = "Payment confirmed; syncing stability payment"
+                }
+                return true
+            }
+
+            if !reconciled {
+                if let paymentIdString {
+                    try? databaseService?.updatePaymentStatus(
+                        paymentId: paymentIdString,
+                        status: "completed",
+                        feeMsat: feePaidMsat
+                    )
+                }
+                saveChannelToDB(preserveBacking: true)
+                statusMessage = "Payment confirmed; syncing stability payment"
+                return true
+            }
+        }
+
+        guard let paymentIdString else { return false }
+        let isRecordedStabilityPayment: Bool
+        if let databaseService {
+            isRecordedStabilityPayment =
+                (try? databaseService.isOutgoingStabilityPayment(paymentId: paymentIdString)) == true
+        } else {
+            isRecordedStabilityPayment = false
+        }
+        guard isRecordedStabilityPayment else { return false }
+
+        try? databaseService?.updatePaymentStatus(
+            paymentId: paymentIdString,
+            status: "completed",
+            feeMsat: feePaidMsat
+        )
+        refreshBalances()
+        updateStableBalances()
+        saveChannelToDB(preserveBacking: true)
+        statusMessage = "Payment confirmed"
+        return true
     }
 
     // MARK: - Channel Closed
@@ -1250,14 +1399,22 @@ class AppState {
 
     private func startStabilityTimer() {
         stabilityTimer?.cancel()
+        heartbeatTimer?.cancel()
+
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        heartbeatTimer = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { break }
+                shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+            }
+        }
+
         stabilityTimer = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Constants.stabilityCheckIntervalSecs * 1_000_000_000)
                 guard !Task.isCancelled else { break }
-
-                // Heartbeat — thread-safe, no need to block main thread
-                UserDefaults(suiteName: Constants.appGroupIdentifier)?
-                    .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
                 // ensureLSPConnected dispatches its own blocking work off-main internally.
                 await ensureLSPConnected()
@@ -1288,6 +1445,8 @@ class AppState {
     }
 
     private func runStabilityCheck() {
+        guard reconcilePendingOutgoingStabilityPayment() else { return }
+
         let price = btcPrice
         guard price > 0 else { return }
 
@@ -1311,35 +1470,72 @@ class AppState {
         let amountMsat = USD(amount: abs(result.dollarsFromPar)).toMsats(price: price)
         guard amountMsat > 0 else { return }
 
+        guard savePendingOutgoingStabilityPayment(
+            PendingOutgoingStabilityPayment(paymentId: "", amountMsat: amountMsat, btcPrice: price)
+        ) else {
+            AuditService.log("STABILITY_PAYMENT_FAILED", data: [
+                "error": "could_not_persist_send_guard"
+            ])
+            return
+        }
+
         // Send stability payment
+        let paymentId: PaymentId
         do {
-            let paymentId = try nodeService.sendKeysend(
+            paymentId = try nodeService.sendKeysend(
                 amountMsat: amountMsat,
                 to: stableChannel.counterparty
             )
-            stableChannel.lastStabilityPayment = now
-            stableChannel.paymentMade = true
+        } catch {
+            clearPendingOutgoingStabilityPayment()
+            AuditService.log("STABILITY_PAYMENT_FAILED", data: [
+                "error": error.localizedDescription
+            ])
+            return
+        }
 
-            // Reset backingSats to equilibrium — accounts payment against stable pool.
-            // Don't recompute nativeSats — receiver balance hasn't updated yet (HTLC in flight).
-            // Native will be recomputed on next balance refresh.
-            if price > 0 {
-                stableChannel
-                    .backingSats = UInt64(stableChannel.expectedUSD.amount / price * Double(Constants.satsInBTC))
+        let paymentIdString = "\(paymentId)"
+        let guardSaved = savePendingOutgoingStabilityPayment(
+            PendingOutgoingStabilityPayment(
+                paymentId: paymentIdString,
+                amountMsat: amountMsat,
+                btcPrice: price
+            )
+        )
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        shared?.set(Date().timeIntervalSince1970, forKey: "nse_last_stability_sent")
+        shared?.synchronize()
+        guard guardSaved else {
+            shared?.set(true, forKey: "pending_push_payment")
+            AuditService.log("STABILITY_PAYMENT_PERSISTENCE_FAILED", data: [
+                "error": "payment_sent_but_id_guard_update_failed"
+            ])
+            return
+        }
+
+        do {
+            guard let databaseService else {
+                throw DatabaseError.executeFailed("DB service unavailable")
             }
-            saveChannelToDB()
-
-            // Record as pending payment
-            _ = try? databaseService?.recordPayment(
-                paymentId: "\(paymentId)",
+            let persistence = try databaseService.recordPaymentAndMaybeUpdateBacking(
+                paymentId: paymentIdString,
                 paymentType: "stability",
                 direction: "sent",
                 amountMsat: amountMsat,
                 amountUSD: abs(result.dollarsFromPar),
                 btcPrice: price,
-                counterparty: stableChannel.counterparty,
-                status: "pending"
+                status: "pending",
+                userChannelId: stableChannel.userChannelId,
+                backingDeltaSats: -Int64(amountMsat / 1000)
             )
+            guard let backing = persistence.backingSats else {
+                throw DatabaseError.executeFailed("DB did not return backing after outgoing stability payment")
+            }
+            stableChannel.lastStabilityPayment = now
+            stableChannel.paymentMade = true
+            stableChannel.backingSats = backing
+            saveChannelToDB(preserveBacking: true)
+            clearPendingOutgoingStabilityPayment()
 
             AuditService.log("STABILITY_PAYMENT_SENT", data: [
                 "amount_msat": "\(amountMsat)",
@@ -1348,9 +1544,99 @@ class AppState {
                 "btc_price": "\(price)"
             ])
         } catch {
-            AuditService.log("STABILITY_PAYMENT_FAILED", data: [
+            // The send already succeeded. Keep the durable marker and block all later sends
+            // until the payment row and backing delta can be committed together.
+            stableChannel.lastStabilityPayment = now
+            stableChannel.paymentMade = true
+            shared?.set(true, forKey: "pending_push_payment")
+            AuditService.log("STABILITY_PAYMENT_PERSISTENCE_FAILED", data: [
                 "error": error.localizedDescription
             ])
+        }
+    }
+
+    private func savePendingOutgoingStabilityPayment(
+        _ payment: PendingOutgoingStabilityPayment
+    ) -> Bool {
+        guard let shared = UserDefaults(suiteName: Constants.appGroupIdentifier) else {
+            return false
+        }
+        shared.set([
+            "payment_id": payment.paymentId,
+            "amount_msat": NSNumber(value: payment.amountMsat),
+            "btc_price": payment.btcPrice
+        ], forKey: Self.pendingOutgoingPaymentKey)
+        return shared.synchronize()
+    }
+
+    private func loadPendingOutgoingStabilityPayment() -> PendingOutgoingStabilityPayment? {
+        guard let value = UserDefaults(suiteName: Constants.appGroupIdentifier)?
+            .dictionary(forKey: Self.pendingOutgoingPaymentKey),
+              let paymentId = value["payment_id"] as? String,
+              let amount = value["amount_msat"] as? NSNumber,
+              let price = value["btc_price"] as? NSNumber else {
+            return nil
+        }
+        return PendingOutgoingStabilityPayment(
+            paymentId: paymentId,
+            amountMsat: amount.uint64Value,
+            btcPrice: price.doubleValue
+        )
+    }
+
+    private func clearPendingOutgoingStabilityPayment() {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        shared?.removeObject(forKey: Self.pendingOutgoingPaymentKey)
+        shared?.synchronize()
+    }
+
+    private func reconcilePendingOutgoingStabilityPayment(status: String = "pending") -> Bool {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        guard shared?.object(forKey: Self.pendingOutgoingPaymentKey) != nil else { return true }
+        guard let pending = loadPendingOutgoingStabilityPayment(),
+              !pending.paymentId.isEmpty,
+              pending.amountMsat > 0,
+              pending.btcPrice > 0 else {
+            UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                .set(true, forKey: "pending_push_payment")
+            AuditService.log("STABILITY_PAYMENT_RECONCILE_BLOCKED", data: [
+                "error": "unresolved_send_marker"
+            ])
+            return false
+        }
+        guard !stableChannel.userChannelId.isEmpty, let databaseService else {
+            return false
+        }
+
+        do {
+            let amountUSD = pending.btcPrice > 0
+                ? Double(pending.amountMsat) / 1000.0 / Double(Constants.satsInBTC) * pending.btcPrice
+                : nil
+            let persistence = try databaseService.recordPaymentAndMaybeUpdateBacking(
+                paymentId: pending.paymentId,
+                paymentType: "stability",
+                direction: "sent",
+                amountMsat: pending.amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: pending.btcPrice > 0 ? pending.btcPrice : nil,
+                status: status,
+                userChannelId: stableChannel.userChannelId,
+                backingDeltaSats: -Int64(pending.amountMsat / 1000)
+            )
+            guard let backing = persistence.backingSats else {
+                throw DatabaseError.executeFailed("DB did not return backing during outgoing reconciliation")
+            }
+            stableChannel.backingSats = backing
+            saveChannelToDB(preserveBacking: true)
+            clearPendingOutgoingStabilityPayment()
+            return true
+        } catch {
+            UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                .set(true, forKey: "pending_push_payment")
+            AuditService.log("STABILITY_PAYMENT_RECONCILE_FAILED", data: [
+                "error": error.localizedDescription
+            ])
+            return false
         }
     }
 
@@ -1594,19 +1880,31 @@ class AppState {
 
     // MARK: - Persistence
 
-    func saveChannelToDB() {
+    func saveChannelToDB(preserveBacking: Bool = false) {
         guard !stableChannel.userChannelId.isEmpty else { return }
         do {
-            try databaseService?.saveChannel(
-                channelId: stableChannel.channelId,
-                userChannelId: stableChannel.userChannelId,
-                expectedUSD: stableChannel.expectedUSD.amount,
-                backingSats: stableChannel.backingSats,
-                nativeSats: stableChannel.nativeSats,
-                note: stableChannel.note,
-                receiverSats: stableChannel.stableReceiverBTC.sats,
-                latestPrice: stableChannel.latestPrice
-            )
+            if preserveBacking {
+                try databaseService?.saveChannelPreservingBacking(
+                    channelId: stableChannel.channelId,
+                    userChannelId: stableChannel.userChannelId,
+                    expectedUSD: stableChannel.expectedUSD.amount,
+                    nativeSats: stableChannel.nativeSats,
+                    note: stableChannel.note,
+                    receiverSats: stableChannel.stableReceiverBTC.sats,
+                    latestPrice: stableChannel.latestPrice
+                )
+            } else {
+                try databaseService?.saveChannel(
+                    channelId: stableChannel.channelId,
+                    userChannelId: stableChannel.userChannelId,
+                    expectedUSD: stableChannel.expectedUSD.amount,
+                    backingSats: stableChannel.backingSats,
+                    nativeSats: stableChannel.nativeSats,
+                    note: stableChannel.note,
+                    receiverSats: stableChannel.stableReceiverBTC.sats,
+                    latestPrice: stableChannel.latestPrice
+                )
+            }
         } catch {
             AuditService.log("DB_SAVE_CHANNEL_FAILED", data: ["error": error.localizedDescription])
         }

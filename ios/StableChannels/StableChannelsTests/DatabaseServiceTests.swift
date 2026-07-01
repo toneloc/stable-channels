@@ -20,6 +20,115 @@ final class DatabaseServiceTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Atomic backing updates
+
+    func testBackingDeltaIsAtomicAndDuplicateReturnsStoredBacking() throws {
+        try service.saveChannel(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 100,
+            backingSats: 1_000,
+            note: nil
+        )
+
+        let first = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 100
+        )
+        XCTAssertTrue(first.isNewPayment)
+        XCTAssertEqual(first.backingSats, 1_100)
+
+        let duplicate = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 100
+        )
+        XCTAssertFalse(duplicate.isNewPayment)
+        XCTAssertEqual(duplicate.backingSats, 1_100)
+
+        let second = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-2",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 50_000,
+            amountUSD: 0.5,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 50
+        )
+        XCTAssertEqual(second.backingSats, 1_150)
+
+        let outgoing = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-outgoing",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 200_000,
+            amountUSD: 2,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: -200
+        )
+        XCTAssertTrue(outgoing.isNewPayment)
+        XCTAssertEqual(outgoing.backingSats, 950)
+
+        let outgoingReplay = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-outgoing",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 200_000,
+            amountUSD: 2,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: -200
+        )
+        XCTAssertFalse(outgoingReplay.isNewPayment)
+        XCTAssertEqual(outgoingReplay.backingSats, 950)
+
+        XCTAssertThrowsError(
+            try service.recordPaymentAndMaybeUpdateBacking(
+                paymentId: "payment-too-large",
+                paymentType: "stability",
+                direction: "sent",
+                amountMsat: 2_000_000,
+                amountUSD: 20,
+                btcPrice: 100_000,
+                status: "pending",
+                userChannelId: "user-channel-1",
+                backingDeltaSats: -2_000
+            )
+        )
+        let afterRejectedDebit = try XCTUnwrap(
+            service.loadChannel(userChannelId: "user-channel-1")
+        )
+        XCTAssertEqual(afterRejectedDebit.backingSats, 950)
+
+        try service.saveChannelPreservingBacking(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 125,
+            note: "metadata-only"
+        )
+        let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
+        XCTAssertEqual(stored.backingSats, 950)
+        XCTAssertEqual(stored.expectedUSD, 125)
+    }
+
     // MARK: - pending_operations
 
     func testPendingOperationsInsertFetch() {

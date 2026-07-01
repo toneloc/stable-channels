@@ -423,6 +423,7 @@ impl UserApp {
         };
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
+        builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/v2/snapshot".to_string());
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
             .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
@@ -2111,6 +2112,7 @@ impl UserApp {
 
     fn process_events(&mut self) {
         while let Some(event) = self.node.next_event() {
+            let mut ack = true;
             match event {
                 Event::ChannelReady {
                     channel_id,
@@ -2317,24 +2319,10 @@ impl UserApp {
                             update_balances(&self.node, &mut sc);
                         }
                         self.update_balances();
-                    } else if self.db.payment_exists(&payment_hash_str).unwrap_or(false) {
-                        // Already recorded, just update balances silently
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                        }
-                        self.update_balances();
                     } else {
-                        audit_event(
-                            "PAYMENT_RECEIVED",
-                            json!({
-                                "amount_msat": amount_msat,
-                                "payment_hash": payment_hash_str
-                            }),
-                        );
-
-                        // Record payment in database
-                        let (amount_usd, btc_price, payment_type) = {
+                        let is_stability_payment = custom_records.iter()
+                            .any(|tlv| tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]);
+                        let (amount_usd, btc_price, payment_type, user_channel_id_str) = {
                             let sc = self.stable_channel.lock().unwrap();
                             let price = sc.latest_price;
                             let usd = if price > 0.0 {
@@ -2342,45 +2330,71 @@ impl UserApp {
                             } else {
                                 None
                             };
-                            let ptype = if sc.expected_usd.0 > 0.0 {
-                                "stability"
-                            } else {
-                                "lightning"
-                            };
-                            (usd, if price > 0.0 { Some(price) } else { None }, ptype)
+                            let ptype = if is_stability_payment { "stability" } else { "lightning" };
+                            let ucid = format!("{}", sc.user_channel_id);
+                            (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid)
                         };
-                        let _ = self.db.record_payment(
+                        let backing_delta = is_stability_payment.then(|| amount_msat / 1000);
+                        // Atomically insert payment and update backing in one transaction.
+                        // Ok(true)=inserted, Ok(false)=duplicate → acknowledge.
+                        // Err → transient failure, do not acknowledge so LDK re-delivers.
+                        let db_result = self.db.record_payment_and_maybe_update_backing(
                             Some(&payment_hash_str),
                             payment_type,
                             "received",
                             amount_msat,
                             amount_usd,
                             btc_price,
-                            None,
                             "completed",
-                            None,
-                            None,
+                            is_stability_payment.then(|| user_channel_id_str.as_str()),
+                            backing_delta,
                         );
+                        match db_result {
+                            Ok(is_new) => {
+                                {
+                                    let mut sc = self.stable_channel.lock().unwrap();
+                                    update_balances(&self.node, &mut sc);
+                                    if is_new && is_stability_payment {
+                                        sc.backing_sats += backing_delta.unwrap_or(0);
+                                    }
+                                    stable::reconcile_incoming(&mut sc);
+                                }
+                                self.save_channel_settings();
+                                self.update_balances();
 
-                        self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                            stable::reconcile_incoming(&mut sc);
+                                if is_new {
+                                    audit_event(
+                                        "PAYMENT_RECEIVED",
+                                        json!({
+                                            "amount_msat": amount_msat,
+                                            "payment_hash": payment_hash_str
+                                        }),
+                                    );
+                                    self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
+                                    self.show_onboarding = false;
+                                    self.waiting_for_payment = false;
+                                    let sats = amount_msat / 1000;
+                                    let toast_msg = if let Some(usd) = amount_usd {
+                                        format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
+                                    } else {
+                                        format!("Received {}", Self::format_sats_as_btc(sats))
+                                    };
+                                    self.show_toast(&toast_msg, "+");
+                                }
+                            }
+                            Err(e) => {
+                                ack = false;
+                                audit_event(
+                                    "PAYMENT_PERSIST_FAILED",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "error": e.to_string(),
+                                    }),
+                                );
+                                self.status_message =
+                                    "Payment received but could not be saved; retrying".to_string();
+                            }
                         }
-                        self.save_channel_settings();
-                        self.update_balances(); // Update UI immediately
-                        self.show_onboarding = false;
-                        self.waiting_for_payment = false;
-
-                        // Show toast notification
-                        let sats = amount_msat / 1000;
-                        let toast_msg = if let Some(usd) = amount_usd {
-                            format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
-                        } else {
-                            format!("Received {}", Self::format_sats_as_btc(sats))
-                        };
-                        self.show_toast(&toast_msg, "+");
                     }
                 }
 
@@ -2748,7 +2762,13 @@ impl UserApp {
                 }
             }
 
-            let _ = self.node.event_handled();
+            if ack {
+                let _ = self.node.event_handled();
+            } else {
+                // LDK returns the same queue-front event until it is acknowledged.
+                // Exit this processing pass so a transient DB failure cannot spin forever.
+                break;
+            }
         }
     }
 

@@ -1,6 +1,11 @@
 import Foundation
 import SQLite3
 
+struct PaymentPersistenceResult {
+    let isNewPayment: Bool
+    let backingSats: UInt64?
+}
+
 /// SQLite database layer — port of src/db.rs
 /// Uses raw SQLite3 C API to avoid external dependencies initially.
 /// Can be migrated to GRDB later for convenience.
@@ -214,6 +219,37 @@ class DatabaseService {
         }
     }
 
+    /// Persist channel metadata without touching stable_sats.
+    ///
+    /// Incoming stability payments update stable_sats transactionally. Excluding it from this
+    /// follow-up write prevents stale in-memory state from undoing a concurrent DB increment.
+    func saveChannelPreservingBacking(
+        channelId: String,
+        userChannelId: String,
+        expectedUSD: Double,
+        nativeSats: UInt64 = 0,
+        note: String?,
+        receiverSats: UInt64 = 0,
+        latestPrice: Double = 0.0
+    ) throws {
+        let sql = """
+            UPDATE channels SET channel_id = ?, expected_usd = ?, native_sats = ?, note = ?,
+                receiver_sats = ?, latest_price = ?, updated_at = strftime('%s', 'now')
+            WHERE user_channel_id = ?
+        """
+        try execute(sql, params: [
+            .text(channelId), .real(expectedUSD), .integer(Int64(nativeSats)),
+            note.map { .text($0) } ?? .null, .integer(Int64(receiverSats)),
+            .real(latestPrice), .text(userChannelId)
+        ])
+        let changedRows = sqlite3_changes(db)
+        guard changedRows == 1 else {
+            throw DatabaseError.executeFailed(
+                "channel metadata UPDATE affected \(changedRows) rows for user_channel_id=\(userChannelId)"
+            )
+        }
+    }
+
     func loadChannel(userChannelId: String? = nil) throws -> ChannelRecord? {
         let sql: String
         let params: [SQLValue]
@@ -310,14 +346,14 @@ class DatabaseService {
         status: String,
         txid: String? = nil,
         address: String? = nil
-    ) throws -> Int64 {
+    ) throws -> Bool {
         // Dedup: skip if a payment with this payment_id already exists
         if let pid = paymentId, !pid.isEmpty {
             let existing = try query(
                 "SELECT id FROM payments WHERE payment_id = ?",
                 params: [.text(pid)]
             )
-            if !existing.isEmpty { return existing[0][0] as? Int64 ?? 0 }
+            if !existing.isEmpty { return false }
         }
 
         let sql = """
@@ -334,7 +370,91 @@ class DatabaseService {
             txid.map { .text($0) } ?? .null,
             address.map { .text($0) } ?? .null
         ])
-        return Int64(sqlite3_last_insert_rowid(db))
+        return true
+    }
+
+    /// Insert a payment and atomically update channel backing sats in one SQLite transaction.
+    /// Returns whether the payment was new and the authoritative backing value, when applicable.
+    func recordPaymentAndMaybeUpdateBacking(
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        status: String,
+        userChannelId: String?,
+        backingDeltaSats: Int64?
+    ) throws -> PaymentPersistenceResult {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            if let pid = paymentId, !pid.isEmpty {
+                let existing = try query("SELECT id FROM payments WHERE payment_id = ?", params: [.text(pid)])
+                if !existing.isEmpty {
+                    let backing = try authoritativeBacking(
+                        userChannelId: userChannelId,
+                        required: backingDeltaSats != nil
+                    )
+                    try execute("ROLLBACK")
+                    return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
+                }
+            }
+            try execute(
+                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params: [
+                    paymentId.map { .text($0) } ?? .null,
+                    .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
+                    amountUSD.map { .real($0) } ?? .null,
+                    btcPrice.map { .real($0) } ?? .null,
+                    .text(status)
+                ]
+            )
+            var resultingBacking: UInt64?
+            if let delta = backingDeltaSats {
+                guard let ucid = userChannelId, !ucid.isEmpty else {
+                    throw DatabaseError.executeFailed("userChannelId required for backing update")
+                }
+                try execute(
+                    "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ? AND stable_sats + ? >= 0",
+                    params: [.integer(delta), .text(ucid), .integer(delta)]
+                )
+                let changedRows = sqlite3_changes(db)
+                if changedRows != 1 {
+                    throw DatabaseError.executeFailed(
+                        "backing UPDATE affected \(changedRows) rows for user_channel_id=\(ucid)"
+                    )
+                }
+                resultingBacking = try authoritativeBacking(userChannelId: ucid, required: true)
+            }
+            try execute("COMMIT")
+            return PaymentPersistenceResult(
+                isNewPayment: true,
+                backingSats: resultingBacking
+            )
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func authoritativeBacking(
+        userChannelId: String?,
+        required: Bool
+    ) throws -> UInt64? {
+        guard required else { return nil }
+        guard let ucid = userChannelId, !ucid.isEmpty else {
+            throw DatabaseError.executeFailed("userChannelId required to load backing")
+        }
+        let rows = try query(
+            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            params: [.text(ucid)]
+        )
+        guard let value = rows.first?[0] as? Int64, value >= 0 else {
+            throw DatabaseError.executeFailed(
+                "No valid backing row for user_channel_id=\(ucid)"
+            )
+        }
+        return UInt64(value)
     }
 
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {
@@ -415,6 +535,14 @@ class DatabaseService {
                 params: [.text(status), .text(paymentId)]
             )
         }
+    }
+
+    func isOutgoingStabilityPayment(paymentId: String) throws -> Bool {
+        let rows = try query(
+            "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
+            params: [.text(paymentId)]
+        )
+        return !rows.isEmpty
     }
 
     // MARK: - Pending Operations
