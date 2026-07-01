@@ -2322,7 +2322,7 @@ impl UserApp {
                     } else {
                         let is_stability_payment = custom_records.iter()
                             .any(|tlv| tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]);
-                        let (amount_usd, btc_price, payment_type, user_channel_id_str, current_backing) = {
+                        let (amount_usd, btc_price, payment_type, user_channel_id_str) = {
                             let sc = self.stable_channel.lock().unwrap();
                             let price = sc.latest_price;
                             let usd = if price > 0.0 {
@@ -2332,10 +2332,9 @@ impl UserApp {
                             };
                             let ptype = if is_stability_payment { "stability" } else { "lightning" };
                             let ucid = format!("{}", sc.user_channel_id);
-                            let backing = sc.backing_sats;
-                            (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid, backing)
+                            (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid)
                         };
-                        let new_backing = is_stability_payment.then(|| current_backing + amount_msat / 1000);
+                        let backing_delta = is_stability_payment.then(|| amount_msat / 1000);
                         // Atomically insert payment and update backing in one transaction.
                         // Ok(true)=inserted, Ok(false)=duplicate → acknowledge.
                         // Err → transient failure, do not acknowledge so LDK re-delivers.
@@ -2348,7 +2347,7 @@ impl UserApp {
                             btc_price,
                             "completed",
                             is_stability_payment.then(|| user_channel_id_str.as_str()),
-                            new_backing,
+                            backing_delta,
                         );
                         match db_result {
                             Ok(is_new) => {
@@ -2356,7 +2355,7 @@ impl UserApp {
                                     let mut sc = self.stable_channel.lock().unwrap();
                                     update_balances(&self.node, &mut sc);
                                     if is_new && is_stability_payment {
-                                        sc.backing_sats = new_backing.unwrap();
+                                        sc.backing_sats += backing_delta.unwrap_or(0);
                                     }
                                     stable::reconcile_incoming(&mut sc);
                                 }

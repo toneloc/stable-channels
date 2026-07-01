@@ -717,7 +717,7 @@ impl Database {
         btc_price: Option<f64>,
         status: &str,
         user_channel_id: Option<&str>,
-        new_backing_sats: Option<u64>,
+        backing_delta_sats: Option<u64>,
     ) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         // Dedup check while holding the lock to prevent races
@@ -743,12 +743,12 @@ impl Database {
                     amount_msat as i64, amount_usd, btc_price, status
                 ],
             )?;
-            if let Some(backing) = new_backing_sats {
+            if let Some(delta) = backing_delta_sats {
                 // user_channel_id must be set when a backing update is requested.
                 let ucid = user_channel_id.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
                 let rows = conn.execute(
-                    "UPDATE channels SET stable_sats = ?1, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?2",
-                    params![backing as i64, ucid],
+                    "UPDATE channels SET stable_sats = stable_sats + ?1, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?2",
+                    params![delta as i64, ucid],
                 )?;
                 if rows != 1 {
                     return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -757,10 +757,13 @@ impl Database {
             Ok(())
         })();
         match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(true)
-            }
+            Ok(()) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK");
                 Err(e)
@@ -1082,6 +1085,79 @@ mod tests {
         assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.native_sats, 50_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
+    }
+
+    #[test]
+    fn test_payment_backing_delta_is_applied_once() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 100.0, 1_000, 0, None)
+            .unwrap();
+
+        let first = db
+            .record_payment_and_maybe_update_backing(
+                Some("payment-1"),
+                "stability",
+                "received",
+                100_000,
+                Some(1.0),
+                Some(100_000.0),
+                "completed",
+                Some("user-channel-1"),
+                Some(100),
+            )
+            .unwrap();
+        assert!(first);
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            1_100
+        );
+
+        let duplicate = db
+            .record_payment_and_maybe_update_backing(
+                Some("payment-1"),
+                "stability",
+                "received",
+                100_000,
+                Some(1.0),
+                Some(100_000.0),
+                "completed",
+                Some("user-channel-1"),
+                Some(100),
+            )
+            .unwrap();
+        assert!(!duplicate);
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            1_100
+        );
+
+        let second = db
+            .record_payment_and_maybe_update_backing(
+                Some("payment-2"),
+                "stability",
+                "received",
+                50_000,
+                Some(0.5),
+                Some(100_000.0),
+                "completed",
+                Some("user-channel-1"),
+                Some(50),
+            )
+            .unwrap();
+        assert!(second);
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            1_150
+        );
     }
 
     #[test]

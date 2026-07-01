@@ -170,18 +170,15 @@ class StabilityProcessingService : Service() {
                         val price = fetchMedianPrice()
                         if (isStabilityPayment) {
                             val amountSats = event.amountMsat.toLong() / 1000
-                            val channelState = loadChannelStateFromDB()
-                                ?: throw BackingUpdateFailed("Cannot read channel state for stability payment — not acknowledging, LDK will retry")
-                            val newBacking = channelState.backingSats + amountSats
                             val result = recordPaymentAtomicInDB(
                                 dbPath, paymentId, "stability", "received",
-                                event.amountMsat.toLong(), price, newBacking
+                                event.amountMsat.toLong(), price, amountSats
                             )
                             when (result) {
                                 InsertResult.INSERTED, InsertResult.DUPLICATE -> {
                                     node.eventHandled()
                                     if (result == InsertResult.INSERTED) {
-                                        Log.d(TAG, "Updated backingSats: ${channelState.backingSats} + $amountSats = $newBacking")
+                                        Log.d(TAG, "Updated backingSats += $amountSats (delta)")
                                     }
                                 }
                                 InsertResult.FAILED ->
@@ -219,7 +216,7 @@ class StabilityProcessingService : Service() {
         direction: String,
         amountMsat: Long,
         btcPrice: Double,
-        newBackingSats: Long?
+        backingDeltaSats: Long?
     ): InsertResult {
         return try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
@@ -239,11 +236,11 @@ class StabilityProcessingService : Service() {
                     "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')",
                     arrayOf(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
                 )
-                if (newBackingSats != null) {
+                if (backingDeltaSats != null) {
                     val updateStmt = db.compileStatement(
-                        "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)"
+                        "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s','now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)"
                     )
-                    updateStmt.bindLong(1, newBackingSats)
+                    updateStmt.bindLong(1, backingDeltaSats)
                     val rowsAffected = updateStmt.executeUpdateDelete()
                     if (rowsAffected == 0) throw Exception("No channel row to update backing sats — rolling back")
                 }

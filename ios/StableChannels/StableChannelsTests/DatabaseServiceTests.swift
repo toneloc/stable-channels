@@ -20,6 +20,69 @@ final class DatabaseServiceTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Atomic backing updates
+
+    func testBackingDeltaIsAtomicAndDuplicateReturnsStoredBacking() throws {
+        try service.saveChannel(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 100,
+            backingSats: 1_000,
+            note: nil
+        )
+
+        let first = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 100
+        )
+        XCTAssertTrue(first.isNewPayment)
+        XCTAssertEqual(first.backingSats, 1_100)
+
+        let duplicate = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 100
+        )
+        XCTAssertFalse(duplicate.isNewPayment)
+        XCTAssertEqual(duplicate.backingSats, 1_100)
+
+        let second = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-2",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 50_000,
+            amountUSD: 0.5,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 50
+        )
+        XCTAssertEqual(second.backingSats, 1_150)
+
+        try service.saveChannelPreservingBacking(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 125,
+            note: "metadata-only"
+        )
+        let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
+        XCTAssertEqual(stored.backingSats, 1_150)
+        XCTAssertEqual(stored.expectedUSD, 125)
+    }
+
     // MARK: - pending_operations
 
     func testPendingOperationsInsertFetch() {

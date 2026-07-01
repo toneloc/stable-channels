@@ -129,6 +129,7 @@ class AppState(private val context: Context) : ViewModel() {
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
     private var stabilityJob: Job? = null
+    private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
 
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
@@ -191,6 +192,7 @@ class AppState(private val context: Context) : ViewModel() {
                         _phase.value = Phase.SYNCING
                     }
                     waitForBackgroundService()
+                    loadChannelFromDB()  // reload — SPS may have incremented backingSats while we waited
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
@@ -250,6 +252,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun stop() {
         stabilityJob?.cancel()
+        heartbeatJob?.cancel()
         pendingDepositJob?.cancel()
         priceService.stopAutoRefresh()
         nodeService.stop()
@@ -360,25 +363,27 @@ class AppState(private val context: Context) : ViewModel() {
         if (isStabilityPayment && userChannelId == null) {
             throw Exception("Stability payment received but userChannelId is empty — cannot update backing, not acknowledging")
         }
-        val newBacking: Long? = if (isStabilityPayment) sc0.backingSats + (amountMsat / 1000) else null
-        // Atomically insert payment row and update backing sats in one SQLite transaction.
+        val backingDelta: Long? = if (isStabilityPayment) amountMsat / 1000 else null
+        // Atomically insert payment row and increment backing sats in one SQLite transaction.
         // Throws on DB failure — propagates to the collector which gates ack on success.
-        val isNewPayment = databaseService?.recordPaymentAndMaybeUpdateBacking(
+        val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
             paymentId = effectiveId, paymentType = paymentType, direction = "received",
             amountMsat = amountMsat,
             amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
             btcPrice = price, counterparty = sc0.counterparty,
             userChannelId = userChannelId,
-            newBackingSats = newBacking
+            backingDeltaSats = backingDelta
         ) ?: throw Exception("DB service unavailable")
         refreshBalances()
         updateStableBalances()
-        if (isNewPayment && isStabilityPayment && newBacking != null) {
-            _stableChannel.value = _stableChannel.value.copy(backingSats = newBacking)
+        if (isStabilityPayment) {
+            val backing = persistence.backingSats
+                ?: throw Exception("DB did not return backing after stability payment")
+            _stableChannel.value = _stableChannel.value.copy(backingSats = backing)
         }
         val sc = StabilityService.reconcileIncoming(_stableChannel.value)
         _stableChannel.value = sc
-        saveChannelToDB()
+        saveChannelToDB(preserveBacking = isStabilityPayment)
         val usdVal = (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price
         _statusMessage.value = "Payment received: ${usdVal.usdFormatted()}"
         triggerPaymentFlash()
@@ -564,10 +569,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun startStabilityTimer() {
+        heartbeatJob?.cancel()
+        FCMService.updateHeartbeat(context)
+        heartbeatJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(5_000)
+                FCMService.updateHeartbeat(context)
+            }
+        }
+
         stabilityJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(Constants.STABILITY_CHECK_INTERVAL_SECS * 1000)
-                FCMService.updateHeartbeat(context)
                 ensureLSPConnected()
                 recordCurrentPrice()
                 runStabilityCheck()
@@ -815,14 +828,22 @@ class AppState(private val context: Context) : ViewModel() {
         _stableChannel.value = sc
     }
 
-    fun saveChannelToDB() {
+    fun saveChannelToDB(preserveBacking: Boolean = false) {
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return
-        databaseService?.saveChannel(
-            sc.channelId, sc.userChannelId, sc.expectedUSD.amount, sc.backingSats, sc.note,
-            receiverSats = sc.stableReceiverBTC.sats,
-            latestPrice = sc.latestPrice
-        )
+        if (preserveBacking) {
+            databaseService?.saveChannelPreservingBacking(
+                sc.channelId, sc.userChannelId, sc.expectedUSD.amount, sc.note,
+                receiverSats = sc.stableReceiverBTC.sats,
+                latestPrice = sc.latestPrice
+            )
+        } else {
+            databaseService?.saveChannel(
+                sc.channelId, sc.userChannelId, sc.expectedUSD.amount, sc.backingSats, sc.note,
+                receiverSats = sc.stableReceiverBTC.sats,
+                latestPrice = sc.latestPrice
+            )
+        }
         // Cache in SharedPreferences so UI has correct state on next launch
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putString("cached_channel_id", sc.channelId)

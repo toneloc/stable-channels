@@ -116,6 +116,7 @@ class AppState {
 
     private var eventObserver: NSObjectProtocol?
     private var stabilityTimer: Task<Void, Never>?
+    private var heartbeatTimer: Task<Void, Never>?
     private(set) var chainURL: String = Constants.primaryChainURL
 
     // Auto-sweep state
@@ -387,7 +388,7 @@ class AppState {
         while shared?.bool(forKey: "nse_processing") == true {
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             waited += 1
-            if waited >= 10 { break } // timeout after 10 seconds
+            if waited >= 30 { break } // NSE has an approximately 30-second execution window
         }
         if waited > 0 {
             AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
@@ -397,6 +398,8 @@ class AppState {
     func stop() {
         stabilityTimer?.cancel()
         stabilityTimer = nil
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         if let observer = eventObserver {
             NotificationCenter.default.removeObserver(observer)
             eventObserver = nil
@@ -452,6 +455,8 @@ class AppState {
         print("[App] Stopping node for background")
         stabilityTimer?.cancel()
         stabilityTimer = nil
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -466,6 +471,8 @@ class AppState {
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
         cancelBackgroundStop()
+        await waitForNSE()
+        loadChannelFromDB()
         if nodeService.isRunning {
             print("[App] Node still running (grace period), restoring gossip + reconnecting")
             restoreGossipToDB()
@@ -475,7 +482,6 @@ class AppState {
             return
         }
         print("[App] Restarting node from foreground")
-        await waitForNSE()
         restoreGossipToDB()
         do {
             try await nodeService.start(
@@ -485,7 +491,6 @@ class AppState {
             )
             refreshBalances()
             updateStableBalances()
-            // Reconcile backingSats — NSE may have received payments while backgrounded
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
             reregisterPushTokenIfNeeded()
@@ -916,13 +921,17 @@ class AppState {
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
         let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
         let paymentType = isStabilityPayment ? "stability" : "lightning"
-        let newBacking: UInt64? = isStabilityPayment ? stableChannel.backingSats + amountMsat / 1000 : nil
+        let backingDelta: UInt64? = isStabilityPayment ? amountMsat / 1000 : nil
 
-        // Atomically insert payment row and update backing sats in one SQLite transaction.
+        // Atomically insert payment row and increment backing sats in one SQLite transaction.
         // On DB failure, veto the ack so LDK re-delivers the event.
-        let isNewPayment: Bool
+        let persistence: PaymentPersistenceResult
         do {
-            isNewPayment = (try databaseService?.recordPaymentAndMaybeUpdateBacking(
+            guard let databaseService else {
+                ackToken?.shouldAck = false
+                return
+            }
+            persistence = try databaseService.recordPaymentAndMaybeUpdateBacking(
                 paymentId: paymentIdStr,
                 paymentType: paymentType,
                 direction: "received",
@@ -931,8 +940,8 @@ class AppState {
                 btcPrice: price > 0 ? price : nil,
                 status: "completed",
                 userChannelId: isStabilityPayment ? stableChannel.userChannelId : nil,
-                newBackingSats: newBacking
-            )) == true
+                backingDeltaSats: backingDelta
+            )
         } catch {
             ackToken?.shouldAck = false
             return
@@ -940,11 +949,15 @@ class AppState {
 
         refreshBalances()
         updateStableBalances()
-        if isNewPayment && isStabilityPayment, let backing = newBacking {
+        if isStabilityPayment {
+            guard let backing = persistence.backingSats else {
+                ackToken?.shouldAck = false
+                return
+            }
             stableChannel.backingSats = backing
         }
         StabilityService.reconcileIncoming(&stableChannel)
-        saveChannelToDB()
+        saveChannelToDB(preserveBacking: isStabilityPayment)
 
         if let usd = amountUSD {
             statusMessage = "Received \(usd.usdFormatted)"
@@ -1264,14 +1277,22 @@ class AppState {
 
     private func startStabilityTimer() {
         stabilityTimer?.cancel()
+        heartbeatTimer?.cancel()
+
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        heartbeatTimer = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { break }
+                shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+            }
+        }
+
         stabilityTimer = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: Constants.stabilityCheckIntervalSecs * 1_000_000_000)
                 guard !Task.isCancelled else { break }
-
-                // Heartbeat — thread-safe, no need to block main thread
-                UserDefaults(suiteName: Constants.appGroupIdentifier)?
-                    .set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
 
                 // ensureLSPConnected dispatches its own blocking work off-main internally.
                 await ensureLSPConnected()
@@ -1608,19 +1629,31 @@ class AppState {
 
     // MARK: - Persistence
 
-    func saveChannelToDB() {
+    func saveChannelToDB(preserveBacking: Bool = false) {
         guard !stableChannel.userChannelId.isEmpty else { return }
         do {
-            try databaseService?.saveChannel(
-                channelId: stableChannel.channelId,
-                userChannelId: stableChannel.userChannelId,
-                expectedUSD: stableChannel.expectedUSD.amount,
-                backingSats: stableChannel.backingSats,
-                nativeSats: stableChannel.nativeSats,
-                note: stableChannel.note,
-                receiverSats: stableChannel.stableReceiverBTC.sats,
-                latestPrice: stableChannel.latestPrice
-            )
+            if preserveBacking {
+                try databaseService?.saveChannelPreservingBacking(
+                    channelId: stableChannel.channelId,
+                    userChannelId: stableChannel.userChannelId,
+                    expectedUSD: stableChannel.expectedUSD.amount,
+                    nativeSats: stableChannel.nativeSats,
+                    note: stableChannel.note,
+                    receiverSats: stableChannel.stableReceiverBTC.sats,
+                    latestPrice: stableChannel.latestPrice
+                )
+            } else {
+                try databaseService?.saveChannel(
+                    channelId: stableChannel.channelId,
+                    userChannelId: stableChannel.userChannelId,
+                    expectedUSD: stableChannel.expectedUSD.amount,
+                    backingSats: stableChannel.backingSats,
+                    nativeSats: stableChannel.nativeSats,
+                    note: stableChannel.note,
+                    receiverSats: stableChannel.stableReceiverBTC.sats,
+                    latestPrice: stableChannel.latestPrice
+                )
+            }
         } catch {
             AuditService.log("DB_SAVE_CHANNEL_FAILED", data: ["error": error.localizedDescription])
         }

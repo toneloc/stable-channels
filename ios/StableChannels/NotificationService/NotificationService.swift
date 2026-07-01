@@ -268,15 +268,10 @@ class NotificationService: UNNotificationServiceExtension {
                     let price = Self.fetchBTCPrice()
                     if isStabilityPayment {
                         let amountSats = amountMsat / 1000
-                        guard let channelState = readChannelState(dbPath: dbPath) else {
-                            nseLog("Cannot read channel state for stability payment — not acknowledging, LDK will retry")
-                            break eventLoop  // don't ack; fall to pending_push_payment path
-                        }
-                        let newBacking = channelState.backingSats + amountSats
                         let result = recordPaymentAndMaybeUpdateBackingInDB(
                             dbPath: dbPath, paymentId: payId, paymentType: "stability",
                             direction: "received", amountMsat: amountMsat, btcPrice: price,
-                            newBackingSats: newBacking
+                            backingDeltaSats: amountSats
                         )
                         switch result {
                         case .inserted, .duplicate:
@@ -289,7 +284,7 @@ class NotificationService: UNNotificationServiceExtension {
                                 content.title = "Stability Payment Received"
                                 content.body = "\(amountSats) sats received"
                             }
-                            if result == .inserted { nseLog("Updated backingSats + \(amountSats) = \(String(describing: newBacking))") }
+                            if result == .inserted { nseLog("Updated backingSats += \(amountSats) (delta)") }
                             UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
                             received = true
                         case .failed:
@@ -618,7 +613,7 @@ class NotificationService: UNNotificationServiceExtension {
         direction: String,
         amountMsat: UInt64,
         btcPrice: Double,
-        newBackingSats: UInt64?
+        backingDeltaSats: UInt64?
     ) -> PaymentInsertResult {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
@@ -667,14 +662,14 @@ class NotificationService: UNNotificationServiceExtension {
         }
         sqlite3_finalize(stmt)
 
-        if let backing = newBackingSats {
-            let updateSql = "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)"
+        if let delta = backingDeltaSats {
+            let updateSql = "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)"
             var updateStmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .failed
             }
-            sqlite3_bind_int64(updateStmt, 1, Int64(backing))
+            sqlite3_bind_int64(updateStmt, 1, Int64(delta))
             let stepRc = sqlite3_step(updateStmt)
             let changedRows = sqlite3_changes(db)
             sqlite3_finalize(updateStmt)
