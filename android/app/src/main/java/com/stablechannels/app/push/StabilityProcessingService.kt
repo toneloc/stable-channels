@@ -21,9 +21,16 @@ import kotlin.math.roundToLong
 
 class StabilityProcessingService : Service() {
 
+    private enum class InsertResult { INSERTED, DUPLICATE, MISSING_CHANNEL, FAILED }
+
+    /** Thrown when a stability payment DB write fails permanently; the polling catch re-throws
+     *  this so it escapes handleLspToUser and reaches onStartCommand's flagPendingPayment path. */
+    private class BackingUpdateFailed(msg: String) : Exception(msg)
+
     companion object {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
+        private const val DB_RETRY_BACKOFF_MS = 500L
 
         @Volatile
         var isRunning = false
@@ -150,35 +157,7 @@ class StabilityProcessingService : Service() {
         // Price dropped — LSP sends us sats. Just poll for incoming payment.
         Log.d(TAG, "Polling for incoming payment...")
         val deadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
-
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                val event = node.nextEvent()
-                when (event) {
-                    is Event.PaymentReceived -> {
-                        Log.d(TAG, "Payment received: ${event.amountMsat} msat")
-                        node.eventHandled()
-                        val price = fetchMedianPrice()
-                        recordPaymentInDB(
-                            dbPath, null, "stability", "received",
-                            event.amountMsat.toLong(), price
-                        )
-                        return
-                    }
-                    else -> node.eventHandled()
-                }
-            } catch (_: Exception) {
-                Thread.sleep(500)
-            }
-        }
-        Log.d(TAG, "Poll timeout — no payment received")
-    }
-
-    private fun handleIncomingPayment(node: Node, dbPath: String) {
-        // Wake push — stay online for POLL_TIMEOUT_SECS to receive any pending payments.
-        Log.d(TAG, "Polling for incoming payments (wake push)...")
-        val deadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
-        var received = false
+        var hasUnpersistedEvent = false
         var price = 0.0
 
         while (System.currentTimeMillis() < deadline) {
@@ -187,20 +166,207 @@ class StabilityProcessingService : Service() {
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
-                        node.eventHandled()
+                        val isStabilityPayment = event.customRecords.any {
+                            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1))
+                        }
+                        val paymentId = event.paymentId ?: event.paymentHash
                         if (price <= 0) price = fetchMedianPrice()
-                        recordPaymentInDB(
-                            dbPath, null, "lightning", "received",
-                            event.amountMsat.toLong(), price
-                        )
-                        received = true
+                        if (isStabilityPayment) {
+                            val amountSats = event.amountMsat.toLong() / 1000
+                            val result = recordPaymentAtomicInDB(
+                                dbPath, paymentId, "stability", "received",
+                                event.amountMsat.toLong(), price, amountSats,
+                                userChannelId = activeUserChannelId()
+                            )
+                            when (result) {
+                                InsertResult.INSERTED, InsertResult.DUPLICATE -> {
+                                    node.eventHandled()
+                                    if (result == InsertResult.INSERTED) {
+                                        Log.d(TAG, "Updated backingSats += $amountSats (delta)")
+                                    }
+                                }
+                                InsertResult.MISSING_CHANNEL ->
+                                    throw BackingUpdateFailed("No channel row for stability payment — not acknowledging, foreground will heal")
+                                InsertResult.FAILED ->
+                                    throw BackingUpdateFailed("DB write failed for stability payment — not acknowledging, LDK will retry")
+                            }
+                            return
+                        } else {
+                            Log.d(TAG, "Non-stability payment received, recording as lightning and continuing to poll")
+                            val result = recordPaymentAtomicInDB(
+                                dbPath, paymentId, "lightning", "received",
+                                event.amountMsat.toLong(), price, null
+                            )
+                            when (result) {
+                                InsertResult.INSERTED, InsertResult.DUPLICATE -> {
+                                    node.eventHandled()
+                                    hasUnpersistedEvent = false
+                                }
+                                InsertResult.MISSING_CHANNEL, InsertResult.FAILED -> {
+                                    hasUnpersistedEvent = true
+                                    Log.e(TAG, "DB write failed for non-stability payment — backing off before retry")
+                                    Thread.sleep(DB_RETRY_BACKOFF_MS)
+                                }
+                            }
+                        }
+                    }
+                    else -> node.eventHandled()
+                }
+            } catch (e: Exception) {
+                if (e is BackingUpdateFailed) throw e  // permanent; let onStartCommand flag for retry
+                Thread.sleep(500)
+            }
+        }
+        if (hasUnpersistedEvent) {
+            throw BackingUpdateFailed(
+                "DB write still failing for non-stability payment — leaving pending for foreground retry"
+            )
+        }
+        Log.d(TAG, "Poll timeout — no payment received")
+    }
+
+    /** Insert a payment and optionally update channel backing sats in one SQLite transaction.
+     *  BEGIN IMMEDIATE is used so the write lock is held before the dedup SELECT,
+     *  preventing TOCTOU races across processes. */
+    private fun recordPaymentAtomicInDB(
+        dbPath: String,
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: Long,
+        btcPrice: Double,
+        backingDeltaSats: Long?,
+        userChannelId: String? = null
+    ): InsertResult {
+        return try {
+            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+            // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT.
+            db.execSQL("BEGIN IMMEDIATE")
+            try {
+                if (!paymentId.isNullOrEmpty()) {
+                    val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                    val exists = cursor.use { it.moveToFirst() }
+                    if (exists) {
+                        Log.d(TAG, "recordPaymentAtomicInDB: already exists, skipping")
+                        db.execSQL("ROLLBACK")
+                        db.close()
+                        return InsertResult.DUPLICATE
+                    }
+                }
+                val amountUsd = if (btcPrice > 0) (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * btcPrice else 0.0
+                db.execSQL(
+                    "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')",
+                    arrayOf<Any?>(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
+                )
+                if (backingDeltaSats != null) {
+                    // Target the backing UPDATE by the explicit user_channel_id — never by recency —
+                    // so a push-triggered payment can't credit/debit the wrong channel row.
+                    if (userChannelId.isNullOrEmpty()) {
+                        throw Exception("Backing delta requested without user_channel_id — rolling back")
+                    }
+                    val backingCursor = db.rawQuery(
+                        "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                        arrayOf(userChannelId)
+                    )
+                    val currentBacking = backingCursor.use { if (it.moveToFirst()) it.getLong(0) else null }
+                    if (currentBacking == null) {
+                        Log.e(TAG, "recordPaymentAtomicInDB: no channel row for user_channel_id=$userChannelId — rolling back")
+                        db.execSQL("ROLLBACK")
+                        db.close()
+                        return InsertResult.MISSING_CHANNEL
+                    }
+                    // Clamp instead of refusing: this runs after the payment already settled, so
+                    // the sats truly moved — a floor of 0 keeps the ledger recordable.
+                    val newBacking = maxOf(0L, currentBacking + backingDeltaSats)
+                    if (currentBacking + backingDeltaSats < 0) {
+                        Log.w(TAG, "BACKING_CLAMPED: current=$currentBacking delta=$backingDeltaSats clamped_to=$newBacking user_channel_id=$userChannelId")
+                    }
+                    val updateStmt = db.compileStatement(
+                        "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+                    )
+                    updateStmt.bindLong(1, newBacking)
+                    updateStmt.bindString(2, userChannelId)
+                    val rowsAffected = updateStmt.executeUpdateDelete()
+                    if (rowsAffected != 1) {
+                        throw Exception("Backing UPDATE affected $rowsAffected rows, expected 1 — rolling back")
+                    }
+                }
+                db.execSQL("COMMIT")
+                db.close()
+                Log.d(TAG, "recordPaymentAtomicInDB: saved $direction $amountMsat msat")
+                InsertResult.INSERTED
+            } catch (e: Exception) {
+                try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+                db.close()
+                throw e
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "recordPaymentAtomicInDB failed", e)
+            InsertResult.FAILED
+        }
+    }
+
+    private fun handleIncomingPayment(node: Node, dbPath: String) {
+        // Wake push — stay online for POLL_TIMEOUT_SECS to receive any pending payments.
+        Log.d(TAG, "Polling for incoming payments (wake push)...")
+        val deadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
+        var received = false
+        var price = 0.0
+        var hasUnpersistedEvent = false
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                val event = node.nextEvent()
+                when (event) {
+                    is Event.PaymentReceived -> {
+                        Log.d(TAG, "Payment received: ${event.amountMsat} msat")
+                        if (price <= 0) price = fetchMedianPrice()
+                        val pid = event.paymentId ?: event.paymentHash
+                        // Classify by TLV like handleLspToUser — a stability payment must credit
+                        // backing, not be misfiled as a plain lightning receive.
+                        val isStabilityPayment = event.customRecords.any {
+                            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1))
+                        }
+                        val result = if (isStabilityPayment) {
+                            val amountSats = event.amountMsat.toLong() / 1000
+                            recordPaymentAtomicInDB(
+                                dbPath, pid, "stability", "received",
+                                event.amountMsat.toLong(), price, amountSats,
+                                userChannelId = activeUserChannelId()
+                            )
+                        } else {
+                            recordPaymentAtomicInDB(dbPath, pid, "lightning", "received", event.amountMsat.toLong(), price, null)
+                        }
+                        when (result) {
+                            InsertResult.INSERTED, InsertResult.DUPLICATE -> {
+                                node.eventHandled()
+                                received = true
+                                hasUnpersistedEvent = false
+                            }
+                            InsertResult.MISSING_CHANNEL ->
+                                throw BackingUpdateFailed("No channel row for stability payment — not acknowledging, foreground will heal")
+                            InsertResult.FAILED -> {
+                                if (isStabilityPayment) {
+                                    throw BackingUpdateFailed("DB write failed for stability payment — not acknowledging, LDK will retry")
+                                }
+                                hasUnpersistedEvent = true
+                                Log.e(TAG, "DB write failed for incoming payment — backing off before retry")
+                                Thread.sleep(DB_RETRY_BACKOFF_MS)
+                            }
+                        }
                         // Keep polling — there might be more payments
                     }
                     else -> node.eventHandled()
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e is BackingUpdateFailed) throw e  // permanent; let onStartCommand flag for retry
                 Thread.sleep(500)
             }
+        }
+        if (hasUnpersistedEvent) {
+            throw BackingUpdateFailed(
+                "DB write still failing for incoming payment — leaving pending for foreground retry"
+            )
         }
         if (received) {
             Log.d(TAG, "Incoming payment(s) received during wake")
@@ -210,6 +376,12 @@ class StabilityProcessingService : Service() {
     }
 
     private fun handleUserToLsp(node: Node, dbPath: String) {
+        if (!reconcilePendingOutgoingPayment(node, dbPath)) {
+            throw BackingUpdateFailed(
+                "Previous outgoing payment marker is unresolved — refusing to send again"
+            )
+        }
+
         // Cooldown: skip if we sent a stability payment recently
         val prefs = FCMService.getPrefs(this)
         val lastSent = prefs.getLong("bg_last_stability_sent", 0)
@@ -269,29 +441,217 @@ class StabilityProcessingService : Service() {
 
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
 
+        // Atomically claim the send before starting it. If another process (foreground timer)
+        // already holds the marker, the claim is denied and we skip this tick — this is the
+        // check-and-set that prevents a double send.
+        if (!claimPendingSendInDB(dbPath, amountMsat, price)) {
+            Log.d(TAG, "Pending send already claimed by another sender — skipping this tick")
+            return
+        }
+
+        val paymentIdString: String
         try {
             val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1))
-            node.spontaneousPayment().sendWithCustomTlvs(
+            val paymentId = node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),
                 Constants.DEFAULT_LSP_PUBKEY,
                 null,
                 listOf(tlv)
             )
-            Log.d(TAG, "Stability keysend sent successfully")
-            recordPaymentInDB(
-                dbPath, null, "stability", "sent",
-                amountMsat, price
-            )
-            // Reset backingSats to equilibrium — accounts payment against stable pool.
-            // Server does the same reset, so they stay in sync.
-            val newBacking = ((expectedUsd / price) * Constants.SATS_IN_BTC).toLong()
-            updateBackingSatsInDB(dbPath, newBacking)
-            Log.d(TAG, "Reset backingSats to $newBacking")
-
-            FCMService.getPrefs(this).edit().putLong("bg_last_stability_sent", System.currentTimeMillis() / 1000).apply()
+            paymentIdString = paymentId.toString()
         } catch (e: Exception) {
+            // sendWithCustomTlvs failed, so there is no successful payment to protect.
+            try { clearPendingSendInDB(dbPath) } catch (_: Exception) {}
             Log.e(TAG, "Stability keysend failed", e)
             throw e
+        }
+        Log.d(TAG, "Stability keysend sent successfully")
+
+        try {
+            setPendingSendPaymentIdInDB(dbPath, paymentIdString)
+        } catch (e: Exception) {
+            throw BackingUpdateFailed(
+                "Payment was sent but its ID could not be persisted; marker remains unresolved — reconcile will adopt it"
+            )
+        }
+        val sentAt = System.currentTimeMillis() / 1000
+        FCMService.getPrefs(this).edit().putLong("bg_last_stability_sent", sentAt).commit()
+
+        val amountSats = amountMsat / 1000
+        val result = recordPaymentAtomicInDB(
+            dbPath, paymentIdString, "stability", "sent",
+            amountMsat, price, -amountSats,
+            userChannelId = channelState.userChannelId
+        )
+        if (result == InsertResult.FAILED || result == InsertResult.MISSING_CHANNEL) {
+            throw BackingUpdateFailed(
+                "Payment was sent but DB persistence failed; durable marker will drive reconciliation"
+            )
+        }
+        clearPendingSendInDB(dbPath)
+        Log.d(TAG, "Recorded outgoing payment and updated backingSats -= $amountSats atomically")
+    }
+
+    /** Resolve any leftover pending-send marker. Returns true when no unresolved marker
+     *  blocks a new send; false means wait (a send may still be in flight). */
+    private fun reconcilePendingOutgoingPayment(node: Node, dbPath: String): Boolean {
+        val pending = loadPendingSendFromDB(dbPath) ?: return true
+        var pendingPaymentId = pending.paymentId
+
+        if (pendingPaymentId.isEmpty()) {
+            // The previous sender died before persisting the payment ID. Resolve the outcome
+            // against LDK's payment store instead of blocking forever.
+            val now = System.currentTimeMillis() / 1000
+            val candidates = try {
+                node.listPayments()
+            } catch (e: Exception) {
+                Log.w(TAG, "listPayments failed during reconcile: ${e.message}")
+                return false
+            }.filter {
+                it.direction == PaymentDirection.OUTBOUND &&
+                    it.kind is PaymentKind.Spontaneous &&
+                    it.amountMsat?.toLong() == pending.amountMsat &&
+                    it.latestUpdateTimestamp.toLong() >= pending.createdAt - 10
+            }
+            val succeeded = candidates.firstOrNull { it.status == PaymentStatus.SUCCEEDED }
+            val stillPending = candidates.firstOrNull { it.status == PaymentStatus.PENDING }
+            val failed = candidates.firstOrNull { it.status == PaymentStatus.FAILED }
+            when {
+                succeeded != null -> {
+                    setPendingSendPaymentIdInDB(dbPath, succeeded.id)
+                    pendingPaymentId = succeeded.id
+                    Log.d(TAG, "Reconcile: adopted succeeded keysend ${succeeded.id} for empty marker")
+                }
+                stillPending != null -> return false  // in flight — wait
+                failed != null -> {
+                    clearPendingSendInDB(dbPath)
+                    Log.w(TAG, "Reconcile: marker's keysend ${failed.id} failed — cleared marker, no debit")
+                    return true
+                }
+                now - pending.createdAt > 120 -> {
+                    clearPendingSendInDB(dbPath)
+                    Log.w(TAG, "Reconcile: no matching keysend after ${now - pending.createdAt}s — send never left device, cleared marker")
+                    return true
+                }
+                else -> return false  // young marker — another process may be mid-send
+            }
+        }
+
+        if (pending.amountMsat <= 0) {
+            clearPendingSendInDB(dbPath)
+            Log.w(TAG, "Reconcile: corrupt marker (amount_msat=${pending.amountMsat}) — cleared")
+            return true
+        }
+
+        val amountSats = pending.amountMsat / 1000
+        val result = recordPaymentAtomicInDB(
+            dbPath, pendingPaymentId, "stability", "sent",
+            pending.amountMsat, pending.price, -amountSats,
+            userChannelId = activeUserChannelId()
+        )
+        if (result == InsertResult.FAILED || result == InsertResult.MISSING_CHANNEL) {
+            Log.e(TAG, "Could not reconcile previously sent payment — will retry later")
+            return false
+        }
+        clearPendingSendInDB(dbPath)
+        Log.d(TAG, "Reconciled previously sent outgoing payment $pendingPaymentId")
+        return true
+    }
+
+    // --- Pending outgoing stability send marker (raw-SQLite copies of DatabaseService's
+    //     pending_stability_send operations, usable without the main app process) ---
+
+    private data class PendingSend(
+        val paymentId: String,
+        val amountMsat: Long,
+        val price: Double,
+        val createdAt: Long
+    )
+
+    private fun ensurePendingSendTable(db: SQLiteDatabase) {
+        // IF NOT EXISTS so either process (main app or this service) can create it.
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS pending_stability_send (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                payment_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL,
+                price REAL NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+    }
+
+    /** Atomic check-and-set: returns false when a marker already exists (claim denied).
+     *  BEGIN IMMEDIATE holds the write lock across the SELECT + INSERT. */
+    private fun claimPendingSendInDB(dbPath: String, amountMsat: Long, price: Double): Boolean {
+        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+        try {
+            ensurePendingSendTable(db)
+            db.execSQL("BEGIN IMMEDIATE")
+            try {
+                val cursor = db.rawQuery("SELECT id FROM pending_stability_send WHERE id = 1", null)
+                val exists = cursor.use { it.moveToFirst() }
+                if (exists) {
+                    db.execSQL("ROLLBACK")
+                    return false
+                }
+                db.execSQL(
+                    "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
+                    arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000)
+                )
+                db.execSQL("COMMIT")
+                return true
+            } catch (e: Exception) {
+                try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+                throw e
+            }
+        } finally {
+            db.close()
+        }
+    }
+
+    private fun setPendingSendPaymentIdInDB(dbPath: String, paymentId: String) {
+        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+        try {
+            ensurePendingSendTable(db)
+            db.execSQL("UPDATE pending_stability_send SET payment_id = ? WHERE id = 1", arrayOf(paymentId))
+        } finally {
+            db.close()
+        }
+    }
+
+    private fun loadPendingSendFromDB(dbPath: String): PendingSend? {
+        if (!File(dbPath).exists()) return null
+        // READWRITE so ensurePendingSendTable can create the table on first touch.
+        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+        try {
+            ensurePendingSendTable(db)
+            val cursor = db.rawQuery(
+                "SELECT payment_id, amount_msat, price, created_at FROM pending_stability_send WHERE id = 1",
+                null
+            )
+            return cursor.use {
+                if (it.moveToFirst()) {
+                    PendingSend(
+                        paymentId = it.getString(0),
+                        amountMsat = it.getLong(1),
+                        price = it.getDouble(2),
+                        createdAt = it.getLong(3)
+                    )
+                } else null
+            }
+        } finally {
+            db.close()
+        }
+    }
+
+    private fun clearPendingSendInDB(dbPath: String) {
+        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+        try {
+            ensurePendingSendTable(db)
+            db.execSQL("DELETE FROM pending_stability_send WHERE id = 1")
+        } finally {
+            db.close()
         }
     }
 
@@ -300,7 +660,8 @@ class StabilityProcessingService : Service() {
         val receiverSats: Long,
         val nativeSats: Long,
         val backingSats: Long,
-        val latestPrice: Double
+        val latestPrice: Double,
+        val userChannelId: String
     )
 
     private fun loadChannelStateFromDB(): ChannelState? {
@@ -310,8 +671,9 @@ class StabilityProcessingService : Service() {
         return try {
             val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             val cursor = db.rawQuery(
-                // Deterministic fallback row when multiple channels exist.
-                "SELECT expected_usd, receiver_sats, latest_price, stable_sats FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
+                // Pick the single active channel deterministically. The user_channel_id it returns is
+                // the stable key every backing UPDATE targets by — the write never re-selects by recency.
+                "SELECT expected_usd, receiver_sats, latest_price, stable_sats, user_channel_id FROM channels WHERE user_channel_id IS NOT NULL AND user_channel_id != '' ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -321,7 +683,8 @@ class StabilityProcessingService : Service() {
                         receiverSats = it.getLong(1),
                         nativeSats = 0,  // not in DB schema, computed at runtime
                         backingSats = it.getLong(3),
-                        latestPrice = it.getDouble(2)
+                        latestPrice = it.getDouble(2),
+                        userChannelId = it.getString(4)
                     )
                 } else null
             }
@@ -332,6 +695,11 @@ class StabilityProcessingService : Service() {
             null
         }
     }
+
+    /** Resolve the single active channel's user_channel_id — the stable key backing UPDATEs target.
+     *  Returns null when no channel row exists, in which case a backing update must fail (not guess). */
+    private fun activeUserChannelId(): String? =
+        loadChannelStateFromDB()?.userChannelId?.takeIf { it.isNotEmpty() }
 
     private fun fetchMedianPrice(): Double {
         val feeds = listOf(
@@ -374,63 +742,6 @@ class StabilityProcessingService : Service() {
             (sorted[mid - 1] + sorted[mid]) / 2.0
         } else {
             sorted[mid]
-        }
-    }
-
-    private fun updateBackingSatsInDB(dbPath: String, backingSats: Long) {
-        try {
-            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-            // Bump updated_at so the row we just wrote remains the deterministic
-            // fallback for the next read (matches ORDER BY updated_at DESC, channel_id DESC).
-            db.execSQL(
-                "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE channel_id = (SELECT channel_id FROM channels ORDER BY updated_at DESC, channel_id DESC LIMIT 1)",
-                arrayOf(backingSats)
-            )
-            db.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to update backingSats in DB", e)
-        }
-    }
-
-    private fun recordPaymentInDB(
-        dbPath: String,
-        paymentId: String?,
-        paymentType: String,
-        direction: String,
-        amountMsat: Long,
-        btcPrice: Double
-    ) {
-        try {
-            val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-
-            // Dedup: skip if payment_id already exists
-            if (paymentId != null && paymentId.isNotEmpty()) {
-                val cursor = db.rawQuery(
-                    "SELECT id FROM payments WHERE payment_id = ?",
-                    arrayOf(paymentId)
-                )
-                val exists = cursor.moveToFirst()
-                cursor.close()
-                if (exists) {
-                    db.close()
-                    Log.d(TAG, "recordPayment: already exists, skipping")
-                    return
-                }
-            }
-
-            val amountUsd = if (btcPrice > 0) {
-                (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * btcPrice
-            } else 0.0
-
-            db.execSQL(
-                """INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
-                   VALUES (?, ?, ?, ?, ?, ?, 'completed')""",
-                arrayOf(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
-            )
-            Log.d(TAG, "recordPayment: saved $direction $amountMsat msat (${"%.2f".format(amountUsd)} USD)")
-            db.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "recordPayment failed", e)
         }
     }
 

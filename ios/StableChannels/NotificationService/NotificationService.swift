@@ -20,6 +20,17 @@ class NotificationService: UNNotificationServiceExtension {
     private var bestAttemptContent: UNMutableNotificationContent?
     private var node: Node?
 
+    private enum PaymentInsertResult {
+        case inserted, duplicate, failed, missingChannelRow
+    }
+
+    private struct PendingOutgoingStabilityPayment {
+        let paymentId: String
+        let amountMsat: UInt64
+        let btcPrice: Double
+        let createdAt: Int64
+    }
+
     // MARK: - Logging
 
     private func nseLog(_ msg: String) {
@@ -248,52 +259,69 @@ class NotificationService: UNNotificationServiceExtension {
     ) {
         nseLog("lsp_to_user: Waiting for incoming payment")
 
+        let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
         let startTime = Date()
         let timeout: TimeInterval = 22 // Leave ~8s for cleanup + notification delivery
         var received = false
-        var amountMsatTotal: UInt64 = 0
-        var paymentIdStr: String?
+        var price = 0.0
 
-        while Date().timeIntervalSince(startTime) < timeout {
+        eventLoop: while Date().timeIntervalSince(startTime) < timeout {
             if let event = node.nextEvent() {
                 nseLog("Event: \(event)")
                 switch event {
-                case .paymentReceived(let paymentId, _, let amountMsat, _):
-                    amountMsatTotal = amountMsat
-                    paymentIdStr = paymentId.map { "\($0)" }
-                    nseLog("Payment received: \(amountMsat / 1000) sats")
-                    try? node.eventHandled()
-                    received = true
+                case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
+                    let isStabilityPayment = customRecords.contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
+                    // Always provide a non-nil ID for dedup so replays don't insert duplicates.
+                    let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
+                    if price <= 0 { price = Self.fetchBTCPrice() }
+                    if isStabilityPayment {
+                        let amountSats = amountMsat / 1000
+                        let result = recordPaymentAndMaybeUpdateBackingInDB(
+                            dbPath: dbPath, paymentId: payId, paymentType: "stability",
+                            direction: "received", amountMsat: amountMsat, btcPrice: price,
+                            backingDeltaSats: Int64(amountSats),
+                            userChannelId: activeUserChannelId(dbPath: dbPath)
+                        )
+                        switch result {
+                        case .inserted, .duplicate:
+                            try? node.eventHandled()
+                            if price > 0 {
+                                let usd = Double(amountSats) / Self.satsInBTC * price
+                                content.title = "Stability Payment Received"
+                                content.body = String(format: "$%.2f received", usd)
+                            } else {
+                                content.title = "Stability Payment Received"
+                                content.body = "\(amountSats) sats received"
+                            }
+                            if result == .inserted { nseLog("Updated backingSats += \(amountSats) (delta)") }
+                            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+                            received = true
+                        case .failed, .missingChannelRow:
+                            nseLog("DB write failed for stability payment — not acknowledging, LDK will retry")
+                        }
+                    } else {
+                        let result = recordPaymentAndMaybeUpdateBackingInDB(
+                            dbPath: dbPath, paymentId: payId, paymentType: "lightning",
+                            direction: "received", amountMsat: amountMsat, btcPrice: price,
+                            backingDeltaSats: nil
+                        )
+                        switch result {
+                        case .inserted, .duplicate:
+                            try? node.eventHandled()
+                        case .failed, .missingChannelRow:
+                            nseLog("DB write failed for non-stability payment — not acknowledging")
+                        }
+                        nseLog("Non-stability payment (\(amountMsat / 1000) sats), continuing to poll")
+                    }
                 default:
                     try? node.eventHandled()
                 }
-                if received { break }
+                if received { break eventLoop }
             }
             Thread.sleep(forTimeInterval: 0.5)
         }
 
-        if received {
-            let price = Self.fetchBTCPrice()
-            let amountSats = amountMsatTotal / 1000
-            if price > 0 {
-                let usd = Double(amountSats) / Self.satsInBTC * price
-                content.title = "Stability Payment Received"
-                content.body = String(format: "$%.2f received", usd)
-            } else {
-                content.title = "Stability Payment Received"
-                content.body = "\(amountSats) sats received"
-            }
-            let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
-            recordPaymentInDB(
-                dbPath: dbPath,
-                paymentId: paymentIdStr,
-                paymentType: "stability",
-                direction: "received",
-                amountMsat: amountMsatTotal,
-                btcPrice: price
-            )
-            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
-        } else {
+        if !received {
             content.title = "Payment Pending"
             content.body = "Open app to receive your payment"
             UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
@@ -316,20 +344,54 @@ class NotificationService: UNNotificationServiceExtension {
         let startTime = Date()
         let timeout: TimeInterval = 22
         var received = false
+        var persistenceFailed = false
         var totalMsat: UInt64 = 0
-        var lastPaymentId: String?
+        var price = 0.0
         let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
 
         while Date().timeIntervalSince(startTime) < timeout {
             if let event = node.nextEvent() {
                 nseLog("Event: \(event)")
                 switch event {
-                case .paymentReceived(let paymentId, _, let amountMsat, _):
-                    totalMsat += amountMsat
-                    lastPaymentId = paymentId.map { "\($0)" }
-                    nseLog("Payment received: \(amountMsat / 1000) sats")
-                    try? node.eventHandled()
-                    received = true
+                case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
+                    if price <= 0 { price = Self.fetchBTCPrice() }
+                    let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
+                    let isStabilityPayment = customRecords.contains {
+                        $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1])
+                    }
+                    let result: PaymentInsertResult
+                    if isStabilityPayment {
+                        result = recordPaymentAndMaybeUpdateBackingInDB(
+                            dbPath: dbPath,
+                            paymentId: payId,
+                            paymentType: "stability",
+                            direction: "received",
+                            amountMsat: amountMsat,
+                            btcPrice: price,
+                            backingDeltaSats: Int64(amountMsat / 1000),
+                            userChannelId: activeUserChannelId(dbPath: dbPath)
+                        )
+                    } else {
+                        result = recordPaymentAndMaybeUpdateBackingInDB(
+                            dbPath: dbPath,
+                            paymentId: payId,
+                            paymentType: "lightning",
+                            direction: "received",
+                            amountMsat: amountMsat,
+                            btcPrice: price,
+                            backingDeltaSats: nil
+                        )
+                    }
+                    switch result {
+                    case .inserted, .duplicate:
+                        try? node.eventHandled()
+                        totalMsat += amountMsat
+                        received = true
+                        nseLog("Payment persisted before ack: \(amountMsat / 1000) sats")
+                    case .failed, .missingChannelRow:
+                        persistenceFailed = true
+                        nseLog("DB write failed for incoming payment — not acknowledging")
+                    }
                 // Keep polling — there might be more payments
                 default:
                     try? node.eventHandled()
@@ -339,7 +401,6 @@ class NotificationService: UNNotificationServiceExtension {
         }
 
         if received {
-            let price = Self.fetchBTCPrice()
             let totalSats = totalMsat / 1000
             if price > 0 {
                 let usd = Double(totalSats) / Self.satsInBTC * price
@@ -349,16 +410,14 @@ class NotificationService: UNNotificationServiceExtension {
                 content.title = "Payment Received"
                 content.body = "\(totalSats) sats received"
             }
-            recordPaymentInDB(
-                dbPath: dbPath,
-                paymentId: lastPaymentId,
-                paymentType: "lightning",
-                direction: "received",
-                amountMsat: totalMsat,
-                btcPrice: price
-            )
             content.sound = .default
-            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+            UserDefaults(suiteName: Self.appGroup)?
+                .set(persistenceFailed, forKey: "pending_push_payment")
+        } else if persistenceFailed {
+            content.title = "Payment Pending"
+            content.body = "Open app to finish recording your payment"
+            content.sound = nil
+            UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
         } else {
             // No payment arrived — this wake push just kept the node online briefly.
             // Can't fully suppress an NSE notification, so show a minimal message.
@@ -381,6 +440,16 @@ class NotificationService: UNNotificationServiceExtension {
     ) {
         nseLog("user_to_lsp: Calculating stability payment")
 
+        let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
+        guard reconcilePendingOutgoingPayment(dbPath: dbPath, node: node) else {
+            content.title = "Payment Sent"
+            content.body = "Open app to finish syncing the stability payment"
+            UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+            cleanup()
+            contentHandler(content)
+            return
+        }
+
         // Cooldown: skip if we sent a stability payment recently
         let shared = UserDefaults(suiteName: Self.appGroup)
         shared?.synchronize()
@@ -397,7 +466,6 @@ class NotificationService: UNNotificationServiceExtension {
         }
 
         // 1. Read channel state from SQLite
-        let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
         guard let channelState = readChannelState(dbPath: dbPath) else {
             nseLog("Failed to read channel state from DB")
             content.title = "Payment Pending"
@@ -471,6 +539,18 @@ class NotificationService: UNNotificationServiceExtension {
 
         nseLog("Sending \(amountSats) sats (\(amountMsat) msat) to LSP")
 
+        // Claim the durable send slot (cross-process atomic via BEGIN IMMEDIATE).
+        // If the foreground app — or a previous run — already holds it, abort this run.
+        guard claimPendingSend(dbPath: dbPath, amountMsat: amountMsat, price: price) else {
+            nseLog("Pending send slot already claimed (or claim failed) — aborting this run")
+            content.title = "Payment Pending"
+            content.body = "Open app to process stability payment"
+            UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+            cleanup()
+            contentHandler(content)
+            return
+        }
+
         // 5. Send keysend with stability TLV marker
         do {
             let tlvRecord = CustomTlvRecord(typeNum: Self.stableChannelTLVType, value: Data([1])) // marker byte
@@ -482,32 +562,47 @@ class NotificationService: UNNotificationServiceExtension {
             )
             nseLog("Keysend sent: \(paymentId)")
 
-            // Wait for payment to settle
-            Thread.sleep(forTimeInterval: 3)
-
-            recordPaymentInDB(
-                dbPath: dbPath,
-                paymentId: "\(paymentId)",
-                paymentType: "stability",
-                direction: "sent",
-                amountMsat: amountMsat,
-                btcPrice: price
-            )
-
-            // Reset backingSats to equilibrium — accounts payment against stable pool.
-            // Server does the same reset, so they stay in sync.
-            let newBacking = UInt64(targetUSD / price * Self.satsInBTC)
-            updateBackingSatsInDB(dbPath: dbPath, backingSats: newBacking)
-
             let cooldownDefaults = UserDefaults(suiteName: Self.appGroup)
+            let paymentIdString = "\(paymentId)"
+            let guardSaved = setPendingSendPaymentId(dbPath: dbPath, paymentId: paymentIdString)
             cooldownDefaults?.set(Date().timeIntervalSince1970, forKey: "nse_last_stability_sent")
             cooldownDefaults?.synchronize()
             nseLog("Cooldown: stamped at \(Date().timeIntervalSince1970)")
 
-            content.title = "Stability Payment Sent"
-            content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
-            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+            guard guardSaved else {
+                nseLog("Payment sent but payment ID guard update failed — blocking future sends")
+                content.title = "Payment Sent"
+                content.body = "Open app to finish syncing the stability payment"
+                UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+                cleanup()
+                contentHandler(content)
+                return
+            }
+
+            let persistence = recordPaymentAndMaybeUpdateBackingInDB(
+                dbPath: dbPath,
+                paymentId: paymentIdString,
+                paymentType: "stability",
+                direction: "sent",
+                amountMsat: amountMsat,
+                btcPrice: price,
+                backingDeltaSats: -Int64(amountSats),
+                userChannelId: channelState.userChannelId
+            )
+            switch persistence {
+            case .inserted, .duplicate:
+                clearPendingSend(dbPath: dbPath)
+                content.title = "Stability Payment Sent"
+                content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
+                UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+            case .failed, .missingChannelRow:
+                nseLog("Payment sent but DB persistence failed — durable guard will block resends")
+                content.title = "Payment Sent"
+                content.body = "Open app to finish syncing the stability payment"
+                UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+            }
         } catch {
+            clearPendingSend(dbPath: dbPath)
             nseLog("Keysend failed: \(error)")
             content.title = "Payment Pending"
             content.body = "Open app to process stability payment"
@@ -518,107 +613,299 @@ class NotificationService: UNNotificationServiceExtension {
         contentHandler(content)
     }
 
-    // MARK: - Record Payment in DB
+    // MARK: - Pending Stability Send (durable cross-process marker in stablechannels.db)
 
-    /// Write a payment record to stablechannels.db so the main app's history is complete.
-    /// Uses INSERT with dedup on payment_id (matches DatabaseService.recordPayment schema).
-    private func recordPaymentInDB(
+    private static let pendingSendTableSQL = """
+        CREATE TABLE IF NOT EXISTS pending_stability_send (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payment_id TEXT NOT NULL,
+            amount_msat INTEGER NOT NULL,
+            price REAL NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+        """
+
+    /// Open stablechannels.db for pending-send operations with the busy timeout
+    /// set and the marker table guaranteed to exist (either process may create it).
+    private func openPendingSendDB(dbPath: String) -> OpaquePointer? {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            nseLog("pendingSend: open failed")
+            sqlite3_close(db)
+            return nil
+        }
+        sqlite3_busy_timeout(db, 2000)
+        guard sqlite3_exec(db, Self.pendingSendTableSQL, nil, nil, nil) == SQLITE_OK else {
+            nseLog("pendingSend: CREATE TABLE failed")
+            sqlite3_close(db)
+            return nil
+        }
+        return db
+    }
+
+    /// Claim the single outgoing-send slot under BEGIN IMMEDIATE so the NSE and
+    /// the foreground app can never both send for the same drift.
+    /// Returns true only if this caller inserted the marker row.
+    private func claimPendingSend(dbPath: String, amountMsat: UInt64, price: Double) -> Bool {
+        guard let db = openPendingSendDB(dbPath: dbPath) else { return false }
+        defer { sqlite3_close(db) }
+
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            nseLog("claimPendingSend: BEGIN failed")
+            return false
+        }
+        var checkStmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id FROM pending_stability_send WHERE id = 1", -1, &checkStmt, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        let alreadyClaimed = sqlite3_step(checkStmt) == SQLITE_ROW
+        sqlite3_finalize(checkStmt)
+        if alreadyClaimed {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            nseLog("claimPendingSend: slot already claimed")
+            return false
+        }
+        var stmt: OpaquePointer?
+        let insertSql = "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)"
+        guard sqlite3_prepare_v2(db, insertSql, -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        sqlite3_bind_int64(stmt, 1, Int64(amountMsat))
+        sqlite3_bind_double(stmt, 2, price)
+        sqlite3_bind_int64(stmt, 3, Int64(Date().timeIntervalSince1970))
+        let inserted = sqlite3_step(stmt) == SQLITE_DONE
+        sqlite3_finalize(stmt)
+        guard inserted, sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        return true
+    }
+
+    /// Attach the real payment id to the claimed send marker once the keysend returns.
+    private func setPendingSendPaymentId(dbPath: String, paymentId: String) -> Bool {
+        guard let db = openPendingSendDB(dbPath: dbPath) else { return false }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1", -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        sqlite3_bind_text(stmt, 1, (paymentId as NSString).utf8String, -1, nil)
+        let ok = sqlite3_step(stmt) == SQLITE_DONE
+        sqlite3_finalize(stmt)
+        return ok
+    }
+
+    private func loadPendingSend(dbPath: String) -> PendingOutgoingStabilityPayment? {
+        guard let db = openPendingSendDB(dbPath: dbPath) else { return nil }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        let sql = "SELECT payment_id, amount_msat, price, created_at FROM pending_stability_send WHERE id = 1"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+
+        let paymentId = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? ""
+        return PendingOutgoingStabilityPayment(
+            paymentId: paymentId,
+            amountMsat: UInt64(sqlite3_column_int64(stmt, 1)),
+            btcPrice: sqlite3_column_double(stmt, 2),
+            createdAt: sqlite3_column_int64(stmt, 3)
+        )
+    }
+
+    private func clearPendingSend(dbPath: String) {
+        guard let db = openPendingSendDB(dbPath: dbPath) else { return }
+        defer { sqlite3_close(db) }
+        sqlite3_exec(db, "DELETE FROM pending_stability_send WHERE id = 1", nil, nil, nil)
+    }
+
+    private func reconcilePendingOutgoingPayment(dbPath: String, node: Node?) -> Bool {
+        guard var pending = loadPendingSend(dbPath: dbPath) else { return true }
+
+        if pending.paymentId.isEmpty {
+            // Process died mid-keysend. Resolve the marker against LDK's payment
+            // store instead of blocking sends forever.
+            guard let node else {
+                nseLog("Previous outgoing payment marker is unresolved — refusing to send again")
+                return false
+            }
+            let candidates = node.listPayments().filter { payment in
+                guard payment.direction == .outbound,
+                      payment.amountMsat == pending.amountMsat,
+                      Int64(payment.latestUpdateTimestamp) >= pending.createdAt - 10,
+                      case .spontaneous = payment.kind else { return false }
+                return true
+            }
+            if let succeeded = candidates.first(where: { $0.status == .succeeded }) {
+                // Sats left the channel — adopt the id and replay the debit below
+                // (the atomic record dedups on payment_id).
+                let adoptedId = "\(succeeded.id)"
+                _ = setPendingSendPaymentId(dbPath: dbPath, paymentId: adoptedId)
+                pending = PendingOutgoingStabilityPayment(
+                    paymentId: adoptedId,
+                    amountMsat: pending.amountMsat,
+                    btcPrice: pending.btcPrice,
+                    createdAt: pending.createdAt
+                )
+                nseLog("Adopted payment id \(adoptedId) for unresolved send marker")
+            } else if candidates.contains(where: { $0.status == .pending }) {
+                nseLog("Unresolved send marker still in flight — waiting")
+                return false
+            } else if candidates.contains(where: { $0.status == .failed }) {
+                nseLog("Unresolved send marker matches a failed payment — clearing (no debit)")
+                clearPendingSend(dbPath: dbPath)
+                return true
+            } else if Int64(Date().timeIntervalSince1970) - pending.createdAt > 120 {
+                nseLog("Unresolved send marker never left the node — clearing")
+                clearPendingSend(dbPath: dbPath)
+                return true
+            } else {
+                nseLog("Unresolved send marker too young to resolve — waiting")
+                return false
+            }
+        }
+
+        let result = recordPaymentAndMaybeUpdateBackingInDB(
+            dbPath: dbPath,
+            paymentId: pending.paymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: pending.amountMsat,
+            btcPrice: pending.btcPrice,
+            backingDeltaSats: -Int64(pending.amountMsat / 1000),
+            userChannelId: activeUserChannelId(dbPath: dbPath)
+        )
+        switch result {
+        case .inserted, .duplicate:
+            clearPendingSend(dbPath: dbPath)
+            nseLog("Reconciled previously sent outgoing payment \(pending.paymentId)")
+            return true
+        case .failed, .missingChannelRow:
+            nseLog("Could not reconcile previously sent payment — refusing to send again")
+            return false
+        }
+    }
+
+    // MARK: - Record Payment and Update Backing in DB
+
+    /// Insert a payment and atomically update channel backing sats in one SQLite transaction.
+    /// BEGIN IMMEDIATE is acquired first so the dedup check and INSERT are atomic cross-process.
+    private func recordPaymentAndMaybeUpdateBackingInDB(
         dbPath: String,
         paymentId: String?,
         paymentType: String,
         direction: String,
         amountMsat: UInt64,
-        btcPrice: Double
-    ) {
+        btcPrice: Double,
+        backingDeltaSats: Int64?,
+        userChannelId: String? = nil
+    ) -> PaymentInsertResult {
         var db: OpaquePointer?
         guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
-            nseLog("recordPayment: SQLite open failed")
-            return
+            nseLog("recordPaymentAndMaybeBacking: open failed")
+            return .failed
         }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
 
-        // Dedup: skip if payment_id already exists
+        // Acquire write lock first — dedup check runs while holding it, eliminating cross-process races.
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            nseLog("recordPaymentAndMaybeBacking: BEGIN failed")
+            return .failed
+        }
+
         if let pid = paymentId, !pid.isEmpty {
             var checkStmt: OpaquePointer?
-            let checkSql = "SELECT id FROM payments WHERE payment_id = ?"
-            if sqlite3_prepare_v2(db, checkSql, -1, &checkStmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT id FROM payments WHERE payment_id = ?", -1, &checkStmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(checkStmt, 1, (pid as NSString).utf8String, -1, nil)
-                if sqlite3_step(checkStmt) == SQLITE_ROW {
-                    sqlite3_finalize(checkStmt)
-                    nseLog("recordPayment: already exists, skipping")
-                    return
-                }
+                let alreadyExists = sqlite3_step(checkStmt) == SQLITE_ROW
                 sqlite3_finalize(checkStmt)
+                if alreadyExists {
+                    sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                    nseLog("recordPaymentAndMaybeBacking: already exists, skipping")
+                    return .duplicate
+                }
             }
         }
 
         let amountUSD = btcPrice > 0 ? (Double(amountMsat) / 1000.0 / Self.satsInBTC) * btcPrice : 0.0
-
         var stmt: OpaquePointer?
-        let sql = """
-            INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'completed')
-        """
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            nseLog("recordPayment: prepare failed")
-            return
+        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')"
+        guard sqlite3_prepare_v2(db, insertSql, -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return .failed
         }
-        defer { sqlite3_finalize(stmt) }
-
-        if let pid = paymentId {
-            sqlite3_bind_text(stmt, 1, (pid as NSString).utf8String, -1, nil)
-        } else {
-            sqlite3_bind_null(stmt, 1)
-        }
+        if let pid = paymentId { sqlite3_bind_text(stmt, 1, (pid as NSString).utf8String, -1, nil) } else { sqlite3_bind_null(stmt, 1) }
         sqlite3_bind_text(stmt, 2, (paymentType as NSString).utf8String, -1, nil)
         sqlite3_bind_text(stmt, 3, (direction as NSString).utf8String, -1, nil)
         sqlite3_bind_int64(stmt, 4, Int64(amountMsat))
         sqlite3_bind_double(stmt, 5, amountUSD)
         sqlite3_bind_double(stmt, 6, btcPrice)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            sqlite3_finalize(stmt)
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return .failed
+        }
+        sqlite3_finalize(stmt)
 
-        if sqlite3_step(stmt) == SQLITE_DONE {
-            nseLog("recordPayment: saved \(direction) \(amountMsat) msat ($\(String(format: "%.2f", amountUSD)))")
-        } else {
-            nseLog("recordPayment: insert failed")
-        }
-    }
+        if let delta = backingDeltaSats {
+            // Target the backing UPDATE by the explicit user_channel_id — never by recency —
+            // so a push-triggered payment can't credit/debit the wrong channel row.
+            guard let ucid = userChannelId, !ucid.isEmpty else {
+                nseLog("recordPaymentAndMaybeBacking: backing delta requested without user_channel_id — rolling back")
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
+            var selectStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT stable_sats FROM channels WHERE user_channel_id = ?", -1, &selectStmt, nil) == SQLITE_OK else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
+            sqlite3_bind_text(selectStmt, 1, (ucid as NSString).utf8String, -1, nil)
+            guard sqlite3_step(selectStmt) == SQLITE_ROW else {
+                sqlite3_finalize(selectStmt)
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                nseLog("recordPaymentAndMaybeBacking: no channel row for user_channel_id=\(ucid) — rolling back")
+                return .missingChannelRow
+            }
+            let currentBacking = sqlite3_column_int64(selectStmt, 0)
+            sqlite3_finalize(selectStmt)
 
-    private func updateBackingSatsInDB(dbPath: String, backingSats: UInt64) {
-        var db: OpaquePointer?
-        let rc = sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil)
-        guard rc == SQLITE_OK else {
-            nseLog("updateBacking: open failed rc=\(rc)")
-            return
+            // Clamp instead of refusing: this runs after a successful keysend, so
+            // recording reality beats wedging reconcile forever.
+            let newBacking = max(0, currentBacking + delta)
+            if currentBacking + delta < 0 {
+                nseLog("BACKING_CLAMPED: current=\(currentBacking) delta=\(delta) — clamping backing to 0")
+            }
+            let updateSql = "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?"
+            var updateStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
+            sqlite3_bind_int64(updateStmt, 1, newBacking)
+            sqlite3_bind_text(updateStmt, 2, (ucid as NSString).utf8String, -1, nil)
+            let stepRc = sqlite3_step(updateStmt)
+            let changedRows = sqlite3_changes(db)
+            sqlite3_finalize(updateStmt)
+            guard stepRc == SQLITE_DONE, changedRows == 1 else {
+                nseLog("recordPaymentAndMaybeBacking: UPDATE affected \(changedRows) rows, expected 1 — rolling back")
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
         }
-        defer { sqlite3_close(db) }
-        /// Bump updated_at so the row we just wrote remains the deterministic
-        /// fallback for the next read (matches ORDER BY updated_at DESC, channel_id DESC).
-        let sql = """
-        UPDATE channels
-        SET stable_sats = ?,
-            updated_at = strftime('%s', 'now')
-        WHERE channel_id = (
-            SELECT channel_id
-            FROM channels
-            ORDER BY updated_at DESC, channel_id DESC
-            LIMIT 1
-        )
-        """
-        var stmt: OpaquePointer?
-        let prepRc = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
-        guard prepRc == SQLITE_OK else {
-            nseLog("updateBacking: prepare failed rc=\(prepRc)")
-            return
+
+        guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return .failed
         }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int64(stmt, 1, Int64(backingSats))
-        let stepRc = sqlite3_step(stmt)
-        if stepRc == SQLITE_DONE {
-            let changes = sqlite3_changes(db)
-            nseLog("Updated backingSats to \(backingSats) (rows=\(changes))")
-        } else {
-            nseLog("updateBacking: step failed rc=\(stepRc)")
-        }
+        nseLog("recordPaymentAndMaybeBacking: saved \(direction) \(amountMsat) msat (\(String(format: "%.2f", amountUSD)) USD)")
+        return .inserted
     }
 
     // MARK: - Lightweight SQLite Reader
@@ -629,6 +916,7 @@ class NotificationService: UNNotificationServiceExtension {
         let nativeSats: UInt64
         let receiverSats: UInt64
         let latestPrice: Double
+        let userChannelId: String
     }
 
     /// Read channel state directly from SQLite using C API (no DatabaseService dependency).
@@ -639,13 +927,15 @@ class NotificationService: UNNotificationServiceExtension {
             return nil
         }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
 
         var stmt: OpaquePointer?
-        /// Avoid nondeterministic row selection when multiple rows exist.
-        /// Uses latest updated row as a stable fallback (not “active channel” semantics).
+        /// Pick the single active channel deterministically. The returned user_channel_id is the
+        /// stable key every backing UPDATE targets by — the write never re-selects by recency.
         let sql = """
-            SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats
+            SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats, user_channel_id
             FROM channels
+            WHERE user_channel_id IS NOT NULL AND user_channel_id != ''
             ORDER BY updated_at DESC, channel_id DESC
             LIMIT 1
         """
@@ -665,14 +955,23 @@ class NotificationService: UNNotificationServiceExtension {
         let receiverSats = UInt64(sqlite3_column_int64(stmt, 2))
         let latestPrice = sqlite3_column_double(stmt, 3)
         let nativeSats = UInt64(sqlite3_column_int64(stmt, 4))
+        let userChannelId = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
 
         return ChannelState(
             expectedUSD: expectedUSD,
             backingSats: backingSats,
             nativeSats: nativeSats,
             receiverSats: receiverSats,
-            latestPrice: latestPrice
+            latestPrice: latestPrice,
+            userChannelId: userChannelId
         )
+    }
+
+    /// Resolve the single active channel's user_channel_id — the stable key backing UPDATEs target.
+    /// Returns nil when no channel row exists, in which case a backing update must fail (not guess).
+    private func activeUserChannelId(dbPath: String) -> String? {
+        guard let ucid = readChannelState(dbPath: dbPath)?.userChannelId, !ucid.isEmpty else { return nil }
+        return ucid
     }
 
     // MARK: - Price Fetch
@@ -777,6 +1076,7 @@ class NotificationService: UNNotificationServiceExtension {
         var db: OpaquePointer?
         guard sqlite3_open(path, &db) == SQLITE_OK else { return }
         defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
 
         // Check if network_graph exists and is large enough to matter
         var stmt: OpaquePointer?

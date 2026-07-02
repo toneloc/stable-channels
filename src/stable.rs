@@ -57,6 +57,11 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
 /// The LSP knows the total sats forwarded and the user's current balance.
 /// Native BTC is spent first; any overflow eats into the stable position.
 ///
+/// `user_sats` MUST be the user's balance BEFORE the spend. Callers reading a
+/// live channel balance after the forward settled (e.g. from `list_channels()`
+/// in a PaymentForwarded handler) must add `total_forwarded_sats` back first —
+/// passing the post-spend balance understates native and over-deducts stable.
+///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` otherwise.
 pub fn reconcile_forwarded(
     sc: &mut StableChannel,

@@ -28,6 +28,8 @@ enum StabilityService {
     }
 
     /// Reconcile a forwarded payment on the LSP side.
+    /// `userSats` MUST be the balance BEFORE the spend — callers with a post-spend
+    /// balance must add totalForwardedSats back first, or stable is over-deducted.
     /// Returns the USD amount deducted from stable, or nil if fully covered by native.
     static func reconcileForwarded(
         _ sc: inout StableChannel,

@@ -10,6 +10,25 @@ import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
 
+data class PaymentPersistenceResult(
+    val isNewPayment: Boolean,
+    val backingSats: Long?
+)
+
+/** A backing update targeted a user_channel_id with no channels row. Callers can recreate the
+ *  row from in-memory state and retry, unlike generic persistence failures. */
+class MissingChannelRowException(userChannelId: String) :
+    IllegalStateException("No channel row for user_channel_id=$userChannelId")
+
+/** Durable marker for an in-flight outgoing stability payment (single row, id = 1).
+ *  An empty paymentId means the keysend outcome is not yet known. */
+data class PendingStabilitySend(
+    val paymentId: String,
+    val amountMsat: Long,
+    val price: Double,
+    val createdAt: Long
+)
+
 class DatabaseService(context: Context) : SQLiteOpenHelper(
     context,
     File(Constants.userDataDir(context), DB_FILENAME).absolutePath,
@@ -99,6 +118,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             )
         """)
 
+        createPendingStabilitySendTable(db)
+
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at)")
@@ -110,6 +131,25 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             db.execSQL("ALTER TABLE channels ADD COLUMN receiver_sats INTEGER NOT NULL DEFAULT 0")
             db.execSQL("ALTER TABLE channels ADD COLUMN latest_price REAL NOT NULL DEFAULT 0.0")
         }
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        super.onOpen(db)
+        // IF NOT EXISTS so either process (main app or background service) can create it,
+        // including on databases created before this table existed.
+        createPendingStabilitySendTable(db)
+    }
+
+    private fun createPendingStabilitySendTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS pending_stability_send (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                payment_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL,
+                price REAL NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
     }
 
     // --- Channels ---
@@ -131,6 +171,41 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         if (updated == 0) {
             cv.put("created_at", now)
             db.insertWithOnConflict("channels", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+    }
+
+    /**
+     * Persist channel metadata without touching stable_sats.
+     *
+     * Incoming stability payments update stable_sats transactionally. Keeping that column out of
+     * this follow-up write prevents stale in-memory state from undoing a concurrent DB increment.
+     */
+    fun saveChannelPreservingBacking(
+        channelId: String,
+        userChannelId: String,
+        expectedUSD: Double,
+        note: String?,
+        receiverSats: Long = 0,
+        latestPrice: Double = 0.0
+    ) {
+        val cv = ContentValues().apply {
+            put("channel_id", channelId)
+            put("expected_usd", expectedUSD)
+            put("note", note)
+            put("receiver_sats", receiverSats)
+            put("latest_price", latestPrice)
+            put("updated_at", System.currentTimeMillis() / 1000)
+        }
+        val rows = writableDatabase.update(
+            "channels",
+            cv,
+            "user_channel_id = ?",
+            arrayOf(userChannelId)
+        )
+        if (rows != 1) {
+            throw IllegalStateException(
+                "channel metadata UPDATE affected $rows rows for user_channel_id=$userChannelId"
+            )
         }
     }
 
@@ -233,6 +308,153 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return writableDatabase.insert("payments", null, cv)
     }
 
+    /** Insert a payment and atomically update channel backing sats in one SQLite transaction.
+     *  Returns whether the payment was new and the authoritative backing value, when applicable. */
+    fun recordPaymentAndMaybeUpdateBacking(
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: Long,
+        amountUSD: Double? = null,
+        btcPrice: Double? = null,
+        counterparty: String? = null,
+        userChannelId: String? = null,
+        backingDeltaSats: Long? = null
+    ): PaymentPersistenceResult {
+        val db = writableDatabase
+        // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT, preventing
+        // a TOCTOU race where two processes both read "not exists" then both INSERT.
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            // Dedup check inside the write lock
+            if (!paymentId.isNullOrEmpty()) {
+                val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                val exists = cursor.use { it.moveToFirst() }
+                if (exists) {
+                    val backing = if (backingDeltaSats != null) {
+                        val ucid = userChannelId
+                            ?: throw IllegalStateException("userChannelId required for backing update")
+                        readBackingSats(db, ucid)
+                            ?: throw MissingChannelRowException(ucid)
+                    } else {
+                        null
+                    }
+                    db.execSQL("ROLLBACK")
+                    return PaymentPersistenceResult(false, backing)
+                }
+            }
+            val cv = ContentValues().apply {
+                put("payment_id", paymentId)
+                put("payment_type", paymentType)
+                put("direction", direction)
+                put("amount_msat", amountMsat)
+                put("amount_usd", amountUSD)
+                put("btc_price", btcPrice)
+                put("counterparty", counterparty)
+                put("status", "completed")
+            }
+            db.insertOrThrow("payments", null, cv)
+            var resultingBacking: Long? = null
+            if (backingDeltaSats != null) {
+                val ucid = userChannelId
+                    ?: throw IllegalStateException("userChannelId required for backing update")
+                val current = readBackingSats(db, ucid)
+                    ?: throw MissingChannelRowException(ucid)
+                // Clamp instead of refusing: this runs after the payment already settled, so the
+                // sats truly moved — a floor of 0 keeps the ledger recordable instead of wedging.
+                val newBacking = maxOf(0L, current + backingDeltaSats)
+                if (current + backingDeltaSats < 0) {
+                    AuditService.log("BACKING_CLAMPED", mapOf(
+                        "user_channel_id" to ucid,
+                        "current_backing_sats" to current,
+                        "delta_sats" to backingDeltaSats,
+                        "clamped_to" to newBacking
+                    ))
+                }
+                val stmt = db.compileStatement(
+                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+                )
+                stmt.bindLong(1, newBacking)
+                stmt.bindString(2, ucid)
+                val rows = stmt.executeUpdateDelete()
+                if (rows != 1) {
+                    throw IllegalStateException(
+                        "backing UPDATE affected $rows rows for user_channel_id=$ucid"
+                    )
+                }
+                resultingBacking = newBacking
+            }
+            db.execSQL("COMMIT")
+            return PaymentPersistenceResult(true, resultingBacking)
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
+        }
+    }
+
+    private fun readBackingSats(db: SQLiteDatabase, userChannelId: String): Long? {
+        val cursor = db.rawQuery(
+            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            arrayOf(userChannelId)
+        )
+        return cursor.use { if (it.moveToFirst()) it.getLong(0) else null }
+    }
+
+    // --- Pending outgoing stability send marker (single row, id = 1) ---
+
+    /** Atomically claim the right to send an outgoing stability payment.
+     *  Returns false when a marker already exists (another sender owns the send).
+     *  BEGIN IMMEDIATE makes the check-and-insert a single atomic step across processes. */
+    fun claimPendingSend(amountMsat: Long, price: Double): Boolean {
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val cursor = db.rawQuery("SELECT id FROM pending_stability_send WHERE id = 1", null)
+            val exists = cursor.use { it.moveToFirst() }
+            if (exists) {
+                db.execSQL("ROLLBACK")
+                return false
+            }
+            db.execSQL(
+                "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
+                arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000)
+            )
+            db.execSQL("COMMIT")
+            return true
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
+        }
+    }
+
+    fun setPendingSendPaymentId(paymentId: String) {
+        writableDatabase.execSQL(
+            "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1",
+            arrayOf(paymentId)
+        )
+    }
+
+    fun loadPendingSend(): PendingStabilitySend? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT payment_id, amount_msat, price, created_at FROM pending_stability_send WHERE id = 1",
+            null
+        )
+        return cursor.use {
+            if (it.moveToFirst()) {
+                PendingStabilitySend(
+                    paymentId = it.getString(0),
+                    amountMsat = it.getLong(1),
+                    price = it.getDouble(2),
+                    createdAt = it.getLong(3)
+                )
+            } else null
+        }
+    }
+
+    fun clearPendingSend() {
+        writableDatabase.execSQL("DELETE FROM pending_stability_send WHERE id = 1")
+    }
+
     fun getRecentPayments(limit: Int = 50): List<PaymentRecord> {
         val cursor = readableDatabase.rawQuery(
             "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments ORDER BY created_at DESC LIMIT ?",
@@ -261,6 +483,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             if (feeMsat > 0) put("fee_msat", feeMsat)
         }
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+    }
+
+    fun isOutgoingStabilityPayment(paymentId: String): Boolean {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
+            arrayOf(paymentId)
+        )
+        return cursor.use { it.moveToFirst() }
     }
 
     fun updatePaymentTxid(paymentId: String, txid: String) {

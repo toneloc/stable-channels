@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stable_channels::audit::*;
 use stable_channels::constants::*;
-use stable_channels::db::{DailyPriceRecord, Database, PaymentRecord, TradeRecord};
+use stable_channels::db::{self, DailyPriceRecord, Database, PaymentRecord, TradeRecord};
 use stable_channels::historical_prices::get_seed_prices;
 use stable_channels::price_feeds::get_cached_price_no_fetch;
 use stable_channels::stable;
@@ -423,6 +423,7 @@ impl UserApp {
         };
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
+        builder.set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/v2/snapshot".to_string());
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
             .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
@@ -1961,6 +1962,48 @@ impl UserApp {
         }
     }
 
+    /// Save user's stable channel to database without overwriting `stable_sats`.
+    ///
+    /// Used after `record_payment_and_maybe_update_backing` has already
+    /// committed the authoritative backing value — a full `save_channel_settings`
+    /// here would write the in-memory snapshot absolutely and could silently
+    /// discard a concurrently committed delta. Falls back to the full save
+    /// (which inserts) if no row exists yet.
+    fn save_channel_settings_preserving_backing(&self) {
+        let (channel_id_str, user_channel_id_str, expected_usd, native_sats, note) = {
+            let sc = self.stable_channel.lock().unwrap();
+
+            // Only save if we have a valid channel
+            if sc.user_channel_id == 0 {
+                return;
+            }
+
+            (
+                sc.channel_id.to_string(),
+                format!("{}", sc.user_channel_id),
+                sc.expected_usd.0,
+                sc.native_sats,
+                sc.note.clone(),
+            )
+        };
+
+        match self.db.save_channel_preserving_backing(
+            &channel_id_str,
+            &user_channel_id_str,
+            expected_usd,
+            native_sats,
+            note.as_deref(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                // No row yet — the full save inserts it (in-memory backing is
+                // fine for a brand-new row).
+                self.save_channel_settings();
+            }
+            Err(e) => eprintln!("Failed to save channel: {}", e),
+        }
+    }
+
     /// Load user's stable channel from database
     fn load_channel_settings(&mut self) {
         let user_channel_id_str = {
@@ -2111,6 +2154,7 @@ impl UserApp {
 
     fn process_events(&mut self) {
         while let Some(event) = self.node.next_event() {
+            let mut ack = true;
             match event {
                 Event::ChannelReady {
                     channel_id,
@@ -2317,24 +2361,10 @@ impl UserApp {
                             update_balances(&self.node, &mut sc);
                         }
                         self.update_balances();
-                    } else if self.db.payment_exists(&payment_hash_str).unwrap_or(false) {
-                        // Already recorded, just update balances silently
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                        }
-                        self.update_balances();
                     } else {
-                        audit_event(
-                            "PAYMENT_RECEIVED",
-                            json!({
-                                "amount_msat": amount_msat,
-                                "payment_hash": payment_hash_str
-                            }),
-                        );
-
-                        // Record payment in database
-                        let (amount_usd, btc_price, payment_type) = {
+                        let is_stability_payment = custom_records.iter()
+                            .any(|tlv| tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]);
+                        let (amount_usd, btc_price, payment_type, user_channel_id_str) = {
                             let sc = self.stable_channel.lock().unwrap();
                             let price = sc.latest_price;
                             let usd = if price > 0.0 {
@@ -2342,45 +2372,112 @@ impl UserApp {
                             } else {
                                 None
                             };
-                            let ptype = if sc.expected_usd.0 > 0.0 {
-                                "stability"
-                            } else {
-                                "lightning"
-                            };
-                            (usd, if price > 0.0 { Some(price) } else { None }, ptype)
+                            let ptype = if is_stability_payment { "stability" } else { "lightning" };
+                            let ucid = format!("{}", sc.user_channel_id);
+                            (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid)
                         };
-                        let _ = self.db.record_payment(
-                            Some(&payment_hash_str),
-                            payment_type,
-                            "received",
-                            amount_msat,
-                            amount_usd,
-                            btc_price,
-                            None,
-                            "completed",
-                            None,
-                            None,
-                        );
+                        let backing_delta =
+                            is_stability_payment.then(|| (amount_msat / 1000) as i64);
+                        // Atomically insert payment and update backing in one transaction.
+                        // is_new=true → inserted, is_new=false → duplicate → acknowledge.
+                        // Err → transient failure, do not acknowledge so LDK re-delivers.
+                        let record = || {
+                            self.db.record_payment_and_maybe_update_backing(
+                                Some(&payment_hash_str),
+                                payment_type,
+                                "received",
+                                amount_msat,
+                                amount_usd,
+                                btc_price,
+                                "completed",
+                                is_stability_payment.then(|| user_channel_id_str.as_str()),
+                                backing_delta,
+                            )
+                        };
+                        let db_result = match record() {
+                            Err(ref e) if db::is_missing_channel_row(e) => {
+                                // The channels row is gone (nothing else recreates
+                                // it) — recreate it from in-memory state and retry
+                                // once so this event can't permanently block the
+                                // queue.
+                                audit_event(
+                                    "PAYMENT_CHANNEL_ROW_MISSING",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "user_channel_id": user_channel_id_str,
+                                    }),
+                                );
+                                self.save_channel_settings();
+                                record()
+                            }
+                            other => other,
+                        };
+                        match db_result {
+                            Ok(persisted) => {
+                                {
+                                    let mut sc = self.stable_channel.lock().unwrap();
+                                    update_balances(&self.node, &mut sc);
+                                    if persisted.is_new && is_stability_payment {
+                                        // Sync memory from the authoritative DB value
+                                        // committed in the transaction, not by
+                                        // re-applying the delta — the sc mutex was
+                                        // dropped across the transaction.
+                                        if let Some(new_backing) = persisted.new_backing {
+                                            sc.backing_sats = new_backing.max(0) as u64;
+                                        }
+                                    }
+                                    stable::reconcile_incoming(&mut sc);
+                                }
+                                if persisted.clamped {
+                                    audit_event(
+                                        "PAYMENT_BACKING_CLAMPED",
+                                        json!({
+                                            "payment_hash": payment_hash_str,
+                                            "backing_delta_sats": backing_delta,
+                                            "new_backing_sats": persisted.new_backing,
+                                        }),
+                                    );
+                                }
+                                // Persist without touching stable_sats — the
+                                // transaction above is authoritative for backing;
+                                // a full absolute save here could overwrite a
+                                // committed delta with a stale snapshot.
+                                self.save_channel_settings_preserving_backing();
+                                self.update_balances();
 
-                        self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                            stable::reconcile_incoming(&mut sc);
+                                if persisted.is_new {
+                                    audit_event(
+                                        "PAYMENT_RECEIVED",
+                                        json!({
+                                            "amount_msat": amount_msat,
+                                            "payment_hash": payment_hash_str
+                                        }),
+                                    );
+                                    self.status_message = format!("Received payment of {}", Self::format_msats_as_btc(amount_msat));
+                                    self.show_onboarding = false;
+                                    self.waiting_for_payment = false;
+                                    let sats = amount_msat / 1000;
+                                    let toast_msg = if let Some(usd) = amount_usd {
+                                        format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
+                                    } else {
+                                        format!("Received {}", Self::format_sats_as_btc(sats))
+                                    };
+                                    self.show_toast(&toast_msg, "+");
+                                }
+                            }
+                            Err(e) => {
+                                ack = false;
+                                audit_event(
+                                    "PAYMENT_PERSIST_FAILED",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "error": e.to_string(),
+                                    }),
+                                );
+                                self.status_message =
+                                    "Payment received but could not be saved; retrying".to_string();
+                            }
                         }
-                        self.save_channel_settings();
-                        self.update_balances(); // Update UI immediately
-                        self.show_onboarding = false;
-                        self.waiting_for_payment = false;
-
-                        // Show toast notification
-                        let sats = amount_msat / 1000;
-                        let toast_msg = if let Some(usd) = amount_usd {
-                            format!("Received {} (${:.2})", Self::format_sats_as_btc(sats), usd)
-                        } else {
-                            format!("Received {}", Self::format_sats_as_btc(sats))
-                        };
-                        self.show_toast(&toast_msg, "+");
                     }
                 }
 
@@ -2748,7 +2845,13 @@ impl UserApp {
                 }
             }
 
-            let _ = self.node.event_handled();
+            if ack {
+                let _ = self.node.event_handled();
+            } else {
+                // LDK returns the same queue-front event until it is acknowledged.
+                // Exit this processing pass so a transient DB failure cannot spin forever.
+                break;
+            }
         }
     }
 

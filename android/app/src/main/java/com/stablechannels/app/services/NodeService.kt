@@ -3,13 +3,14 @@ package com.stablechannels.app.services
 import android.content.Context
 import android.util.Log
 import com.stablechannels.app.util.Constants
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -37,8 +38,11 @@ class NodeService(private val context: Context) {
     private var eventJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
 
-    private val _events = MutableSharedFlow<Event>(extraBufferCapacity = 64)
-    val events: SharedFlow<Event> = _events
+    // Each event is paired with a CompletableDeferred. The event loop awaits the deferred
+    // before calling n.eventHandled(), ensuring ack happens after processing completes.
+    // Boolean deferred: true = call n.eventHandled(); false = skip (LDK will retry this event).
+    private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Boolean>>>(Channel.RENDEZVOUS)
+    val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Boolean>>> = _eventChannel
 
     fun start(network: Network, esploraURL: String, mnemonic: String?) {
         val dataDir = Constants.userDataDir(context)
@@ -148,10 +152,19 @@ class NodeService(private val context: Context) {
     private fun startEventLoop() {
         eventJob = scope.launch {
             val n = node ?: return@launch
+            var retryDelayMs = 1_000L
             while (true) {
                 val event = n.nextEventAsync()
-                _events.emit(event)
-                n.eventHandled()
+                val ack = CompletableDeferred<Boolean>()
+                _eventChannel.send(Pair(event, ack))  // suspends until AppState receives
+                if (ack.await()) {
+                    n.eventHandled()
+                    retryDelayMs = 1_000L
+                } else {
+                    Log.w("NodeService", "Event processing failed; retrying in ${retryDelayMs}ms")
+                    delay(retryDelayMs)
+                    retryDelayMs = (retryDelayMs * 2).coerceAtMost(30_000L)
+                }
             }
         }
     }
