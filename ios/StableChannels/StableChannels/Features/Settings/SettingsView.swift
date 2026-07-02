@@ -35,7 +35,7 @@ struct SettingsView: View {
                         )
                     }
                     NavigationLink {
-                        BackupSettingsView()
+                        BackupSettingsView(backupService: CloudBackupService.shared)
                     } label: {
                         rowLabel(
                             icon: "lock.doc.fill",

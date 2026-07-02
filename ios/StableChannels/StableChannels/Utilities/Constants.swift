@@ -135,3 +135,15 @@ struct PriceFeedConfig: Codable {
     let urlFormat: String
     let jsonPath: [String]
 }
+
+// MARK: - Seed Constants
+
+enum SeedConstants {
+    static let wordCount12 = 12
+    static let wordCount24 = 24
+    static let maxWordCount = 24
+    static let clipboardClearSeconds: TimeInterval = 60
+    static let defaultWordCount = 12
+    static let animationDuration: TimeInterval = 0.3
+    static let successDisplaySeconds: UInt64 = 1_500_000_000
+}

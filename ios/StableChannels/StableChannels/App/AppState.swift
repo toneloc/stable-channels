@@ -60,7 +60,7 @@ class AppState {
 
     // MARK: - Services
 
-    let nodeService = NodeService()
+    let nodeService = NodeService.shared
     let priceService = PriceService()
     let feeRateService = FeeRateService()
     var databaseService: DatabaseService?
@@ -153,6 +153,163 @@ class AppState {
     // Pending splice info
     var pendingSplice: PendingSplice?
 
+    enum WalletRestoreError: LocalizedError {
+        case invalidMnemonic
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidMnemonic:
+                return "Enter a valid 12 or 24-word seed phrase."
+            }
+        }
+    }
+
+    private func initializeDatabaseServices() throws {
+        databaseService = try DatabaseService(dataDir: Constants.userDataDir)
+        nodeService.databaseService = databaseService
+
+        let resolverConfig = URLSessionConfiguration.default
+        resolverConfig.timeoutIntervalForRequest = 5
+        resolverConfig.timeoutIntervalForResource = 10
+        let resolverSession = URLSession(configuration: resolverConfig)
+        closeTxidResolver = CloseTxidResolver(
+            chainURLs: Constants.esploraChainURLs,
+            onResolved: { [weak self] opId, closingTxid in
+                self?.handleCloseTxidResolved(opId: opId, closingTxid: closingTxid)
+            },
+            urlSession: resolverSession
+        )
+        onchainTxidResolver = OnchainTxidResolver(
+            chainURLs: Constants.esploraChainURLs,
+            onResolved: { [weak self] workId, txid in
+                // workId is "res-<resolutionId>"; recover the Int64.
+                guard let idStr = workId.split(separator: "-", maxSplits: 1).last,
+                      let resolutionId = Int64(idStr) else { return }
+                self?.handleOnchainReceiveResolved(resolutionId: resolutionId, txid: txid)
+            },
+            urlSession: resolverSession
+        )
+        // txidLinks (TxidLinkStore) restores its own lastClose/lastReceive
+        // from UserDefaults on init, with 7-day expiry.
+
+        tradeService = TradeService(nodeService: nodeService)
+
+        // Set audit log path
+        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        AuditService.setLogPath(auditPath)
+    }
+
+    /// Replace the active wallet with a restored seed in one app-owned flow.
+    ///
+    /// Restore is destructive for the current local wallet state, so AppState
+    /// owns the full sequence: stop LDK, drop DB handles, wipe LDK + app DB
+    /// files, clear in-memory/app-group cache, then start the node fresh.
+    func restoreWalletFromMnemonic(_ mnemonic: String) async throws {
+        let words = MnemonicUtils.formatForDisplay(mnemonic)
+        guard MnemonicUtils.isValidWordCount(words),
+              MnemonicUtils.hasValidCharacterFormat(words) else {
+            throw WalletRestoreError.invalidMnemonic
+        }
+
+        phase = .syncing
+        isSyncing = true
+        statusMessage = "Restoring wallet..."
+        defer {
+            isSyncing = false
+        }
+
+        cancelBackgroundStop()
+        await waitForNSE()
+        stabilityTimer?.cancel()
+        stabilityTimer = nil
+        closeLauncher.cancelAll()
+        onchainLauncher.cancelAll()
+        nodeService.stop()
+
+        resetInMemoryWalletState()
+        dropDatabaseServices()
+        wipeWalletPersistence()
+
+        do {
+            try initializeDatabaseServices()
+            try await nodeService.start(
+                network: .bitcoin,
+                esploraURL: chainURL,
+                mnemonic: words
+            )
+
+            let nodeId = nodeService.nodeId
+            if !nodeId.isEmpty {
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(nodeId, forKey: "node_id")
+            }
+
+            phase = .wallet
+            refreshBalances()
+            updateStableBalances()
+            startStabilityTimer()
+            reregisterPushTokenIfNeeded()
+            statusMessage = ""
+        } catch {
+            phase = .error("Wallet restore failed: \(error.localizedDescription)")
+            statusMessage = ""
+            throw error
+        }
+    }
+
+    private func resetInMemoryWalletState() {
+        stableChannel = .default
+        statusMessage = ""
+        paymentFlash = false
+        isChannelClosing = false
+        isOpeningChannel = false
+        isSweeping = false
+        spliceTxid = nil
+        sweepOnchainStart = 0
+        prevOnchainSats = 0
+        fundingTxid = nil
+        onchainReceiveAddress = nil
+        lightningBalanceSats = 0
+        onchainBalanceSats = 0
+        hasReadyChannel = false
+        spendableOnchainSats = 0
+        pendingTradePayments.removeAll()
+        pendingSplice = nil
+        txidLinks.setClose(nil)
+        txidLinks.setReceive(nil)
+
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        shared?.removeObject(forKey: "funding_txid")
+        shared?.removeObject(forKey: "node_id")
+        shared?.set(Int64(0), forKey: "cached_lightning_sats")
+        shared?.set(Int64(0), forKey: "cached_onchain_sats")
+        shared?.set(false, forKey: "pending_push_payment")
+    }
+
+    private func dropDatabaseServices() {
+        nodeService.databaseService = nil
+        nodeService.clearSavedMnemonic()
+        tradeService = nil
+        databaseService = nil
+        closeTxidResolver = nil
+        onchainTxidResolver = nil
+    }
+
+    private func wipeWalletPersistence() {
+        NodeService.wipeWalletData()
+
+        let dir = Constants.userDataDir
+        let filesToDelete = [
+            DatabaseService.dbFilename,
+            "\(DatabaseService.dbFilename)-wal",
+            "\(DatabaseService.dbFilename)-shm"
+        ]
+
+        for file in filesToDelete {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
+        }
+    }
+
     // MARK: - Startup
 
     func start() async {
@@ -167,45 +324,11 @@ class AppState {
 
         // Initialize database
         do {
-            databaseService = try DatabaseService(dataDir: Constants.userDataDir)
+            try initializeDatabaseServices()
         } catch {
             await MainActor.run { phase = .error("Database init failed: \(error.localizedDescription)") }
             return
         }
-
-        nodeService.databaseService = databaseService
-
-        if databaseService != nil {
-            let resolverConfig = URLSessionConfiguration.default
-            resolverConfig.timeoutIntervalForRequest = 5
-            resolverConfig.timeoutIntervalForResource = 10
-            let resolverSession = URLSession(configuration: resolverConfig)
-            closeTxidResolver = CloseTxidResolver(
-                chainURLs: Constants.esploraChainURLs,
-                onResolved: { [weak self] opId, closingTxid in
-                    await self?.handleCloseTxidResolved(opId: opId, closingTxid: closingTxid)
-                },
-                urlSession: resolverSession
-            )
-            onchainTxidResolver = OnchainTxidResolver(
-                chainURLs: Constants.esploraChainURLs,
-                onResolved: { [weak self] workId, txid in
-                    // workId is "res-<resolutionId>"; recover the Int64.
-                    guard let idStr = workId.split(separator: "-", maxSplits: 1).last,
-                          let resolutionId = Int64(idStr) else { return }
-                    await self?.handleOnchainReceiveResolved(resolutionId: resolutionId, txid: txid)
-                },
-                urlSession: resolverSession
-            )
-            // txidLinks (TxidLinkStore) restores its own lastClose/lastReceive
-            // from UserDefaults on init, with 7-day expiry.
-        }
-
-        tradeService = TradeService(nodeService: nodeService)
-
-        // Set audit log path
-        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
-        AuditService.setLogPath(auditPath)
 
         // Load saved channel state from DB
         loadChannelFromDB()
