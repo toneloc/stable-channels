@@ -43,6 +43,12 @@ class AppState(private val context: Context) : ViewModel() {
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing
 
+    private var isInitialized = false
+    private var backgroundStopJob: Job? = null
+
+    @Volatile
+    var isWaitingForPayment = false
+
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
 
@@ -251,11 +257,105 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun stop() {
+        cancelBackgroundStop()
         stabilityJob?.cancel()
         heartbeatJob?.cancel()
         pendingDepositJob?.cancel()
         priceService.stopAutoRefresh()
         nodeService.stop()
+    }
+
+    fun stopNodeForBackground() {
+        if (!isWaitingForPayment) {
+            Log.d("AppState", "Stopping node immediately (no active payment request)")
+            performBackgroundStop()
+            return
+        }
+
+        Log.d("AppState", "Scheduling node stop after 60s grace period")
+        backgroundStopJob?.cancel()
+
+        // Start Foreground Service to keep CPU and network active
+        try {
+            LdkBackgroundService.start(context)
+        } catch (e: Exception) {
+            Log.e("AppState", "Failed to start LdkBackgroundService", e)
+        }
+
+        backgroundStopJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(60000L) // 60 seconds delay
+            performBackgroundStop()
+        }
+    }
+
+    fun cancelBackgroundStop() {
+        if (backgroundStopJob != null) {
+            backgroundStopJob?.cancel()
+            backgroundStopJob = null
+            Log.d("AppState", "Cancelled pending background stop")
+        }
+        try {
+            LdkBackgroundService.stop(context)
+        } catch (e: Exception) {
+            Log.e("AppState", "Failed to stop LdkBackgroundService", e)
+        }
+    }
+
+    private fun performBackgroundStop() {
+        backgroundStopJob = null
+        try {
+            LdkBackgroundService.stop(context)
+        } catch (e: Exception) {
+            Log.e("AppState", "Failed to stop LdkBackgroundService", e)
+        }
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        stabilityJob?.cancel()
+        stabilityJob = null
+        pendingDepositJob?.cancel()
+        pendingDepositJob = null
+        if (!nodeService.isRunning) return
+        Log.d("AppState", "Stopping node for background")
+        nodeService.stop()
+    }
+
+    fun restartNodeFromForeground() {
+        isWaitingForPayment = false
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!isInitialized) {
+                isInitialized = true
+                start()
+                return@launch
+            }
+            cancelBackgroundStop()
+            if (nodeService.isRunning) {
+                Log.d("AppState", "Node still running (grace period), reconnecting")
+                loadChannelFromDB()
+                ensureLSPConnected()
+                refreshBalances()
+                updateStableBalances()
+                return@launch
+            }
+            Log.d("AppState", "Restarting node from foreground")
+            waitForBackgroundService()
+            try {
+                loadChannelFromDB()
+                _phase.value = Phase.SYNCING
+                nodeService.start(Network.BITCOIN, chainUrl, null)
+                _phase.value = Phase.WALLET
+                refreshBalances()
+                updateStableBalances()
+                val sc = StabilityService.reconcileIncoming(_stableChannel.value)
+                _stableChannel.value = sc
+                saveChannelToDB()
+                reregisterPushTokenIfNeeded()
+                startStabilityTimer()
+            } catch (e: Exception) {
+                Log.e("AppState", "Node restart failed", e)
+                _phase.value = Phase.ERROR
+                _errorMessage.value = e.message ?: "Restart failed"
+            }
+        }
     }
 
     private fun handleEvent(event: Event) {
@@ -358,6 +458,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handlePaymentReceived(paymentId: String?, amountMsat: Long, paymentHash: String, customRecords: List<CustomTlvRecord>) {
+        isWaitingForPayment = false
         // Check for sync message
         if (handleSyncMessage(customRecords, paymentHash)) {
             refreshBalances()

@@ -10,7 +10,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -19,12 +18,8 @@ import com.stablechannels.app.Phase
 import com.stablechannels.app.R
 
 @Composable
-fun ContentView() {
-    val context = LocalContext.current
-    val appState = remember { AppState(context) }
+fun ContentView(appState: AppState) {
 
-    LaunchedEffect(Unit) { appState.start() }
-    DisposableEffect(Unit) { onDispose { appState.stop() } }
 
     val phase by appState.phase.collectAsState()
     val errorMessage by appState.errorMessage.collectAsState()
@@ -118,4 +113,3 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
         }
     }
 }
-
