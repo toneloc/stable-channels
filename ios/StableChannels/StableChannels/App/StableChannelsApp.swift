@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import UserNotifications
+import BackgroundTasks
 
 @main
 struct StableChannelsApp: App {
@@ -17,10 +18,12 @@ struct StableChannelsApp: App {
                 .onReceive(NotificationCenter.default
                     .publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                         appState.stopNodeForBackground()
+                        BackgroundTaskManager.shared.scheduleKeepAlive()
                 }
                 .onReceive(NotificationCenter.default
                     .publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                         Task { await appState.restartNodeFromForeground() }
+                        BackgroundTaskManager.shared.cancelKeepAlive()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
                     appState.stop()
@@ -49,6 +52,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
             DispatchQueue.main.async {
                 application.registerForRemoteNotifications()
             }
+
+            // Register BGProcessingTask for periodic background keep-alive
+            BackgroundTaskManager.shared
+
             if !granted {
                 print("[Push] Permission denied — stability payments require notifications")
             }
@@ -155,10 +162,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse {
-                print("[Push] LSP registration response: \(http.statusCode) node_id: \(nodeId.prefix(16))...")
+                print("[Push] Re-registered with node_id: \(nodeId.prefix(16))...")
             }
         } catch {
-            print("[Push] LSP registration failed: \(error.localizedDescription)")
+            print("[Push] Re-registration failed: \(error.localizedDescription)")
         }
     }
 }
