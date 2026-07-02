@@ -9,6 +9,7 @@ enum SyncStatus: Equatable {
     case notSupported
 }
 
+@MainActor
 protocol BackupServiceProtocol {
     var backupExists: Bool { get }
     var hasLocalBackup: Bool { get }

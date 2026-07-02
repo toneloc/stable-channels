@@ -190,15 +190,10 @@ struct RestoreSeedSheet: View {
         }
 
         do {
-            try await appState.nodeService.start(
-                network: .bitcoin,
-                esploraURL: appState.chainURL,
-                mnemonic: input
-            )
+            try await appState.restoreWalletFromMnemonic(input)
             restoreMnemonic = ""
             wordFields = Array(repeating: "", count: SeedConstants.maxWordCount)
             isWordFieldsReadOnly = false
-            appState.refreshBalances()
             isRestoring = false
             onSuccess()
             dismiss()
