@@ -29,7 +29,8 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-        containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White
+        containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+        contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
     ) {
         Column(
             modifier = Modifier

@@ -27,6 +27,7 @@
             android:name=".MainActivity"
             android:configChanges="uiMode"
             android:windowSoftInputMode="adjustResize"
+            android:screenOrientation="portrait"
             android:exported="true"
             android:theme="@style/Theme.StableChannels">
             <intent-filter>

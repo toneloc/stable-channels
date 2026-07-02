@@ -445,6 +445,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             SendScreen(appState) { showSend = false }
@@ -455,6 +456,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showReceive = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             ReceiveScreen(appState) { showReceive = false }
@@ -465,6 +467,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showBuy = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) { showBuy = false; prefillTradeAmount = 0.0 }
@@ -475,6 +478,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showSell = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
             modifier = Modifier.fillMaxHeight(0.9f)
         ) {
             SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }

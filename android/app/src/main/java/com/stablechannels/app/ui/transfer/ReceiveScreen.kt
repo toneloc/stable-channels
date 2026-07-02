@@ -62,6 +62,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {

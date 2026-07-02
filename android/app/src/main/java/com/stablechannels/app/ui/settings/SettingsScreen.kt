@@ -427,7 +427,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showOnchainSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
         ) {
             OnChainSendScreen(appState) { showOnchainSend = false }
         }
