@@ -26,6 +26,8 @@ final class KeychainService {
     // MARK: - CRUD
 
     func generateAndStoreKey() throws {
+        if hasKey() { return }
+
         let keyData = try generateRandomBytes(count: 32)
         try storeKey(keyData)
     }
