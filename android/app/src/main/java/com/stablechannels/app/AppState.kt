@@ -307,6 +307,18 @@ class AppState(private val context: Context) : ViewModel() {
             }
             is Event.PaymentFailed -> {
                 val pid = event.paymentId
+                if (pid != null) {
+                    // If this is the in-flight stability send, release the marker — the send
+                    // failed so there is no debit, and future sends must not stay blocked.
+                    val pendingSend = try { databaseService?.loadPendingSend() } catch (_: Exception) { null }
+                    if (pendingSend != null && pendingSend.paymentId == pid) {
+                        databaseService?.clearPendingSend()
+                        AuditService.log("STABILITY_PAYMENT_FAILED", mapOf(
+                            "payment_id" to pid,
+                            "error" to "payment_failed_event_cleared_pending_send"
+                        ))
+                    }
+                }
                 val curPending = _pendingTradePayments.value
                 if (pid != null && curPending.containsKey(pid)) {
                     val ptp = curPending[pid]!!
@@ -356,9 +368,26 @@ class AppState(private val context: Context) : ViewModel() {
         val price = priceService.currentPrice.value
         val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1)) }
         val paymentType = if (isStabilityPayment) "stability" else "lightning"
-        val sc0 = _stableChannel.value
+        var sc0 = _stableChannel.value
         // Always use paymentHash as fallback so dedup check runs even when paymentId is null.
         val effectiveId = paymentId ?: paymentHash
+        if (isStabilityPayment && sc0.userChannelId.isEmpty()) {
+            // Inline discovery from the node's channel list (mirrors StabilityService.updateBalances)
+            // before giving up on the backing update.
+            nodeService.refreshChannels()
+            val discovered = nodeService.channels.firstOrNull()
+            if (discovered != null) {
+                val recovered = sc0.copy()
+                recovered.userChannelId = discovered.userChannelId
+                recovered.channelId = discovered.channelId
+                _stableChannel.value = recovered
+                sc0 = recovered
+                AuditService.log("CHANNEL_ID_DISCOVERED", mapOf(
+                    "user_channel_id" to discovered.userChannelId,
+                    "channel_id" to discovered.channelId
+                ))
+            }
+        }
         val userChannelId = if (isStabilityPayment) sc0.userChannelId.ifEmpty { null } else null
         if (isStabilityPayment && userChannelId == null) {
             throw Exception("Stability payment received but userChannelId is empty — cannot update backing, not acknowledging")
@@ -366,14 +395,26 @@ class AppState(private val context: Context) : ViewModel() {
         val backingDelta: Long? = if (isStabilityPayment) amountMsat / 1000 else null
         // Atomically insert payment row and increment backing sats in one SQLite transaction.
         // Throws on DB failure — propagates to the collector which gates ack on success.
-        val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
-            paymentId = effectiveId, paymentType = paymentType, direction = "received",
-            amountMsat = amountMsat,
-            amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-            btcPrice = price, counterparty = sc0.counterparty,
-            userChannelId = userChannelId,
-            backingDeltaSats = backingDelta
-        ) ?: throw Exception("DB service unavailable")
+        val record = {
+            databaseService?.recordPaymentAndMaybeUpdateBacking(
+                paymentId = effectiveId, paymentType = paymentType, direction = "received",
+                amountMsat = amountMsat,
+                amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
+                btcPrice = price, counterparty = sc0.counterparty,
+                userChannelId = userChannelId,
+                backingDeltaSats = backingDelta
+            ) ?: throw Exception("DB service unavailable")
+        }
+        val persistence = try {
+            record()
+        } catch (e: MissingChannelRowException) {
+            // The channels row vanished (e.g. DB recreated) — rebuild it from in-memory state
+            // via the full save, then retry once. If it still fails, rethrow to nack.
+            Log.w("AppState", "Channel row missing during payment persist — recreating and retrying: ${e.message}")
+            AuditService.log("CHANNEL_ROW_RECREATED", mapOf("user_channel_id" to (userChannelId ?: "")))
+            saveChannelToDB()
+            record()
+        }
         refreshBalances()
         updateStableBalances()
         if (isStabilityPayment) {
@@ -384,9 +425,11 @@ class AppState(private val context: Context) : ViewModel() {
         val sc = StabilityService.reconcileIncoming(_stableChannel.value)
         _stableChannel.value = sc
         saveChannelToDB(preserveBacking = isStabilityPayment)
-        val usdVal = (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price
-        _statusMessage.value = "Payment received: ${usdVal.usdFormatted()}"
-        triggerPaymentFlash()
+        if (persistence.isNewPayment) {
+            val usdVal = (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price
+            _statusMessage.value = "Payment received: ${usdVal.usdFormatted()}"
+            triggerPaymentFlash()
+        }
     }
 
     private fun handleSyncMessage(customRecords: List<CustomTlvRecord>, paymentHash: String): Boolean {
@@ -468,7 +511,7 @@ class AppState(private val context: Context) : ViewModel() {
                     Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
                 }
             }
-            saveChannelToDB()
+            saveChannelToDB(preserveBacking = true)
             val successMsg = if (displayVal != null) "Payment sent: $displayVal" else "Payment confirmed"
             _statusMessage.value = successMsg
             _lastPaymentResult.value = successMsg
@@ -476,12 +519,33 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handleStabilityPaymentSuccessful(paymentId: String?, feePaidMsat: Long?): Boolean {
-        val pending = FCMService.getPendingOutgoingStabilityPayment(context)
+        var pending = try { databaseService?.loadPendingSend() } catch (_: Exception) { null }
+        if (pending != null && pending.paymentId.isEmpty() && !paymentId.isNullOrEmpty()) {
+            // The previous sender died before persisting the payment ID. Adopt this event if
+            // its amount matches the marker's, then reconcile through the normal replay path.
+            val eventAmountMsat = try {
+                nodeService.node?.payment(paymentId)?.amountMsat?.toLong()
+            } catch (_: Exception) {
+                null
+            }
+            if (eventAmountMsat != null && eventAmountMsat == pending.amountMsat) {
+                try {
+                    databaseService?.setPendingSendPaymentId(paymentId)
+                    pending = pending.copy(paymentId = paymentId)
+                    AuditService.log("STABILITY_PAYMENT_MARKER_ADOPTED", mapOf(
+                        "payment_id" to paymentId,
+                        "amount_msat" to pending.amountMsat
+                    ))
+                } catch (e: Exception) {
+                    Log.w("AppState", "Could not adopt payment id for pending send marker: ${e.message}")
+                }
+            }
+        }
         if (pending != null) {
             if (pending.paymentId.isEmpty()) {
-                // The send outcome is known to be unsafe to reinterpret generically. Leave the
-                // marker unresolved and avoid flushing in-memory backing through the normal
-                // outgoing-payment path.
+                // Still unresolved — the reconcile path will resolve it against LDK's payment
+                // store later. Avoid flushing in-memory backing through the normal
+                // outgoing-payment path in the meantime.
                 FCMService.flagPendingPayment(context)
                 if (!paymentId.isNullOrEmpty()) {
                     databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
@@ -675,25 +739,39 @@ class AppState(private val context: Context) : ViewModel() {
             val amountMsat = USD(abs(result.dollarsFromPar)).toMsats(price)
             if (amountMsat == 0L) return
 
-            if (!FCMService.savePendingOutgoingStabilityPayment(context, "", amountMsat, price)) {
-                AuditService.log("STABILITY_PAYMENT_FAILED", mapOf("error" to "could_not_persist_send_guard"))
+            // Atomically claim the send. A denied claim means another sender (e.g. the
+            // background push service) already owns an in-flight send — skip this tick.
+            val claimed = try {
+                databaseService?.claimPendingSend(amountMsat, price) ?: false
+            } catch (e: Exception) {
+                AuditService.log("STABILITY_PAYMENT_FAILED", mapOf("error" to "could_not_persist_send_guard: ${e.message}"))
+                return
+            }
+            if (!claimed) {
+                AuditService.log("STABILITY_SKIP", mapOf("reason" to "pending_send_already_claimed"))
                 return
             }
 
             val paymentId = try {
                 nodeService.sendKeysend(amountMsat, sc.counterparty)
             } catch (e: Exception) {
-                FCMService.clearPendingOutgoingStabilityPayment(context)
+                // Send never happened — release the claim.
+                try { databaseService?.clearPendingSend() } catch (_: Exception) {}
                 AuditService.log("STABILITY_PAYMENT_FAILED", mapOf("error" to (e.message ?: "")))
                 return
             }
 
             val paymentIdString = paymentId.toString()
-            val guardSaved = FCMService.savePendingOutgoingStabilityPayment(
-                context, paymentIdString, amountMsat, price
-            )
+            val guardSaved = try {
+                databaseService?.setPendingSendPaymentId(paymentIdString)
+                true
+            } catch (e: Exception) {
+                false
+            }
             FCMService.getPrefs(context).edit().putLong("bg_last_stability_sent", now).commit()
             if (!guardSaved) {
+                // The payment left the device but the marker still has an empty id — the
+                // reconcile path resolves it against LDK's payment store.
                 FCMService.flagPendingPayment(context)
                 AuditService.log(
                     "STABILITY_PAYMENT_PERSISTENCE_FAILED",
@@ -719,7 +797,7 @@ class AppState(private val context: Context) : ViewModel() {
                 val updated = sc.copy(lastStabilityPayment = now, backingSats = backing)
                 _stableChannel.value = updated
                 saveChannelToDB(preserveBacking = true)
-                FCMService.clearPendingOutgoingStabilityPayment(context)
+                databaseService?.clearPendingSend()
                 AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
             } catch (e: Exception) {
                 // The send already succeeded. Keep the durable marker and block all later sends
@@ -735,14 +813,60 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun reconcilePendingOutgoingStabilityPayment(): Boolean {
-        val pending = FCMService.getPendingOutgoingStabilityPayment(context) ?: return true
-        if (pending.paymentId.isEmpty() || pending.amountMsat <= 0 || pending.btcPrice <= 0) {
-            FCMService.flagPendingPayment(context)
-            AuditService.log(
-                "STABILITY_PAYMENT_RECONCILE_BLOCKED",
-                mapOf("error" to "unresolved_send_marker")
-            )
-            return false
+        val db = databaseService ?: return false
+        val pending = try { db.loadPendingSend() } catch (_: Exception) { return false } ?: return true
+        var pendingPaymentId = pending.paymentId
+
+        if (pendingPaymentId.isEmpty()) {
+            // The previous sender died before persisting the payment ID. Resolve the outcome
+            // against LDK's payment store instead of blocking forever.
+            val node = nodeService.node ?: run {
+                FCMService.flagPendingPayment(context)
+                return false
+            }
+            val now = System.currentTimeMillis() / 1000
+            val candidates = try {
+                node.listPayments()
+            } catch (e: Exception) {
+                Log.w("AppState", "listPayments failed during reconcile: ${e.message}")
+                return false
+            }.filter {
+                it.direction == PaymentDirection.OUTBOUND &&
+                    it.kind is PaymentKind.Spontaneous &&
+                    it.amountMsat?.toLong() == pending.amountMsat &&
+                    it.latestUpdateTimestamp.toLong() >= pending.createdAt - 10
+            }
+            val succeeded = candidates.firstOrNull { it.status == PaymentStatus.SUCCEEDED }
+            val stillPending = candidates.firstOrNull { it.status == PaymentStatus.PENDING }
+            val failed = candidates.firstOrNull { it.status == PaymentStatus.FAILED }
+            when {
+                succeeded != null -> {
+                    db.setPendingSendPaymentId(succeeded.id)
+                    pendingPaymentId = succeeded.id
+                    AuditService.log("STABILITY_PAYMENT_MARKER_ADOPTED", mapOf(
+                        "payment_id" to succeeded.id,
+                        "amount_msat" to pending.amountMsat
+                    ))
+                }
+                stillPending != null -> return false  // in flight — wait
+                failed != null -> {
+                    db.clearPendingSend()
+                    AuditService.log("STABILITY_PAYMENT_RECONCILE_CLEARED", mapOf(
+                        "reason" to "send_failed",
+                        "payment_id" to failed.id
+                    ))
+                    return true
+                }
+                now - pending.createdAt > 120 -> {
+                    db.clearPendingSend()
+                    AuditService.log("STABILITY_PAYMENT_RECONCILE_CLEARED", mapOf(
+                        "reason" to "send_never_left_device",
+                        "amount_msat" to pending.amountMsat
+                    ))
+                    return true
+                }
+                else -> return false  // young marker — another process may be mid-send
+            }
         }
 
         val sc = _stableChannel.value
@@ -752,22 +876,22 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         return try {
-            val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
-                paymentId = pending.paymentId,
+            val persistence = db.recordPaymentAndMaybeUpdateBacking(
+                paymentId = pendingPaymentId,
                 paymentType = "stability",
                 direction = "sent",
                 amountMsat = pending.amountMsat,
-                amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.btcPrice,
-                btcPrice = pending.btcPrice,
+                amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.price,
+                btcPrice = pending.price,
                 counterparty = sc.counterparty,
                 userChannelId = sc.userChannelId,
                 backingDeltaSats = -(pending.amountMsat / 1000)
-            ) ?: throw IllegalStateException("DB service unavailable")
+            )
             val backing = persistence.backingSats
                 ?: throw IllegalStateException("DB did not return backing during outgoing reconciliation")
             _stableChannel.value = sc.copy(backingSats = backing)
             saveChannelToDB(preserveBacking = true)
-            FCMService.clearPendingOutgoingStabilityPayment(context)
+            db.clearPendingSend()
             true
         } catch (e: Exception) {
             FCMService.flagPendingPayment(context)
@@ -996,6 +1120,13 @@ class AppState(private val context: Context) : ViewModel() {
             .putString("cached_user_channel_id", sc.userChannelId)
             .putFloat("cached_expected_usd", sc.expectedUSD.amount.toFloat())
             .apply()
+    }
+
+    /** Called when the UI returns to the foreground. Reloads channel state from the DB so
+     *  backing increments committed by StabilityProcessingService while this process was
+     *  cached are picked up before any save can clobber them. Cheap and safe to call repeatedly. */
+    fun onForegroundResume() {
+        loadChannelFromDB()
     }
 
     private fun loadChannelFromDB() {

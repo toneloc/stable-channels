@@ -21,18 +21,9 @@ class FCMService : FirebaseMessagingService() {
         private const val KEY_NODE_ID = "node_id"
         private const val KEY_PENDING_PUSH_PAYMENT = "pending_push_payment"
         private const val KEY_MAIN_APP_LAST_ACTIVE = "main_app_last_active"
-        private const val KEY_PENDING_OUTGOING_PAYMENT_ID = "pending_outgoing_stability_payment_id"
-        private const val KEY_PENDING_OUTGOING_AMOUNT_MSAT = "pending_outgoing_stability_amount_msat"
-        private const val KEY_PENDING_OUTGOING_BTC_PRICE = "pending_outgoing_stability_btc_price"
         private const val HEARTBEAT_THRESHOLD_SECS = 10
 
         private val httpClient = OkHttpClient()
-
-        data class PendingOutgoingStabilityPayment(
-            val paymentId: String,
-            val amountMsat: Long,
-            val btcPrice: Double
-        )
 
         fun getPrefs(context: Context) =
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -61,44 +52,6 @@ class FCMService : FirebaseMessagingService() {
 
         fun hasPendingPayment(context: Context): Boolean =
             getPrefs(context).getBoolean(KEY_PENDING_PUSH_PAYMENT, false)
-
-        /**
-         * Persisted before the keysend starts. An empty paymentId means the send outcome is
-         * uncertain, so every sender must stop rather than risk sending the same adjustment twice.
-         */
-        fun savePendingOutgoingStabilityPayment(
-            context: Context,
-            paymentId: String,
-            amountMsat: Long,
-            btcPrice: Double
-        ): Boolean =
-            getPrefs(context).edit()
-                .putString(KEY_PENDING_OUTGOING_PAYMENT_ID, paymentId)
-                .putLong(KEY_PENDING_OUTGOING_AMOUNT_MSAT, amountMsat)
-                .putLong(KEY_PENDING_OUTGOING_BTC_PRICE, java.lang.Double.doubleToRawLongBits(btcPrice))
-                .commit()
-
-        fun getPendingOutgoingStabilityPayment(context: Context): PendingOutgoingStabilityPayment? {
-            val prefs = getPrefs(context)
-            val hasMarker = prefs.contains(KEY_PENDING_OUTGOING_PAYMENT_ID) ||
-                prefs.contains(KEY_PENDING_OUTGOING_AMOUNT_MSAT) ||
-                prefs.contains(KEY_PENDING_OUTGOING_BTC_PRICE)
-            if (!hasMarker) return null
-            return PendingOutgoingStabilityPayment(
-                paymentId = prefs.getString(KEY_PENDING_OUTGOING_PAYMENT_ID, "") ?: "",
-                amountMsat = prefs.getLong(KEY_PENDING_OUTGOING_AMOUNT_MSAT, 0),
-                btcPrice = java.lang.Double.longBitsToDouble(
-                    prefs.getLong(KEY_PENDING_OUTGOING_BTC_PRICE, 0)
-                )
-            )
-        }
-
-        fun clearPendingOutgoingStabilityPayment(context: Context): Boolean =
-            getPrefs(context).edit()
-                .remove(KEY_PENDING_OUTGOING_PAYMENT_ID)
-                .remove(KEY_PENDING_OUTGOING_AMOUNT_MSAT)
-                .remove(KEY_PENDING_OUTGOING_BTC_PRICE)
-                .commit()
 
         fun updateHeartbeat(context: Context) {
             val now = System.currentTimeMillis() / 1000

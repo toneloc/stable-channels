@@ -6,9 +6,30 @@
 //! - Price history (for charts and analytics)
 
 use chrono::{Duration as ChronoDuration, Utc};
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// Outcome of `record_payment_and_maybe_update_backing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaymentPersistence {
+    /// True if the payment row was newly inserted, false if it was a duplicate.
+    pub is_new: bool,
+    /// Authoritative `stable_sats` value committed to the DB, when a backing
+    /// update was requested and applied. Callers should sync in-memory state
+    /// from this rather than re-applying the delta themselves.
+    pub new_backing: Option<i64>,
+    /// True if `current + delta` went below zero and was clamped to 0.
+    pub clamped: bool,
+}
+
+/// Returns true if `err` is the distinct missing-channel-row condition from
+/// `record_payment_and_maybe_update_backing` — i.e. a backing update was
+/// requested but no `channels` row exists for the user_channel_id. Callers
+/// can recreate the row and retry.
+pub fn is_missing_channel_row(err: &rusqlite::Error) -> bool {
+    matches!(err, rusqlite::Error::QueryReturnedNoRows)
+}
 
 /// Database file name
 pub const DB_FILENAME: &str = "stablechannels.db";
@@ -284,6 +305,38 @@ impl Database {
             )?;
         }
         Ok(())
+    }
+
+    /// Save channel settings without touching `stable_sats`.
+    ///
+    /// `stable_sats` is owned by the transactional payment path
+    /// (`record_payment_and_maybe_update_backing`) and intentional absolute
+    /// writers (trades, channel creation, settings edits). State saves that
+    /// only carry a stale in-memory snapshot must use this so they can't
+    /// silently overwrite a backing delta committed concurrently.
+    ///
+    /// UPDATE-only: returns Ok(true) if a row was updated, Ok(false) if no
+    /// row exists for `user_channel_id` (caller may fall back to the full
+    /// `save_channel` insert path). Like `save_channel`, this asserts the
+    /// channel is live, so `closed_at` is cleared.
+    pub fn save_channel_preserving_backing(
+        &self,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        native_sats: u64,
+        note: Option<&str>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE channels SET channel_id = ?1, expected_usd = ?2,
+                                 note = ?3, user_channel_id = ?4, native_sats = ?5,
+                                 closed_at = NULL,
+                                 updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?4",
+            params![channel_id, expected_usd, note, user_channel_id, native_sats as i64],
+        )?;
+        Ok(updated > 0)
     }
 
     /// Hard-delete a channel row. Reserved for explicit admin purge; reconcile
@@ -706,7 +759,18 @@ impl Database {
     }
 
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
-    /// Returns Ok(true) if the payment was new, Ok(false) if it was a duplicate.
+    ///
+    /// The dedup check runs inside `BEGIN IMMEDIATE` so concurrent writers
+    /// (including other processes) can't race between the check and the insert.
+    /// The backing update is a floored delta: `new = max(0, current + delta)` —
+    /// the payment already happened, so refusing to record (or going negative)
+    /// would misaccount; clamping is surfaced via `PaymentPersistence::clamped`.
+    ///
+    /// Errors: if a backing update is requested but no `channels` row exists for
+    /// `user_channel_id`, the transaction is rolled back and the distinct
+    /// `rusqlite::Error::QueryReturnedNoRows` is returned (match it with
+    /// `is_missing_channel_row`) so callers can recreate the row and retry.
+    /// No other failure mode of this function returns that variant.
     pub fn record_payment_and_maybe_update_backing(
         &self,
         payment_id: Option<&str>,
@@ -717,24 +781,28 @@ impl Database {
         btc_price: Option<f64>,
         status: &str,
         user_channel_id: Option<&str>,
-        backing_delta_sats: Option<u64>,
-    ) -> SqliteResult<bool> {
+        backing_delta_sats: Option<i64>,
+    ) -> SqliteResult<PaymentPersistence> {
         let conn = self.conn.lock().unwrap();
-        // Dedup check while holding the lock to prevent races
-        if let Some(pid) = payment_id {
-            let exists: bool = conn
-                .query_row(
-                    "SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1",
-                    params![pid],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
-            if exists {
-                return Ok(false);
-            }
-        }
         conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result: SqliteResult<()> = (|| {
+        let result: SqliteResult<PaymentPersistence> = (|| {
+            // Dedup check inside the transaction to prevent cross-process TOCTOU
+            if let Some(pid) = payment_id {
+                let exists: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1",
+                        params![pid],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if exists.is_some() {
+                    return Ok(PaymentPersistence {
+                        is_new: false,
+                        new_backing: None,
+                        clamped: false,
+                    });
+                }
+            }
             conn.execute(
                 "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -743,22 +811,42 @@ impl Database {
                     amount_msat as i64, amount_usd, btc_price, status
                 ],
             )?;
+            let mut new_backing = None;
+            let mut clamped = false;
             if let Some(delta) = backing_delta_sats {
                 // user_channel_id must be set when a backing update is requested.
-                let ucid = user_channel_id.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-                let rows = conn.execute(
-                    "UPDATE channels SET stable_sats = stable_sats + ?1, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?2",
-                    params![delta as i64, ucid],
+                let ucid = user_channel_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "user_channel_id required for backing update".to_string(),
+                    )
+                })?;
+                let current: Option<i64> = conn
+                    .query_row(
+                        "SELECT stable_sats FROM channels WHERE user_channel_id = ?1",
+                        params![ucid],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                // Distinct missing-channel-row error — see doc comment.
+                let current = current.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                let target = current.saturating_add(delta);
+                let updated = target.max(0);
+                clamped = target < 0;
+                conn.execute(
+                    "UPDATE channels SET stable_sats = ?1, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?2",
+                    params![updated, ucid],
                 )?;
-                if rows != 1 {
-                    return Err(rusqlite::Error::QueryReturnedNoRows);
-                }
+                new_backing = Some(updated);
             }
-            Ok(())
+            Ok(PaymentPersistence {
+                is_new: true,
+                new_backing,
+                clamped,
+            })
         })();
         match result {
-            Ok(()) => match conn.execute_batch("COMMIT") {
-                Ok(()) => Ok(true),
+            Ok(persistence) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(persistence),
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK");
                     Err(e)
@@ -1106,7 +1194,9 @@ mod tests {
                 Some(100),
             )
             .unwrap();
-        assert!(first);
+        assert!(first.is_new);
+        assert_eq!(first.new_backing, Some(1_100));
+        assert!(!first.clamped);
         assert_eq!(
             db.load_channel("user-channel-1")
                 .unwrap()
@@ -1128,7 +1218,8 @@ mod tests {
                 Some(100),
             )
             .unwrap();
-        assert!(!duplicate);
+        assert!(!duplicate.is_new);
+        assert_eq!(duplicate.new_backing, None);
         assert_eq!(
             db.load_channel("user-channel-1")
                 .unwrap()
@@ -1150,7 +1241,8 @@ mod tests {
                 Some(50),
             )
             .unwrap();
-        assert!(second);
+        assert!(second.is_new);
+        assert_eq!(second.new_backing, Some(1_150));
         assert_eq!(
             db.load_channel("user-channel-1")
                 .unwrap()
@@ -1158,6 +1250,81 @@ mod tests {
                 .backing_sats,
             1_150
         );
+    }
+
+    #[test]
+    fn test_payment_backing_delta_clamps_at_zero() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 100.0, 1_000, 0, None)
+            .unwrap();
+
+        let result = db
+            .record_payment_and_maybe_update_backing(
+                Some("payment-neg"),
+                "stability",
+                "sent",
+                100_000,
+                Some(1.0),
+                Some(100_000.0),
+                "completed",
+                Some("user-channel-1"),
+                Some(-5_000),
+            )
+            .unwrap();
+        assert!(result.is_new);
+        assert!(result.clamped);
+        assert_eq!(result.new_backing, Some(0));
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            0
+        );
+    }
+
+    #[test]
+    fn test_payment_backing_missing_channel_row_is_distinct_error() {
+        let db = Database::open_in_memory().unwrap();
+
+        let err = db
+            .record_payment_and_maybe_update_backing(
+                Some("payment-orphan"),
+                "stability",
+                "received",
+                100_000,
+                Some(1.0),
+                Some(100_000.0),
+                "completed",
+                Some("no-such-channel"),
+                Some(100),
+            )
+            .unwrap_err();
+        assert!(is_missing_channel_row(&err));
+        // Transaction rolled back — the payment row must not exist either,
+        // so a retry after recreating the channel row succeeds.
+        assert!(!db.payment_exists("payment-orphan").unwrap());
+    }
+
+    #[test]
+    fn test_save_channel_preserving_backing() {
+        let db = Database::open_in_memory().unwrap();
+        // No row yet — signals false so the caller can fall back to save_channel
+        assert!(!db
+            .save_channel_preserving_backing("ch1", "uch1", 50.0, 10_000, None)
+            .unwrap());
+
+        db.save_channel("ch1", "uch1", 50.0, 50_000, 10_000, None)
+            .unwrap();
+        assert!(db
+            .save_channel_preserving_backing("ch1", "uch1", 75.0, 20_000, Some("n"))
+            .unwrap());
+
+        let loaded = db.load_channel("uch1").unwrap().unwrap();
+        assert!((loaded.expected_usd - 75.0).abs() < 0.001);
+        assert_eq!(loaded.backing_sats, 50_000); // untouched
+        assert_eq!(loaded.native_sats, 20_000);
+        assert_eq!(loaded.note, Some("n".to_string()));
     }
 
     #[test]

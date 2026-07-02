@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stable_channels::audit::*;
 use stable_channels::constants::*;
-use stable_channels::db::{DailyPriceRecord, Database, PaymentRecord, TradeRecord};
+use stable_channels::db::{self, DailyPriceRecord, Database, PaymentRecord, TradeRecord};
 use stable_channels::historical_prices::get_seed_prices;
 use stable_channels::price_feeds::get_cached_price_no_fetch;
 use stable_channels::stable;
@@ -1962,6 +1962,48 @@ impl UserApp {
         }
     }
 
+    /// Save user's stable channel to database without overwriting `stable_sats`.
+    ///
+    /// Used after `record_payment_and_maybe_update_backing` has already
+    /// committed the authoritative backing value — a full `save_channel_settings`
+    /// here would write the in-memory snapshot absolutely and could silently
+    /// discard a concurrently committed delta. Falls back to the full save
+    /// (which inserts) if no row exists yet.
+    fn save_channel_settings_preserving_backing(&self) {
+        let (channel_id_str, user_channel_id_str, expected_usd, native_sats, note) = {
+            let sc = self.stable_channel.lock().unwrap();
+
+            // Only save if we have a valid channel
+            if sc.user_channel_id == 0 {
+                return;
+            }
+
+            (
+                sc.channel_id.to_string(),
+                format!("{}", sc.user_channel_id),
+                sc.expected_usd.0,
+                sc.native_sats,
+                sc.note.clone(),
+            )
+        };
+
+        match self.db.save_channel_preserving_backing(
+            &channel_id_str,
+            &user_channel_id_str,
+            expected_usd,
+            native_sats,
+            note.as_deref(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                // No row yet — the full save inserts it (in-memory backing is
+                // fine for a brand-new row).
+                self.save_channel_settings();
+            }
+            Err(e) => eprintln!("Failed to save channel: {}", e),
+        }
+    }
+
     /// Load user's stable channel from database
     fn load_channel_settings(&mut self) {
         let user_channel_id_str = {
@@ -2334,35 +2376,76 @@ impl UserApp {
                             let ucid = format!("{}", sc.user_channel_id);
                             (usd, if price > 0.0 { Some(price) } else { None }, ptype, ucid)
                         };
-                        let backing_delta = is_stability_payment.then(|| amount_msat / 1000);
+                        let backing_delta =
+                            is_stability_payment.then(|| (amount_msat / 1000) as i64);
                         // Atomically insert payment and update backing in one transaction.
-                        // Ok(true)=inserted, Ok(false)=duplicate → acknowledge.
+                        // is_new=true → inserted, is_new=false → duplicate → acknowledge.
                         // Err → transient failure, do not acknowledge so LDK re-delivers.
-                        let db_result = self.db.record_payment_and_maybe_update_backing(
-                            Some(&payment_hash_str),
-                            payment_type,
-                            "received",
-                            amount_msat,
-                            amount_usd,
-                            btc_price,
-                            "completed",
-                            is_stability_payment.then(|| user_channel_id_str.as_str()),
-                            backing_delta,
-                        );
+                        let record = || {
+                            self.db.record_payment_and_maybe_update_backing(
+                                Some(&payment_hash_str),
+                                payment_type,
+                                "received",
+                                amount_msat,
+                                amount_usd,
+                                btc_price,
+                                "completed",
+                                is_stability_payment.then(|| user_channel_id_str.as_str()),
+                                backing_delta,
+                            )
+                        };
+                        let db_result = match record() {
+                            Err(ref e) if db::is_missing_channel_row(e) => {
+                                // The channels row is gone (nothing else recreates
+                                // it) — recreate it from in-memory state and retry
+                                // once so this event can't permanently block the
+                                // queue.
+                                audit_event(
+                                    "PAYMENT_CHANNEL_ROW_MISSING",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "user_channel_id": user_channel_id_str,
+                                    }),
+                                );
+                                self.save_channel_settings();
+                                record()
+                            }
+                            other => other,
+                        };
                         match db_result {
-                            Ok(is_new) => {
+                            Ok(persisted) => {
                                 {
                                     let mut sc = self.stable_channel.lock().unwrap();
                                     update_balances(&self.node, &mut sc);
-                                    if is_new && is_stability_payment {
-                                        sc.backing_sats += backing_delta.unwrap_or(0);
+                                    if persisted.is_new && is_stability_payment {
+                                        // Sync memory from the authoritative DB value
+                                        // committed in the transaction, not by
+                                        // re-applying the delta — the sc mutex was
+                                        // dropped across the transaction.
+                                        if let Some(new_backing) = persisted.new_backing {
+                                            sc.backing_sats = new_backing.max(0) as u64;
+                                        }
                                     }
                                     stable::reconcile_incoming(&mut sc);
                                 }
-                                self.save_channel_settings();
+                                if persisted.clamped {
+                                    audit_event(
+                                        "PAYMENT_BACKING_CLAMPED",
+                                        json!({
+                                            "payment_hash": payment_hash_str,
+                                            "backing_delta_sats": backing_delta,
+                                            "new_backing_sats": persisted.new_backing,
+                                        }),
+                                    );
+                                }
+                                // Persist without touching stable_sats — the
+                                // transaction above is authoritative for backing;
+                                // a full absolute save here could overwrite a
+                                // committed delta with a stale snapshot.
+                                self.save_channel_settings_preserving_backing();
                                 self.update_balances();
 
-                                if is_new {
+                                if persisted.is_new {
                                     audit_event(
                                         "PAYMENT_RECEIVED",
                                         json!({

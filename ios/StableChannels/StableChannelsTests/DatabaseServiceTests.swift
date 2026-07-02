@@ -100,24 +100,6 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertFalse(outgoingReplay.isNewPayment)
         XCTAssertEqual(outgoingReplay.backingSats, 950)
 
-        XCTAssertThrowsError(
-            try service.recordPaymentAndMaybeUpdateBacking(
-                paymentId: "payment-too-large",
-                paymentType: "stability",
-                direction: "sent",
-                amountMsat: 2_000_000,
-                amountUSD: 20,
-                btcPrice: 100_000,
-                status: "pending",
-                userChannelId: "user-channel-1",
-                backingDeltaSats: -2_000
-            )
-        )
-        let afterRejectedDebit = try XCTUnwrap(
-            service.loadChannel(userChannelId: "user-channel-1")
-        )
-        XCTAssertEqual(afterRejectedDebit.backingSats, 950)
-
         try service.saveChannelPreservingBacking(
             channelId: "channel-1",
             userChannelId: "user-channel-1",
@@ -127,6 +109,125 @@ final class DatabaseServiceTests: XCTestCase {
         let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
         XCTAssertEqual(stored.backingSats, 950)
         XCTAssertEqual(stored.expectedUSD, 125)
+    }
+
+    func testDebitBelowZeroClampsToZeroAndSucceeds() throws {
+        try service.saveChannel(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 100,
+            backingSats: 500,
+            note: nil
+        )
+
+        // A debit larger than the stored backing clamps to 0 and still records
+        // the payment — it runs after a successful keysend, so refusing to
+        // record would wedge reconcile forever.
+        let clamped = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-too-large",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 2_000_000,
+            amountUSD: 20,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: -2_000
+        )
+        XCTAssertTrue(clamped.isNewPayment)
+        XCTAssertEqual(clamped.backingSats, 0)
+
+        let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
+        XCTAssertEqual(stored.backingSats, 0)
+
+        // Replay of the same payment dedups and reports the clamped backing.
+        let replay = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-too-large",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 2_000_000,
+            amountUSD: 20,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: -2_000
+        )
+        XCTAssertFalse(replay.isNewPayment)
+        XCTAssertEqual(replay.backingSats, 0)
+    }
+
+    func testBackingUpdateWithMissingChannelRowThrowsDedicatedError() throws {
+        XCTAssertThrowsError(
+            try service.recordPaymentAndMaybeUpdateBacking(
+                paymentId: "payment-no-row",
+                paymentType: "stability",
+                direction: "sent",
+                amountMsat: 100_000,
+                amountUSD: 1,
+                btcPrice: 100_000,
+                status: "pending",
+                userChannelId: "no-such-channel",
+                backingDeltaSats: -100
+            )
+        ) { error in
+            guard case DatabaseError.missingChannelRow(let ucid) = error else {
+                return XCTFail("Expected missingChannelRow, got \(error)")
+            }
+            XCTAssertEqual(ucid, "no-such-channel")
+        }
+
+        // The whole transaction rolled back: after the channel row is recreated,
+        // the same payment id inserts as new (no orphan payments row).
+        try service.saveChannel(
+            channelId: "channel-1",
+            userChannelId: "no-such-channel",
+            expectedUSD: 100,
+            backingSats: 1_000,
+            note: nil
+        )
+        let retried = try service.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-no-row",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: "no-such-channel",
+            backingDeltaSats: -100
+        )
+        XCTAssertTrue(retried.isNewPayment)
+        XCTAssertEqual(retried.backingSats, 900)
+    }
+
+    // MARK: - pending_stability_send
+
+    func testClaimPendingSendClaimDenyClearCycle() throws {
+        XCTAssertNil(service.loadPendingSend())
+
+        // First claim wins the slot with an empty payment id.
+        XCTAssertTrue(service.claimPendingSend(amountMsat: 123_000, price: 100_000))
+        var pending = try XCTUnwrap(service.loadPendingSend())
+        XCTAssertEqual(pending.paymentId, "")
+        XCTAssertEqual(pending.amountMsat, 123_000)
+        XCTAssertEqual(pending.price, 100_000)
+        XCTAssertGreaterThan(pending.createdAt, 0)
+
+        // Second claim is denied while the marker exists.
+        XCTAssertFalse(service.claimPendingSend(amountMsat: 456_000, price: 100_000))
+        pending = try XCTUnwrap(service.loadPendingSend())
+        XCTAssertEqual(pending.amountMsat, 123_000, "Denied claim must not overwrite the marker")
+
+        // The real payment id attaches once the keysend returns.
+        XCTAssertTrue(service.setPendingSendPaymentId("payment-abc"))
+        pending = try XCTUnwrap(service.loadPendingSend())
+        XCTAssertEqual(pending.paymentId, "payment-abc")
+        XCTAssertEqual(pending.amountMsat, 123_000)
+
+        // Clear frees the slot for the next claim.
+        service.clearPendingSend()
+        XCTAssertNil(service.loadPendingSend())
+        XCTAssertTrue(service.claimPendingSend(amountMsat: 456_000, price: 90_000))
     }
 
     // MARK: - pending_operations
@@ -204,8 +305,10 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertFalse(second, "Second update must not clobber a resolved row")
 
-        let ops = service.fetchPendingOperations()
-        XCTAssertEqual(ops.first?.closingTxid, "first")
+        // fetchPendingOperations() filters by status='pending', so the resolved
+        // row is excluded. Use the PK lookup to verify the first txid stuck.
+        let op = service.fetchPendingOperation(opId: "close-q")
+        XCTAssertEqual(op?.closingTxid, "first")
     }
 
     // MARK: - onchain_receive_txids

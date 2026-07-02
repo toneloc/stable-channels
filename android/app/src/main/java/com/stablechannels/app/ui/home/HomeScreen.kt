@@ -98,6 +98,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 } else true
                 // Run blocking LDK calls off main thread
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                    // Pick up backing increments committed by the background stability
+                    // service while this process was cached, before any save can clobber them.
+                    appState.onForegroundResume()
                     appState.refreshBalances()
                     appState.detectOnchainDeposit()
                     appState.ensureLSPConnected()

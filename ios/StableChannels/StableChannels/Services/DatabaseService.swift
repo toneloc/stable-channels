@@ -21,6 +21,9 @@ class DatabaseService {
         guard sqlite3_open(dbPath, &db) == SQLITE_OK else {
             throw DatabaseError.openFailed(String(cString: sqlite3_errmsg(db)))
         }
+        // Main app and NSE genuinely overlap on this DB — wait briefly for locks
+        // instead of failing instantly with SQLITE_BUSY.
+        sqlite3_busy_timeout(db, 2000)
 
         try initSchema()
     }
@@ -126,6 +129,15 @@ class DatabaseService {
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 resolved_at INTEGER
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pending_stability_send (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                payment_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL,
+                price REAL NOT NULL,
+                created_at INTEGER NOT NULL
             )
             """,
             """
@@ -414,9 +426,26 @@ class DatabaseService {
                 guard let ucid = userChannelId, !ucid.isEmpty else {
                     throw DatabaseError.executeFailed("userChannelId required for backing update")
                 }
+                let rows = try query(
+                    "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                    params: [.text(ucid)]
+                )
+                guard let current = rows.first?[0] as? Int64 else {
+                    throw DatabaseError.missingChannelRow(ucid)
+                }
+                // Clamp instead of refusing: this runs after the payment already
+                // happened, so recording reality beats wedging reconcile forever.
+                let newBacking = max(0, current + delta)
+                if current + delta < 0 {
+                    AuditService.log("BACKING_CLAMPED", data: [
+                        "user_channel_id": ucid,
+                        "current_backing_sats": "\(current)",
+                        "delta_sats": "\(delta)"
+                    ])
+                }
                 try execute(
-                    "UPDATE channels SET stable_sats = stable_sats + ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ? AND stable_sats + ? >= 0",
-                    params: [.integer(delta), .text(ucid), .integer(delta)]
+                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
+                    params: [.integer(newBacking), .text(ucid)]
                 )
                 let changedRows = sqlite3_changes(db)
                 if changedRows != 1 {
@@ -424,7 +453,7 @@ class DatabaseService {
                         "backing UPDATE affected \(changedRows) rows for user_channel_id=\(ucid)"
                     )
                 }
-                resultingBacking = try authoritativeBacking(userChannelId: ucid, required: true)
+                resultingBacking = UInt64(newBacking)
             }
             try execute("COMMIT")
             return PaymentPersistenceResult(
@@ -449,12 +478,83 @@ class DatabaseService {
             "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
             params: [.text(ucid)]
         )
-        guard let value = rows.first?[0] as? Int64, value >= 0 else {
+        guard let value = rows.first?[0] as? Int64 else {
+            throw DatabaseError.missingChannelRow(ucid)
+        }
+        guard value >= 0 else {
             throw DatabaseError.executeFailed(
                 "No valid backing row for user_channel_id=\(ucid)"
             )
         }
         return UInt64(value)
+    }
+
+    // MARK: - Pending Stability Send
+
+    /// Durable cross-process marker for an in-flight outgoing stability payment.
+    /// Claimed under BEGIN IMMEDIATE so the foreground timer and the NSE can never
+    /// both hold the send slot at once.
+    ///
+    /// Returns true if this caller claimed the slot; false if a marker already
+    /// exists (another sender owns it) or the claim could not be persisted.
+    func claimPendingSend(amountMsat: UInt64, price: Double) -> Bool {
+        do {
+            try execute("BEGIN IMMEDIATE")
+        } catch {
+            return false
+        }
+        do {
+            let existing = try query("SELECT id FROM pending_stability_send WHERE id = 1")
+            guard existing.isEmpty else {
+                try execute("ROLLBACK")
+                return false
+            }
+            try execute(
+                "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
+                params: [
+                    .integer(Int64(amountMsat)),
+                    .real(price),
+                    .integer(Int64(Date().timeIntervalSince1970))
+                ]
+            )
+            try execute("COMMIT")
+            return true
+        } catch {
+            try? execute("ROLLBACK")
+            return false
+        }
+    }
+
+    /// Attach the real payment id to the claimed send marker once the keysend returns.
+    @discardableResult
+    func setPendingSendPaymentId(_ paymentId: String) -> Bool {
+        do {
+            try execute(
+                "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1",
+                params: [.text(paymentId)]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func loadPendingSend() -> PendingStabilitySend? {
+        guard let rows = try? query(
+            "SELECT payment_id, amount_msat, price, created_at FROM pending_stability_send WHERE id = 1"
+        ), let row = rows.first else {
+            return nil
+        }
+        return PendingStabilitySend(
+            paymentId: row[0] as? String ?? "",
+            amountMsat: UInt64(row[1] as? Int64 ?? 0),
+            price: row[2] as? Double ?? 0,
+            createdAt: row[3] as? Int64 ?? 0
+        )
+    }
+
+    func clearPendingSend() {
+        try? execute("DELETE FROM pending_stability_send WHERE id = 1")
     }
 
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {
@@ -1076,14 +1176,27 @@ enum DatabaseError: LocalizedError {
     case openFailed(String)
     case prepareFailed(String)
     case executeFailed(String)
+    /// No channels row exists for the given user_channel_id — recoverable by
+    /// recreating the row from in-memory state, unlike a plain execute failure.
+    case missingChannelRow(String)
 
     var errorDescription: String? {
         switch self {
         case .openFailed(let msg): return "Database open failed: \(msg)"
         case .prepareFailed(let msg): return "SQL prepare failed: \(msg)"
         case .executeFailed(let msg): return "SQL execute failed: \(msg)"
+        case .missingChannelRow(let ucid): return "No channel row for user_channel_id=\(ucid)"
         }
     }
+}
+
+/// Durable marker row for an in-flight outgoing stability payment.
+/// `paymentId` is empty between the claim and the keysend returning an id.
+struct PendingStabilitySend: Equatable {
+    let paymentId: String
+    let amountMsat: UInt64
+    let price: Double
+    let createdAt: Int64
 }
 
 struct OnchainReceiveResolution: Hashable {
