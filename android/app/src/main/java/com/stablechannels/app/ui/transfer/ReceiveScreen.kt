@@ -258,6 +258,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                             }
                             invoiceAmountSats = if (sats > 0) sats else null
                             invoice = inv.toString()
+                            appState.isWaitingForPayment = true
                         } catch (e: Exception) {
                             error = e.message ?: "Failed to generate invoice"
                         }
@@ -282,6 +283,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                                 val inv = appState.nodeService.receiveVariablePayment("Stable Channels")
                                 invoiceAmountSats = null
                                 invoice = inv.toString()
+                                appState.isWaitingForPayment = true
                             } catch (e: Exception) {
                                 error = e.message ?: "Failed to generate invoice"
                             }

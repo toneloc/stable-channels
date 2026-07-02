@@ -14,17 +14,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.util.Log
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
 import com.stablechannels.app.Phase
 import com.stablechannels.app.R
 
 @Composable
-fun ContentView() {
-    val context = LocalContext.current
-    val appState = remember { AppState(context) }
+fun ContentView(appState: AppState) {
 
-    LaunchedEffect(Unit) { appState.start() }
-    DisposableEffect(Unit) { onDispose { appState.stop() } }
 
     val phase by appState.phase.collectAsState()
     val errorMessage by appState.errorMessage.collectAsState()

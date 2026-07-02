@@ -44,5 +44,9 @@
         <service android:name=".push.StabilityProcessingService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <service android:name=".services.LdkBackgroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
