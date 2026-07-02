@@ -189,8 +189,10 @@ class StabilityProcessingService : Service() {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
                         node.eventHandled()
                         if (price <= 0) price = fetchMedianPrice()
+                        val isStability = event.customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() }
+                        val paymentType = if (isStability) "stability" else "lightning"
                         recordPaymentInDB(
-                            dbPath, null, "lightning", "received",
+                            dbPath, null, paymentType, "received",
                             event.amountMsat.toLong(), price
                         )
                         received = true
