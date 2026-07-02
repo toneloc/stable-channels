@@ -1,7 +1,6 @@
 package com.stablechannels.app
 
 import android.content.Context
-import android.os.PowerManager
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -136,6 +135,7 @@ class AppState(private val context: Context) : ViewModel() {
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
     private var stabilityJob: Job? = null
+    private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
 
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
@@ -245,6 +245,7 @@ class AppState(private val context: Context) : ViewModel() {
     fun stop() {
         cancelBackgroundStop()
         stabilityJob?.cancel()
+        heartbeatJob?.cancel()
         pendingDepositJob?.cancel()
         priceService.stopAutoRefresh()
         nodeService.stop()
@@ -259,7 +260,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         Log.d("AppState", "Scheduling node stop after 60s grace period")
         backgroundStopJob?.cancel()
-        
+
         // Start Foreground Service to keep CPU and network active
         try {
             LdkBackgroundService.start(context)
@@ -293,12 +294,14 @@ class AppState(private val context: Context) : ViewModel() {
         } catch (e: Exception) {
             Log.e("AppState", "Failed to stop LdkBackgroundService", e)
         }
-        if (!nodeService.isRunning) return
-        Log.d("AppState", "Stopping node for background")
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         stabilityJob?.cancel()
         stabilityJob = null
         pendingDepositJob?.cancel()
         pendingDepositJob = null
+        if (!nodeService.isRunning) return
+        Log.d("AppState", "Stopping node for background")
         nodeService.stop()
     }
 
@@ -313,6 +316,7 @@ class AppState(private val context: Context) : ViewModel() {
             cancelBackgroundStop()
             if (nodeService.isRunning) {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
+                loadChannelFromDB()
                 ensureLSPConnected()
                 refreshBalances()
                 updateStableBalances()
@@ -321,6 +325,7 @@ class AppState(private val context: Context) : ViewModel() {
             Log.d("AppState", "Restarting node from foreground")
             waitForBackgroundService()
             try {
+                loadChannelFromDB()
                 _phase.value = Phase.SYNCING
                 nodeService.start(Network.BITCOIN, chainUrl, null)
                 _phase.value = Phase.WALLET
@@ -634,10 +639,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun startStabilityTimer() {
+        heartbeatJob?.cancel()
+        FCMService.updateHeartbeat(context)
+        heartbeatJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(5_000)
+                FCMService.updateHeartbeat(context)
+            }
+        }
+
         stabilityJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 delay(Constants.STABILITY_CHECK_INTERVAL_SECS * 1000)
-                FCMService.updateHeartbeat(context)
                 ensureLSPConnected()
                 recordCurrentPrice()
                 runStabilityCheck()

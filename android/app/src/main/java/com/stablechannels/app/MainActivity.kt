@@ -36,9 +36,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        requestNotificationPermission()
-
         appState = AppState(applicationContext)
+        requestNotificationPermission()
 
         // Lock on launch if app unlock is enabled
         if (AppAccessPreferencesManager.isAppUnlockEnabled(this)) {
@@ -64,11 +63,14 @@ class MainActivity : FragmentActivity() {
     override fun onPause() {
         super.onPause()
         lastBackgroundedTime = System.currentTimeMillis()
-        appState.stopNodeForBackground()
+        if (::appState.isInitialized) {
+            appState.stopNodeForBackground()
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        if (!::appState.isInitialized) return
         if (isFirstResume) {
             isFirstResume = false
             appState.restartNodeFromForeground()
@@ -85,7 +87,9 @@ class MainActivity : FragmentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        appState.stop()
+        if (::appState.isInitialized) {
+            appState.stop()
+        }
     }
 
     @Composable

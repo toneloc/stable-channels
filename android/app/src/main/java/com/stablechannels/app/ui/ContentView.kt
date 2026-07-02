@@ -10,14 +10,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import android.util.Log
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
 import com.stablechannels.app.Phase
 import com.stablechannels.app.R
@@ -118,4 +113,3 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
         }
     }
 }
-
