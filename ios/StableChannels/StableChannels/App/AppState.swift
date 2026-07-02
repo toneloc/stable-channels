@@ -839,7 +839,7 @@ class AppState {
             do {
                 let (_, response) = try await URLSession.shared.data(for: request)
                 if let http = response as? HTTPURLResponse {
-                    print("[Push] Re-registered with node_id: \(http.statusCode)")
+                    print("[Push] Re-registered with node_id: \(nodeId.prefix(16))...")
                 }
             } catch {
                 print("[Push] Re-registration failed: \(error.localizedDescription)")
