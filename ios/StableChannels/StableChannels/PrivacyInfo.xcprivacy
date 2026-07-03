@@ -12,11 +12,11 @@
 	<array>
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
-      		<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
-      		<key>NSPrivacyAccessedAPITypeReasons</key>
-      		<array>
-          		<string>35F9.1</string>
-      		</array>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
 		</dict>
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
@@ -32,6 +32,22 @@
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>C617.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryActiveKeyboard</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>1B7A.1</string>
 			</array>
 		</dict>
 	</array>
