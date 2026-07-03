@@ -50,7 +50,7 @@ struct SettingsView: View {
                             rowLabel(
                                 icon: "bitcoinsign.circle.fill",
                                 color: Color.stablePrimary,
-                                text: String(localized: "link_send_on_chain", defaultValue: "Send On-Chain")
+                                text: String(localized: "link_send_on_chain", defaultValue: "Send Onchain")
                             )
                         }
                     }

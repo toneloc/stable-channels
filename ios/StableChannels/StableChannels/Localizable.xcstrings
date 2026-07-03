@@ -3358,7 +3358,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Receiving on-chain..."
+            "value" : "Receiving onchain..."
           }
         }
       }
@@ -3688,7 +3688,7 @@
     "This backup contains your seed phrase. Lightning channel state is NOT included." : {
 
     },
-    "This recovery will restore on-chain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close." : {
+    "This recovery will restore onchain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close." : {
 
     },
     "Time" : {

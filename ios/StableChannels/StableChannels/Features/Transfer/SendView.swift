@@ -196,7 +196,7 @@ struct SendView: View {
                             }
                         case .onchain:
                             Label(
-                                String(localized: "label_on_chain_address", defaultValue: "On-chain Address"),
+                                String(localized: "label_on_chain_address", defaultValue: "Onchain Address"),
                                 systemImage: "link"
                             )
                             .foregroundStyle(.orange)
@@ -345,7 +345,7 @@ struct SendView: View {
         switch detectedType {
         case .onchain:
             requiresAuth = true
-            reason = "Confirm on-chain withdrawal of all funds"
+            reason = "Confirm onchain withdrawal of all funds"
         case .bolt11, .bolt12:
             requiresAuth = transactionAuth
             reason = "Confirm payment of \(displaySats) sats"

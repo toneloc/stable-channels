@@ -1111,7 +1111,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         val spendable = nodeService.spendableOnchainSats()
         if (spendable <= 0) {
-            _statusMessage.value = "Insufficient on-chain balance"
+            _statusMessage.value = "Insufficient onchain balance"
             return
         }
         val sweepAmount = spendable
@@ -1121,7 +1121,7 @@ class AppState(private val context: Context) : ViewModel() {
             isSweeping = true
             sweepOnchainStart = spendable
             pendingSplice = PendingSplice("in", sweepAmount)
-            _statusMessage.value = "Moving all on-chain funds to channel..."
+            _statusMessage.value = "Moving all onchain funds to channel..."
             val price = priceService.currentPrice.value
             val amountUSD = if (price > 0) (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price else null
             databaseService?.recordPayment(

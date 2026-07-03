@@ -57,7 +57,7 @@ struct ReceiveView: View {
                     } label: {
                         Image(systemName: "link")
                     }
-                    .accessibilityLabel(String(localized: "toolbar_on_chain", defaultValue: "On-Chain"))
+                    .accessibilityLabel(String(localized: "toolbar_on_chain", defaultValue: "Onchain"))
                 }
             }
             .navigationDestination(isPresented: $showOnChain) {

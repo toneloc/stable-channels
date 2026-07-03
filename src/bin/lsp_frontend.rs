@@ -337,7 +337,7 @@ impl Dashboard {
                         bal.lightning_sats, bal.lightning_usd
                     ));
                     ui.label(format!(
-                        "On-chain:  {} sats  ≈ ${:.2}",
+                        "Onchain:  {} sats  ≈ ${:.2}",
                         bal.onchain_sats, bal.onchain_usd
                     ));
                     ui.separator();
@@ -785,7 +785,7 @@ impl Dashboard {
 
     fn show_onchain_address_section(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
-            ui.heading("On-chain Address");
+            ui.heading("Onchain Address");
             if ui.button("Get Address").clicked() {
                 self.fetch_onchain_address();
             }
@@ -929,7 +929,7 @@ impl App for Dashboard {
                 ui.add_space(10.0);
 
                 ui.group(|ui| {
-                    ui.heading("On-chain Send");
+                    ui.heading("Onchain Send");
                     ui.horizontal(|ui| {
                         ui.label("Address:");
                         ui.text_edit_singleline(&mut self.onchain_address);
@@ -938,7 +938,7 @@ impl App for Dashboard {
                         ui.label("Amount (sats):");
                         ui.text_edit_singleline(&mut self.onchain_amount);
                     });
-                    if ui.button("Send On-chain").clicked() {
+                    if ui.button("Send Onchain").clicked() {
                         self.send_onchain();
                     }
                     if let Some(msg) = &self.onchain_send_result {

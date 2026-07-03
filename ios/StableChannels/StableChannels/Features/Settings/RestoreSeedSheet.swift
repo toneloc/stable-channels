@@ -127,7 +127,7 @@ struct RestoreSeedSheet: View {
             }
 
             Text(
-                "This recovery will restore on-chain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close."
+                "This recovery will restore onchain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close."
             )
             .font(.caption)
             .foregroundStyle(.secondary)

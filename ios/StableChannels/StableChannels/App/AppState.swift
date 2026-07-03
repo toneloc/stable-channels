@@ -2044,7 +2044,7 @@ class AppState {
                 )
                 sweepOnchainStart = balances.totalOnchainBalanceSats
                 pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
-                statusMessage = "Moving all on-chain funds to channel..."
+                statusMessage = "Moving all onchain funds to channel..."
 
                 _ = try? databaseService?.recordPayment(
                     paymentId: nil,

@@ -345,7 +345,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 )
                                 Spacer(Modifier.width(6.dp))
                                 Text(
-                                    "Channel closing — funds will arrive on-chain",
+                                    "Channel closing — funds will arrive onchain",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

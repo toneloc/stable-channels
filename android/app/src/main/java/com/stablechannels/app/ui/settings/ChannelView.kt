@@ -139,7 +139,7 @@ fun ChannelView(appState: AppState) {
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    text = "Funds will be swept to your on-chain wallet",
+                    text = "Funds will be swept to your onchain wallet",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -165,7 +165,7 @@ fun ChannelView(appState: AppState) {
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = { Text("Close Channel?") },
-            text = { Text("This will cooperatively close the channel and sweep funds on-chain.") },
+            text = { Text("This will cooperatively close the channel and sweep funds onchain.") },
             confirmButton = {
                 TextButton(onClick = {
                     showCloseConfirm = false

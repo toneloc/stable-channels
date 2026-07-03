@@ -1565,7 +1565,7 @@ impl UserApp {
                                         None,
                                     );
                                     self.show_toast("Sent!", "OK");
-                                    self.status_message = format!("On-chain TX: {}", txid);
+                                    self.status_message = format!("Onchain TX: {}", txid);
                                     self.send_input.clear();
                                     self.send_amount.clear();
                                     self.send_error.clear();
@@ -3622,7 +3622,7 @@ impl UserApp {
 
                         cols[1].vertical_centered(|ui| {
                             let onchain_btn = egui::Button::new(
-                                egui::RichText::new("On-chain").size(14.0).color(
+                                egui::RichText::new("Onchain").size(14.0).color(
                                     if onchain_selected {
                                         Color32::WHITE
                                     } else {
@@ -4876,7 +4876,7 @@ impl UserApp {
                         // Amount is total = confirmed + unconfirmed + pending sweep.
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("On-chain")
+                                RichText::new("Onchain")
                                     .size(11.0)
                                     .color(theme::MUTED)
                                     .strong(),
@@ -6666,7 +6666,7 @@ impl UserApp {
                                             }
                                             "splice_in" => ("Deposit", theme::SUCCESS),
                                             "splice_out" => ("Withdraw", theme::WARNING),
-                                            "onchain" => ("On-chain", theme::SUCCESS),
+                                            "onchain" => ("Onchain", theme::SUCCESS),
                                             "lightning" => {
                                                 ("Lightning", Color32::from_rgb(234, 179, 8))
                                             }
@@ -6946,7 +6946,7 @@ impl UserApp {
                     "lightning" => "Lightning",
                     "splice_in" => "Deposit",
                     "splice_out" => "Withdraw",
-                    "onchain" => "On-chain",
+                    "onchain" => "Onchain",
                     _ => "Manual",
                 };
                 row(ui, "Type", type_label);
@@ -7174,7 +7174,7 @@ impl UserApp {
                 || input_lower.starts_with("3")
                 || input_lower.starts_with("bcrt1")
             {
-                "On-chain Address"
+                "Onchain Address"
             } else {
                 "Unknown"
             };
@@ -7467,7 +7467,7 @@ impl UserApp {
         // On-chain address
         ui.group(|ui| {
             ui.label(
-                RichText::new("On-chain Address")
+                RichText::new("Onchain Address")
                     .strong()
                     .color(Color32::BLACK),
             );

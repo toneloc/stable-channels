@@ -432,7 +432,7 @@ struct HomeView: View {
             }
         case .onchainReceive(let txid):
             pendingRowImpl(
-                text: String(localized: "status_onchain_receiving", defaultValue: "Receiving on-chain..."),
+                text: String(localized: "status_onchain_receiving", defaultValue: "Receiving onchain..."),
                 txid: txid
             )
         }

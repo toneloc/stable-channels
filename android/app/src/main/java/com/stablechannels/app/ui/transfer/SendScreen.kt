@@ -484,7 +484,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
                         if (requiresAuth && activity != null) {
                             val reason = if (isOnChain) {
-                                "Confirm on-chain withdrawal"
+                                "Confirm onchain withdrawal"
                             } else {
                                 "Confirm payment of $displaySats sats"
                             }
@@ -560,7 +560,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                 btcPrice = if (price > 0) price else null,
                                                 txid = txid, address = trimmed
                                             )
-                                            result = "On-chain tx sent: $txid"
+                                            result = "Onchain tx sent: $txid"
                                         }
                                     }
                                     InputType.UNKNOWN -> throw Exception("Enter a valid invoice, offer, or address")
