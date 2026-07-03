@@ -22,6 +22,7 @@
 		3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623F41D841B312F0C9AE01E6 /* MainTabView.swift */; };
 		3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3940DC5406ABC63AA090441A /* DatabaseService.swift */; };
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
+		49514E7B2FF83F2E0004C92D /* BackgroundTaskManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49514E7A2FF83F2E0004C92D /* BackgroundTaskManager.swift */; };
 		496A44432FCD4F75005AF12F /* QRInputToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44422FCD4F75005AF12F /* QRInputToolbar.swift */; };
 		496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */; };
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
@@ -137,6 +138,7 @@
 		445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveView.swift; sourceTree = "<group>"; };
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
+		49514E7A2FF83F2E0004C92D /* BackgroundTaskManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskManager.swift; sourceTree = "<group>"; };
 		496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractor.swift; sourceTree = "<group>"; };
 		496A44422FCD4F75005AF12F /* QRInputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRInputToolbar.swift; sourceTree = "<group>"; };
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
@@ -277,6 +279,7 @@
 			isa = PBXGroup;
 			children = (
 				FFC40949E35E9317ACA30E35 /* AppState.swift */,
+				49514E7A2FF83F2E0004C92D /* BackgroundTaskManager.swift */,
 				D62A82EA774DC10F10A6574A /* ContentView.swift */,
 				623F41D841B312F0C9AE01E6 /* MainTabView.swift */,
 				B785A33E02FD999CB62019AD /* StableChannelsApp.swift */,
@@ -609,6 +612,7 @@
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
 				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
+				49514E7B2FF83F2E0004C92D /* BackgroundTaskManager.swift in Sources */,
 				49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */,
 				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */,

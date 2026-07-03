@@ -1323,13 +1323,13 @@
         }
       }
     },
-    "hint_create_account" : {
+    "hint_create_wallet" : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Receive over Lightning to create your Stable Account"
+            "value" : "Receive over Lightning to create your Stable Wallet"
           }
         }
       }
