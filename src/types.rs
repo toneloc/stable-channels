@@ -214,7 +214,7 @@ mod tests {
     // Bitcoin conversion tests
     #[test]
     fn test_bitcoin_from_sats() {
-        let btc = Bitcoin::from_sats(100_000_000);
+        let btc = Bitcoin::from_sats(Self::SATS_IN_BTC);
         assert_eq!(btc.to_btc(), 1.0);
     }
 

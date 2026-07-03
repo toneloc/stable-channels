@@ -668,10 +668,10 @@ pub async fn get_channels() -> Json<Vec<ChannelInfo>> {
                 capacity_sats: c.channel_value_sats,
 
                 local_balance_sats: local_sat,
-                local_balance_usd: local_sat as f64 / 100_000_000.0 * price,
+                local_balance_usd: local_sat as f64 / SATS_IN_BTC as f64 * price,
 
                 remote_balance_sats: remote_sat,
-                remote_balance_usd: remote_sat as f64 / 100_000_000.0 * price,
+                remote_balance_usd: remote_sat as f64 / SATS_IN_BTC as f64 * price,
 
                 expected_usd, // Some(x) or None
                 status: if c.is_channel_ready {
@@ -832,14 +832,14 @@ async fn get_stability_status() -> Json<Vec<ChannelStabilityStatus>> {
             let capacity_sats = ldk_chan.map(|c| c.channel_value_sats).unwrap_or(0);
 
             // Current USD = user's actual sats at current price
-            let current_usd = user_sats as f64 / 100_000_000.0 * price;
+            let current_usd = user_sats as f64 / SATS_IN_BTC as f64 * price;
 
             // Derive backing_sats from balance using native_sats invariant
             let derived_backing = user_sats.saturating_sub(sc.native_sats);
             let native_sats = user_sats.saturating_sub(derived_backing);
 
             // Use derived backing for USD calculation
-            let stable_usd = (derived_backing as f64 / 100_000_000.0) * price;
+            let stable_usd = (derived_backing as f64 / SATS_IN_BTC as f64) * price;
             let dollars_from_par = stable_usd - expected;
             let percent_from_par = if expected > 0.0 {
                 ((stable_usd - expected) / expected) * 100.0
@@ -1152,7 +1152,7 @@ fn get_output_sats(txid: &str, vout: u32) -> Option<u64> {
     let vouts = json["result"]["vout"].as_array()?;
     let output = vouts.get(vout as usize)?;
     let value_btc = output["value"].as_f64()?;
-    let value_sats = (value_btc * 100_000_000.0).round() as u64;
+    let value_sats = (value_btc * SATS_IN_BTC as f64).round() as u64;
 
     Some(value_sats)
 }
@@ -1312,8 +1312,8 @@ impl ServerApp {
         }
 
         let balances = self.node.list_balances();
-        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / SATS_IN_BTC as f64;
+        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / SATS_IN_BTC as f64;
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
         self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
@@ -1361,7 +1361,7 @@ impl ServerApp {
 
             // Quick drift check — does this channel need a stability payment?
             let stable_usd_value = if derived_backing > 0 {
-                (derived_backing as f64 / 100_000_000.0) * current_price
+                (derived_backing as f64 / SATS_IN_BTC as f64) * current_price
             } else {
                 sc.stable_receiver_usd.0
             };
@@ -2594,7 +2594,7 @@ impl ServerApp {
                 // Calculate backing_sats: BTC amount backing the stable portion
                 let backing_sats = if self.btc_price > 0.0 {
                     let btc_amount = amount / self.btc_price;
-                    (btc_amount * 100_000_000.0) as u64
+                    (btc_amount * SATS_IN_BTC as f64) as u64
                 } else {
                     0
                 };
