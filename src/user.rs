@@ -2517,8 +2517,20 @@ impl UserApp {
                         let verb = if trade.action == "buy" { "Buy" } else { "Sell" };
                         self.show_toast(&format!("{} confirmed", verb), "OK");
                     } else {
-                        // Normal (non-trade) outgoing payment
+                        // Non-trade outgoing payment: normal lightning/bolt12 send
+                        // OR a stability keysend. They need different accounting.
                         let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
+
+                        // Identify stability payments by their recorded payment_type.
+                        // Stability sends originate on the background thread too, so a
+                        // DB lookup (shared) is the reliable signal — pending_payments
+                        // only holds foreground lightning/bolt12 sends.
+                        let pid_str = payment_id.map(|p| format!("{p}"));
+                        let is_stability = pid_str
+                            .as_deref()
+                            .and_then(|p| self.db.get_payment_type(p).ok().flatten())
+                            .as_deref()
+                            == Some("stability");
 
                         // Refresh channel balances from LDK
                         {
@@ -2536,60 +2548,98 @@ impl UserApp {
                             json!({
                                 "payment_hash": payment_hash_str,
                                 "fee_paid_msat": fee_paid_msat,
+                                "is_stability": is_stability,
                             }),
                         );
 
-                        // Reconcile stable balance
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            let old_expected = sc.expected_usd.0;
-                            if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
-                                audit_event(
-                                    "OUTGOING_STABLE_DEDUCTED",
-                                    json!({
-                                        "payment_hash": payment_hash_str,
-                                        "usd_deducted": usd_deducted,
-                                        "old_expected_usd": old_expected,
-                                        "new_expected_usd": sc.expected_usd.0,
-                                        "btc_price": price,
-                                    }),
-                                );
-                            }
-                        }
-
-                        if let Some(p) = pending {
-                            // Update existing pending record to completed + fee
-                            let _ = self.db.update_payment_status(
-                                p.payment_db_id,
-                                "completed",
-                                fee_paid_msat,
+                        if is_stability {
+                            // Settlement rebase (moved here from check_stability
+                            // initiation): rebase backing to par exactly once, now
+                            // that the HTLC has actually settled. Do NOT call
+                            // reconcile_outgoing — that would double-count the
+                            // stability payment against expected_usd.
+                            let (old_backing, new_backing) = {
+                                let mut sc = self.stable_channel.lock().unwrap();
+                                let old_backing = sc.backing_sats;
+                                if price > 0.0 {
+                                    sc.backing_sats =
+                                        (sc.expected_usd.0 / price * 100_000_000.0) as u64;
+                                }
+                                (old_backing, sc.backing_sats)
+                                // guard dropped here before save_channel_settings
+                            };
+                            audit_event(
+                                "STABILITY_PAYMENT_SETTLED",
+                                json!({
+                                    "payment_hash": payment_hash_str,
+                                    "old_backing_sats": old_backing,
+                                    "new_backing_sats": new_backing,
+                                    "btc_price": price,
+                                    "fee_paid_msat": fee_paid_msat,
+                                }),
                             );
-                        } else {
-                            // Try to confirm a pending stability payment by payment_hash
-                            let updated = self
-                                .db
-                                .update_payment_status_by_pid(
-                                    &payment_hash_str,
+                            if let Some(ref pid) = pid_str {
+                                let _ = self.db.update_payment_status_by_pid(
+                                    pid,
                                     "completed",
                                     fee_paid_msat,
-                                )
-                                .unwrap_or(0);
-                            if updated == 0
-                                && !self.db.payment_exists(&payment_hash_str).unwrap_or(false)
-                            {
-                                // Completely unknown payment — record as completed
-                                let _ = self.db.record_payment(
-                                    Some(&payment_hash_str),
-                                    "lightning",
-                                    "sent",
-                                    0,
-                                    None,
-                                    if price > 0.0 { Some(price) } else { None },
-                                    None,
-                                    "completed",
-                                    None,
-                                    None,
                                 );
+                            }
+                        } else {
+                            // Reconcile stable balance for normal outgoing payments
+                            {
+                                let mut sc = self.stable_channel.lock().unwrap();
+                                let old_expected = sc.expected_usd.0;
+                                if let Some(usd_deducted) =
+                                    stable::reconcile_outgoing(&mut sc, price)
+                                {
+                                    audit_event(
+                                        "OUTGOING_STABLE_DEDUCTED",
+                                        json!({
+                                            "payment_hash": payment_hash_str,
+                                            "usd_deducted": usd_deducted,
+                                            "old_expected_usd": old_expected,
+                                            "new_expected_usd": sc.expected_usd.0,
+                                            "btc_price": price,
+                                        }),
+                                    );
+                                }
+                            }
+
+                            if let Some(p) = pending {
+                                // Update existing pending record to completed + fee
+                                let _ = self.db.update_payment_status(
+                                    p.payment_db_id,
+                                    "completed",
+                                    fee_paid_msat,
+                                );
+                            } else {
+                                // Try to confirm a pending payment by payment_hash
+                                let updated = self
+                                    .db
+                                    .update_payment_status_by_pid(
+                                        &payment_hash_str,
+                                        "completed",
+                                        fee_paid_msat,
+                                    )
+                                    .unwrap_or(0);
+                                if updated == 0
+                                    && !self.db.payment_exists(&payment_hash_str).unwrap_or(false)
+                                {
+                                    // Completely unknown payment — record as completed
+                                    let _ = self.db.record_payment(
+                                        Some(&payment_hash_str),
+                                        "lightning",
+                                        "sent",
+                                        0,
+                                        None,
+                                        if price > 0.0 { Some(price) } else { None },
+                                        None,
+                                        "completed",
+                                        None,
+                                        None,
+                                    );
+                                }
                             }
                         }
 

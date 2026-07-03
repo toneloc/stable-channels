@@ -881,35 +881,13 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
 
-            try {
-                val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
-                    paymentId = paymentIdString,
-                    paymentType = "stability",
-                    direction = "sent",
-                    amountMsat = amountMsat,
-                    amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-                    btcPrice = price,
-                    counterparty = sc.counterparty,
-                    userChannelId = sc.userChannelId,
-                    backingDeltaSats = -(amountMsat / 1000)
-                ) ?: throw IllegalStateException("DB service unavailable")
-                val backing = persistence.backingSats
-                    ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
-                val updated = sc.copy(lastStabilityPayment = now, backingSats = backing)
-                _stableChannel.value = updated
-                saveChannelToDB(preserveBacking = true)
-                databaseService?.clearPendingSend()
-                AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
-            } catch (e: Exception) {
-                // The send already succeeded. Keep the durable marker and block all later sends
-                // until the payment row and backing delta can be committed together.
-                _stableChannel.value = sc.copy(lastStabilityPayment = now)
-                FCMService.flagPendingPayment(context)
-                AuditService.log(
-                    "STABILITY_PAYMENT_PERSISTENCE_FAILED",
-                    mapOf("error" to (e.message ?: ""))
-                )
-            }
+            // Strategy A: debit backingSats only on settlement, never at send. A failed HTLC
+            // must not leave the position silently short. The pending_stability_send marker
+            // stays in place as the in-flight double-send guard and carries amount_msat + price,
+            // so settlement (handlePaymentSuccessful → reconcilePendingOutgoingStabilityPayment,
+            // or a launch-time reconcile) applies the debit exactly once, deduped by payment_id.
+            _stableChannel.value = sc.copy(lastStabilityPayment = now)
+            AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
         }
     }
 
@@ -967,6 +945,46 @@ class AppState(private val context: Context) : ViewModel() {
                     return true
                 }
                 else -> return false  // young marker — another process may be mid-send
+            }
+        } else {
+            // Real payment id present. Under debit-on-settlement the marker persists
+            // from send until the payment resolves, so verify the actual LDK outcome
+            // before debiting — an unconditional debit here would charge a still-in-flight
+            // or already-failed payment (silent loss, the bug this whole change fixes).
+            val node = nodeService.node ?: run {
+                FCMService.flagPendingPayment(context)
+                return false
+            }
+            val payment = try {
+                node.listPayments().firstOrNull { it.id == pendingPaymentId }
+            } catch (e: Exception) {
+                Log.w("AppState", "listPayments failed during reconcile: ${e.message}")
+                return false
+            }
+            val now = System.currentTimeMillis() / 1000
+            when (payment?.status) {
+                PaymentStatus.SUCCEEDED -> { /* settled — fall through to debit exactly once */ }
+                PaymentStatus.PENDING -> return false  // in flight — wait
+                PaymentStatus.FAILED -> {
+                    db.clearPendingSend()
+                    AuditService.log("STABILITY_PAYMENT_RECONCILE_CLEARED", mapOf(
+                        "reason" to "send_failed",
+                        "payment_id" to pendingPaymentId
+                    ))
+                    return true
+                }
+                else -> {
+                    // Not found in the payment store. Abandon only after the grace window.
+                    if (now - pending.createdAt > 120) {
+                        db.clearPendingSend()
+                        AuditService.log("STABILITY_PAYMENT_RECONCILE_CLEARED", mapOf(
+                            "reason" to "payment_not_found",
+                            "payment_id" to pendingPaymentId
+                        ))
+                        return true
+                    }
+                    return false
+                }
             }
         }
 

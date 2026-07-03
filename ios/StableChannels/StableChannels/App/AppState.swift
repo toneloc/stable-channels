@@ -1674,43 +1674,23 @@ class AppState {
             return
         }
 
-        do {
-            let persistence = try databaseService.recordPaymentAndMaybeUpdateBacking(
-                paymentId: paymentIdString,
-                paymentType: "stability",
-                direction: "sent",
-                amountMsat: amountMsat,
-                amountUSD: abs(result.dollarsFromPar),
-                btcPrice: price,
-                status: "pending",
-                userChannelId: stableChannel.userChannelId,
-                backingDeltaSats: -Int64(amountMsat / 1000)
-            )
-            guard let backing = persistence.backingSats else {
-                throw DatabaseError.executeFailed("DB did not return backing after outgoing stability payment")
-            }
-            stableChannel.lastStabilityPayment = now
-            stableChannel.paymentMade = true
-            stableChannel.backingSats = backing
-            saveChannelToDB(preserveBacking: true)
-            databaseService.clearPendingSend()
+        // Settle-on-success: the keysend has been initiated and the marker now holds the
+        // real payment id as the in-flight double-send guard. Do NOT debit backing or
+        // clear the marker here — debiting at send would silently lose backing if the HTLC
+        // later fails (the position would read at-par and never retry). The debit is
+        // applied exactly once at settlement, by handleStabilityPaymentSuccessful /
+        // reconcilePendingOutgoingStabilityPayment (deduped by payment_id), which also
+        // clears the marker once the payment has actually succeeded.
+        stableChannel.lastStabilityPayment = now
+        stableChannel.paymentMade = true
+        saveChannelToDB(preserveBacking: true)
 
-            AuditService.log("STABILITY_PAYMENT_SENT", data: [
-                "amount_msat": "\(amountMsat)",
-                "dollars_from_par": "\(result.dollarsFromPar)",
-                "percent_from_par": "\(result.percentFromPar)",
-                "btc_price": "\(price)"
-            ])
-        } catch {
-            // The send already succeeded. Keep the durable marker and block all later sends
-            // until the payment row and backing delta can be committed together.
-            stableChannel.lastStabilityPayment = now
-            stableChannel.paymentMade = true
-            shared?.set(true, forKey: "pending_push_payment")
-            AuditService.log("STABILITY_PAYMENT_PERSISTENCE_FAILED", data: [
-                "error": error.localizedDescription
-            ])
-        }
+        AuditService.log("STABILITY_PAYMENT_SENT", data: [
+            "amount_msat": "\(amountMsat)",
+            "dollars_from_par": "\(result.dollarsFromPar)",
+            "percent_from_par": "\(result.percentFromPar)",
+            "btc_price": "\(price)"
+        ])
     }
 
     private func reconcilePendingOutgoingStabilityPayment(status: String = "pending") -> Bool {
@@ -1771,6 +1751,37 @@ class AppState {
                 return true
             } else {
                 // Too young to declare dead — the payment store may not have caught up.
+                return false
+            }
+        } else {
+            // The marker already carries the real payment id. Under settle-on-success the
+            // marker is held from send until the HTLC reaches a terminal state, so verify
+            // the outcome against LDK before touching backing: debit only once it has
+            // actually succeeded, clear with no debit if it failed, and keep waiting while
+            // it is still in flight. This is what guarantees a failed/abandoned send
+            // debits zero and never prematurely debits an in-flight payment.
+            guard let node = nodeService.node else {
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(true, forKey: "pending_push_payment")
+                AuditService.log("STABILITY_PAYMENT_RECONCILE_BLOCKED", data: [
+                    "error": "node_unavailable"
+                ])
+                return false
+            }
+            let match = node.listPayments().first { "\($0.id)" == pending.paymentId }
+            switch match?.status {
+            case .some(.succeeded):
+                break  // settled — fall through to record the debit exactly once
+            case .some(.failed):
+                databaseService.clearPendingSend()
+                AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
+                    "payment_id": pending.paymentId,
+                    "reason": "payment_failed"
+                ])
+                return true
+            default:
+                // .pending, or not yet visible in the payment store — keep the marker as
+                // the in-flight guard and resolve on a later tick / the success event.
                 return false
             }
         }

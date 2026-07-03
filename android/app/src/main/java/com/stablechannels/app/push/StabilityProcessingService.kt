@@ -477,19 +477,13 @@ class StabilityProcessingService : Service() {
         val sentAt = System.currentTimeMillis() / 1000
         FCMService.getPrefs(this).edit().putLong("bg_last_stability_sent", sentAt).commit()
 
-        val amountSats = amountMsat / 1000
-        val result = recordPaymentAtomicInDB(
-            dbPath, paymentIdString, "stability", "sent",
-            amountMsat, price, -amountSats,
-            userChannelId = channelState.userChannelId
-        )
-        if (result == InsertResult.FAILED || result == InsertResult.MISSING_CHANNEL) {
-            throw BackingUpdateFailed(
-                "Payment was sent but DB persistence failed; durable marker will drive reconciliation"
-            )
-        }
-        clearPendingSendInDB(dbPath)
-        Log.d(TAG, "Recorded outgoing payment and updated backingSats -= $amountSats atomically")
+        // Strategy A: debit backingSats only on settlement, never at send. This service runs in
+        // the background and may be killed before the payment settles, so debiting here would
+        // risk a silent loss on a later HTLC failure. Leave the pending_stability_send marker in
+        // place as the in-flight double-send guard; reconcilePendingOutgoingPayment (this service
+        // on its next wake, or the foreground app) looks the payment up in LDK and applies the
+        // debit exactly once on success, deduped by payment_id.
+        Log.d(TAG, "Stability keysend in flight ($amountMsat msat); debit deferred to settlement/reconcile")
     }
 
     /** Resolve any leftover pending-send marker. Returns true when no unresolved marker
@@ -534,6 +528,35 @@ class StabilityProcessingService : Service() {
                     return true
                 }
                 else -> return false  // young marker — another process may be mid-send
+            }
+        } else {
+            // Real payment id present. Under debit-on-settlement the marker persists from
+            // send until the payment resolves, so verify the actual LDK outcome before
+            // debiting — an unconditional debit here would charge a still-in-flight or
+            // already-failed payment (silent loss).
+            val now = System.currentTimeMillis() / 1000
+            val payment = try {
+                node.listPayments().firstOrNull { it.id == pendingPaymentId }
+            } catch (e: Exception) {
+                Log.w(TAG, "listPayments failed during reconcile: ${e.message}")
+                return false
+            }
+            when (payment?.status) {
+                PaymentStatus.SUCCEEDED -> { /* settled — fall through to debit exactly once */ }
+                PaymentStatus.PENDING -> return false  // in flight — wait
+                PaymentStatus.FAILED -> {
+                    clearPendingSendInDB(dbPath)
+                    Log.w(TAG, "Reconcile: keysend $pendingPaymentId failed — cleared marker, no debit")
+                    return true
+                }
+                else -> {
+                    if (now - pending.createdAt > 120) {
+                        clearPendingSendInDB(dbPath)
+                        Log.w(TAG, "Reconcile: keysend $pendingPaymentId not found after ${now - pending.createdAt}s — cleared marker")
+                        return true
+                    }
+                    return false
+                }
             }
         }
 

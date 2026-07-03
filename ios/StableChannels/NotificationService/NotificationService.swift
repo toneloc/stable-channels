@@ -579,28 +579,17 @@ class NotificationService: UNNotificationServiceExtension {
                 return
             }
 
-            let persistence = recordPaymentAndMaybeUpdateBackingInDB(
-                dbPath: dbPath,
-                paymentId: paymentIdString,
-                paymentType: "stability",
-                direction: "sent",
-                amountMsat: amountMsat,
-                btcPrice: price,
-                backingDeltaSats: -Int64(amountSats),
-                userChannelId: channelState.userChannelId
-            )
-            switch persistence {
-            case .inserted, .duplicate:
-                clearPendingSend(dbPath: dbPath)
-                content.title = "Stability Payment Sent"
-                content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
-                UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
-            case .failed, .missingChannelRow:
-                nseLog("Payment sent but DB persistence failed — durable guard will block resends")
-                content.title = "Payment Sent"
-                content.body = "Open app to finish syncing the stability payment"
-                UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
-            }
+            // Settle-on-success: do NOT debit backing here. The NSE can be suspended
+            // before the HTLC settles, so debiting at send would silently lose backing if
+            // the payment later fails. The marker (with the real payment id) stays as the
+            // in-flight guard; the authoritative debit is applied exactly once — deduped
+            // by payment_id — by whichever process next reconciles the marker against LDK
+            // and observes a succeeded payment (foreground reconcile / success handler, or
+            // a later NSE run). Leave pending_push_payment set so the app finalizes it.
+            nseLog("Keysend initiated; leaving marker for reconcile to finalize on success")
+            content.title = "Stability Payment Sent"
+            content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
+            UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
         } catch {
             clearPendingSend(dbPath: dbPath)
             nseLog("Keysend failed: \(error)")
@@ -768,6 +757,28 @@ class NotificationService: UNNotificationServiceExtension {
                 nseLog("Unresolved send marker too young to resolve — waiting")
                 return false
             }
+        } else {
+            // The marker already carries the real payment id. Under settle-on-success the
+            // marker is held from send until the HTLC settles, so verify the outcome
+            // against LDK before debiting: only a succeeded payment debits backing, a
+            // failed one clears with no debit, and an in-flight one keeps waiting. This
+            // prevents prematurely debiting (and never reverting) an in-flight send.
+            guard let node else {
+                nseLog("Outgoing send marker unresolved (no node) — refusing to send again")
+                return false
+            }
+            let match = node.listPayments().first { "\($0.id)" == pending.paymentId }
+            switch match?.status {
+            case .some(.succeeded):
+                break  // settled — fall through to record the debit exactly once
+            case .some(.failed):
+                clearPendingSend(dbPath: dbPath)
+                nseLog("Outgoing send marker \(pending.paymentId) failed — clearing (no debit)")
+                return true
+            default:
+                nseLog("Outgoing send marker \(pending.paymentId) still in flight — waiting")
+                return false
+            }
         }
 
         let result = recordPaymentAndMaybeUpdateBackingInDB(
@@ -835,7 +846,9 @@ class NotificationService: UNNotificationServiceExtension {
 
         let amountUSD = btcPrice > 0 ? (Double(amountMsat) / 1000.0 / Self.satsInBTC) * btcPrice : 0.0
         var stmt: OpaquePointer?
-        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')"
+        // Insert as 'pending' so the foreground app's pending-filtered status updates and
+        // reconcile can act on the row; the settlement path flips it to completed/failed.
+        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')"
         guard sqlite3_prepare_v2(db, insertSql, -1, &stmt, nil) == SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return .failed

@@ -726,6 +726,18 @@ impl Database {
     // Payment Operations
     // =========================================================================
 
+    /// Look up the payment_type ("stability", "lightning", ...) for a payment
+    /// by its payment_id string. Returns None if no such payment is recorded.
+    pub fn get_payment_type(&self, payment_id: &str) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT payment_type FROM payments WHERE payment_id = ?1 LIMIT 1",
+            params![payment_id],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
     /// Check if a payment with the given payment_id already exists
     pub fn payment_exists(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();

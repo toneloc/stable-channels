@@ -478,13 +478,12 @@ pub fn check_stability(
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // Reset backing_sats to equilibrium at current price.
-            // This accounts the payment against the stable pool, not native BTC.
-            // Don't recompute native_sats here — receiver balance hasn't updated yet
-            // (HTLC still in flight). Native will be recomputed on next balance refresh.
-            let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
-            sc.backing_sats = new_backing;
-
+            // NOTE: backing_sats is deliberately NOT rebased here.
+            // Rebasing to equilibrium happens only on settlement
+            // (Event::PaymentSuccessful → stability branch). If the HTLC
+            // fails, the position stays off-par so the next check_stability
+            // tick retries automatically. The last_stability_payment cooldown
+            // guards against a double-send during the in-flight window.
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
             audit_event(
@@ -494,7 +493,6 @@ pub fn check_stability(
                     "payment_id": payment_id_str,
                     "counterparty": counterparty_str,
                     "expected_usd": target_usd,
-                    "new_backing_sats": new_backing
                 }),
             );
             Some(StabilityPaymentInfo {
