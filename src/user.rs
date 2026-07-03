@@ -2183,13 +2183,22 @@ impl UserApp {
                         .map(|outpoint| outpoint.txid.to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    let mut completed_splice = false;
+                    // Splices keep the channel_id stable in current LDK, so a changed
+                    // channel_id can't be the splice signal. Match the channel's actual
+                    // funding txid against a recorded splice row instead; the update is
+                    // exact-match and idempotent, so replayed events are no-ops.
+                    let mut completed_splice = txid_str != "unknown"
+                        && self
+                            .db
+                            .complete_latest_splice(Some(txid_str.as_str()))
+                            .map(|rows| rows > 0)
+                            .unwrap_or(false);
+                    let is_splice;
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
-                        let is_splice =
-                            sc.user_channel_id == user_channel_id.0 && sc.channel_id != channel_id;
-                        // Update channel_id in case this is a splice (channel_id changes, user_channel_id doesn't)
-                        if is_splice {
+                        let ours = sc.user_channel_id == user_channel_id.0;
+                        let channel_id_changed = ours && sc.channel_id != channel_id;
+                        if channel_id_changed {
                             audit_event(
                                 "CHANNEL_ID_UPDATED_SPLICE",
                                 json!({
@@ -2199,13 +2208,21 @@ impl UserApp {
                                 }),
                             );
                             sc.channel_id = channel_id;
+                            if !completed_splice {
+                                // Legacy fallback (no txid matched a splice row).
+                                completed_splice = self
+                                    .db
+                                    .complete_latest_splice(None)
+                                    .map(|rows| rows > 0)
+                                    .unwrap_or(false);
+                            }
                         }
+                        is_splice = ours && (completed_splice || channel_id_changed);
                         update_balances(&self.node, &mut sc);
 
                         // After splice confirms, reconcile: if splice-out exceeded
                         // native BTC, the overflow eats into the stable position.
                         if is_splice {
-                            completed_splice = true;
                             let price = sc.latest_price;
                             if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
                                 audit_event(
@@ -2229,14 +2246,10 @@ impl UserApp {
                     self.save_channel_settings();
                     self.update_balances(); // Update UI immediately
 
-                    // Mark any pending splice payment with this txid as confirmed
-                    if completed_splice {
-                        let _ = self.db.complete_latest_splice(if txid_str != "unknown" {
-                            Some(txid_str.as_str())
-                        } else {
-                            None
-                        });
-                    } else if txid_str != "unknown" {
+                    // Splice rows were already completed above (exact txid match,
+                    // or the legacy latest-row fallback). Everything else with a
+                    // known funding txid is a regular channel open.
+                    if !completed_splice && txid_str != "unknown" {
                         let _ = self
                             .db
                             .update_payment_confirmations(&txid_str, 1, "completed");
@@ -2780,6 +2793,20 @@ impl UserApp {
                         } else {
                             // Splice-out was recorded when initiated; attach the txid
                             // instead of inserting a second history row.
+                            let _ = self.db.set_pending_splice_out_txid(&txid_str);
+                        }
+                    } else {
+                        // pending_splice is in-memory and lost across restart. If this
+                        // event is a restart replay, the latest NULL-txid splice row is
+                        // this splice's initiation row — stamp it so ChannelReady can
+                        // complete it and the no-txid expiry can't mark it failed.
+                        // Direction is unknown here; splice_in is the dominant flow.
+                        let stamped_in = self
+                            .db
+                            .set_pending_splice_txid(&txid_str)
+                            .map(|rows| rows > 0)
+                            .unwrap_or(false);
+                        if !stamped_in {
                             let _ = self.db.set_pending_splice_out_txid(&txid_str);
                         }
                     }

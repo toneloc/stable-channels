@@ -381,12 +381,30 @@ class AppState(private val context: Context) : ViewModel() {
             }
             is Event.ChannelReady -> {
                 val sc = _stableChannel.value.copy()
-                val isSplice = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
+                // Splices keep the channel_id stable in current LDK, so a changed
+                // channel_id can't be the splice signal. Match the channel's actual
+                // funding txid against a recorded splice row instead; completeSplice
+                // is exact-match and idempotent, so replayed events are no-ops.
+                val channelIdChanged = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
                 sc.channelId = event.channelId
+                var completedSplice = false
+                if (sc.userChannelId == event.userChannelId) {
+                    nodeService.refreshChannels()
+                    val channelFundingTxid = nodeService.channels
+                        .firstOrNull { it.userChannelId == event.userChannelId }
+                        ?.fundingTxo?.txid
+                    for (candidate in listOfNotNull(channelFundingTxid, spliceTxid)) {
+                        if (candidate.isNotEmpty() && databaseService?.completeSplice(candidate) == true) {
+                            completedSplice = true
+                            break
+                        }
+                    }
+                }
+                val isSplice = completedSplice || channelIdChanged
                 if (isSplice) {
                     isSweeping = false
                     spliceTxid = null
-                    databaseService?.completeLatestSplice(fundingTxid)
+                    if (!completedSplice) databaseService?.completeLatestSplice(fundingTxid)
                     val price = priceService.currentPrice.value
                     val result = StabilityService.reconcileOutgoing(sc, price)
                     val reconciled = result.first
@@ -735,10 +753,18 @@ class AppState(private val context: Context) : ViewModel() {
                         paymentId = null, paymentType = "splice_out", direction = "sent",
                         amountMsat = splice.amountSats * 1000,
                         amountUSD = (splice.amountSats.toDouble() / Constants.SATS_IN_BTC) * price,
-                        btcPrice = price, txid = newFundingTxo, address = splice.address
+                        // bare txid (not the "txid:vout" outpoint) so completeSplice
+                        // txid lookups match this row
+                        btcPrice = price, txid = txid, address = splice.address
                     )
                 }
             }
+        } else {
+            // pendingSplice is in-memory and lost across relaunch. If this event
+            // is a restart replay, the latest NULL-txid splice row is this
+            // splice's initiation row — stamp it so ChannelReady can complete it
+            // and the no-txid expiry can't mark it failed.
+            databaseService?.setPendingSpliceTxid(txid)
         }
         refreshBalances()
         updateStableBalances()

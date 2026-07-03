@@ -959,17 +959,38 @@ class AppState {
             ])
 
         case .channelReady(let channelId, let userChannelId, _, _):
-            let isSplice = stableChannel.userChannelId == userChannelId
+            // Splices keep the channel_id stable in current LDK, so a changed
+            // channel_id can't be the splice signal. Instead, match the channel's
+            // actual funding txid against a recorded splice row; completeSplice is
+            // exact-match and idempotent, so replayed events are no-ops.
+            let channelIdChanged = stableChannel.userChannelId == userChannelId
                 && stableChannel.channelId != channelId
 
             stableChannel.channelId = channelId
             refreshBalances()
             updateStableBalances()
 
+            var completedSplice = false
+            if stableChannel.userChannelId == userChannelId {
+                nodeService.refreshChannels()
+                let fundingTxid: String? = nodeService.channels
+                    .first(where: { "\($0.userChannelId)" == "\(userChannelId)" })
+                    .flatMap { $0.fundingTxo.map { "\($0.txid)" } }
+                for candidate in [fundingTxid, spliceTxid].compactMap({ $0 }) where !candidate.isEmpty {
+                    if databaseService?.completeSplice(txid: candidate) == true {
+                        completedSplice = true
+                        break
+                    }
+                }
+            }
+            let isSplice = completedSplice || channelIdChanged
+
             // After splice confirms, reconcile outgoing and clear sweep state
             if isSplice {
                 isSweeping = false
-                databaseService?.completeLatestSplice(txid: spliceTxid)
+                if !completedSplice {
+                    databaseService?.completeLatestSplice(txid: spliceTxid)
+                }
                 spliceTxid = nil
                 sweepOnchainStart = 0
                 let price = stableChannel.latestPrice
@@ -1603,6 +1624,12 @@ class AppState {
                     address: splice.address
                 )
             }
+        } else {
+            // pendingSplice is in-memory and lost across relaunch. If this event
+            // is a restart replay, the latest NULL-txid splice row is this
+            // splice's initiation row — stamp it so ChannelReady can complete it
+            // and the no-txid expiry can't mark it failed.
+            try? databaseService?.setPendingSpliceTxid(txidStr)
         }
 
         refreshBalances()

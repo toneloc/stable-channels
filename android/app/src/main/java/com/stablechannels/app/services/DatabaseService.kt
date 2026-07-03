@@ -528,11 +528,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    fun completeSplice(txid: String) {
-        writableDatabase.execSQL(
-            "UPDATE payments SET status = 'completed' WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')",
-            arrayOf(txid)
+    /** Returns true only if a splice row was actually flipped to completed,
+     *  so callers can use the result as the "this ChannelReady was a splice" signal. */
+    fun completeSplice(txid: String): Boolean {
+        val stmt = writableDatabase.compileStatement(
+            "UPDATE payments SET status = 'completed' WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')"
         )
+        stmt.bindString(1, txid)
+        return stmt.executeUpdateDelete() > 0
     }
 
     fun failLatestPendingSplice() {

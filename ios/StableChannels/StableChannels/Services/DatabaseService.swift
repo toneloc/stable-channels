@@ -668,6 +668,8 @@ class DatabaseService {
         }
     }
 
+    /// Returns true only if a splice row was actually flipped to completed,
+    /// so callers can use the result as the "this ChannelReady was a splice" signal.
     @discardableResult
     func completeSplice(txid: String) -> Bool {
         do {
@@ -681,7 +683,7 @@ class DatabaseService {
                 """,
                 params: [.text(txid)]
             )
-            return true
+            return sqlite3_changes(db) > 0
         } catch {
             return false
         }
