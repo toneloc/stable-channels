@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
+import com.stablechannels.app.services.TradeService
 import com.stablechannels.app.util.Constants
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -41,6 +42,69 @@ class StabilityProcessingService : Service() {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
+
+    private fun isStabilityMarker(records: List<CustomTlvRecord>): Boolean =
+        records.any {
+            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
+                it.value.contentEquals(byteArrayOf(1))
+        }
+
+    private fun hasStableControlMessage(records: List<CustomTlvRecord>): Boolean =
+        records.any {
+            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
+                !it.value.contentEquals(byteArrayOf(1))
+        }
+
+    private fun handleStableControlMessage(node: Node, dbPath: String, records: List<CustomTlvRecord>): Boolean {
+        val tlv = records.firstOrNull {
+            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
+                !it.value.contentEquals(byteArrayOf(1))
+        } ?: return false
+
+        val parsed = TradeService.parseIncomingTLV(tlv.value, Constants.DEFAULT_LSP_PUBKEY) { msg, sig, pk ->
+            node.verifySignature(msg.map { it.toUByte() }, sig, pk)
+        } ?: return false
+
+        val (type, expectedUsd, parsedUserChannelId) = parsed
+        if (type != Constants.SYNC_MESSAGE_TYPE) return false
+
+        var price = fetchMedianPrice()
+        if (price <= 0.0) price = loadChannelStateFromDB()?.latestPrice ?: 0.0
+        if (price <= 0.0) throw BackingUpdateFailed("Cannot apply SYNC_V1 without a BTC price")
+
+        val userChannelId = parsedUserChannelId.takeIf { it.isNotEmpty() }
+            ?: activeUserChannelId()
+            ?: throw BackingUpdateFailed("Cannot apply SYNC_V1 without a channel row")
+
+        applySyncMessageInDB(dbPath, userChannelId, expectedUsd, price)
+        Log.d(TAG, "Applied background SYNC_V1 expected_usd=$expectedUsd")
+        return true
+    }
+
+    private fun applySyncMessageInDB(dbPath: String, userChannelId: String, expectedUsd: Double, price: Double) {
+        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val backingSats = ((expectedUsd / price) * Constants.SATS_IN_BTC).roundToLong().coerceAtLeast(0L)
+            val stmt = db.compileStatement(
+                "UPDATE channels SET expected_usd = ?, stable_sats = ?, latest_price = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+            )
+            stmt.bindDouble(1, expectedUsd)
+            stmt.bindLong(2, backingSats)
+            stmt.bindDouble(3, price)
+            stmt.bindString(4, userChannelId)
+            val rowsAffected = stmt.executeUpdateDelete()
+            if (rowsAffected != 1) {
+                throw BackingUpdateFailed("SYNC_V1 UPDATE affected $rowsAffected rows, expected 1")
+            }
+            db.execSQL("COMMIT")
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
+        } finally {
+            db.close()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -166,9 +230,20 @@ class StabilityProcessingService : Service() {
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
-                        val isStabilityPayment = event.customRecords.any {
-                            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1))
+                        if (hasStableControlMessage(event.customRecords)) {
+                            if (handleStableControlMessage(node, dbPath, event.customRecords)) {
+                                node.eventHandled()
+                                hasUnpersistedEvent = false
+                                continue
+                            }
+                            throw BackingUpdateFailed("Unrecognized stable-control message — leaving for foreground")
                         }
+                        if (event.amountMsat.toLong() < 1000L) {
+                            node.eventHandled()
+                            Log.d(TAG, "Ignored sub-sat incoming event")
+                            continue
+                        }
+                        val isStabilityPayment = isStabilityMarker(event.customRecords)
                         val paymentId = event.paymentId ?: event.paymentHash
                         if (price <= 0) price = fetchMedianPrice()
                         if (isStabilityPayment) {
@@ -320,13 +395,25 @@ class StabilityProcessingService : Service() {
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
+                        if (hasStableControlMessage(event.customRecords)) {
+                            if (handleStableControlMessage(node, dbPath, event.customRecords)) {
+                                node.eventHandled()
+                                received = true
+                                hasUnpersistedEvent = false
+                                continue
+                            }
+                            throw BackingUpdateFailed("Unrecognized stable-control message — leaving for foreground")
+                        }
+                        if (event.amountMsat.toLong() < 1000L) {
+                            node.eventHandled()
+                            Log.d(TAG, "Ignored sub-sat incoming event")
+                            continue
+                        }
                         if (price <= 0) price = fetchMedianPrice()
                         val pid = event.paymentId ?: event.paymentHash
                         // Classify by TLV like handleLspToUser — a stability payment must credit
                         // backing, not be misfiled as a plain lightning receive.
-                        val isStabilityPayment = event.customRecords.any {
-                            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1))
-                        }
+                        val isStabilityPayment = isStabilityMarker(event.customRecords)
                         val result = if (isStabilityPayment) {
                             val amountSats = event.amountMsat.toLong() / 1000
                             recordPaymentAtomicInDB(

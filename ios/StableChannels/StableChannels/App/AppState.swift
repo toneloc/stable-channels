@@ -389,6 +389,16 @@ class AppState {
                     // Restore fundingTxid from UserDefaults
                     fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .string(forKey: "funding_txid")
+                    let pendingSpliceTxid: String? = {
+                        guard let databaseService else { return nil }
+                        return try? databaseService.getPendingSpliceTxid()
+                    }()
+                    let spliceCompletionCandidate = pendingSpliceTxid ?? fundingTxid
+                    if let txid = spliceCompletionCandidate,
+                       !txid.isEmpty,
+                       currentChannelFundingTxidMatches(txid) {
+                        databaseService?.completeSplice(txid: txid)
+                    }
                     // Restore pending splice state from DB
                     if let hasSplice = try? databaseService?.hasPendingSplice(), hasSplice {
                         isSweeping = true
@@ -940,6 +950,7 @@ class AppState {
             // After splice confirms, reconcile outgoing and clear sweep state
             if isSplice {
                 isSweeping = false
+                databaseService?.completeLatestSplice(txid: spliceTxid)
                 spliceTxid = nil
                 sweepOnchainStart = 0
                 let price = stableChannel.latestPrice
@@ -1028,6 +1039,7 @@ class AppState {
             spliceTxid = nil
             sweepOnchainStart = 0
             pendingSplice = nil
+            databaseService?.failLatestPendingSplice()
 
             AuditService.log("SPLICE_FAILED", data: [
                 "channel_id": "\(channelId)",
@@ -1063,6 +1075,22 @@ class AppState {
         if handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
             refreshBalances()
             updateStableBalances()
+            return
+        }
+
+        let hasStableControlTLV = customRecords.contains {
+            $0.typeNum == Constants.stableChannelTLVType && $0.value != Data([1])
+        }
+        if hasStableControlTLV || amountMsat < 1000 {
+            // A non-marker stable TLV is a control message, not a user payment.
+            // If it wasn't a valid SYNC_V1 above, don't turn it into a fake
+            // "Received 0 sats" lightning row. Ack it so a malformed/unknown
+            // control packet cannot loop forever in the foreground.
+            AuditService.log("PAYMENT_RECEIVED_IGNORED", data: [
+                "payment_hash": paymentHashStr,
+                "amount_msat": "\(amountMsat)",
+                "reason": hasStableControlTLV ? "unhandled_stable_control_tlv" : "sub_sat_amount"
+            ])
             return
         }
 
@@ -1529,10 +1557,11 @@ class AppState {
         ])
 
         // Record/update splice payment
+        let txidStr = "\(newFundingTxo.txid)"
+        spliceTxid = txidStr
+
         if let splice = pendingSplice {
             pendingSplice = nil
-            let txidStr = "\(newFundingTxo.txid)"
-            spliceTxid = txidStr
             if splice.direction == "in" {
                 // Auto-sweep splice_in was already recorded — update with txid
                 try? databaseService?.setPendingSpliceTxid(txidStr)
@@ -1947,39 +1976,42 @@ class AppState {
             }
 
             let feeRateSatVb = await feeRateService.currentRate()
-            let feeReserve = feeRateSatVb * 250
             let spendable = balances.spendableOnchainBalanceSats
-            guard spendable > feeReserve else {
+            guard spendable > 0 else {
                 statusMessage = "Insufficient onchain balance"
                 isSweeping = false
                 return
             }
-            let sweepAmount = spendable - feeReserve
+            let sweepAmount = spendable
+            let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
+            let amountUSD: Double? = price > 0
+                ? Double(sweepAmount) / Double(Constants.satsInBTC) * price
+                : nil
 
             do {
-                try nodeService.spliceIn(
+                try nodeService.spliceInWithAll(
                     userChannelId: channel.userChannelId,
-                    counterpartyNodeId: channel.counterpartyNodeId,
-                    amountSats: sweepAmount
+                    counterpartyNodeId: channel.counterpartyNodeId
                 )
                 sweepOnchainStart = balances.totalOnchainBalanceSats
                 pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
-                statusMessage = "Moving \(sweepAmount) sats to channel..."
+                statusMessage = "Moving all on-chain funds to channel..."
 
                 _ = try? databaseService?.recordPayment(
                     paymentId: nil,
                     paymentType: "splice_in",
                     direction: "received",
                     amountMsat: sweepAmount * 1000,
-                    amountUSD: nil,
-                    btcPrice: nil,
+                    amountUSD: amountUSD,
+                    btcPrice: price > 0 ? price : nil,
                     counterparty: nil,
                     status: "pending"
                 )
 
                 AuditService.log("SWEEP_TO_CHANNEL", data: [
                     "amount_sats": "\(sweepAmount)",
-                    "fee_rate_sat_vb": "\(feeRateSatVb)"
+                    "fee_rate_sat_vb": "\(feeRateSatVb)",
+                    "mode": "splice_in_with_all"
                 ])
             } catch {
                 statusMessage = "Sweep failed: \(error.localizedDescription)"
@@ -2046,6 +2078,16 @@ class AppState {
         // If userChannelId was just discovered, reload saved state (expectedUSD etc.) from DB
         if !hadChannelId && !stableChannel.userChannelId.isEmpty {
             loadChannelFromDB()
+        }
+    }
+
+    private func currentChannelFundingTxidMatches(_ txid: String) -> Bool {
+        nodeService.refreshChannels()
+        return nodeService.channels.contains { channel in
+            guard channel.isChannelReady, let fundingTxo = channel.fundingTxo else {
+                return false
+            }
+            return "\(fundingTxo.txid)" == txid
         }
     }
 

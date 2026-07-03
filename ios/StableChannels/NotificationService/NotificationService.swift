@@ -13,6 +13,7 @@ class NotificationService: UNNotificationServiceExtension {
     private static let lspPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     private static let lspAddress = "34.198.44.89:9735"
     private static let stableChannelTLVType: UInt64 = 13_377_331
+    private static let syncMessageType = "SYNC_V1"
     private static let satsInBTC: Double = 100_000_000.0
     private static let stabilityThresholdPercent: Double = 0.1
 
@@ -22,6 +23,10 @@ class NotificationService: UNNotificationServiceExtension {
 
     private enum PaymentInsertResult {
         case inserted, duplicate, failed, missingChannelRow
+    }
+
+    private enum StableControlResult {
+        case none, handled, deferToForeground
     }
 
     private struct PendingOutgoingStabilityPayment {
@@ -263,6 +268,8 @@ class NotificationService: UNNotificationServiceExtension {
         let startTime = Date()
         let timeout: TimeInterval = 22 // Leave ~8s for cleanup + notification delivery
         var received = false
+        var handledStableControl = false
+        var deferStableControlToForeground = false
         var price = 0.0
 
         eventLoop: while Date().timeIntervalSince(startTime) < timeout {
@@ -270,10 +277,34 @@ class NotificationService: UNNotificationServiceExtension {
                 nseLog("Event: \(event)")
                 switch event {
                 case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
-                    let isStabilityPayment = customRecords.contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
                     // Always provide a non-nil ID for dedup so replays don't insert duplicates.
                     let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
                     if price <= 0 { price = Self.fetchBTCPrice() }
+                    switch handleStableControlMessage(node: node, dbPath: dbPath, customRecords: customRecords) {
+                    case .handled:
+                        try? node.eventHandled()
+                        UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+                        content.title = ""
+                        content.body = ""
+                        content.sound = nil
+                        handledStableControl = true
+                        break eventLoop
+                    case .deferToForeground:
+                        UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+                        content.title = "Payment Pending"
+                        content.body = "Open app to sync stable position"
+                        content.sound = nil
+                        deferStableControlToForeground = true
+                        break eventLoop
+                    case .none:
+                        break
+                    }
+                    guard amountMsat >= 1000 else {
+                        try? node.eventHandled()
+                        nseLog("Ignoring sub-sat non-control payment")
+                        continue eventLoop
+                    }
+                    let isStabilityPayment = customRecords.contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
                     if isStabilityPayment {
                         let amountSats = amountMsat / 1000
                         let result = recordPaymentAndMaybeUpdateBackingInDB(
@@ -321,7 +352,17 @@ class NotificationService: UNNotificationServiceExtension {
             Thread.sleep(forTimeInterval: 0.5)
         }
 
-        if !received {
+        if deferStableControlToForeground {
+            content.title = "Payment Pending"
+            content.body = "Open app to sync stable position"
+            content.sound = nil
+            UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+        } else if handledStableControl {
+            content.title = ""
+            content.body = ""
+            content.sound = nil
+            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+        } else if !received {
             content.title = "Payment Pending"
             content.body = "Open app to receive your payment"
             UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
@@ -345,17 +386,43 @@ class NotificationService: UNNotificationServiceExtension {
         let timeout: TimeInterval = 22
         var received = false
         var persistenceFailed = false
+        var handledStableControl = false
+        var deferStableControlToForeground = false
         var totalMsat: UInt64 = 0
         var price = 0.0
         let dbPath = dataDir.appendingPathComponent("stablechannels.db").path
 
-        while Date().timeIntervalSince(startTime) < timeout {
+        eventLoop: while Date().timeIntervalSince(startTime) < timeout {
             if let event = node.nextEvent() {
                 nseLog("Event: \(event)")
                 switch event {
                 case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
                     if price <= 0 { price = Self.fetchBTCPrice() }
                     let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
+                    switch handleStableControlMessage(node: node, dbPath: dbPath, customRecords: customRecords) {
+                    case .handled:
+                        try? node.eventHandled()
+                        UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
+                        content.title = ""
+                        content.body = ""
+                        content.sound = nil
+                        handledStableControl = true
+                        break eventLoop
+                    case .deferToForeground:
+                        UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+                        content.title = "Payment Pending"
+                        content.body = "Open app to sync stable position"
+                        content.sound = nil
+                        deferStableControlToForeground = true
+                        break eventLoop
+                    case .none:
+                        break
+                    }
+                    guard amountMsat >= 1000 else {
+                        try? node.eventHandled()
+                        nseLog("Ignoring sub-sat non-control payment")
+                        continue eventLoop
+                    }
                     let isStabilityPayment = customRecords.contains {
                         $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1])
                     }
@@ -413,6 +480,16 @@ class NotificationService: UNNotificationServiceExtension {
             content.sound = .default
             UserDefaults(suiteName: Self.appGroup)?
                 .set(persistenceFailed, forKey: "pending_push_payment")
+        } else if deferStableControlToForeground {
+            content.title = "Payment Pending"
+            content.body = "Open app to sync stable position"
+            content.sound = nil
+            UserDefaults(suiteName: Self.appGroup)?.set(true, forKey: "pending_push_payment")
+        } else if handledStableControl {
+            content.title = ""
+            content.body = ""
+            content.sound = nil
+            UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
         } else if persistenceFailed {
             content.title = "Payment Pending"
             content.body = "Open app to finish recording your payment"
@@ -789,6 +866,167 @@ class NotificationService: UNNotificationServiceExtension {
             nseLog("Could not reconcile previously sent payment — refusing to send again")
             return false
         }
+    }
+
+    // MARK: - Stable Control Messages (SYNC_V1)
+
+    private func handleStableControlMessage(
+        node: Node,
+        dbPath: String,
+        customRecords: [CustomTlvRecord]
+    ) -> StableControlResult {
+        for record in customRecords where record.typeNum == Self.stableChannelTLVType {
+            // Raw marker byte is a real stability payment, not a signed control message.
+            if record.value == Data([1]) { continue }
+
+            guard let envelopeStr = String(data: record.value, encoding: .utf8),
+                  let envelopeData = envelopeStr.data(using: .utf8),
+                  let envelope = try? JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],
+                  let payloadStr = envelope["payload"] as? String,
+                  let signature = envelope["signature"] as? String else {
+                nseLog("Stable TLV was not a signed envelope — deferring to foreground")
+                return .deferToForeground
+            }
+
+            guard node.verifySignature(
+                msg: Array(payloadStr.utf8),
+                sig: signature,
+                pkey: Self.lspPubkey
+            ) else {
+                nseLog("Stable control signature invalid — deferring to foreground")
+                return .deferToForeground
+            }
+
+            guard let payloadData = payloadStr.data(using: .utf8),
+                  let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+                  let type = payload["type"] as? String else {
+                nseLog("Stable control payload parse failed — deferring to foreground")
+                return .deferToForeground
+            }
+
+            guard type == Self.syncMessageType else {
+                nseLog("Stable control type \(type) is not handled by NSE — deferring to foreground")
+                return .deferToForeground
+            }
+
+            guard let expectedUSD = payload["expected_usd"] as? Double else {
+                nseLog("SYNC_V1 missing expected_usd — deferring to foreground")
+                return .deferToForeground
+            }
+
+            let payloadUserChannelId = payload["user_channel_id"] as? String
+            guard applySyncMessageInDB(
+                dbPath: dbPath,
+                expectedUSD: expectedUSD,
+                payloadUserChannelId: payloadUserChannelId
+            ) else {
+                nseLog("SYNC_V1 DB apply failed — deferring to foreground")
+                return .deferToForeground
+            }
+
+            nseLog("SYNC_V1 applied in NSE: expected_usd=\(expectedUSD)")
+            return .handled
+        }
+
+        return .none
+    }
+
+    private func applySyncMessageInDB(
+        dbPath: String,
+        expectedUSD: Double,
+        payloadUserChannelId: String?
+    ) -> Bool {
+        let userChannelId: String
+        if let payloadUserChannelId, !payloadUserChannelId.isEmpty {
+            userChannelId = payloadUserChannelId
+        } else if let active = activeUserChannelId(dbPath: dbPath) {
+            userChannelId = active
+        } else {
+            return false
+        }
+
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 2000)
+
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            return false
+        }
+
+        var selectStmt: OpaquePointer?
+        let selectSql = "SELECT stable_sats, receiver_sats, latest_price FROM channels WHERE user_channel_id = ?"
+        guard sqlite3_prepare_v2(db, selectSql, -1, &selectStmt, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        sqlite3_bind_text(selectStmt, 1, (userChannelId as NSString).utf8String, -1, nil)
+
+        guard sqlite3_step(selectStmt) == SQLITE_ROW else {
+            sqlite3_finalize(selectStmt)
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+
+        let currentBacking = UInt64(sqlite3_column_int64(selectStmt, 0))
+        let receiverSats = UInt64(sqlite3_column_int64(selectStmt, 1))
+        var price = sqlite3_column_double(selectStmt, 2)
+        sqlite3_finalize(selectStmt)
+
+        if price <= 0 {
+            price = Self.fetchBTCPrice()
+        }
+
+        let newBacking: UInt64
+        if price > 0 {
+            newBacking = UInt64(max(0.0, expectedUSD / price * Self.satsInBTC))
+        } else {
+            // Match foreground behavior: if price is unavailable, update expected_usd
+            // but preserve backing and recompute native from existing backing.
+            newBacking = currentBacking
+        }
+        let newNative = receiverSats >= newBacking ? receiverSats - newBacking : 0
+
+        var updateStmt: OpaquePointer?
+        let updateSql = """
+            UPDATE channels
+            SET expected_usd = ?,
+                stable_sats = ?,
+                native_sats = ?,
+                latest_price = ?,
+                updated_at = strftime('%s', 'now')
+            WHERE user_channel_id = ?
+        """
+        guard sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        sqlite3_bind_double(updateStmt, 1, expectedUSD)
+        sqlite3_bind_int64(updateStmt, 2, Int64(newBacking))
+        sqlite3_bind_int64(updateStmt, 3, Int64(newNative))
+        sqlite3_bind_double(updateStmt, 4, price)
+        sqlite3_bind_text(updateStmt, 5, (userChannelId as NSString).utf8String, -1, nil)
+
+        guard sqlite3_step(updateStmt) == SQLITE_DONE else {
+            sqlite3_finalize(updateStmt)
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+        sqlite3_finalize(updateStmt)
+
+        guard sqlite3_changes(db) == 1 else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+
+        guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            return false
+        }
+
+        return true
     }
 
     // MARK: - Record Payment and Update Backing in DB

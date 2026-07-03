@@ -63,9 +63,13 @@ struct HistoryView: View {
                 TradeDetailView(trade: trade)
             }
             .sheet(item: $selectedPayment) { payment in
-                PaymentDetailView(payment: payment)
+                PaymentDetailView(payment: payment, displayPrice: historyDisplayPrice)
             }
         }
+    }
+
+    private var historyDisplayPrice: Double {
+        appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
     }
 
     // MARK: - Trades List
@@ -84,7 +88,7 @@ struct HistoryView: View {
     private var paymentsList: some View {
         ForEach(payments) { payment in
             Button { selectedPayment = payment } label: {
-                PaymentRowView(payment: payment)
+                PaymentRowView(payment: payment, displayPrice: historyDisplayPrice)
             }
             .tint(.primary)
         }
@@ -145,6 +149,7 @@ struct TradeRowView: View {
 
 struct PaymentRowView: View {
     let payment: PaymentRecord
+    let displayPrice: Double
 
     var body: some View {
         HStack {
@@ -165,7 +170,7 @@ struct PaymentRowView: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                if let usd = payment.amountUSD {
+                if let usd = payment.displayUSD(fallbackPrice: displayPrice) {
                     Text(usd.usdFormatted)
                         .fontWeight(.medium)
                 } else {
@@ -201,5 +206,24 @@ struct PaymentRowView: View {
         case "failed": return .red
         default: return .secondary
         }
+    }
+}
+
+private extension PaymentRecord {
+    var shouldPreferUSDDisplay: Bool {
+        switch paymentType {
+        case "splice_in", "splice_out", "onchain", "channel_close":
+            return true
+        default:
+            return false
+        }
+    }
+
+    func displayUSD(fallbackPrice: Double) -> Double? {
+        if let amountUSD { return amountUSD }
+        guard shouldPreferUSDDisplay else { return nil }
+        let price = (btcPrice ?? 0) > 0 ? (btcPrice ?? 0) : fallbackPrice
+        guard price > 0 else { return nil }
+        return Double(amountSats) / Double(Constants.satsInBTC) * price
     }
 }

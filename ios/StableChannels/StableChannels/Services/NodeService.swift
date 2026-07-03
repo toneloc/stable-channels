@@ -293,6 +293,14 @@ class NodeService: NodeServiceProtocol {
         )
     }
 
+    func spliceInWithAll(userChannelId: UserChannelId, counterpartyNodeId: PublicKey) throws {
+        guard let node else { throw NodeServiceError.notRunning }
+        try node.spliceInWithAll(
+            userChannelId: userChannelId,
+            counterpartyNodeId: counterpartyNodeId
+        )
+    }
+
     func spliceOut(
         userChannelId: UserChannelId,
         counterpartyNodeId: PublicKey,

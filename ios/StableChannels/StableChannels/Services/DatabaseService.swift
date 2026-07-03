@@ -561,7 +561,9 @@ class DatabaseService {
         let sql = """
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
                    counterparty, status, created_at, fee_msat, txid, address, confirmations
-            FROM payments ORDER BY id DESC LIMIT ?
+            FROM payments
+            WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000)
+            ORDER BY id DESC LIMIT ?
         """
         let rows = try query(sql, params: [.integer(Int64(limit))])
         return rows.map { row in
@@ -593,7 +595,14 @@ class DatabaseService {
 
     func setPendingSpliceTxid(_ txid: String) throws {
         try execute(
-            "UPDATE payments SET txid = ? WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NULL ORDER BY id DESC LIMIT 1",
+            """
+            UPDATE payments
+            SET txid = ?
+            WHERE payment_type = 'splice_in'
+              AND status IN ('pending', 'failed')
+              AND txid IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
             params: [.text(txid)]
         )
     }
@@ -606,21 +615,94 @@ class DatabaseService {
     }
 
     func hasPendingSplice() throws -> Bool {
-        // Auto-expire pending splices: 10 min if no txid, 1 hour if has txid
+        // If the app died before SpliceNegotiated delivered a txid, there is no
+        // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
+        // Keep with-txid rows pending: confirmation can outlive the app process,
+        // and ChannelReady is the authoritative success signal.
         let noTxidCutoff = Int64(Date().timeIntervalSince1970) - 600
         try execute(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NULL AND created_at < ?",
+            """
+            UPDATE payments
+            SET status = 'failed'
+            WHERE status = 'pending'
+              AND payment_type IN ('splice_in', 'splice_out')
+              AND txid IS NULL
+              AND created_at < ?
+            """,
             params: [.integer(noTxidCutoff)]
-        )
-        let txidCutoff = Int64(Date().timeIntervalSince1970) - 3600
-        try execute(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NOT NULL AND created_at < ?",
-            params: [.integer(txidCutoff)]
         )
         let rows = try query(
             "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') LIMIT 1"
         )
         return !rows.isEmpty
+    }
+
+    @discardableResult
+    func completeLatestSplice(txid: String?) -> Bool {
+        do {
+            if let txid, !txid.isEmpty {
+                try execute(
+                    """
+                    UPDATE payments
+                    SET status = 'completed'
+                    WHERE payment_type IN ('splice_in', 'splice_out')
+                      AND txid = ?
+                      AND status IN ('pending', 'failed')
+                    """,
+                    params: [.text(txid)]
+                )
+            } else {
+                try execute(
+                    """
+                    UPDATE payments
+                    SET status = 'completed'
+                    WHERE payment_type IN ('splice_in', 'splice_out')
+                      AND status IN ('pending', 'failed')
+                    ORDER BY id DESC LIMIT 1
+                    """
+                )
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    func completeSplice(txid: String) -> Bool {
+        do {
+            try execute(
+                """
+                UPDATE payments
+                SET status = 'completed'
+                WHERE payment_type IN ('splice_in', 'splice_out')
+                  AND txid = ?
+                  AND status IN ('pending', 'failed')
+                """,
+                params: [.text(txid)]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    func failLatestPendingSplice() -> Bool {
+        do {
+            try execute(
+                """
+                UPDATE payments
+                SET status = 'failed'
+                WHERE payment_type IN ('splice_in', 'splice_out')
+                  AND status = 'pending'
+                ORDER BY id DESC LIMIT 1
+                """
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {

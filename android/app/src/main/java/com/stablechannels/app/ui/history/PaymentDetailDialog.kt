@@ -14,6 +14,7 @@ import com.stablechannels.app.util.usdFormatted
 import com.stablechannels.app.util.shortString
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
+import com.stablechannels.app.util.Constants
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,19 +90,11 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0,
                     DetailRow("Type", typeLabel)
                     
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    val isLightning = payment.paymentType == "lightning" || payment.paymentType == "bolt12" || payment.paymentType == "bolt11" || typeLabel == "Lightning" || typeLabel == "Bolt12"
-                    val amountStr = if (isLightning) {
-                        val usdVal = payment.amountUSD ?: payment.btcPrice?.let { price ->
-                            if (price > 0.0) (payment.amountSats.toDouble() / 100_000_000.0) * price else null
-                        } ?: if (currentPrice > 0.0) {
-                            (payment.amountSats.toDouble() / 100_000_000.0) * currentPrice
-                        } else {
-                            null
-                        }
-                        usdVal?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
-                    } else {
-                        payment.amountUSD?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
+                    val usdVal = payment.amountUSD ?: run {
+                        val price = payment.btcPrice?.takeIf { it > 0.0 } ?: currentPrice.takeIf { it > 0.0 }
+                        price?.let { (payment.amountSats.toDouble() / Constants.SATS_IN_BTC) * it }
                     }
+                    val amountStr = usdVal?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
                     DetailRow("Amount", amountStr)
                     
                     payment.btcPrice?.let {
