@@ -334,7 +334,13 @@ impl Database {
                                  closed_at = NULL,
                                  updated_at = strftime('%s', 'now')
              WHERE user_channel_id = ?4",
-            params![channel_id, expected_usd, note, user_channel_id, native_sats as i64],
+            params![
+                channel_id,
+                expected_usd,
+                note,
+                user_channel_id,
+                native_sats as i64
+            ],
         )?;
         Ok(updated > 0)
     }
@@ -908,8 +914,46 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
             "UPDATE payments SET txid = ?1, payment_id = ?1
-             WHERE id = (SELECT id FROM payments WHERE payment_type = 'splice_in' AND status = 'pending' AND txid IS NULL ORDER BY id DESC LIMIT 1)",
+             WHERE id = (SELECT id FROM payments WHERE payment_type = 'splice_in' AND status IN ('pending','failed') AND txid IS NULL ORDER BY id DESC LIMIT 1)",
             params![txid],
+        )?;
+        Ok(rows)
+    }
+
+    /// Set txid on the most recent pending splice_out payment (desktop records it before txid is known)
+    pub fn set_pending_splice_out_txid(&self, txid: &str) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE payments SET txid = ?1, payment_id = ?1
+             WHERE id = (SELECT id FROM payments WHERE payment_type = 'splice_out' AND status IN ('pending','failed') AND txid IS NULL ORDER BY id DESC LIMIT 1)",
+            params![txid],
+        )?;
+        Ok(rows)
+    }
+
+    pub fn complete_latest_splice(&self, txid: Option<&str>) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = match txid {
+            Some(txid) if !txid.is_empty() => conn.execute(
+                "UPDATE payments SET status = 'completed'
+                 WHERE payment_type IN ('splice_in','splice_out') AND txid = ?1 AND status IN ('pending','failed')",
+                params![txid],
+            )?,
+            _ => conn.execute(
+                "UPDATE payments SET status = 'completed'
+                 WHERE id = (SELECT id FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status IN ('pending','failed') ORDER BY id DESC LIMIT 1)",
+                [],
+            )?,
+        };
+        Ok(rows)
+    }
+
+    pub fn fail_latest_pending_splice(&self) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE payments SET status = 'failed'
+             WHERE id = (SELECT id FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY id DESC LIMIT 1)",
+            [],
         )?;
         Ok(rows)
     }
@@ -935,6 +979,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
              FROM payments
+             WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000)
              ORDER BY id DESC
              LIMIT ?1"
         )?;
@@ -1040,9 +1085,8 @@ impl Database {
     /// List recorded settlements as (payment_id, kind) pairs, oldest first.
     pub fn list_settlements(&self) -> SqliteResult<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT payment_id, kind FROM settlement_payments ORDER BY recorded_at ASC",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT payment_id, kind FROM settlement_payments ORDER BY recorded_at ASC")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
@@ -1347,14 +1391,20 @@ mod tests {
     #[test]
     fn test_mark_channel_closed_excludes_from_load_all() {
         let db = Database::open_in_memory().unwrap();
-        db.save_channel("ch_a", "uch_a", 10.0, 1000, 0, None).unwrap();
-        db.save_channel("ch_b", "uch_b", 20.0, 2000, 0, None).unwrap();
+        db.save_channel("ch_a", "uch_a", 10.0, 1000, 0, None)
+            .unwrap();
+        db.save_channel("ch_b", "uch_b", 20.0, 2000, 0, None)
+            .unwrap();
         assert_eq!(db.load_all_channels().unwrap().len(), 2);
 
         db.mark_channel_closed("uch_a").unwrap();
 
         let active = db.load_all_channels().unwrap();
-        assert_eq!(active.len(), 1, "closed channel must be excluded from load_all_channels");
+        assert_eq!(
+            active.len(),
+            1,
+            "closed channel must be excluded from load_all_channels"
+        );
         assert_eq!(active[0].user_channel_id, "uch_b");
 
         let all = db.load_all_channels_including_closed().unwrap();
@@ -1366,11 +1416,13 @@ mod tests {
         // A row marked closed by mistake (e.g. transient gRPC blip) must
         // re-activate the next time we save it.
         let db = Database::open_in_memory().unwrap();
-        db.save_channel("ch_x", "uch_x", 50.0, 5000, 0, None).unwrap();
+        db.save_channel("ch_x", "uch_x", 50.0, 5000, 0, None)
+            .unwrap();
         db.mark_channel_closed("uch_x").unwrap();
         assert!(db.load_all_channels().unwrap().is_empty());
 
-        db.save_channel("ch_x", "uch_x", 75.0, 7500, 0, Some("revived")).unwrap();
+        db.save_channel("ch_x", "uch_x", 75.0, 7500, 0, Some("revived"))
+            .unwrap();
 
         let active = db.load_all_channels().unwrap();
         assert_eq!(active.len(), 1, "save_channel must clear closed_at");
@@ -1383,7 +1435,8 @@ mod tests {
         // Calling mark_channel_closed twice must preserve the original
         // close timestamp, not overwrite it.
         let db = Database::open_in_memory().unwrap();
-        db.save_channel("ch_y", "uch_y", 10.0, 1000, 0, None).unwrap();
+        db.save_channel("ch_y", "uch_y", 10.0, 1000, 0, None)
+            .unwrap();
 
         db.mark_channel_closed("uch_y").unwrap();
         // Read the closed_at value directly so we can compare across calls.

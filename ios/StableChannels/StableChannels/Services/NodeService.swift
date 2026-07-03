@@ -7,6 +7,7 @@ import LDKNode
 final class EventAckToken {
     var shouldAck = true
 }
+
 protocol NodeServiceProtocol {
     var node: Node? { get }
     var isRunning: Bool { get }
@@ -290,6 +291,14 @@ class NodeService: NodeServiceProtocol {
             userChannelId: userChannelId,
             counterpartyNodeId: counterpartyNodeId,
             spliceAmountSats: amountSats
+        )
+    }
+
+    func spliceInWithAll(userChannelId: UserChannelId, counterpartyNodeId: PublicKey) throws {
+        guard let node else { throw NodeServiceError.notRunning }
+        try node.spliceInWithAll(
+            userChannelId: userChannelId,
+            counterpartyNodeId: counterpartyNodeId
         )
     }
 

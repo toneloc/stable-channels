@@ -457,7 +457,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     fun getRecentPayments(limit: Int = 50): List<PaymentRecord> {
         val cursor = readableDatabase.rawQuery(
-            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000) ORDER BY created_at DESC LIMIT ?",
             arrayOf(limit.toString())
         )
         return cursor.use { c ->
@@ -510,8 +510,37 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     fun setPendingSpliceTxid(txid: String) {
         writableDatabase.execSQL(
-            "UPDATE payments SET txid = ?, status = 'completed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY created_at DESC LIMIT 1)",
+            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'splice_in' AND status IN ('pending','failed') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)",
             arrayOf(txid)
+        )
+    }
+
+    fun completeLatestSplice(txid: String?) {
+        if (txid.isNullOrBlank()) {
+            writableDatabase.execSQL(
+                "UPDATE payments SET status = 'completed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status IN ('pending','failed') ORDER BY created_at DESC LIMIT 1)"
+            )
+        } else {
+            writableDatabase.execSQL(
+                "UPDATE payments SET status = 'completed' WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')",
+                arrayOf(txid)
+            )
+        }
+    }
+
+    /** Returns true only if a splice row was actually flipped to completed,
+     *  so callers can use the result as the "this ChannelReady was a splice" signal. */
+    fun completeSplice(txid: String): Boolean {
+        val stmt = writableDatabase.compileStatement(
+            "UPDATE payments SET status = 'completed' WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')"
+        )
+        stmt.bindString(1, txid)
+        return stmt.executeUpdateDelete() > 0
+    }
+
+    fun failLatestPendingSplice() {
+        writableDatabase.execSQL(
+            "UPDATE payments SET status = 'failed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY created_at DESC LIMIT 1)"
         )
     }
 
@@ -524,16 +553,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     fun hasPendingSplice(): Boolean {
-        // Auto-expire pending splices: 10 min if no txid, 1 hour if has txid
+        // If the app died before SpliceNegotiated delivered a txid, there is no
+        // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
+        // Keep with-txid rows pending: confirmation can outlive the app process,
+        // and ChannelReady is the authoritative success signal.
         val noTxidCutoff = System.currentTimeMillis() / 1000 - 600
         writableDatabase.execSQL(
             "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ?",
             arrayOf(noTxidCutoff)
-        )
-        val txidCutoff = System.currentTimeMillis() / 1000 - 3600
-        writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL AND created_at < ?",
-            arrayOf(txidCutoff)
         )
         val cursor = readableDatabase.rawQuery(
             "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') LIMIT 1",

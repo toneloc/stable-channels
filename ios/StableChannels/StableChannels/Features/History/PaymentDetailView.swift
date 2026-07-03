@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PaymentDetailView: View {
     let payment: PaymentRecord
+    let displayPrice: Double
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -17,7 +18,7 @@ struct PaymentDetailView: View {
                         String(localized: "label_amount", defaultValue: "Amount"),
                         "\(payment.amountSats.btcSpacedFormatted) BTC"
                     )
-                    if let usd = payment.amountUSD {
+                    if let usd = displayUSD {
                         row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
                     }
                     if let price = payment.btcPrice {
@@ -87,6 +88,23 @@ struct PaymentDetailView: View {
         case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
         case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
         default: return payment.paymentType
+        }
+    }
+
+    private var displayUSD: Double? {
+        if let amountUSD = payment.amountUSD { return amountUSD }
+        guard shouldPreferUSDDisplay else { return nil }
+        let price = (payment.btcPrice ?? 0) > 0 ? (payment.btcPrice ?? 0) : displayPrice
+        guard price > 0 else { return nil }
+        return Double(payment.amountSats) / Double(Constants.satsInBTC) * price
+    }
+
+    private var shouldPreferUSDDisplay: Bool {
+        switch payment.paymentType {
+        case "splice_in", "splice_out", "onchain", "channel_close":
+            return true
+        default:
+            return false
         }
     }
 }

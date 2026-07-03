@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -142,7 +143,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                         }
                     } else {
                         itemsIndexed(payments) { index, payment ->
-                            PaymentRow(payment) { selectedPayment = payment }
+                            PaymentRow(payment, currentPrice) { selectedPayment = payment }
                             if (index < payments.lastIndex) {
                                 HorizontalDivider(
                                     modifier = Modifier.padding(start = 68.dp),
@@ -220,7 +221,7 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
+private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: () -> Unit) {
     val isIncoming = payment.isIncoming
     val icon = if (isIncoming) Icons.Default.ArrowCircleDown else Icons.Default.ArrowCircleUp
     val iconColor = if (isIncoming) Color(0xFF10B981) else Color(0xFF3B82F6)
@@ -271,9 +272,13 @@ private fun PaymentRow(payment: PaymentRecord, onClick: () -> Unit) {
 
         // Amount + status
         Column(horizontalAlignment = Alignment.End) {
-            val usdVal = payment.amountUSD ?: ((payment.amountSats.toDouble() / 100_000_000.0) * (payment.btcPrice ?: 0.0))
+            val displayUsd = payment.amountUSD ?: run {
+                val price = payment.btcPrice?.takeIf { it > 0.0 } ?: currentPrice.takeIf { it > 0.0 }
+                price?.let { (payment.amountSats.toDouble() / Constants.SATS_IN_BTC) * it }
+            }
+            val amountText = displayUsd?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
             Text(
-                text = (if (isIncoming) "+" else "-") + usdVal.usdFormatted(),
+                text = (if (isIncoming) "+" else "-") + amountText,
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.Medium,
                 color = if (isIncoming) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface

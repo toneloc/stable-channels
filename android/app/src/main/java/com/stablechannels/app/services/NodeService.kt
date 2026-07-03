@@ -183,6 +183,11 @@ class NodeService(private val context: Context) {
         n.spliceIn(userChannelId, counterpartyNodeId, amountSats.toULong())
     }
 
+    fun spliceInWithAll(userChannelId: String, counterpartyNodeId: String) {
+        val n = node ?: throw NodeServiceError()
+        n.spliceInWithAll(userChannelId, counterpartyNodeId)
+    }
+
     fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) {
         val n = node ?: throw NodeServiceError()
         n.spliceOut(userChannelId, counterpartyNodeId, address, amountSats.toULong())
