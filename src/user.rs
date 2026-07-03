@@ -9199,21 +9199,21 @@ pub fn run() {
                 "Stable Channels Wallet",
                 native_options,
                 Box::new(|cc| {
-                    // Custom font: load Inter from assets/fonts/Inter-Regular.ttf if
-                    // present. Falls back to egui defaults if the file isn't there —
-                    // drop the TTF in to get the upgrade without code changes.
-                    if let Ok(font_data) = std::fs::read("assets/fonts/Inter-Regular.ttf") {
-                        let mut fonts = egui::FontDefinitions::default();
-                        fonts.font_data.insert(
-                            "inter".to_owned(),
-                            std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-                        );
-                        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional)
-                        {
-                            prop.insert(0, "inter".to_owned());
-                        }
-                        cc.egui_ctx.set_fonts(fonts);
+                    // Custom font: Inter, embedded in the binary. A cwd-relative
+                    // fs::read breaks in release bundles (Finder launches with "/"
+                    // as cwd), silently falling back to fonts that lack the ↑ ↓ →
+                    // glyphs the action buttons use.
+                    let mut fonts = egui::FontDefinitions::default();
+                    fonts.font_data.insert(
+                        "inter".to_owned(),
+                        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                            "../assets/fonts/Inter-Regular.ttf"
+                        ))),
+                    );
+                    if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                        prop.insert(0, "inter".to_owned());
                     }
+                    cc.egui_ctx.set_fonts(fonts);
 
                     // Visuals: light theme with themed surfaces + subtle hover/active
                     // backgrounds. Filled-button color overrides still win; this just
