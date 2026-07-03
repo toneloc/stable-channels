@@ -38,7 +38,14 @@ enum class Tab(val label: String, val icon: ImageVector) {
 @Composable
 fun MainTabView(appState: AppState) {
     var selectedTab by remember { mutableStateOf(Tab.HOME) }
+    var showBottomBar by remember { mutableStateOf(true) }
     val systemBarsPadding = WindowInsets.systemBars.asPaddingValues()
+
+    LaunchedEffect(selectedTab) {
+        if (selectedTab != Tab.SETTINGS) {
+            showBottomBar = true
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -48,13 +55,15 @@ fun MainTabView(appState: AppState) {
         when (selectedTab) {
             Tab.HOME -> HomeScreen(appState)
             Tab.HISTORY -> HistoryScreen(appState)
-            Tab.SETTINGS -> SettingsNavHost(appState)
+            Tab.SETTINGS -> SettingsNavHost(appState, onShowBottomBar = { showBottomBar = it })
         }
-        ModernBottomNavBar(
-            selectedTab = selectedTab,
-            onTabSelected = { selectedTab = it },
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
+        if (showBottomBar) {
+            ModernBottomNavBar(
+                selectedTab = selectedTab,
+                onTabSelected = { selectedTab = it },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
     }
 }
 
