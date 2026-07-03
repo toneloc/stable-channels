@@ -13,7 +13,7 @@ use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
 use qrcode::{Color, QrCode};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read as IoRead, Write};
 use std::path::Path;
@@ -309,6 +309,11 @@ pub struct UserApp {
 
     // In-flight outgoing payments awaiting LDK confirmation
     pending_payments: HashMap<PaymentId, PendingPayment>,
+
+    // In-flight automatic stability keysends awaiting LDK confirmation. This is
+    // an immediate in-memory signal so a success event can't be misclassified as
+    // a normal outgoing payment if it beats/dodges the DB row.
+    pending_stability_payment_ids: HashSet<String>,
 
     // Non-blocking daily price update
     daily_prices_receiver: Option<std::sync::mpsc::Receiver<bool>>,
@@ -645,6 +650,7 @@ impl UserApp {
             is_syncing: true, // Always start syncing until we have price AND balance data
             pending_trade_payments: HashMap::new(),
             pending_payments: HashMap::new(),
+            pending_stability_payment_ids: HashSet::new(),
             daily_prices_receiver: None,
             bar_chart_show_btc: false,
             bar_chart_anim: 0.0,
@@ -677,6 +683,8 @@ impl UserApp {
         {
             let mut sc = app.stable_channel.lock().unwrap();
             if let Some(payment_info) = stable::check_stability(&app.node, &mut sc, btc_price) {
+                app.pending_stability_payment_ids
+                    .insert(payment_info.payment_id.clone());
                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
                 let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
                     * payment_info.btc_price;
@@ -2526,11 +2534,16 @@ impl UserApp {
                         // DB lookup (shared) is the reliable signal — pending_payments
                         // only holds foreground lightning/bolt12 sends.
                         let pid_str = payment_id.map(|p| format!("{p}"));
-                        let is_stability = pid_str
-                            .as_deref()
-                            .and_then(|p| self.db.get_payment_type(p).ok().flatten())
-                            .as_deref()
-                            == Some("stability");
+                        let was_tracked_stability = pid_str
+                            .as_ref()
+                            .map(|p| self.pending_stability_payment_ids.remove(p))
+                            .unwrap_or(false);
+                        let is_stability = was_tracked_stability
+                            || pid_str
+                                .as_deref()
+                                .and_then(|p| self.db.get_payment_type(p).ok().flatten())
+                                .as_deref()
+                                == Some("stability");
 
                         // Refresh channel balances from LDK
                         {
@@ -2678,11 +2691,28 @@ impl UserApp {
                         self.show_toast(&format!("{} failed", verb), "X");
                     } else {
                         // Check if this is a pending outgoing payment
-                        let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
-                        if let Some(p) = pending {
-                            let _ = self
-                                .db
-                                .update_payment_status(p.payment_db_id, "failed", None);
+                        let pid_str = payment_id.map(|pid| format!("{pid}"));
+                        let was_tracked_stability = pid_str
+                            .as_ref()
+                            .map(|p| self.pending_stability_payment_ids.remove(p))
+                            .unwrap_or(false);
+                        let is_stability = was_tracked_stability
+                            || pid_str
+                                .as_deref()
+                                .and_then(|p| self.db.get_payment_type(p).ok().flatten())
+                                .as_deref()
+                                == Some("stability");
+                        if is_stability {
+                            if let Some(ref pid) = pid_str {
+                                let _ = self.db.update_payment_status_by_pid(pid, "failed", None);
+                            }
+                        } else {
+                            let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
+                            if let Some(p) = pending {
+                                let _ = self
+                                    .db
+                                    .update_payment_status(p.payment_db_id, "failed", None);
+                            }
                         }
 
                         audit_event(
@@ -2690,6 +2720,7 @@ impl UserApp {
                             json!({
                                 "payment_hash": payment_hash.map(|h| format!("{h}")),
                                 "reason": format!("{:?}", reason),
+                                "is_stability": is_stability,
                             }),
                         );
 
@@ -5771,7 +5802,9 @@ impl UserApp {
             let receive_fill = if !has_active_channel {
                 let t = ui.ctx().input(|i| i.time);
                 let pulse = (0.5 + 0.5 * (t * std::f64::consts::PI / 1.2).sin()) as f32;
-                ui.ctx().request_repaint();
+                // 30fps is plenty for this slow pulse; an uncapped repaint here
+                // forces the whole UI to render at display refresh rate.
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
                 let g = theme::IOS_GREEN;
                 let lighter = Color32::from_rgb(
                     (g.r() as f32 + (255.0 - g.r() as f32) * 0.35) as u8,
@@ -8954,7 +8987,23 @@ impl App for UserApp {
         // Render toast notifications on top
         self.render_toasts(ctx);
 
-        ctx.request_repaint_after(Duration::from_millis(100));
+        // Keep the fast cadence only while something animates or polls for
+        // completion; when idle, 1s is enough (prices refresh every few
+        // seconds, and input events trigger immediate repaints regardless).
+        let needs_fast_repaint = self.is_syncing
+            || self.waiting_for_payment
+            || self.jit_choice_open
+            || self.show_transfer_modal
+            || self.show_buy_modal
+            || self.show_sell_modal
+            || self.show_restore_modal
+            || !self.toasts.is_empty();
+        let idle_cadence = if needs_fast_repaint {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(1)
+        };
+        ctx.request_repaint_after(idle_cadence);
     }
 }
 

@@ -338,10 +338,33 @@ pub fn check_stability(
         return None;
     }
 
-    // Do NOT recalculate backing_sats here.
-    // backing_sats is set at trade time (expected_usd / price * 1e8) and stays fixed.
-    // As BTC price moves, stable_usd_value = backing_sats * new_price will drift
-    // from expected_usd, triggering a stability payment to rebalance.
+    // Do NOT generally recalculate backing_sats here: it is set at trade time
+    // and intentionally drifts with price. The one exception is a previously
+    // initiated LSP→user stability top-up on the provider side. Send
+    // initiation is not settlement; once a later balance refresh shows receiver
+    // sats above the native-sats invariant, the top-up actually landed and the
+    // derived backing is now authoritative. Keep this provider-side only:
+    // on the stable receiver/user side, an ordinary incoming payment during
+    // cooldown would also raise receiver sats and must not be mistaken for a
+    // stability top-up.
+    let derived_backing = sc.stable_receiver_btc.sats.saturating_sub(sc.native_sats);
+    if !sc.is_stable_receiver
+        && sc.last_stability_payment > 0
+        && derived_backing > sc.backing_sats
+    {
+        let old_backing = sc.backing_sats;
+        sc.backing_sats = derived_backing;
+        recompute_native(sc);
+        audit_event(
+            "STABILITY_PAYMENT_SETTLED",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "old_backing_sats": old_backing,
+                "new_backing_sats": sc.backing_sats,
+                "btc_price": current_price,
+            }),
+        );
+    }
 
     // Skip if expected_usd is zero or very small (nothing to stabilize)
     if sc.expected_usd.0 < 0.01 {

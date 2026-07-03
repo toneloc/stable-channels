@@ -1311,9 +1311,7 @@ class AppState {
             }
 
             let matchesPendingStabilityPayment = paymentIdString.map { $0 == pending.paymentId } ?? false
-            let reconciled = reconcilePendingOutgoingStabilityPayment(
-                status: matchesPendingStabilityPayment ? "completed" : "pending"
-            )
+            let reconciled = reconcilePendingOutgoingStabilityPayment()
             if matchesPendingStabilityPayment {
                 if reconciled {
                     if let paymentIdString {
@@ -1693,7 +1691,7 @@ class AppState {
         ])
     }
 
-    private func reconcilePendingOutgoingStabilityPayment(status: String = "pending") -> Bool {
+    private func reconcilePendingOutgoingStabilityPayment(status: String = "completed") -> Bool {
         guard let databaseService else { return false }
         guard var pending = databaseService.loadPendingSend() else { return true }
 
