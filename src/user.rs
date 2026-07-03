@@ -5802,9 +5802,15 @@ impl UserApp {
             let receive_fill = if !has_active_channel {
                 let t = ui.ctx().input(|i| i.time);
                 let pulse = (0.5 + 0.5 * (t * std::f64::consts::PI / 1.2).sin()) as f32;
+<<<<<<< Updated upstream
                 // 30fps is plenty for this slow pulse; an uncapped repaint here
                 // forces the whole UI to render at display refresh rate.
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
+=======
+                // 10fps is enough for this slow color pulse; an uncapped repaint
+                // here forces the whole UI to render at display refresh rate.
+                ui.ctx().request_repaint_after(Duration::from_millis(100));
+>>>>>>> Stashed changes
                 let g = theme::IOS_GREEN;
                 let lighter = Color32::from_rgb(
                     (g.r() as f32 + (255.0 - g.r() as f32) * 0.35) as u8,

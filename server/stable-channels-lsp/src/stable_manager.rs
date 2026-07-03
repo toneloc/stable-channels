@@ -551,6 +551,38 @@ impl StableChannelManager {
             sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
             sc.latest_price = btc_price;
 
+            // LSP→user stability top-ups are only accounted once the live channel
+            // balance reflects the sats. `spontaneous_send` returning means the HTLC
+            // was initiated, not necessarily settled; rebasing backing there would
+            // make a later HTLC failure look at-par forever. If the receiver balance
+            // rises above the native-sats invariant after a recent send, the top-up
+            // actually landed and the derived backing is now authoritative.
+            let derived_backing = their_sats.saturating_sub(sc.native_sats);
+            if sc.last_stability_payment > 0 && derived_backing > sc.backing_sats {
+                let old_backing = sc.backing_sats;
+                sc.backing_sats = derived_backing;
+                stable_channels::stable::recompute_native(sc);
+                stable_channels::audit::audit_event(
+                    "STABILITY_PAYMENT_SETTLED",
+                    serde_json::json!({
+                        "user_channel_id": format!("{}", sc.user_channel_id),
+                        "old_backing_sats": old_backing,
+                        "new_backing_sats": sc.backing_sats,
+                        "btc_price": btc_price,
+                    }),
+                );
+                if let Err(e) = self.db.save_channel(
+                    &c.channel_id,
+                    &format!("{}", sc.user_channel_id),
+                    sc.expected_usd.0,
+                    sc.backing_sats,
+                    sc.native_sats,
+                    sc.note.as_deref(),
+                ) {
+                    tracing::error!("[stable] settled top-up save_channel failed: {}", e);
+                }
+            }
+
             // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced since outbound_capacity excludes in-flight HTLCs.
             let uid = sc.user_channel_id;
             if their_sats < sc.backing_sats {
@@ -634,7 +666,10 @@ impl StableChannelManager {
                         amount_msat,
                         node_id: sc.counterparty.to_string(),
                         route_parameters: None,
-                        custom_tlvs: vec![],
+                        custom_tlvs: vec![CustomTlvRecord {
+                            type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+                            value: vec![1u8].into(),
+                        }],
                     };
                     let channel_id_clone = c.channel_id.clone();
                     let user_channel_id_clone = c.user_channel_id.clone();
@@ -653,9 +688,6 @@ impl StableChannelManager {
                                 }
                             }
                             sc.last_stability_payment = now;
-                            // Reset backing_sats to equilibrium so the next tick doesn't re-pay the same drift forever. Native is recomputed on the next balance refresh.
-                            sc.backing_sats =
-                                ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
                             let backing = sc.backing_sats;
                             let native = sc.native_sats;
                             if let Err(e) = self.db.save_channel(
@@ -680,7 +712,7 @@ impl StableChannelManager {
                                     "payment_id": resp.payment_id,
                                     "counterparty": sc.counterparty.to_string(),
                                     "expected_usd": expected_usd_for_db,
-                                    "new_backing_sats": sc.backing_sats,
+                                    "backing_sats": sc.backing_sats,
                                 }),
                             );
                         },
@@ -1856,7 +1888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_tick_resets_backing_to_equilibrium_after_send() {
+    async fn run_tick_rebases_backing_only_after_live_balance_settles() {
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
@@ -1874,8 +1906,23 @@ mod tests {
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
 
         assert_eq!(fake.sends.lock().unwrap().len(), 1, "should send in lsp_to_user direction");
-        // backing reset to target/price = 50/80000*1e8 = 62_500 (NOT left at stale 50_000).
-        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500, "backing must reset to equilibrium, preventing oscillation");
+        assert_eq!(
+            mgr.stable_channels[0].backing_sats, 50_000,
+            "send initiation must not rebase backing before the HTLC settles"
+        );
+
+        // Now the live channel balance reflects the landed top-up: receiver/user
+        // sats are 62_500, with native_sats unchanged at 0, so derived backing is
+        // 62_500. The next tick should account the settlement without another send.
+        let settled = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 37_500_000, true,
+        )]);
+        mgr.run_tick(&settled as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(settled.sends.lock().unwrap().len(), 0, "settlement rebase must not send again");
+        assert_eq!(
+            mgr.stable_channels[0].backing_sats, 62_500,
+            "backing must rebase once live balance proves the top-up settled"
+        );
     }
 
     #[tokio::test]
