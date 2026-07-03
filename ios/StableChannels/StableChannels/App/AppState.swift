@@ -646,9 +646,28 @@ class AppState {
               let latest = recent.first(where: { $0.direction == "received" }) else { return }
         if let usd = latest.amountUSD {
             statusMessage = "Received \(usd.usdFormatted)"
+        } else if let usd = usdValue(sats: latest.amountSats, rowPrice: latest.btcPrice) {
+            statusMessage = "Received \(usd.usdFormatted)"
         } else {
             statusMessage = "Received \(latest.amountSats.btcSpacedFormatted) BTC"
         }
+    }
+
+    /// USD value for a payment row that was recorded without one: prefer the
+    /// price stored on the row, else the current price. Nil only if no price
+    /// is available at all.
+    private func usdValue(sats: UInt64, rowPrice: Double?) -> Double? {
+        let price: Double
+        if let rowPrice, rowPrice > 0 {
+            price = rowPrice
+        } else if btcPrice > 0 {
+            price = btcPrice
+        } else if stableChannel.latestPrice > 0 {
+            price = stableChannel.latestPrice
+        } else {
+            return nil
+        }
+        return Double(sats) / Double(Constants.satsInBTC) * price
     }
 
     // MARK: - Gossip Data Management
@@ -1166,6 +1185,8 @@ class AppState {
         guard persistence.isNewPayment else { return }
 
         if let usd = amountUSD {
+            statusMessage = "Received \(usd.usdFormatted)"
+        } else if let usd = usdValue(sats: amountMsat / 1000, rowPrice: nil) {
             statusMessage = "Received \(usd.usdFormatted)"
         } else {
             let sats = amountMsat / 1000
