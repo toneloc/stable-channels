@@ -21,6 +21,7 @@ use rand::distr::Alphanumeric;
 use rand::Rng;
 use serde_json::{json, Value};
 
+use stable_channels::constants::SATS_IN_BTC;
 use stable_channels::types::{StableChannel, USD};
 
 // ================================================================
@@ -490,7 +491,7 @@ pub fn create_stable_channel(
         .expect("no channel found with counterparty");
 
     let btc_amount = expected_usd / price;
-    let backing_sats = (btc_amount * 100_000_000.0) as u64;
+    let backing_sats = (btc_amount * SATS_IN_BTC as f64) as u64;
 
     StableChannel {
         channel_id: ch.channel_id,

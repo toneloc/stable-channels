@@ -12,6 +12,7 @@ use ldk_server_client::ldk_server_grpc::api::{
     VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord};
+use stable_channels::constants::SATS_IN_BTC;
 use stable_channels::db::Database;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
@@ -167,7 +168,7 @@ impl StableChannelManager {
         let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, btc_price);
 
         let backing_sats = if btc_price > 0.0 {
-            ((expected_usd_f / btc_price) * 100_000_000.0) as u64
+            ((expected_usd_f / btc_price) * SATS_IN_BTC as f64) as u64
         } else {
             0
         };
@@ -592,7 +593,7 @@ impl StableChannelManager {
             }
 
             let stable_usd_value = if sc.backing_sats > 0 {
-                (sc.backing_sats as f64 / 100_000_000.0) * btc_price
+                (sc.backing_sats as f64 / SATS_IN_BTC as f64) * btc_price
             } else {
                 sc.stable_receiver_usd.0
             };
@@ -625,7 +626,7 @@ impl StableChannelManager {
             } else {
                 "user_to_lsp"
             };
-            let amount_sats = ((dollars_from_par / btc_price) * 100_000_000.0) as u64;
+            let amount_sats = ((dollars_from_par / btc_price) * SATS_IN_BTC as f64) as u64;
             let amount_msat = amount_sats.saturating_mul(1000);
 
             if c.is_usable {
@@ -659,7 +660,7 @@ impl StableChannelManager {
                             sc.last_stability_payment = now;
                             // Reset backing_sats to equilibrium so the next tick doesn't re-pay the same drift forever. Native is recomputed on the next balance refresh.
                             sc.backing_sats =
-                                ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+                                ((sc.expected_usd.0 / btc_price) * SATS_IN_BTC as f64) as u64;
                             let backing = sc.backing_sats;
                             let native = sc.native_sats;
                             if let Err(e) = self.db.save_channel(

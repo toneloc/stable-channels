@@ -39,7 +39,7 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
 
     sc.expected_usd = USD::from_f64(new_expected);
     let btc_amount = new_expected / price;
-    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    sc.backing_sats = (btc_amount * SATS_IN_BTC as f64) as u64;
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
@@ -87,7 +87,7 @@ pub fn reconcile_forwarded(
     sc.expected_usd = USD::from_f64(new_expected);
     if price > 0.0 {
         let btc_amount = new_expected / price;
-        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+        sc.backing_sats = (btc_amount * SATS_IN_BTC as f64) as u64;
     }
     // After forwarding: user's actual remaining balance is user_sats - total_forwarded_sats
     let remaining_user_sats = user_sats.saturating_sub(total_forwarded_sats);
@@ -138,7 +138,7 @@ pub fn deduct_outgoing(sc: &mut StableChannel, amount_sats: u64, price: f64) -> 
 
     sc.expected_usd = USD::from_f64(new_expected);
     let btc_amount = new_expected / price;
-    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    sc.backing_sats = (btc_amount * SATS_IN_BTC as f64) as u64;
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
@@ -172,7 +172,7 @@ pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
     sc.expected_usd = USD::from_f64(new_expected_usd);
     if price > 0.0 {
         let btc_amount = new_expected_usd / price;
-        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+        sc.backing_sats = (btc_amount * SATS_IN_BTC as f64) as u64;
     }
     // native_sats is everything NOT backing the stable position
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
@@ -363,7 +363,7 @@ pub fn check_stability(
     // This excludes the native BTC position from stability calculations
     let stable_usd_value = if sc.backing_sats > 0 {
         // backing_sats tracks the BTC backing the stable portion
-        (sc.backing_sats as f64 / 100_000_000.0) * current_price
+        (sc.backing_sats as f64 / SATS_IN_BTC as f64) * current_price
     } else {
         // Fallback for channels without backing_sats set yet - use total balance
         // but only if expected_usd is set (means user has a stable position)
@@ -482,7 +482,7 @@ pub fn check_stability(
             // This accounts the payment against the stable pool, not native BTC.
             // Don't recompute native_sats here — receiver balance hasn't updated yet
             // (HTLC still in flight). Native will be recomputed on next balance refresh.
-            let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
+            let new_backing = (target_usd / sc.latest_price * SATS_IN_BTC as f64) as u64;
             sc.backing_sats = new_backing;
 
             let payment_id_str = payment_id.to_string();
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_usd_from_bitcoin_conversion() {
-        let btc = Bitcoin::from_sats(100_000_000); // 1 BTC
+        let btc = Bitcoin::from_sats(SATS_IN_BTC); // 1 BTC
         let price = 50_000.0;
         let usd = USD::from_bitcoin(btc, price);
         assert_eq!(usd.0, 50_000.0);
@@ -584,7 +584,7 @@ mod tests {
     // ================================================================
     fn test_sc(expected_usd: f64, price: f64, receiver_sats: u64) -> StableChannel {
         let backing = if price > 0.0 {
-            (expected_usd / price * 100_000_000.0) as u64
+            (expected_usd / price * SATS_IN_BTC as f64) as u64
         } else {
             0
         };
@@ -635,7 +635,7 @@ mod tests {
         );
         assert!((sc.expected_usd.0 - 900.0).abs() < 0.01);
         // backing_sats should match new expected_usd
-        let expected_backing = (900.0 / 100_000.0 * 100_000_000.0) as u64;
+        let expected_backing = (900.0 / 100_000.0 * SATS_IN_BTC as f64) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
     }
 
@@ -794,7 +794,7 @@ mod tests {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         apply_trade(&mut sc, 300.0, 100_000.0);
         assert_eq!(sc.expected_usd.0, 300.0);
-        let expected_backing = (300.0 / 100_000.0 * 100_000_000.0) as u64;
+        let expected_backing = (300.0 / 100_000.0 * SATS_IN_BTC as f64) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
     }
 
@@ -804,7 +804,7 @@ mod tests {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         apply_trade(&mut sc, 700.0, 100_000.0);
         assert_eq!(sc.expected_usd.0, 700.0);
-        let expected_backing = (700.0 / 100_000.0 * 100_000_000.0) as u64;
+        let expected_backing = (700.0 / 100_000.0 * SATS_IN_BTC as f64) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
     }
 
@@ -831,7 +831,7 @@ mod tests {
         // backing should be half the sats
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         apply_trade(&mut sc, 500.0, 200_000.0);
-        let expected_backing = (500.0 / 200_000.0 * 100_000_000.0) as u64; // 250k
+        let expected_backing = (500.0 / 200_000.0 * SATS_IN_BTC as f64) as u64; // 250k
         assert_eq!(sc.backing_sats, expected_backing);
         assert_eq!(expected_backing, 250_000);
     }
@@ -889,7 +889,7 @@ mod tests {
         // Sell BTC: increase stable from $500 to $800
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         apply_trade(&mut sc, 800.0, 100_000.0);
-        let expected_backing = (800.0 / 100_000.0 * 100_000_000.0) as u64;
+        let expected_backing = (800.0 / 100_000.0 * SATS_IN_BTC as f64) as u64;
         assert_eq!(sc.native_channel_btc.sats, 1_000_000 - expected_backing);
     }
 

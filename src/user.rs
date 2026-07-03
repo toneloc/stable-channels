@@ -678,7 +678,7 @@ impl UserApp {
             let mut sc = app.stable_channel.lock().unwrap();
             if let Some(payment_info) = stable::check_stability(&app.node, &mut sc, btc_price) {
                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
-                let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
+                let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64)
                     * payment_info.btc_price;
                 let _ = app.db.record_payment(
                     Some(&payment_info.payment_id),
@@ -749,7 +749,7 @@ impl UserApp {
                             {
                                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
                                 let amount_usd =
-                                    (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
+                                    (payment_info.amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64)
                                         * payment_info.btc_price;
                                 let _ = db.record_payment(
                                     Some(&payment_info.payment_id),
@@ -800,7 +800,7 @@ impl UserApp {
                         if current_onchain > prev_onchain_sats && !is_splicing {
                             let deposit_sats = current_onchain - prev_onchain_sats;
                             let amount_usd = if price > 0.0 {
-                                Some(deposit_sats as f64 / 100_000_000.0 * price)
+                                Some(deposit_sats as f64 / SATS_IN_BTC as f64 * price)
                             } else {
                                 None
                             };
@@ -1035,7 +1035,7 @@ impl UserApp {
             self.status_message = "Enter an amount in BTC".to_string();
             return;
         }
-        let amount_sats = (btc_val * 100_000_000.0) as u64;
+        let amount_sats = (btc_val * SATS_IN_BTC as f64) as u64;
 
         let msats = amount_sats * 1000;
         match self.node.bolt11_payment().receive(
@@ -1423,7 +1423,7 @@ impl UserApp {
 
                             // Splice-first: withdraw from channel via splice_out
                             let amount_sats = match self.send_amount.trim().parse::<f64>() {
-                                Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
+                                Ok(btc) if btc > 0.0 => (btc * SATS_IN_BTC as f64) as u64,
                                 _ => {
                                     self.send_error = "Enter a valid amount in BTC".to_string();
                                     return false;
@@ -1478,7 +1478,7 @@ impl UserApp {
                                     self.show_toast("Withdrawal started", "-");
                                     self.status_message = format!(
                                         "Splice-out: {:.8} BTC",
-                                        amount_sats as f64 / 100_000_000.0
+                                        amount_sats as f64 / SATS_IN_BTC as f64
                                     );
                                     self.send_input.clear();
                                     self.send_amount.clear();
@@ -1494,7 +1494,7 @@ impl UserApp {
                         } else {
                             // No channel — fallback to regular onchain send
                             let amount_sats = match self.send_amount.trim().parse::<f64>() {
-                                Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
+                                Ok(btc) if btc > 0.0 => (btc * SATS_IN_BTC as f64) as u64,
                                 _ if self.send_all => {
                                     self.node.list_balances().spendable_onchain_balance_sats
                                 }
@@ -1607,8 +1607,8 @@ impl UserApp {
         }
         self.last_known_total_sats = total_sats_now;
 
-        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / SATS_IN_BTC as f64;
+        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / SATS_IN_BTC as f64;
 
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
@@ -1886,7 +1886,7 @@ impl UserApp {
         // Calculate fee in msats (sent to LSP as keysend amount)
         let fee_msats = if price > 0.0 && fee_usd > 0.0 {
             let fee_btc = fee_usd / price;
-            let fee_sats = (fee_btc * 100_000_000.0) as u64;
+            let fee_sats = (fee_btc * SATS_IN_BTC as f64) as u64;
             fee_sats * 1000 // convert to msats
         } else {
             1 // minimum 1 msat if no fee
@@ -2073,7 +2073,7 @@ impl UserApp {
             // Otherwise default to 0 (will be set on next trade)
             let backing_sats = if sc.latest_price > 0.0 && expected_usd > 0.0 {
                 let btc_amount = expected_usd / sc.latest_price;
-                (btc_amount * 100_000_000.0) as u64
+                (btc_amount * SATS_IN_BTC as f64) as u64
             } else {
                 0
             };
@@ -2368,7 +2368,7 @@ impl UserApp {
                             let sc = self.stable_channel.lock().unwrap();
                             let price = sc.latest_price;
                             let usd = if price > 0.0 {
-                                Some((amount_msat as f64 / 1000.0 / 100_000_000.0) * price)
+                                Some((amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64) * price)
                             } else {
                                 None
                             };
@@ -2730,7 +2730,7 @@ impl UserApp {
                             };
                             let amount_msat = splice.amount_sats * 1000;
                             let amount_usd =
-                                btc_price.map(|p| splice.amount_sats as f64 / 100_000_000.0 * p);
+                                btc_price.map(|p| splice.amount_sats as f64 / SATS_IN_BTC as f64 * p);
                             let txid_str = new_funding_txo.txid.to_string();
                             let _ = self.db.record_payment(
                                 Some(&txid_str),
@@ -3023,7 +3023,7 @@ impl UserApp {
 
     /// Canonical Bitcoin display: "0.00 100 000 BTC" for any sat value.
     fn format_sats_as_btc(sats: u64) -> String {
-        format!("{} BTC", Self::format_btc_spaced(sats as f64 / 100_000_000.0))
+        format!("{} BTC", Self::format_btc_spaced(sats as f64 / SATS_IN_BTC as f64))
     }
 
     /// Canonical Bitcoin display for msat values: same "0.00 000 001 BTC" shape.
@@ -3070,7 +3070,7 @@ impl UserApp {
             if !btc.is_finite() || btc < 0.0 || btc > 21_000_000.0 {
                 return None;
             }
-            Some((btc * 100_000_000.0).round() as u64)
+            Some((btc * SATS_IN_BTC as f64).round() as u64)
         } else {
             cleaned.parse::<u64>().ok()
         }
@@ -3611,7 +3611,7 @@ impl UserApp {
                                 let sats = msat / 1000;
                                 ui.add_space(8.0);
                                 if self.btc_price > 0.0 {
-                                    let usd = sats as f64 * self.btc_price / 100_000_000.0;
+                                    let usd = sats as f64 * self.btc_price / SATS_IN_BTC as f64;
                                     ui.label(
                                         egui::RichText::new(Self::format_price(usd))
                                             .size(20.0)
@@ -3858,7 +3858,7 @@ impl UserApp {
                     // Fixed-amount entry, denominated in USD.
                     let price = self.btc_price;
                     let min_usd = if price > 0.0 {
-                        JIT_MIN_SATS as f64 * price / 100_000_000.0
+                        JIT_MIN_SATS as f64 * price / SATS_IN_BTC as f64
                     } else {
                         0.0
                     };
@@ -3904,7 +3904,7 @@ impl UserApp {
                             match Self::parse_usd(&self.jit_amount_input) {
                                 Some(usd) if usd > 0.0 => {
                                     let sats =
-                                        (usd * 100_000_000.0 / price).round() as u64;
+                                        (usd * SATS_IN_BTC as f64 / price).round() as u64;
                                     if sats >= JIT_MIN_SATS {
                                         self.status_message = format!(
                                             "Creating invoice for {}...",
@@ -4356,7 +4356,7 @@ impl UserApp {
             } else {
                 pending_sweep_sats + total_onchain_sats
             };
-            let total_btc = total_sats as f64 / 100_000_000.0;
+            let total_btc = total_sats as f64 / SATS_IN_BTC as f64;
             let total_usd = total_btc * btc_price;
 
             // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
@@ -4792,7 +4792,7 @@ impl UserApp {
                     .auto_splice_in_progress
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let total_visible_sats = total_onchain_sats + pending_sweep_sats;
-                let total_visible_btc = total_visible_sats as f64 / 100_000_000.0;
+                let total_visible_btc = total_visible_sats as f64 / SATS_IN_BTC as f64;
 
                 ui.add_space(8.0);
 
@@ -7149,7 +7149,7 @@ impl UserApp {
                     } else {
                         balances.total_onchain_balance_sats
                     };
-                    let max_btc = max_sats as f64 / 100_000_000.0;
+                    let max_btc = max_sats as f64 / SATS_IN_BTC as f64;
                     self.send_amount = format!("{:.8}", max_btc);
                     if price > 0.0 {
                         self.send_amount_usd = format!("{:.2}", max_btc * price);
@@ -7236,7 +7236,7 @@ impl UserApp {
                 match self.cached_fee_rate {
                     Some(rate) => {
                         let estimated_fee = rate * vbytes;
-                        let fee_btc = estimated_fee as f64 / 100_000_000.0;
+                        let fee_btc = estimated_fee as f64 / SATS_IN_BTC as f64;
                         format!("Estimated fee: ~{:.8} BTC ({} sat/vB)", fee_btc, rate)
                     }
                     None => "Estimating fee...".to_string(),
@@ -7251,7 +7251,7 @@ impl UserApp {
                 match Bolt11Invoice::from_str(invoice_str) {
                     Ok(invoice) => {
                         if let Some(amount_msat) = invoice.amount_milli_satoshis() {
-                            let amount_btc = amount_msat as f64 / 1000.0 / 100_000_000.0;
+                            let amount_btc = amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64;
                             let fee_btc = amount_btc / 100.0;
                             let price = self.stable_channel.lock().unwrap().latest_price;
                             let usd_str = if price > 0.0 {
@@ -7507,7 +7507,7 @@ impl UserApp {
                             self.lightning_receive_error = "Please enter an amount.".to_string();
                         } else {
                             self.lightning_receive_error.clear();
-                            let sats = (btc_val * 100_000_000.0) as u64;
+                            let sats = (btc_val * SATS_IN_BTC as f64) as u64;
                             self.generate_jit_ln_invoice(ctx, Some(sats));
                         }
                     }

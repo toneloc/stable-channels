@@ -1,6 +1,7 @@
 mod common;
 
 use ldk_node::bitcoin::Amount;
+use stable_channels::constants::SATS_IN_BTC;
 use stable_channels::stable::{
     apply_trade, check_stability, reconcile_forwarded, reconcile_incoming, reconcile_outgoing,
     update_balances,
@@ -375,7 +376,7 @@ async fn test_multiple_stability_cycles() {
     update_balances(&user_node, &mut user_sc);
     update_balances(&lsp_node, &mut lsp_sc);
     // Reset backing_sats to new equilibrium (as the real app does)
-    user_sc.backing_sats = (expected_usd / price1 * 100_000_000.0) as u64;
+    user_sc.backing_sats = (expected_usd / price1 * SATS_IN_BTC as f64) as u64;
     lsp_sc.backing_sats = user_sc.backing_sats;
 
     print_stable_channel("User (after cycle 1)", &user_sc);
@@ -395,7 +396,7 @@ async fn test_multiple_stability_cycles() {
 
     update_balances(&user_node, &mut user_sc);
     update_balances(&lsp_node, &mut lsp_sc);
-    user_sc.backing_sats = (expected_usd / price2 * 100_000_000.0) as u64;
+    user_sc.backing_sats = (expected_usd / price2 * SATS_IN_BTC as f64) as u64;
     lsp_sc.backing_sats = user_sc.backing_sats;
 
     print_stable_channel("User (after cycle 2)", &user_sc);
@@ -709,7 +710,7 @@ async fn test_outgoing_payment_deducts_from_stable() {
 
     // --- Verify the deduction ---
     let expected_usd_after = user_sc.expected_usd.0;
-    let expected_deduction_usd = payment_sats as f64 / 100_000_000.0 * price; // $100
+    let expected_deduction_usd = payment_sats as f64 / SATS_IN_BTC as f64 * price; // $100
 
     println!(
         "\n[verify] Expected USD after reconciliation: ${:.2}",
@@ -742,7 +743,7 @@ async fn test_outgoing_payment_deducts_from_stable() {
     );
 
     // After reconciliation, backing_sats should match the new expected_usd
-    let expected_backing = (expected_usd_after / price * 100_000_000.0) as u64;
+    let expected_backing = (expected_usd_after / price * SATS_IN_BTC as f64) as u64;
     assert_eq!(
         user_sc.backing_sats, expected_backing,
         "Backing sats should match new expected_usd / price"
@@ -978,7 +979,7 @@ async fn test_buy_btc_reduces_stable_position() {
 
     // Send the fee as keysend to LSP (this is what send_trade does)
     let fee_btc = fee_usd / price;
-    let fee_sats = (fee_btc * 100_000_000.0) as u64;
+    let fee_sats = (fee_btc * SATS_IN_BTC as f64) as u64;
     let fee_msats = (fee_sats * 1000).max(1);
 
     user_node
@@ -1013,7 +1014,7 @@ async fn test_buy_btc_reduces_stable_position() {
     );
     assert_eq!(
         user_sc.backing_sats,
-        (300.0 / price * 100_000_000.0) as u64,
+        (300.0 / price * SATS_IN_BTC as f64) as u64,
         "Backing sats should match $300 at $100k"
     );
 
@@ -1062,7 +1063,7 @@ async fn test_buy_btc_reduces_stable_position() {
     // The payment should be proportional to $300 position (not the old $500)
     // At $100k, 300k backing sats. At $90k, those sats are worth $270. Drift = $30.
     // Expected payment: $30 / $90k * 1e8 * 1000 = ~33,333,333 msats
-    let expected_payment_msats = (30.0 / drop_price * 100_000_000.0 * 1000.0) as u64;
+    let expected_payment_msats = (30.0 / drop_price * SATS_IN_BTC as f64 * 1000.0) as u64;
     let tolerance = expected_payment_msats / 10; // 10% tolerance
     assert!(
         payment_info.amount_msat > expected_payment_msats - tolerance
@@ -1185,7 +1186,7 @@ async fn test_sell_btc_increases_stable_position() {
 
     // Send the fee as keysend to LSP
     let fee_btc = fee_usd / price;
-    let fee_sats = (fee_btc * 100_000_000.0) as u64;
+    let fee_sats = (fee_btc * SATS_IN_BTC as f64) as u64;
     let fee_msats = (fee_sats * 1000).max(1);
 
     user_node
@@ -1219,7 +1220,7 @@ async fn test_sell_btc_increases_stable_position() {
     );
     assert_eq!(
         user_sc.backing_sats,
-        (498.0 / price * 100_000_000.0) as u64,
+        (498.0 / price * SATS_IN_BTC as f64) as u64,
         "Backing sats should match $498 at $100k"
     );
 
@@ -1273,8 +1274,8 @@ async fn test_sell_btc_increases_stable_position() {
 
     // At $100k backing had 498k sats. At $110k, those sats worth $547.80. Drift = $49.80.
     // Expected payment: $49.80 / $110k * 1e8 * 1000 = ~45,272,727 msats
-    let drift_usd = (498_000.0 / 100_000_000.0 * rise_price) - 498.0;
-    let expected_payment_msats = (drift_usd / rise_price * 100_000_000.0 * 1000.0) as u64;
+    let drift_usd = (498_000.0 / SATS_IN_BTC as f64 * rise_price) - 498.0;
+    let expected_payment_msats = (drift_usd / rise_price * SATS_IN_BTC as f64 * 1000.0) as u64;
     let tolerance = expected_payment_msats / 5; // 20% tolerance (fees may vary)
     assert!(
         payment_info.amount_msat > expected_payment_msats.saturating_sub(tolerance)
@@ -1302,7 +1303,7 @@ async fn test_sell_btc_increases_stable_position() {
 
     // Send fee
     let fee2_btc = fee2 / rise_price;
-    let fee2_sats = (fee2_btc * 100_000_000.0) as u64;
+    let fee2_sats = (fee2_btc * SATS_IN_BTC as f64) as u64;
     let fee2_msats = (fee2_sats * 1000).max(1);
 
     user_node
@@ -1500,7 +1501,7 @@ async fn test_bolt11_receive_preserves_stable() {
 
     // Native BTC should have increased
     let native_usd_after = user_sc.stable_receiver_usd.0 - user_sc.expected_usd.0;
-    let native_usd_before = user_sats_before as f64 / 100_000_000.0 * price - expected_usd;
+    let native_usd_before = user_sats_before as f64 / SATS_IN_BTC as f64 * price - expected_usd;
     println!(
         "[verify] Native BTC: ${:.2} -> ${:.2}",
         native_usd_before, native_usd_after
@@ -1646,7 +1647,7 @@ async fn test_keysend_send_deducts_from_stable() {
     print_stable_channel("User (after keysend send)", &user_sc);
 
     // Verify deduction
-    let expected_deduction_usd = send_sats as f64 / 100_000_000.0 * price; // ~$75
+    let expected_deduction_usd = send_sats as f64 / SATS_IN_BTC as f64 * price; // ~$75
     let actual_deduction = expected_usd - user_sc.expected_usd.0;
     println!(
         "\n[verify] Sats spent: {} (expected ~{})",
