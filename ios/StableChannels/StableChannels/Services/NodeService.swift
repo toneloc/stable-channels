@@ -7,6 +7,7 @@ import LDKNode
 final class EventAckToken {
     var shouldAck = true
 }
+
 protocol NodeServiceProtocol {
     var node: Node? { get }
     var isRunning: Bool { get }

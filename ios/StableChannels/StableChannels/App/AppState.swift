@@ -1143,7 +1143,8 @@ class AppState {
 
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
-        let isStabilityPayment = customRecords.contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
+        let isStabilityPayment = customRecords
+            .contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
         let paymentType = isStabilityPayment ? "stability" : "lightning"
         let backingDelta: Int64? = isStabilityPayment ? Int64(amountMsat / 1000) : nil
 
@@ -2135,7 +2136,7 @@ class AppState {
             guard channel.isChannelReady, let fundingTxo = channel.fundingTxo else {
                 return false
             }
-            return "\(fundingTxo.txid)" == txid
+            return txid == "\(fundingTxo.txid)"
         }
     }
 

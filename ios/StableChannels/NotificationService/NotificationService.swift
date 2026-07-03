@@ -304,7 +304,8 @@ class NotificationService: UNNotificationServiceExtension {
                         nseLog("Ignoring sub-sat non-control payment")
                         continue eventLoop
                     }
-                    let isStabilityPayment = customRecords.contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
+                    let isStabilityPayment = customRecords
+                        .contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
                     if isStabilityPayment {
                         let amountSats = amountMsat / 1000
                         let result = recordPaymentAndMaybeUpdateBackingInDB(
@@ -670,7 +671,11 @@ class NotificationService: UNNotificationServiceExtension {
             case .inserted, .duplicate:
                 clearPendingSend(dbPath: dbPath)
                 content.title = "Stability Payment Sent"
-                content.body = String(format: "Sent %d sats ($%.2f) to maintain stable position", amountSats, dollarsAbs)
+                content.body = String(
+                    format: "Sent %d sats ($%.2f) to maintain stable position",
+                    amountSats,
+                    dollarsAbs
+                )
                 UserDefaults(suiteName: Self.appGroup)?.set(false, forKey: "pending_push_payment")
             case .failed, .missingChannelRow:
                 nseLog("Payment sent but DB persistence failed — durable guard will block resends")
@@ -693,14 +698,14 @@ class NotificationService: UNNotificationServiceExtension {
     // MARK: - Pending Stability Send (durable cross-process marker in stablechannels.db)
 
     private static let pendingSendTableSQL = """
-        CREATE TABLE IF NOT EXISTS pending_stability_send (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            payment_id TEXT NOT NULL,
-            amount_msat INTEGER NOT NULL,
-            price REAL NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-        """
+    CREATE TABLE IF NOT EXISTS pending_stability_send (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        payment_id TEXT NOT NULL,
+        amount_msat INTEGER NOT NULL,
+        price REAL NOT NULL,
+        created_at INTEGER NOT NULL
+    )
+    """
 
     /// Open stablechannels.db for pending-send operations with the busy timeout
     /// set and the marker table guaranteed to exist (either process may create it).
@@ -732,7 +737,8 @@ class NotificationService: UNNotificationServiceExtension {
             return false
         }
         var checkStmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT id FROM pending_stability_send WHERE id = 1", -1, &checkStmt, nil) == SQLITE_OK else {
+        guard sqlite3_prepare_v2(db, "SELECT id FROM pending_stability_send WHERE id = 1", -1, &checkStmt, nil) ==
+            SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return false
         }
@@ -767,7 +773,8 @@ class NotificationService: UNNotificationServiceExtension {
         defer { sqlite3_close(db) }
 
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1", -1, &stmt, nil) == SQLITE_OK else {
+        guard sqlite3_prepare_v2(db, "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1", -1, &stmt, nil) ==
+            SQLITE_OK else {
             return false
         }
         sqlite3_bind_text(stmt, 1, (paymentId as NSString).utf8String, -1, nil)
@@ -1059,7 +1066,8 @@ class NotificationService: UNNotificationServiceExtension {
 
         if let pid = paymentId, !pid.isEmpty {
             var checkStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT id FROM payments WHERE payment_id = ?", -1, &checkStmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(db, "SELECT id FROM payments WHERE payment_id = ?", -1, &checkStmt, nil) ==
+                SQLITE_OK {
                 sqlite3_bind_text(checkStmt, 1, (pid as NSString).utf8String, -1, nil)
                 let alreadyExists = sqlite3_step(checkStmt) == SQLITE_ROW
                 sqlite3_finalize(checkStmt)
@@ -1078,7 +1086,11 @@ class NotificationService: UNNotificationServiceExtension {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return .failed
         }
-        if let pid = paymentId { sqlite3_bind_text(stmt, 1, (pid as NSString).utf8String, -1, nil) } else { sqlite3_bind_null(stmt, 1) }
+        if let pid = paymentId { sqlite3_bind_text(stmt, 1, (pid as NSString).utf8String, -1, nil) }
+        else { sqlite3_bind_null(
+            stmt,
+            1
+        ) }
         sqlite3_bind_text(stmt, 2, (paymentType as NSString).utf8String, -1, nil)
         sqlite3_bind_text(stmt, 3, (direction as NSString).utf8String, -1, nil)
         sqlite3_bind_int64(stmt, 4, Int64(amountMsat))
@@ -1100,7 +1112,13 @@ class NotificationService: UNNotificationServiceExtension {
                 return .failed
             }
             var selectStmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "SELECT stable_sats FROM channels WHERE user_channel_id = ?", -1, &selectStmt, nil) == SQLITE_OK else {
+            guard sqlite3_prepare_v2(
+                db,
+                "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                -1,
+                &selectStmt,
+                nil
+            ) == SQLITE_OK else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .failed
             }
@@ -1142,7 +1160,9 @@ class NotificationService: UNNotificationServiceExtension {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return .failed
         }
-        nseLog("recordPaymentAndMaybeBacking: saved \(direction) \(amountMsat) msat (\(String(format: "%.2f", amountUSD)) USD)")
+        nseLog(
+            "recordPaymentAndMaybeBacking: saved \(direction) \(amountMsat) msat (\(String(format: "%.2f", amountUSD)) USD)"
+        )
         return .inserted
     }
 
