@@ -46,7 +46,6 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .navigationBarsPadding()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
