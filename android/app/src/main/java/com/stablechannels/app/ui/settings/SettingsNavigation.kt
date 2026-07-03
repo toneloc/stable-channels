@@ -10,6 +10,9 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.navigation.compose.currentBackStackEntryAsState
 import com.stablechannels.app.AppState
 
 sealed class SettingsRoute(val route: String) {
@@ -28,8 +31,15 @@ sealed class SettingsRoute(val route: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsNavHost(appState: AppState, modifier: Modifier = Modifier) {
+fun SettingsNavHost(appState: AppState, onShowBottomBar: (Boolean) -> Unit, modifier: Modifier = Modifier) {
     val navController = rememberNavController()
+    val currentBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = currentBackStackEntry?.destination?.route
+    val isHub = currentRoute == SettingsRoute.Hub.route || currentRoute == null
+
+    LaunchedEffect(isHub) {
+        onShowBottomBar(isHub)
+    }
 
     NavHost(
         navController = navController,

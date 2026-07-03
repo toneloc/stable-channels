@@ -8,6 +8,9 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowCompat
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -445,9 +448,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            modifier = Modifier.fillMaxHeight(0.9f)
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
         ) {
-            SendScreen(appState) { showSend = false }
+            val view = LocalView.current
+            DisposableEffect(view) {
+                var context = view.context
+                var dialog: android.app.Dialog? = null
+                while (context is android.content.ContextWrapper) {
+                    if (context is android.app.Dialog) {
+                        dialog = context
+                        break
+                    }
+                    context = context.baseContext
+                }
+                val window = dialog?.window
+                if (window != null) {
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    window.navigationBarColor = android.graphics.Color.TRANSPARENT
+                    window.statusBarColor = android.graphics.Color.TRANSPARENT
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        window.isNavigationBarContrastEnforced = false
+                    }
+                    window.setLayout(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+                onDispose {}
+            }
+            Box(modifier = Modifier.fillMaxHeight(0.9f)) {
+                SendScreen(appState) { showSend = false }
+            }
         }
     }
     if (showReceive) {
@@ -455,9 +486,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showReceive = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            modifier = Modifier.fillMaxHeight(0.9f)
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
         ) {
-            ReceiveScreen(appState) { showReceive = false }
+            val view = LocalView.current
+            DisposableEffect(view) {
+                var context = view.context
+                var dialog: android.app.Dialog? = null
+                while (context is android.content.ContextWrapper) {
+                    if (context is android.app.Dialog) {
+                        dialog = context
+                        break
+                    }
+                    context = context.baseContext
+                }
+                val window = dialog?.window
+                if (window != null) {
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    window.navigationBarColor = android.graphics.Color.TRANSPARENT
+                    window.statusBarColor = android.graphics.Color.TRANSPARENT
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        window.isNavigationBarContrastEnforced = false
+                    }
+                    window.setLayout(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+                onDispose {}
+            }
+            Box(modifier = Modifier.fillMaxHeight(0.9f)) {
+                ReceiveScreen(appState) { showReceive = false }
+            }
         }
     }
     if (showBuy) {
@@ -465,9 +524,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showBuy = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            modifier = Modifier.fillMaxHeight(0.9f)
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
         ) {
-            BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) { showBuy = false; prefillTradeAmount = 0.0 }
+            val view = LocalView.current
+            DisposableEffect(view) {
+                var context = view.context
+                var dialog: android.app.Dialog? = null
+                while (context is android.content.ContextWrapper) {
+                    if (context is android.app.Dialog) {
+                        dialog = context
+                        break
+                    }
+                    context = context.baseContext
+                }
+                val window = dialog?.window
+                if (window != null) {
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    window.navigationBarColor = android.graphics.Color.TRANSPARENT
+                    window.statusBarColor = android.graphics.Color.TRANSPARENT
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        window.isNavigationBarContrastEnforced = false
+                    }
+                    window.setLayout(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+                onDispose {}
+            }
+            Box(modifier = Modifier.fillMaxHeight(0.9f)) {
+                BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) { showBuy = false; prefillTradeAmount = 0.0 }
+            }
         }
     }
     if (showSell) {
@@ -475,9 +562,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showSell = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            modifier = Modifier.fillMaxHeight(0.9f)
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
         ) {
-            SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }
+            val view = LocalView.current
+            DisposableEffect(view) {
+                var context = view.context
+                var dialog: android.app.Dialog? = null
+                while (context is android.content.ContextWrapper) {
+                    if (context is android.app.Dialog) {
+                        dialog = context
+                        break
+                    }
+                    context = context.baseContext
+                }
+                val window = dialog?.window
+                if (window != null) {
+                    WindowCompat.setDecorFitsSystemWindows(window, false)
+                    window.navigationBarColor = android.graphics.Color.TRANSPARENT
+                    window.statusBarColor = android.graphics.Color.TRANSPARENT
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        window.isNavigationBarContrastEnforced = false
+                    }
+                    window.setLayout(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }
+                onDispose {}
+            }
+            Box(modifier = Modifier.fillMaxHeight(0.9f)) {
+                SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }
+            }
         }
     }
 }

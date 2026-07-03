@@ -62,6 +62,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -168,12 +169,13 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
+                Spacer(Modifier.height(12.dp))
                 Text(
                     "$${Constants.MAX_CHANNEL_USD.toInt()} Maximum",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
             }
 
             Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
