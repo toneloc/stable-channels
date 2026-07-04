@@ -11,7 +11,7 @@ import SQLite3
 class NotificationService: UNNotificationServiceExtension {
     private static let appGroup = "group.com.stablechannels.app"
     private static let lspPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
-    private static let lspAddress = "ec2-34-198-44-89.compute-1.amazonaws.com:9735"
+    private static let lspAddress = "lsp.stablechannels.com:9735"
     private static let stableChannelTLVType: UInt64 = 13_377_331
     private static let syncMessageType = "SYNC_V1"
     private static let satsInBTC: Double = 100_000_000.0
