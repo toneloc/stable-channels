@@ -286,7 +286,34 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let client = client.clone();
 			self.state.tasks.ldk_log = Some(self.spawn_task(async move {
-				client.ldk_log(LogRequest { max_lines }).await.map_err(|e| e.to_string())
+				client.ldk_log(LogRequest { max_lines, filter: String::new(), full: false }).await.map_err(|e| e.to_string())
+			}));
+		}
+	}
+
+	pub fn fetch_audit_log(&mut self) {
+		if self.state.tasks.audit_log.is_some() {
+			return;
+		}
+		let max_lines = self.state.forms.audit_log.max_lines.parse::<u32>().unwrap_or(200);
+		if let Some(client) = &self.state.client {
+			let client = client.clone();
+			self.state.tasks.audit_log = Some(self.spawn_task(async move {
+				client.audit_log(LogRequest { max_lines, filter: String::new(), full: false }).await.map_err(|e| e.to_string())
+			}));
+		}
+	}
+
+	/// Complete history for the filtered id, oldest-first (server `full` mode, ignores max_lines).
+	pub fn fetch_channel_history(&mut self) {
+		if self.state.tasks.channel_history.is_some() {
+			return;
+		}
+		let filter = self.state.forms.channel_history.filter.clone();
+		if let Some(client) = &self.state.client {
+			let client = client.clone();
+			self.state.tasks.channel_history = Some(self.spawn_task(async move {
+				client.audit_log(LogRequest { max_lines: 0, filter, full: true }).await.map_err(|e| e.to_string())
 			}));
 		}
 	}
@@ -1058,6 +1085,14 @@ impl LspServerApp {
 			self.state.ldk_log = Some(v);
 		});
 
+		poll_task!(self.state.tasks.audit_log => |v| {
+			self.state.audit_log = Some(v);
+		});
+
+		poll_task!(self.state.tasks.channel_history => |v| {
+			self.state.channel_history = Some(v);
+		});
+
 		poll_task!(self.state.tasks.payment_details => |v| {
 			self.state.payment_details = Some(v);
 		});
@@ -1356,7 +1391,7 @@ impl App for LspServerApp {
 				ActiveTab::StableChannels => ui::stable_channels::render(ui, self),
 				ActiveTab::Tools => ui::tools::render(ui, self),
 				ActiveTab::NetworkGraph => ui::network_graph::render(ui, self),
-				ActiveTab::Logs => ui::ldk_log::render(ui, self),
+				ActiveTab::Logs => ui::logs::render(ui, self),
 				ActiveTab::Settings => ui::settings::render(ui, self),
 			});
 		});

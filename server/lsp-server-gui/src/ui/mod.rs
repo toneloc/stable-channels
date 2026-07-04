@@ -1,8 +1,12 @@
+pub mod audit_log;
+pub mod channel_history;
 pub mod balances;
 pub mod channels;
 pub mod connection;
 pub mod forwarded_payments;
 pub mod ldk_log;
+pub mod log_view;
+pub mod logs;
 pub mod lightning;
 pub mod network_graph;
 pub mod node_info;

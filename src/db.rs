@@ -40,6 +40,22 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// Stable dedup key for a forwarded payment (the proto gives forwards no unique id).
+pub fn forward_fingerprint(
+    prev_channel_id: &str,
+    next_channel_id: &str,
+    outbound_amount_msat: Option<u64>,
+    total_fee_msat: Option<u64>,
+) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        prev_channel_id,
+        next_channel_id,
+        outbound_amount_msat.unwrap_or(0),
+        total_fee_msat.unwrap_or(0)
+    )
+}
+
 impl Database {
     /// Open or create the database at the given directory path.
     pub fn open(data_dir: &Path) -> SqliteResult<Self> {
@@ -249,6 +265,18 @@ impl Database {
             [],
         )?;
 
+        // Migration: add user_channel_id column to settlement_payments for outcome-event keying
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN user_channel_id TEXT",
+            [],
+        ); // Ignore error if column already exists
+
+        // Forwarded-payment dedup: tracks fingerprints of forwards already audited (live or backfilled)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS forwarded_seen (fingerprint TEXT PRIMARY KEY)",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -370,6 +398,18 @@ impl Database {
             params![user_channel_id],
         )?;
         Ok(())
+    }
+
+    /// Resolve user_channel_id from a (possibly closed) channel_id.
+    pub fn get_user_channel_id_by_channel_id(&self, channel_id: &str) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT user_channel_id FROM channels WHERE channel_id = ?1")?;
+        let mut rows = stmt.query(params![channel_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get::<_, Option<String>>(0)?)
+        } else {
+            Ok(None)
+        }
     }
 
     /// Load channel settings by user_channel_id (stable across splices)
@@ -1082,6 +1122,46 @@ impl Database {
         Ok(())
     }
 
+    /// Like `record_settlement` but also records the `user_channel_id` for outcome-event keying.
+    pub fn record_settlement_with_channel(
+        &self,
+        payment_id: &str,
+        kind: &str,
+        user_channel_id: &str,
+    ) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO settlement_payments (payment_id, kind, user_channel_id)
+             VALUES (?1, ?2, ?3)",
+            params![payment_id, kind, user_channel_id],
+        )?;
+        Ok(())
+    }
+
+    /// Record a forward's fingerprint. Returns true if newly inserted (not seen before).
+    pub fn record_forwarded_seen(&self, fingerprint: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO forwarded_seen (fingerprint) VALUES (?1)",
+            params![fingerprint],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Return the stored `user_channel_id` for a payment_id, or None if absent/NULL/not found.
+    pub fn get_settlement_channel(&self, payment_id: &str) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT user_channel_id FROM settlement_payments WHERE payment_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![payment_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get::<_, Option<String>>(0)?)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// List recorded settlements as (payment_id, kind) pairs, oldest first.
     pub fn list_settlements(&self) -> SqliteResult<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
@@ -1193,6 +1273,29 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list.contains(&("pay_a".to_string(), "stability".to_string())));
         assert!(list.contains(&("pay_b".to_string(), "sync".to_string())));
+    }
+
+    #[test]
+    fn test_settlement_channel_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        // with-channel variant stores and retrieves user_channel_id
+        db.record_settlement_with_channel("pmt1", "stability", "12345").unwrap();
+        assert_eq!(db.get_settlement_channel("pmt1").unwrap(), Some("12345".to_string()));
+        // absent key returns None
+        assert_eq!(db.get_settlement_channel("absent").unwrap(), None);
+        // plain record_settlement leaves user_channel_id as NULL (returns None)
+        db.record_settlement("pmt2", "sync").unwrap();
+        assert_eq!(db.get_settlement_channel("pmt2").unwrap(), None);
+    }
+
+    #[test]
+    fn forwarded_seen_dedups_and_fingerprint_is_stable() {
+        let db = Database::open_in_memory().unwrap();
+        let fp = forward_fingerprint("aa", "bb", Some(1000), Some(7));
+        assert_eq!(fp, forward_fingerprint("aa", "bb", Some(1000), Some(7)));
+        assert_ne!(fp, forward_fingerprint("aa", "bb", Some(1001), Some(7)));
+        assert!(db.record_forwarded_seen(&fp).unwrap());   // first insert -> true
+        assert!(!db.record_forwarded_seen(&fp).unwrap());  // repeat -> false
     }
 
     #[test]
@@ -1515,5 +1618,13 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let result = db.load_channel("nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn user_channel_id_by_channel_id_roundtrips() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("chan_x", "42", 0.0, 0, 0, None).unwrap();
+        assert_eq!(db.get_user_channel_id_by_channel_id("chan_x").unwrap(), Some("42".to_string()));
+        assert_eq!(db.get_user_channel_id_by_channel_id("missing").unwrap(), None);
     }
 }

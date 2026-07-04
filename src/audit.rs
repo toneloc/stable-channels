@@ -1,6 +1,20 @@
 use serde_json::Value;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::OnceLock;
+
+static CAPTURE_ON: AtomicBool = AtomicBool::new(false);
+static CAPTURE: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new());
+
+pub fn enable_test_capture() {
+    CAPTURE.lock().unwrap().clear();
+    CAPTURE_ON.store(true, Ordering::SeqCst);
+}
+pub fn disable_test_capture() { CAPTURE_ON.store(false, Ordering::SeqCst); }
+pub fn drain_test_capture() -> Vec<(String, Value)> {
+    std::mem::take(&mut *CAPTURE.lock().unwrap())
+}
 
 static AUDIT_LOG_PATH: OnceLock<String> = OnceLock::new();
 
@@ -13,6 +27,9 @@ pub fn get_audit_log_path() -> Option<&'static str> {
 }
 
 pub fn audit_event(event: &str, data: Value) {
+    if CAPTURE_ON.load(Ordering::SeqCst) {
+        CAPTURE.lock().unwrap().push((event.to_owned(), data.clone()));
+    }
     if let Some(path_str) = get_audit_log_path() {
         let path = std::path::Path::new(path_str);
 
@@ -27,13 +44,15 @@ pub fn audit_event(event: &str, data: Value) {
             "data": data
         });
 
-        // append to file
+        // One write_all is a single atomic O_APPEND; writeln! emits token-by-token so concurrent calls interleave into corrupt lines.
+        let mut line = log_line.to_string();
+        line.push('\n');
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
         {
-            let _ = writeln!(file, "{}", log_line);
+            let _ = file.write_all(line.as_bytes());
         }
     }
 }
@@ -55,6 +74,17 @@ mod tests {
         // due to OnceLock behavior, but we test the function works
         let _path = get_audit_log_path();
         // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_capture_records_events_when_enabled() {
+        enable_test_capture();
+        audit_event("CAP_TEST", serde_json::json!({"user_channel_id": "42"}));
+        let got = drain_test_capture();
+        disable_test_capture();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "CAP_TEST");
+        assert_eq!(got[0].1.get("user_channel_id").unwrap(), "42");
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 	// before we call app.fmt_sats and widgets::id_with_copy below.
 	struct StableRow {
 		channel_id: String,
+		user_channel_id: String,
 		counterparty: String,
 		expected_usd: f64,
 		backing_sats: u64,
@@ -47,6 +48,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 			.iter()
 			.map(|ch| StableRow {
 				channel_id: ch.channel_id.clone(),
+				user_channel_id: ch.user_channel_id.clone(),
 				counterparty: ch.counterparty.clone(),
 				expected_usd: ch.expected_usd,
 				backing_sats: ch.expected_msats / 1000,
@@ -67,6 +69,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						// Headers
 						for h in [
 							"Channel ID",
+							"User Channel ID",
 							"Counterparty",
 							"Stable $",
 							"Backing",
@@ -83,6 +86,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 							widgets::id_with_copy(
 								ui,
 								&row.channel_id,
+								&mut app.state.status_message,
+							);
+
+							// User Channel ID — monospace truncated + copy-to-clipboard
+							widgets::id_with_copy(
+								ui,
+								&row.user_channel_id,
 								&mut app.state.status_message,
 							);
 

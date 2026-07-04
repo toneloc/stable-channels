@@ -76,7 +76,7 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 				ui.label("Filter:");
 				ui.add(
 					egui::TextEdit::singleline(&mut filter)
-						.hint_text("channel id or counterparty"),
+						.hint_text("channel id, user channel id, or counterparty"),
 				);
 				egui::ComboBox::from_id_salt(status_id)
 					.selected_text(channel_status_label(status_filter))
@@ -94,6 +94,7 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 					let r = &rows[i];
 					let matches_text = needle.is_empty()
 						|| r.channel_id.to_lowercase().contains(&needle)
+						|| r.user_channel_id.to_lowercase().contains(&needle)
 						|| r.counterparty_node_id.to_lowercase().contains(&needle);
 					let matches_status = match status_filter {
 						0 => r.is_channel_ready,
@@ -129,6 +130,7 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 					|ui| {
 						// Header (values now carry their own unit).
 						ui.strong("Channel ID");
+						ui.strong("User Channel ID");
 						ui.strong("Counterparty");
 						ui.strong("Funding Tx");
 						if ui.button(sort_header("Capacity", &sort, 0)).clicked() {
@@ -152,6 +154,13 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 							widgets::id_with_copy(
 								ui,
 								&ch.channel_id,
+								&mut app.state.status_message,
+							);
+
+							// User Channel ID
+							widgets::id_with_copy(
+								ui,
+								&ch.user_channel_id,
 								&mut app.state.status_message,
 							);
 

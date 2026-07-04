@@ -184,11 +184,12 @@ pub struct GraphGetNodeForm {
 #[derive(Clone)]
 pub struct LogForm {
 	pub max_lines: String,
+	pub filter: String,
 }
 
 impl Default for LogForm {
 	fn default() -> Self {
-		Self { max_lines: "200".to_string() }
+		Self { max_lines: "200".to_string(), filter: String::new() }
 	}
 }
 
@@ -267,6 +268,8 @@ pub struct Forms {
 	pub graph_get_channel: GraphGetChannelForm,
 	pub graph_get_node: GraphGetNodeForm,
 	pub ldk_log: LogForm,
+	pub audit_log: LogForm,
+	pub channel_history: LogForm,
 	#[allow(dead_code)]
 	pub chain_source: ChainSourceForm,
 }
@@ -340,6 +343,8 @@ pub struct AsyncTasks {
 	pub list_stable_channels: Option<ChannelTaskHandle<ListStableChannelsResponse>>,
 	pub list_settlement_payments: Option<ChannelTaskHandle<ListSettlementPaymentsResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
+	pub audit_log: Option<ChannelTaskHandle<LogResponse>>,
+	pub channel_history: Option<ChannelTaskHandle<LogResponse>>,
 }
 
 impl Default for AsyncTasks {
@@ -378,6 +383,8 @@ impl Default for AsyncTasks {
 			list_stable_channels: None,
 			list_settlement_payments: None,
 			ldk_log: None,
+			audit_log: None,
+			channel_history: None,
 		}
 	}
 }
@@ -417,6 +424,8 @@ impl AsyncTasks {
 			|| self.list_stable_channels.is_some()
 			|| self.list_settlement_payments.is_some()
 			|| self.ldk_log.is_some()
+			|| self.audit_log.is_some()
+			|| self.channel_history.is_some()
 	}
 }
 
@@ -455,6 +464,8 @@ pub struct AppState {
 	// payment_id (hex) -> settlement classification, fetched alongside payments.
 	pub settlement_kinds: Option<HashMap<String, SettlementKind>>,
 	pub ldk_log: Option<LogResponse>,
+	pub audit_log: Option<LogResponse>,
+	pub channel_history: Option<LogResponse>,
 
 	// Operation results
 	pub onchain_address: Option<String>,
@@ -487,6 +498,7 @@ pub struct AppState {
 	pub config_paste_text: String,
 	pub lightning_tab: LightningTab,
 	pub onchain_tab: OnchainTab,
+	pub logs_tab: LogsTab,
 	pub graph_channels: Option<GraphListChannelsResponse>,
 	pub graph_channel_detail: Option<GraphGetChannelResponse>,
 	pub graph_nodes: Option<GraphListNodesResponse>,
@@ -515,6 +527,14 @@ pub enum OnchainTab {
 	Send,
 	Receive,
 	History,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum LogsTab {
+	#[default]
+	Audit,
+	ChannelHistory,
+	Ldk,
 }
 
 impl Default for AppState {
@@ -546,6 +566,8 @@ impl Default for AppState {
 			stable_channels: None,
 			settlement_kinds: None,
 			ldk_log: None,
+			audit_log: None,
+			channel_history: None,
 
 			onchain_address: None,
 			generated_invoice: None,
@@ -574,6 +596,7 @@ impl Default for AppState {
 			config_paste_text: String::new(),
 			lightning_tab: LightningTab::default(),
 			onchain_tab: OnchainTab::default(),
+			logs_tab: LogsTab::default(),
 			graph_channels: None,
 			graph_channel_detail: None,
 			graph_nodes: None,

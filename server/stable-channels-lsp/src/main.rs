@@ -1,8 +1,11 @@
 mod auth;
+mod backfill;
+mod channel_close;
 mod config;
 mod event_loop;
 mod handlers;
 pub mod messages;
+mod observability;
 mod price_task;
 mod push;
 mod stability_tick;
@@ -12,6 +15,7 @@ mod tls;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::routing::post;
@@ -40,6 +44,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::state::AppState;
+
+/// Bound on how long startup waits for the price cache to warm before deferring reconcile to the stability-tick backstop.
+const STARTUP_RECONCILE_PRICE_WAIT_SECS: u64 = 60;
 
 #[derive(Parser, Debug)]
 #[command(name = "stable-channels-lsp", about = "Stable Channels LSP daemon")]
@@ -120,26 +127,45 @@ async fn main() -> Result<()> {
         ldk_log_file,
     };
 
+    let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);
     tokio::spawn(async move {
-        price_task::run().await;
+        price_task::run(price_tx).await;
     });
 
-    // One-shot reconcile from gRPC to catch up snapshots changed while the daemon was down. Skipped if the price cache is cold.
+    // Reconcile from gRPC to catch up snapshots that changed while the daemon was down. The stable math needs a BTC/USD price, so wait (bounded) for the cache to warm first; spawned so the REST server and event loop come up immediately.
     {
-        let btc_price = stable_channels::price_feeds::get_cached_price();
-        if btc_price > 0.0 {
-            let mut mgr = state.stable_manager.lock().await;
-            mgr.reconcile_from_grpc(
-                state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
-                btc_price,
+        let state = state.clone();
+        let mut price_rx = price_rx;
+        tokio::spawn(async move {
+            // Copy the price out and drop the watch guard before any await so the future stays Send.
+            let warmed = tokio::time::timeout(
+                Duration::from_secs(STARTUP_RECONCILE_PRICE_WAIT_SECS),
+                price_rx.wait_for(|&p| p > 0.0),
             )
-            .await;
-        } else {
-            tracing::warn!("startup reconcile skipped: price cache cold");
-        }
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|price| *price);
+            match warmed {
+                Some(btc_price) => {
+                    let ldk: &dyn crate::stable_manager::LdkServerCalls =
+                        state.ldk_server.as_ref();
+                    state
+                        .stable_manager
+                        .lock()
+                        .await
+                        .reconcile_from_grpc(ldk, btc_price)
+                        .await;
+                }
+                None => tracing::warn!(
+                    "startup reconcile skipped: price cache stayed cold; tick backstop will retry"
+                ),
+            }
+        });
     }
     event_loop::spawn(state.clone());
     stability_tick::spawn(state.clone());
+    observability::spawn(state.clone());
 
     let router = Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))

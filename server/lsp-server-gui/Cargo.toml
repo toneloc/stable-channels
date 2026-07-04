@@ -16,6 +16,7 @@ sc-protos = { path = "../sc-protos" }
 futures-util = "0.3"
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 hex = { package = "hex-conservative", version = "0.2", default-features = false, features = ["std"] }
 bytes = "1.4.0"
 
