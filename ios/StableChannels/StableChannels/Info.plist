@@ -30,7 +30,7 @@
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.stablechannels.app.keepAlive</string>
+		<string>com.stablechannels.app.channelSync</string>
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>

@@ -5,7 +5,7 @@ import UIKit
 final class BackgroundTaskManager: @unchecked Sendable {
     static let shared = BackgroundTaskManager()
 
-    static let keepAliveIdentifier = "com.stablechannels.app.keepAlive"
+    static let channelSyncIdentifier = "com.stablechannels.app.channelSync"
 
     private init() {
         register()
@@ -14,42 +14,42 @@ final class BackgroundTaskManager: @unchecked Sendable {
     private func register() {
         do {
             try BGTaskScheduler.shared.register(
-                forTaskWithIdentifier: Self.keepAliveIdentifier,
+                forTaskWithIdentifier: Self.channelSyncIdentifier,
                 using: nil
             ) { [weak self] task in
-                self?.handleKeepAlive(task: task)
+                self?.handleChannelSync(task: task)
             }
-            print("[BGTask] Registered keep-alive task")
+            print("[BGTask] Registered channel sync task")
         } catch {
             print("[BGTask] Registration failed: \(error.localizedDescription)")
         }
     }
 
-    func scheduleKeepAlive() {
-        let request = BGProcessingTaskRequest(identifier: Self.keepAliveIdentifier)
+    func scheduleChannelSync() {
+        let request = BGProcessingTaskRequest(identifier: Self.channelSyncIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
 
         do {
             try BGTaskScheduler.shared.submit(request)
-            print("[BGTask] Keep-alive scheduled")
+            print("[BGTask] Channel sync scheduled")
         } catch {
             print("[BGTask] Schedule failed: \(error.localizedDescription)")
         }
     }
 
-    func cancelKeepAlive() {
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.keepAliveIdentifier)
-        print("[BGTask] Keep-alive cancelled")
+    func cancelChannelSync() {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.channelSyncIdentifier)
+        print("[BGTask] Channel sync cancelled")
     }
 
-    private func handleKeepAlive(task: BGTask) {
+    private func handleChannelSync(task: BGTask) {
         guard let processingTask = task as? BGProcessingTask else { return }
 
         processingTask.expirationHandler = { [weak self] in
-            print("[BGTask] Expiration — cancelling keep-alive")
-            self?.cancelKeepAlive()
+            print("[BGTask] Expiration — cancelling channel sync")
+            self?.cancelChannelSync()
         }
 
         print("[BGTask] Fired — isRunning: \(NodeService.shared.isRunning)")
@@ -69,7 +69,7 @@ final class BackgroundTaskManager: @unchecked Sendable {
             }
         }
 
-        scheduleKeepAlive()
+        scheduleChannelSync()
         processingTask.setTaskCompleted(success: true)
     }
 }

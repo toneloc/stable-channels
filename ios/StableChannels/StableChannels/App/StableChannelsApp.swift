@@ -18,12 +18,12 @@ struct StableChannelsApp: App {
                 .onReceive(NotificationCenter.default
                     .publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
                         appState.stopNodeForBackground()
-                        BackgroundTaskManager.shared.scheduleKeepAlive()
+                        BackgroundTaskManager.shared.scheduleChannelSync()
                 }
                 .onReceive(NotificationCenter.default
                     .publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                         Task { await appState.restartNodeFromForeground() }
-                        BackgroundTaskManager.shared.cancelKeepAlive()
+                        BackgroundTaskManager.shared.cancelChannelSync()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
                     appState.stop()
@@ -53,7 +53,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                 application.registerForRemoteNotifications()
             }
 
-            // Register BGProcessingTask for periodic background keep-alive
+            // Register BGProcessingTask for periodic background channel sync
             BackgroundTaskManager.shared
 
             if !granted {
