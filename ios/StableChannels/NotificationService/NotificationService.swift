@@ -277,8 +277,6 @@ class NotificationService: UNNotificationServiceExtension {
                 nseLog("Event: \(event)")
                 switch event {
                 case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
-                    let isStabilityPayment = customRecords
-                        .contains { $0.typeNum == Self.stableChannelTLVType && $0.value == Data([1]) }
                     // Always provide a non-nil ID for dedup so replays don't insert duplicates.
                     let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
                     if price <= 0 { price = Self.fetchBTCPrice() }
