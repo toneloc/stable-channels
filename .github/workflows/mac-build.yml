@@ -3,10 +3,11 @@ name: Desktop Build – Mac
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # needed to create/attach GitHub Releases on tag push
 
 concurrency:
   group: build-${{ github.ref }}
@@ -14,7 +15,7 @@ concurrency:
 
 jobs:
   build-macos:
-    if: contains(github.event.head_commit.message, 'build')
+    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, 'build')
     runs-on: macos-14   # Apple‑silicon runner
 
     env:
@@ -38,7 +39,7 @@ jobs:
           APP_NAME="Stable Channels"
           APP_BUNDLE="${APP_NAME}.app"
           IDENTIFIER="com.stablechannels.mac"
-          VERSION="0.1.0"
+          VERSION="0.9.0"
           BIN_NAME="stable-channels"
           WRAPPER_NAME="$APP_NAME"
           PNG_ICON="photos/sc-icon-egui.png"
@@ -145,3 +146,11 @@ jobs:
           name: stable-channels-mac
           path: Stable-Channels-mac.zip
           if-no-files-found: error
+
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: Stable-Channels-mac.zip
+          fail_on_unmatched_files: true
