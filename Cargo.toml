@@ -1,6 +1,6 @@
 [package]
 name = "stable-channels"
-version = "0.1.0"
+version = "0.9.0"
 edition = "2021"
 
 [features]
@@ -56,7 +56,7 @@ path = "src/lib.rs"
 name = "Stable Channels"
 identifier = "com.stablechannels"
 icon = ["icons/icon.icns"]
-version = "0.1.0"
+version = "0.9.0"
 resources = ["assets", "resources"]
 copyright = "Copyright (c) 2025 Stable Channels Developers"
 short_description = "Stable Channels Wallet"
