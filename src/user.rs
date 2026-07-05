@@ -429,7 +429,7 @@ impl UserApp {
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
         builder
-            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/v2/snapshot".to_string());
+            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/snapshot/".to_string());
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
             .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
