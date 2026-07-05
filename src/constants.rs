@@ -42,14 +42,8 @@ pub const DEFAULT_LSP_PUBKEY: &str =
     "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850";
 
 /// Default LSP address
-pub const DEFAULT_LSP_ADDRESS: &str = "34.198.44.89:9735";
+pub const DEFAULT_LSP_ADDRESS: &str = "stablechannels.com:9735";
 
-/// Default gateway public key
-pub const DEFAULT_GATEWAY_PUBKEY: &str =
-    "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed";
-
-/// Default gateway address
-pub const DEFAULT_GATEWAY_ADDRESS: &str = "213.174.156.80:9735";
 
 // ============================================================================
 // TIMING CONSTANTS

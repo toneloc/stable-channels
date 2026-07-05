@@ -495,16 +495,6 @@ impl UserApp {
 
         println!("User node started: {}", node.node_id());
 
-        // We try to connect to the "GATEWAY NODE" ... a well-connected Lightning node
-        if let (Ok(gateway_pubkey), Ok(gateway_address)) = (
-            PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY),
-            SocketAddress::from_str(DEFAULT_GATEWAY_ADDRESS),
-        ) {
-            if let Err(e) = node.connect(gateway_pubkey, gateway_address, true) {
-                println!("Failed to connect to Gateway node: {}", e);
-            }
-        }
-
         // And the LSP
         if let Ok(socket_addr) = SocketAddress::from_str(DEFAULT_LSP_ADDRESS) {
             if let Err(e) = node.connect(lsp_pubkey, socket_addr, true) {

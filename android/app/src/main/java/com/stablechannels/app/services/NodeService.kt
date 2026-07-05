@@ -125,12 +125,7 @@ class NodeService(private val context: Context) {
         _isRunning.value = true
         nodeId = ldkNode.nodeId()
 
-        // Connect to gateway and LSP
-        try {
-            ldkNode.connect(Constants.DEFAULT_GATEWAY_PUBKEY, Constants.DEFAULT_GATEWAY_ADDRESS, true)
-        } catch (e: Exception) {
-            Log.w("NodeService", "Gateway connect failed: ${e.message}")
-        }
+        // Connect to LSP
         try {
             ldkNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
         } catch (e: Exception) {

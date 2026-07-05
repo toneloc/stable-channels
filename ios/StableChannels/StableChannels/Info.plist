@@ -20,17 +20,11 @@
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-<key>NSCameraUsageDescription</key>
+	<key>NSCameraUsageDescription</key>
 	<string>Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses.</string>
 	<key>UIBackgroundModes</key>
 	<array>
-		<string>fetch</string>
-		<string>processing</string>
 		<string>remote-notification</string>
-	</array>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>com.stablechannels.app.refresh</string>
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
