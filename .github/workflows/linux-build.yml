@@ -3,10 +3,11 @@ name: Desktop Build – Linux
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: read          # change to write only if publishing releases
+  contents: write   # needed to create/attach GitHub Releases on tag push
 
 concurrency:
   group: build-linux-${{ github.ref }}
@@ -14,7 +15,7 @@ concurrency:
 
 jobs:
   build-linux:
-    if: contains(github.event.head_commit.message, 'build')
+    if: startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, 'build')
     runs-on: ubuntu-latest
 
     steps:
@@ -54,7 +55,7 @@ jobs:
           # ─── config ──────────────────────────────────────────────────────
           APP_NAME="Stable Channels"
           BIN_NAME="stable-channels"
-          VERSION="0.1.0"
+          VERSION="0.9.0"
           PNG_ICON="photos/sc-icon-egui.png"      
           ARCHS=(x86_64 aarch64)           # build for x86‑64 & AArch64
           DIST_DIR="dist"
@@ -124,4 +125,12 @@ jobs:
         with:
           name: stable-channels-linux
           path: dist/*.AppImage
+
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*.AppImage
+          fail_on_unmatched_files: true
           if-no-files-found: error

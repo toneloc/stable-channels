@@ -34,9 +34,7 @@ enum Constants {
     }
 
     static let defaultLSPPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
-    static let defaultLSPAddress = "34.198.44.89:9735"
-    static let defaultGatewayPubkey = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"
-    static let defaultGatewayAddress = "213.174.156.80:9735"
+    static let defaultLSPAddress = "stablechannels.com:9735"
 
     // MARK: - Timing
 

@@ -142,13 +142,6 @@ class NodeService: NodeServiceProtocol {
         self.isRunning = true
         self.nodeId = ldkNode.nodeId()
 
-        // Connect to gateway node (well-connected Lightning node for routing)
-        try? ldkNode.connect(
-            nodeId: Constants.defaultGatewayPubkey,
-            address: Constants.defaultGatewayAddress,
-            persist: true
-        )
-
         // Connect to LSP
         try? ldkNode.connect(
             nodeId: Constants.defaultLSPPubkey,

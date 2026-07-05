@@ -61,8 +61,6 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
-          - fetch
-          - processing
           - remote-notification
         NSCameraUsageDescription: "Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses."
 

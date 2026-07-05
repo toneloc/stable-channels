@@ -202,7 +202,7 @@ impl Dashboard {
             invoice_to_pay: String::new(),
 
             open_channel_pubkey: String::new(),
-            open_channel_address: "34.198.44.89:9735".into(),
+            open_channel_address: "stablechannels.com:9735".into(),
             open_channel_sats: "100000".into(),
             close_channel_id: String::new(),
 

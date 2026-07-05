@@ -429,7 +429,7 @@ impl UserApp {
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
         builder
-            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/v2/snapshot".to_string());
+            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/snapshot/".to_string());
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
             .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
@@ -494,16 +494,6 @@ impl UserApp {
         node.start().expect("Failed to start node");
 
         println!("User node started: {}", node.node_id());
-
-        // We try to connect to the "GATEWAY NODE" ... a well-connected Lightning node
-        if let (Ok(gateway_pubkey), Ok(gateway_address)) = (
-            PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY),
-            SocketAddress::from_str(DEFAULT_GATEWAY_ADDRESS),
-        ) {
-            if let Err(e) = node.connect(gateway_pubkey, gateway_address, true) {
-                println!("Failed to connect to Gateway node: {}", e);
-            }
-        }
 
         // And the LSP
         if let Ok(socket_addr) = SocketAddress::from_str(DEFAULT_LSP_ADDRESS) {
@@ -9199,21 +9189,21 @@ pub fn run() {
                 "Stable Channels Wallet",
                 native_options,
                 Box::new(|cc| {
-                    // Custom font: load Inter from assets/fonts/Inter-Regular.ttf if
-                    // present. Falls back to egui defaults if the file isn't there —
-                    // drop the TTF in to get the upgrade without code changes.
-                    if let Ok(font_data) = std::fs::read("assets/fonts/Inter-Regular.ttf") {
-                        let mut fonts = egui::FontDefinitions::default();
-                        fonts.font_data.insert(
-                            "inter".to_owned(),
-                            std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-                        );
-                        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional)
-                        {
-                            prop.insert(0, "inter".to_owned());
-                        }
-                        cc.egui_ctx.set_fonts(fonts);
+                    // Custom font: Inter, embedded in the binary. A cwd-relative
+                    // fs::read breaks in release bundles (Finder launches with "/"
+                    // as cwd), silently falling back to fonts that lack the ↑ ↓ →
+                    // glyphs the action buttons use.
+                    let mut fonts = egui::FontDefinitions::default();
+                    fonts.font_data.insert(
+                        "inter".to_owned(),
+                        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                            "../assets/fonts/Inter-Regular.ttf"
+                        ))),
+                    );
+                    if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                        prop.insert(0, "inter".to_owned());
                     }
+                    cc.egui_ctx.set_fonts(fonts);
 
                     // Visuals: light theme with themed surfaces + subtle hover/active
                     // backgrounds. Filled-button color overrides still win; this just

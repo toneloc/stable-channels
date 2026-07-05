@@ -371,8 +371,8 @@ struct HomeView: View {
                 }
                 if !hasReadyChannel {
                     Text(String(
-                        localized: "hint_create_account",
-                        defaultValue: "Receive over Lightning to create your Stable Account"
+                        localized: "hint_create_wallet",
+                        defaultValue: "Receive over Lightning to create your Stable Wallet"
                     ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -380,8 +380,8 @@ struct HomeView: View {
             } else {
                 // 4. No channel, confirmed deposit — just needs a Lightning receive
                 Text(String(
-                    localized: "hint_create_account",
-                    defaultValue: "Receive over Lightning to create your Stable Account"
+                    localized: "hint_create_wallet",
+                    defaultValue: "Receive over Lightning to create your Stable Wallet"
                 ))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
