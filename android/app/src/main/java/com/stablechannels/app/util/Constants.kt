@@ -20,9 +20,7 @@ object Constants {
     const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
     const val FALLBACK_CHAIN_URL = "https://mempool.space/api"
     const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
-    const val DEFAULT_LSP_ADDRESS = "34.198.44.89:9735"
-    const val DEFAULT_GATEWAY_PUBKEY = "03da1c27ca77872ac5b3e568af30673e599a47a5e4497f85c7b5da42048807b3ed"
-    const val DEFAULT_GATEWAY_ADDRESS = "213.174.156.80:9735"
+    const val DEFAULT_LSP_ADDRESS = "stablechannels.com:9735"
 
     const val PRICE_CACHE_REFRESH_SECS: Long = 5
     const val PRICE_FETCH_RETRY_DELAY_MS: Long = 300

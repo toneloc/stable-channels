@@ -17,23 +17,19 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>0.9</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-<key>NSCameraUsageDescription</key>
-	<string>Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses.</string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>fetch</string>
-		<string>processing</string>
-		<string>remote-notification</string>
-	</array>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>com.stablechannels.app.refresh</string>
-	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Stable Channels uses Face ID to secure your wallet and confirm transactions.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
@@ -47,7 +43,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSFaceIDUsageDescription</key>
-	<string>Stable Channels uses Face ID to secure your wallet and confirm transactions.</string>
 </dict>
 </plist>

@@ -154,11 +154,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse {
-                print("[Push] LSP registration response: \(http.statusCode) node_id: \(nodeId.prefix(16))...")
+            if response is HTTPURLResponse {
+                print("[Push] Re-registered with node_id: \(nodeId.prefix(16))...")
             }
         } catch {
-            print("[Push] LSP registration failed: \(error.localizedDescription)")
+            print("[Push] Re-registration failed: \(error.localizedDescription)")
         }
     }
 }

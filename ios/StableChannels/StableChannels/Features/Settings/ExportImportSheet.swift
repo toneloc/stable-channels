@@ -119,14 +119,14 @@ struct ExportImportSheet: View {
         VStack(spacing: 16) {
             passphraseCard(
                 label: String(localized: "passphrase", defaultValue: "Passphrase"),
-                placeholder: String(localized: "enter_passphrase", defaultValue: "Enter passphrase"),
+                prompt: String(localized: "enter_passphrase", defaultValue: "Enter passphrase"),
                 text: $passphrase,
                 isNew: true
             )
 
             passphraseCard(
                 label: String(localized: "confirm_passphrase", defaultValue: "Confirm Passphrase"),
-                placeholder: String(localized: "confirm_passphrase_hint", defaultValue: "Confirm your passphrase"),
+                prompt: String(localized: "confirm_passphrase_hint", defaultValue: "Confirm your passphrase"),
                 text: $confirmPassphrase,
                 isNew: true
             )
@@ -184,7 +184,7 @@ struct ExportImportSheet: View {
             if selectedFileURL != nil {
                 passphraseCard(
                     label: String(localized: "passphrase", defaultValue: "Passphrase"),
-                    placeholder: String(localized: "enter_backup_passphrase", defaultValue: "Enter backup passphrase"),
+                    prompt: String(localized: "enter_backup_passphrase", defaultValue: "Enter backup passphrase"),
                     text: $passphrase,
                     isNew: false
                 )
@@ -274,13 +274,13 @@ struct ExportImportSheet: View {
 
     // MARK: - Passphrase Card
 
-    private func passphraseCard(label: String, placeholder: String, text: Binding<String>, isNew: Bool) -> some View {
+    private func passphraseCard(label: String, prompt: String, text: Binding<String>, isNew: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            SecureField(placeholder, text: text)
+            SecureField(prompt, text: text)
                 .textContentType(isNew ? .newPassword : .password)
                 .padding(16)
                 .background(Color(uiColor: .secondarySystemGroupedBackground))

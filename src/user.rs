@@ -429,7 +429,7 @@ impl UserApp {
 
         builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
         builder
-            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/v2/snapshot".to_string());
+            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/snapshot/".to_string());
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
             .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
@@ -494,16 +494,6 @@ impl UserApp {
         node.start().expect("Failed to start node");
 
         println!("User node started: {}", node.node_id());
-
-        // We try to connect to the "GATEWAY NODE" ... a well-connected Lightning node
-        if let (Ok(gateway_pubkey), Ok(gateway_address)) = (
-            PublicKey::from_str(DEFAULT_GATEWAY_PUBKEY),
-            SocketAddress::from_str(DEFAULT_GATEWAY_ADDRESS),
-        ) {
-            if let Err(e) = node.connect(gateway_pubkey, gateway_address, true) {
-                println!("Failed to connect to Gateway node: {}", e);
-            }
-        }
 
         // And the LSP
         if let Ok(socket_addr) = SocketAddress::from_str(DEFAULT_LSP_ADDRESS) {
