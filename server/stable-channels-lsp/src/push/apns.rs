@@ -1,31 +1,44 @@
 //! APNs (iOS) push sender. try_new returns None (send() then no-ops) when [push] credentials or AuthKey.p8 are missing.
+//!
+//! One .p8 signing key is valid for both APNs environments, but sandbox and production
+//! are distinct gateways: a token minted by a DEBUG build only resolves at the sandbox
+//! endpoint and an App Store build's token only at production. The registered fleet is
+//! a mix of both, so we hold a client per endpoint and route each send by the
+//! environment the device reported at registration.
 
 use a2::{
     Client as ApnsClient, ClientConfig as ApnsClientConfig, DefaultNotificationBuilder,
     NotificationBuilder, NotificationOptions, Priority,
 };
-use std::fs::File;
+use std::io::Cursor;
 use tracing::{info, warn};
 
 use crate::config::PushConfig;
 
 #[derive(Clone)]
 pub struct ApnsService {
-    client: ApnsClient,
+    sandbox_client: Option<ApnsClient>,
+    production_client: Option<ApnsClient>,
     topic: String,
+    /// Endpoint used when a stored token has no environment (from `apns_environment`).
+    default_environment: String,
 }
 
 impl ApnsService {
-    /// Build an APNs client from config. None if a required credential or the key file is missing.
+    /// Build APNs clients from config. None if a required credential or the key file is missing.
     pub fn try_new(cfg: &PushConfig) -> Option<Self> {
         let key_path = cfg.apns_key_path.as_deref()?;
         let key_id = cfg.apns_key_id.as_deref()?;
         let team_id = cfg.apns_team_id.as_deref()?;
         let topic = cfg.apns_topic.as_deref()?;
-        let env = cfg.apns_environment.as_deref().unwrap_or("sandbox");
+        let default_environment = cfg
+            .apns_environment
+            .as_deref()
+            .unwrap_or("sandbox")
+            .to_string();
 
-        let mut key_file = match File::open(key_path) {
-            Ok(f) => f,
+        let key_data = match std::fs::read(key_path) {
+            Ok(d) => d,
             Err(e) => {
                 warn!(
                     "[apns] AuthKey file unreadable at {}: {}. APNs disabled.",
@@ -35,35 +48,67 @@ impl ApnsService {
             }
         };
 
-        let endpoint = if env == "production" {
-            a2::Endpoint::Production
-        } else {
-            a2::Endpoint::Sandbox
-        };
-
-        let client = match ApnsClient::token(
-            &mut key_file,
-            key_id,
-            team_id,
-            ApnsClientConfig::new(endpoint),
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("[apns] Failed to construct client: {}. APNs disabled.", e);
-                return None;
+        let build = |endpoint: a2::Endpoint, label: &str| -> Option<ApnsClient> {
+            match ApnsClient::token(
+                &mut Cursor::new(&key_data),
+                key_id,
+                team_id,
+                ApnsClientConfig::new(endpoint),
+            ) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    warn!("[apns] Failed to construct {} client: {}", label, e);
+                    None
+                }
             }
         };
 
-        info!("[apns] enabled, topic={}, env={}", topic, env);
+        let sandbox_client = build(a2::Endpoint::Sandbox, "sandbox");
+        let production_client = build(a2::Endpoint::Production, "production");
+        if sandbox_client.is_none() && production_client.is_none() {
+            warn!("[apns] No APNs client could be constructed. APNs disabled.");
+            return None;
+        }
+
+        info!(
+            "[apns] enabled, topic={}, default_env={}, sandbox={}, production={}",
+            topic,
+            default_environment,
+            sandbox_client.is_some(),
+            production_client.is_some()
+        );
         Some(Self {
-            client,
+            sandbox_client,
+            production_client,
             topic: topic.to_string(),
+            default_environment,
         })
     }
 
-    /// Send a wake-up notification to the device token. Direction ("incoming"/"outgoing") rides in the payload.
+    /// Send a wake-up notification to the device token, routed to the APNs endpoint
+    /// matching the environment the token was registered under.
     pub async fn send(&self, device_token: &str, direction: &str, environment: &str) {
-        let _ = environment;
+        let env = if environment.is_empty() {
+            self.default_environment.as_str()
+        } else {
+            environment
+        };
+        let client = if env == "production" {
+            &self.production_client
+        } else {
+            &self.sandbox_client
+        };
+        let client = match client {
+            Some(c) => c,
+            None => {
+                warn!(
+                    "[apns] No {} client available; dropping push for {}",
+                    env,
+                    &device_token[..device_token.len().min(16)]
+                );
+                return;
+            }
+        };
         let body = match direction {
             "lsp_to_user" => "Receiving stability payment...",
             "user_to_lsp" => "Sending stability payment...",
@@ -86,10 +131,11 @@ impl ApnsService {
         let mut stability_data = std::collections::HashMap::new();
         stability_data.insert("direction", direction);
         let _ = payload.add_custom_data("stability", &stability_data);
-        match self.client.send(payload).await {
+        match client.send(payload).await {
             Ok(resp) => info!(
-                "[apns] Sent push to {} (code={})",
+                "[apns] Sent push to {} ({}, code={})",
                 &device_token[..device_token.len().min(16)],
+                env,
                 resp.code,
             ),
             Err(e) => warn!(

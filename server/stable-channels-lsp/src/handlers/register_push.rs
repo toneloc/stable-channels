@@ -82,6 +82,58 @@ pub async fn register_push(State(state): State<AppState>, body: Bytes) -> Respon
     ok_response(RegisterPushResponse { ok: true })
 }
 
+/// The unsigned registration body every deployed wallet build sends (fork contract).
+#[derive(serde::Deserialize)]
+pub struct LegacyPushRequest {
+    pub device_token: String,
+    pub platform: String,
+    #[serde(default)]
+    pub node_id: String,
+    #[serde(default)]
+    pub environment: String,
+}
+
+/// Legacy push registration: deployed wallets POST unsigned JSON to /api/register-push
+/// (Apache-proxied, no HMAC, no node-ownership proof). Mounted OUTSIDE the auth layer.
+/// Response shape mirrors the fork byte-for-byte: 200 `"ok"` or 400 with the parse error.
+/// Remove once every install signs registrations (see verify_push_registration).
+pub async fn register_push_legacy(State(state): State<AppState>, body: Bytes) -> Response {
+    let req: LegacyPushRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            stable_channels::audit::audit_event(
+                "REGISTER_PUSH_LEGACY_INVALID",
+                serde_json::json!({ "error": e.to_string() }),
+            );
+            return Response::builder()
+                .status(axum::http::StatusCode::BAD_REQUEST)
+                .header("content-type", "text/plain")
+                .body(axum::body::Body::from(e.to_string()))
+                .unwrap();
+        }
+    };
+
+    {
+        let push = state.push.lock().await;
+        push.register_token(
+            &req.device_token,
+            &req.platform,
+            &req.node_id,
+            &req.environment,
+        );
+    }
+    // Flagged as LEGACY: this token was stored without a node-ownership proof.
+    stable_channels::audit::audit_event(
+        "REGISTER_PUSH_LEGACY_OK",
+        serde_json::json!({ "node_id": req.node_id, "platform": req.platform }),
+    );
+    Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from("\"ok\""))
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +196,27 @@ mod tests {
         let fake = VerifyFake { valid: false };
         let ok = verify_push_registration(&fake, "node", "token", "sig", 1000, 1000, 300).await;
         assert!(!ok);
+    }
+
+    #[test]
+    fn legacy_body_parses_with_and_without_optional_fields() {
+        // Exact shape shipped iOS/Android builds send.
+        let full: LegacyPushRequest = serde_json::from_str(
+            r#"{"device_token":"tok","platform":"ios","node_id":"02ab","environment":"production"}"#,
+        )
+        .unwrap();
+        assert_eq!(full.environment, "production");
+
+        // node_id/environment are optional in the fork contract.
+        let minimal: LegacyPushRequest =
+            serde_json::from_str(r#"{"device_token":"tok","platform":"android"}"#).unwrap();
+        assert_eq!(minimal.node_id, "");
+        assert_eq!(minimal.environment, "");
+    }
+
+    #[test]
+    fn legacy_body_rejects_missing_required_fields() {
+        assert!(serde_json::from_str::<LegacyPushRequest>(r#"{"platform":"ios"}"#).is_err());
+        assert!(serde_json::from_str::<LegacyPushRequest>(r#"{"device_token":"tok"}"#).is_err());
     }
 }

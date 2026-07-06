@@ -18,7 +18,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceOutResponse, SpontaneousSendResponse, UpdateChannelConfigResponse,
 	VerifySignatureResponse,
 };
-use sc_rest_client::sc_protos::stable::{GetPriceResponse, ListSettlementPaymentsResponse, ListStableChannelsResponse, LogResponse};
+use sc_rest_client::sc_protos::stable::{EditStableChannelResponse, GetPriceResponse, ListSettlementPaymentsResponse, ListStableChannelsResponse, LogResponse};
 use sc_rest_client::ldk_server_grpc::types::PageToken;
 
 #[derive(Clone, PartialEq, Default)]
@@ -250,9 +250,17 @@ impl ChainSourceForm {
 }
 
 #[derive(Default, Clone)]
+pub struct EditStableChannelForm {
+	pub channel_id: String,
+	pub expected_usd: String,
+	pub note: String,
+}
+
+#[derive(Default, Clone)]
 pub struct Forms {
 	pub open_channel: OpenChannelForm,
 	pub bolt11_receive: Bolt11ReceiveForm,
+	pub edit_stable_channel: EditStableChannelForm,
 	pub bolt11_send: Bolt11SendForm,
 	pub bolt12_receive: Bolt12ReceiveForm,
 	pub bolt12_send: Bolt12SendForm,
@@ -341,6 +349,7 @@ pub struct AsyncTasks {
 	pub export_pathfinding_scores: Option<ChannelTaskHandle<ExportPathfindingScoresResponse>>,
 	pub get_price: Option<ChannelTaskHandle<GetPriceResponse>>,
 	pub list_stable_channels: Option<ChannelTaskHandle<ListStableChannelsResponse>>,
+	pub edit_stable_channel: Option<ChannelTaskHandle<EditStableChannelResponse>>,
 	pub list_settlement_payments: Option<ChannelTaskHandle<ListSettlementPaymentsResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 	pub audit_log: Option<ChannelTaskHandle<LogResponse>>,
@@ -381,6 +390,7 @@ impl Default for AsyncTasks {
 			export_pathfinding_scores: None,
 			get_price: None,
 			list_stable_channels: None,
+			edit_stable_channel: None,
 			list_settlement_payments: None,
 			ldk_log: None,
 			audit_log: None,
@@ -422,6 +432,7 @@ impl AsyncTasks {
 			|| self.export_pathfinding_scores.is_some()
 			|| self.get_price.is_some()
 			|| self.list_stable_channels.is_some()
+			|| self.edit_stable_channel.is_some()
 			|| self.list_settlement_payments.is_some()
 			|| self.ldk_log.is_some()
 			|| self.audit_log.is_some()

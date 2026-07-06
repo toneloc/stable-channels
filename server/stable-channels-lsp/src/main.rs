@@ -237,6 +237,13 @@ async fn main() -> Result<()> {
             state.clone(),
             auth::auth_middleware,
         ))
+        // Legacy push registration for deployed wallets: unsigned JSON, no HMAC.
+        // Registered AFTER the auth layer so it is exempt from it (axum layers only
+        // wrap routes added before them). Audit-flagged REGISTER_PUSH_LEGACY_*.
+        .route(
+            "/api/register-push",
+            post(handlers::register_push::register_push_legacy),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

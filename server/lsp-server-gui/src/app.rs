@@ -17,7 +17,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceInRequest, SpliceOutRequest, SpontaneousSendRequest, UpdateChannelConfigRequest,
 	VerifySignatureRequest,
 };
-use sc_rest_client::sc_protos::stable::{GetPriceRequest, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest};
+use sc_rest_client::sc_protos::stable::{EditStableChannelRequest, GetPriceRequest, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest};
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
 };
@@ -781,6 +781,37 @@ impl LspServerApp {
 		}
 	}
 
+	pub fn edit_stable_channel(&mut self) {
+		if self.state.tasks.edit_stable_channel.is_some() {
+			return;
+		}
+		if let Some(client) = &self.state.client {
+			let form = &self.state.forms.edit_stable_channel;
+			let channel_id = form.channel_id.trim().to_string();
+			let expected_usd = form.expected_usd.trim().parse::<f64>().ok();
+			let note =
+				if form.note.trim().is_empty() { None } else { Some(form.note.trim().to_string()) };
+
+			if channel_id.is_empty() {
+				self.state.status_message = Some(StatusMessage::error("Channel ID is required"));
+				return;
+			}
+			if !form.expected_usd.trim().is_empty() && expected_usd.is_none() {
+				self.state.status_message =
+					Some(StatusMessage::error("Target USD must be a number"));
+				return;
+			}
+
+			let client = client.clone();
+			self.state.tasks.edit_stable_channel = Some(self.spawn_task(async move {
+				client
+					.edit_stable_channel(EditStableChannelRequest { channel_id, expected_usd, note })
+					.await
+					.map_err(|e| e.to_string())
+			}));
+		}
+	}
+
 	pub fn fetch_settlement_payments(&mut self) {
 		if self.state.tasks.list_settlement_payments.is_some() {
 			return;
@@ -1200,6 +1231,17 @@ impl LspServerApp {
 
 		poll_task!(self.state.tasks.list_stable_channels => |v| {
 			self.state.stable_channels = Some(v);
+		});
+
+		poll_task!(self.state.tasks.edit_stable_channel => |v| {
+			if v.ok {
+				self.state.status_message = Some(StatusMessage::success(v.status));
+				self.state.forms.edit_stable_channel = Default::default();
+				// Refresh the table so the new target shows immediately.
+				self.fetch_stable_channels();
+			} else {
+				self.state.status_message = Some(StatusMessage::error(v.status));
+			}
 		});
 
 		poll_task!(self.state.tasks.list_settlement_payments => |v| {
