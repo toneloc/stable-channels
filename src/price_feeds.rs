@@ -1,9 +1,7 @@
-use crate::audit::audit_event;
 use crate::constants::{
     PRICE_CACHE_REFRESH_SECS, PRICE_FETCH_MAX_RETRIES, PRICE_FETCH_RETRY_DELAY_MS,
 };
 use retry::{delay::Fixed, retry};
-use serde_json::json;
 use serde_json::Value;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -68,7 +66,6 @@ pub fn get_cached_price() -> f64 {
             cache.price = new_price;
             cache.last_update = Instant::now();
             cache.updating = false;
-            audit_event("PRICE_FETCH", json!({ "btc_price": new_price }));
             return new_price;
         } else {
             let mut cache = PRICE_CACHE.lock().unwrap();

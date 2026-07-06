@@ -28,6 +28,8 @@ pub struct StableChannelInfo {
 	pub note: ::prost::alloc::string::String,
 	#[prost(bool, tag = "7")]
 	pub is_stable_receiver: bool,
+	#[prost(string, tag = "8")]
+	pub user_channel_id: ::prost::alloc::string::String,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -92,6 +94,10 @@ pub struct RegisterPushResponse {
 pub struct LogRequest {
 	#[prost(uint32, tag = "1")]
 	pub max_lines: u32,
+	#[prost(string, tag = "2")]
+	pub filter: ::prost::alloc::string::String,
+	#[prost(bool, tag = "3")]
+	pub full: bool,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]

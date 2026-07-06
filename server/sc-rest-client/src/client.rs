@@ -44,7 +44,7 @@ use ldk_server_client::ldk_server_grpc::error::{ErrorCode, ErrorResponse};
 use sc_protos::stable::{
 	EditStableChannelRequest, EditStableChannelResponse, GetPriceRequest, GetPriceResponse,
 	ListSettlementPaymentsRequest, ListSettlementPaymentsResponse, ListStableChannelsRequest,
-	ListStableChannelsResponse, LogRequest, LogResponse, EDIT_STABLE_CHANNEL_PATH,
+	ListStableChannelsResponse, LogRequest, LogResponse, AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH,
 	GET_PRICE_PATH, LDK_LOG_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
 };
 use prost::Message;
@@ -499,6 +499,12 @@ impl LspRestClient {
 	/// Tail LDK Server's log file via the SC daemon.
 	pub async fn ldk_log(&self, request: LogRequest) -> Result<LogResponse, LspRestError> {
 		let url = self.build_url(LDK_LOG_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Tail the SC daemon's own audit log.
+	pub async fn audit_log(&self, request: LogRequest) -> Result<LogResponse, LspRestError> {
+		let url = self.build_url(AUDIT_LOG_PATH);
 		self.post_request(&request, &url).await
 	}
 

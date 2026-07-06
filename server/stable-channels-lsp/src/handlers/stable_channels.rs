@@ -37,6 +37,7 @@ pub async fn list_stable_channels(
             latest_price,
             note: sc.note.clone().unwrap_or_default(),
             is_stable_receiver: sc.is_stable_receiver,
+            user_channel_id: format!("{}", sc.user_channel_id),
         })
         .collect::<Vec<_>>();
     drop(mgr);

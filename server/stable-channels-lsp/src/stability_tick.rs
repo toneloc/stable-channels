@@ -25,6 +25,8 @@ async fn run(state: AppState) {
             continue;
         }
         let mut mgr = state.stable_manager.lock().await;
+        mgr.reconcile_if_empty(state.ldk_server.as_ref() as &dyn LdkServerCalls, btc_price)
+            .await;
         mgr.run_tick(
             state.ldk_server.as_ref() as &dyn LdkServerCalls,
             &state.push,
