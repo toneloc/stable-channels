@@ -76,6 +76,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 							"Price",
 							"Role",
 							"Note",
+							"",
 						] {
 							ui.label(RichText::new(h).strong());
 						}
@@ -127,6 +128,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 							// Note
 							ui.label(if row.note.is_empty() { "---" } else { &row.note });
 
+							// Prefill the edit form from this row
+							if ui.button("Edit").on_hover_text("Edit this channel's stable target").clicked() {
+								let form = &mut app.state.forms.edit_stable_channel;
+								form.channel_id = row.channel_id.clone();
+								form.expected_usd = format!("{:.2}", row.expected_usd);
+								form.note = row.note.clone();
+							}
+
 							ui.end_row();
 						}
 					});
@@ -140,4 +149,37 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		},
 	}
 
+	ui.add_space(15.0);
+	ui.separator();
+	ui.add_space(5.0);
+
+	// Edit a channel's stable target. "Edit" on a row prefills; submitting sets
+	// expected_usd (and note) via EditStableChannel on the daemon.
+	ui.heading("Edit Stable Channel");
+	ui.add_space(5.0);
+
+	{
+		let form = &mut app.state.forms.edit_stable_channel;
+		ui.horizontal(|ui| {
+			ui.label("Channel ID:");
+			ui.add(egui::TextEdit::singleline(&mut form.channel_id).desired_width(420.0));
+		});
+		ui.horizontal(|ui| {
+			ui.label("Target USD:");
+			ui.add(egui::TextEdit::singleline(&mut form.expected_usd).desired_width(120.0));
+			ui.label(RichText::new("0 = stop stabilizing").weak());
+		});
+		ui.horizontal(|ui| {
+			ui.label("Note:");
+			ui.add(egui::TextEdit::singleline(&mut form.note).desired_width(300.0));
+		});
+	}
+
+	ui.add_space(5.0);
+	let is_loading = app.state.tasks.edit_stable_channel.is_some();
+	ui.add_enabled_ui(!is_loading, |ui| {
+		if ui.button(if is_loading { "Submitting..." } else { "Submit" }).clicked() {
+			app.edit_stable_channel();
+		}
+	});
 }
