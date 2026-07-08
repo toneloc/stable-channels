@@ -587,6 +587,12 @@ impl StableChannelManager {
                         );
                     }
                 }
+                // Tagged-but-not-envelope = a user's stability payment. Reconcile the
+                // books NOW: with stale backing_sats the channel still reads above par
+                // (double-charge risk) and the balance-truth backstop would misread the
+                // user's payment as an unreconciled spend and deduct expected_usd.
+                self.reconcile_incoming_stability(payment_id.as_deref(), amount_msat, ldk, btc_price)
+                    .await;
             }
             return;
         }
@@ -594,6 +600,125 @@ impl StableChannelManager {
         stable_channels::audit::audit_event(
             "PAYMENT_RECEIVED",
             serde_json::json!({ "payment_id": payment_id, "amount_msat": amount_msat }),
+        );
+    }
+
+    /// Settle the books for an inbound stability payment (user above par paid the LSP).
+    ///
+    /// The user's side of the channel just dropped by the payment amount, so their
+    /// stable value is back at par — reset `backing_sats` to equilibrium
+    /// (expected_usd at the current price), exactly mirroring the reset done after
+    /// the LSP *sends* a stability payment. `native_sats` is the remainder, so the
+    /// user's non-stable sats are untouched by the settlement.
+    ///
+    /// The event carries no channel id, so the channel is attributed by amount:
+    /// the tracked channel whose live user-side balance dropped by the payment
+    /// amount (±1 sat for msat rounding) since the last tick snapshot. If the match
+    /// is not unique, nothing is mutated and the miss is audited — the tick +
+    /// backstop path then handles it as before, but visibly.
+    async fn reconcile_incoming_stability(
+        &mut self,
+        payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
+        let amount_sats = amount_msat.unwrap_or(0) / 1000;
+        if amount_sats == 0 {
+            // Sub-sat keysends are control traffic (sync/trade carriers), not settlements.
+            return;
+        }
+        if btc_price <= 0.0 {
+            stable_channels::audit::audit_event(
+                "STABILITY_RECEIVE_UNATTRIBUTED",
+                serde_json::json!({ "payment_id": payment_id, "amount_msat": amount_msat, "reason": "price_cold" }),
+            );
+            return;
+        }
+        let channels = match ldk.list_channels(ListChannelsRequest {}).await {
+            Ok(r) => r.channels,
+            Err(e) => {
+                stable_channels::audit::audit_event(
+                    "STABILITY_RECEIVE_UNATTRIBUTED",
+                    serde_json::json!({ "payment_id": payment_id, "amount_msat": amount_msat, "reason": "list_channels_failed", "error": e.to_string() }),
+                );
+                return;
+            }
+        };
+
+        // Attribute by balance drop: (index, live channel, live user-side sats).
+        let mut matches: Vec<(usize, &Channel, u64)> = Vec::new();
+        for (i, sc) in self.stable_channels.iter().enumerate() {
+            if sc.expected_usd.0 < 0.01 {
+                continue;
+            }
+            let Some(c) = channels.iter().find(|c| {
+                parse_user_channel_id(&c.user_channel_id) == Some(sc.user_channel_id)
+            }) else {
+                continue;
+            };
+            let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
+            let our_sats = (c.outbound_capacity_msat / 1000) + unspendable;
+            let their_sats = c.channel_value_sats.saturating_sub(our_sats);
+            let drop = sc.stable_receiver_btc.sats.saturating_sub(their_sats);
+            if drop > 0 && drop.abs_diff(amount_sats) <= 1 {
+                matches.push((i, c, their_sats));
+            }
+        }
+
+        if matches.len() != 1 {
+            stable_channels::audit::audit_event(
+                "STABILITY_RECEIVE_UNATTRIBUTED",
+                serde_json::json!({
+                    "payment_id": payment_id,
+                    "amount_msat": amount_msat,
+                    "reason": "no_unique_match",
+                    "candidates": matches.len(),
+                }),
+            );
+            return;
+        }
+        let (idx, live, their_sats) = matches[0];
+        let channel_id = live.channel_id.clone();
+        let sc = &mut self.stable_channels[idx];
+        let uid = sc.user_channel_id;
+
+        sc.latest_price = btc_price;
+        sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+        sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
+        // Equilibrium reset, clamped so backing can never exceed the live balance
+        // (which would immediately re-trigger the backstop we're protecting against).
+        let equilibrium = ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+        sc.backing_sats = equilibrium.min(their_sats);
+        sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
+        stable_channels::stable::recompute_native(sc);
+        // The drop is settled; make sure the backstop forgets any ticks it counted.
+        self.spend_debounce.remove(&uid);
+
+        if let Err(e) = self.db.save_channel(
+            &channel_id,
+            &format!("{}", uid),
+            self.stable_channels[idx].expected_usd.0,
+            self.stable_channels[idx].backing_sats,
+            self.stable_channels[idx].native_sats,
+            self.stable_channels[idx].note.as_deref(),
+        ) {
+            tracing::error!("[stable] reconcile_incoming save_channel failed: {}", e);
+            stable_channels::audit::audit_event(
+                "DB_WRITE_FAILED",
+                serde_json::json!({ "op": "save_channel", "context": "reconcile_incoming", "user_channel_id": format!("{}", uid), "channel_id": channel_id, "error": e.to_string() }),
+            );
+        }
+        stable_channels::audit::audit_event(
+            "STABILITY_RECEIVED_RECONCILED",
+            serde_json::json!({
+                "channel_id": channel_id,
+                "user_channel_id": format!("{}", uid),
+                "payment_id": payment_id,
+                "amount_msat": amount_msat,
+                "new_backing_sats": self.stable_channels[idx].backing_sats,
+                "new_native_sats": self.stable_channels[idx].native_sats,
+            }),
         );
     }
 
@@ -2804,5 +2929,133 @@ mod tests {
         stable_channels::audit::disable_test_capture();
         let n = events.iter().filter(|(e, _)| e == "STABILITY_CHECK_ONLY").count();
         assert_eq!(n, 1, "identical repeated ticks must emit CHECK_ONLY once");
+    }
+
+    /// TLV marker record that is NOT a signed envelope: the stability-payment carrier.
+    fn stability_marker() -> CustomTlvRecord {
+        CustomTlvRecord {
+            type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+            value: vec![1u8].into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_stability_payment_resets_backing_and_preserves_native() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        // $10 target at $100k: equilibrium backing = 10_000 sats; user side 50_000 -> native 40_000.
+        let fake0 = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // Snapshot balances at par (no drift at $100k, so nothing fires).
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+        assert_eq!(mgr.stable_channels[0].stable_receiver_btc.sats, 50_000);
+
+        // Price rises to $110k: user is $1 above par and settles 909 sats to the LSP.
+        // Live user side drops 50_000 -> 49_091 (our side gains).
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_909_000, true,
+        )]);
+        mgr.handle_payment_received(
+            vec![stability_marker()],
+            Some("pay-1".to_string()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+
+        let sc = &mgr.stable_channels[0];
+        // Equilibrium at $110k: 10/110_000 BTC = 9_090 sats.
+        assert_eq!(sc.backing_sats, 9_090, "backing must reset to equilibrium at the new price");
+        // Native must absorb only rounding, never the settlement: 49_091 - 9_090 = 40_001.
+        assert_eq!(sc.native_sats, 40_001, "native sats must be preserved across the settlement");
+        assert!(sc.backing_sats <= sc.stable_receiver_btc.sats, "backing may never exceed live balance");
+    }
+
+    #[tokio::test]
+    async fn incoming_stability_payment_prevents_backstop_misfire() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let fake0 = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+
+        // User settles 909 sats; books reconciled at receive.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_909_000, true,
+        )]);
+        mgr.handle_payment_received(
+            vec![stability_marker()], Some("pay-2".to_string()), Some(909_000),
+            &fake as &dyn LdkServerCalls, 110_000.0,
+        ).await;
+        let expected_before = mgr.stable_channels[0].expected_usd.0;
+
+        // Two ticks at the new price: without receive-time reconcile the backstop
+        // would read the settled sats as an unreconciled spend and deduct expected_usd.
+        stable_channels::audit::enable_test_capture();
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0).await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert!(
+            !events.iter().any(|(e, _)| e == "BACKSTOP_STABLE_DEDUCTED"),
+            "settled stability payment must not trigger the backstop"
+        );
+        assert_eq!(
+            mgr.stable_channels[0].expected_usd.0, expected_before,
+            "expected_usd must survive a settled stability payment"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_incoming_stability_payment_mutates_nothing() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        const CHAN2_ID: &str = "aa634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b";
+        const UID2_HEX: &str = "00000000000000000000000000000002";
+        // Two identical channels: an identical balance drop on both is unattributable.
+        let mk = |outbound_msat: u64| {
+            vec![
+                make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, outbound_msat, true),
+                make_channel(CHAN2_ID, UID2_HEX, COUNTERPARTY_HEX, 100_000, outbound_msat, true),
+            ]
+        };
+        let fake0 = FakeLdkServer::new(mk(50_000_000));
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.edit_stable_channel(CHAN2_ID, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        let backing_before: Vec<u64> = mgr.stable_channels.iter().map(|s| s.backing_sats).collect();
+
+        let fake = FakeLdkServer::new(mk(50_909_000));
+        stable_channels::audit::enable_test_capture();
+        mgr.handle_payment_received(
+            vec![stability_marker()], Some("pay-3".to_string()), Some(909_000),
+            &fake as &dyn LdkServerCalls, 110_000.0,
+        ).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        let backing_after: Vec<u64> = mgr.stable_channels.iter().map(|s| s.backing_sats).collect();
+        assert_eq!(backing_before, backing_after, "ambiguous attribution must not touch the books");
+        assert!(
+            events.iter().any(|(e, d)| e == "STABILITY_RECEIVE_UNATTRIBUTED"
+                && d.get("candidates").and_then(|v| v.as_u64()) == Some(2)),
+            "the miss must be audited with the candidate count"
+        );
     }
 }
