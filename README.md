@@ -1,23 +1,31 @@
 ## Stable Channels
 
+[![macOS](https://github.com/toneloc/stable-channels/actions/workflows/mac-build.yml/badge.svg)](https://github.com/toneloc/stable-channels/actions/workflows/mac-build.yml)
+[![Windows](https://github.com/toneloc/stable-channels/actions/workflows/windows-build.yml/badge.svg)](https://github.com/toneloc/stable-channels/actions/workflows/windows-build.yml)
+[![Linux](https://github.com/toneloc/stable-channels/actions/workflows/linux-build.yml/badge.svg)](https://github.com/toneloc/stable-channels/actions/workflows/linux-build.yml)
+[![Android](https://github.com/toneloc/stable-channels/actions/workflows/android-build.yml/badge.svg)](https://github.com/toneloc/stable-channels/actions/workflows/android-build.yml)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./COPYING)
+
 The Stable Channels Wallet lets users peg a portion of their bitcoin to a dollar balance, all while staying self-custodial and 100% in bitcoin. 
 
 <p align="center">
-  <img width="337" height="524" src="https://github.com/user-attachments/assets/c9a15617-dc60-48a6-a21f-18f7c2d3f95b" />
+  <img width="280" src="https://github.com/user-attachments/assets/cb6c5508-0602-4348-9242-50e7b9f3d9c4" />
   &#x2003;&#x2003;&#x2003;&#x2003; <!-- 4 em-spaces (~wide gap) -->
-  <img width="331" height="520" src="https://github.com/user-attachments/assets/43191915-eaad-4593-bb85-3af40be15d01" />
+  <img width="280" src="https://github.com/user-attachments/assets/6daf2249-4f76-423d-9632-fe135a0fbe6a" />
 </p>
 
 ### Downloads
-- [macOS](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-mac.zip)
-- [Windows](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-windows.zip)
-- [Linux](https://github.com/toneloc/stable-channels/releases/download/0.6/stable-channels-linux.zip)
+- iOS — version 0.9 is in App Store review; link coming soon
+- [macOS](https://github.com/toneloc/stable-channels/releases/latest/download/Stable-Channels-mac.zip)
+- [Windows](https://github.com/toneloc/stable-channels/releases/latest/download/stable-channels.exe)
+- [Android APK](https://github.com/toneloc/stable-channels/releases/latest/download/stable-channels-android.apk)
+- [Linux (AppImage)](https://github.com/toneloc/stable-channels/releases/latest) — download the `.AppImage` for your architecture (x86_64 or aarch64)
 
-Check out the latest releases in [Releases](https://github.com/toneloc/stable-channels/releases)
+These links always point to the newest release. All releases: [Releases](https://github.com/toneloc/stable-channels/releases)
 
 ### Overview
 
-The Stable Channels Desktop Wallet runs a full Lightning node that lets users stabilize the bitcoin that they send to themselves during onboarding. 
+Stable Channels ships as an iOS app, an Android app, and a desktop wallet (macOS, Windows, Linux). Every app runs a full Lightning node on the device and lets users stabilize the bitcoin that they send to themselves during onboarding. 
 
 The LSP/Server keeps the user stable by overcollateralizing the Stable Channel by 100% at the time of channel creation. Each user (the stability receiver and the LSP/stability provider) puts in the same amount of bitcoin, and the stability mechanism is activated. 
 
@@ -90,7 +98,7 @@ This points git at `.githooks/` so the pre-commit checks (secret scanning, `carg
 
 ### Stable Channels Process
 
-Every 30 seconds, the price of bitcoin:
+Every 60 seconds, the price of bitcoin:
 
 - **(a) Goes up:**
   - **User/Stable Receiver loses bitcoin.**
