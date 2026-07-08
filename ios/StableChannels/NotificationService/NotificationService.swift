@@ -68,6 +68,9 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
+        // Group payment notifications under a single thread to coalesce them
+        content.threadIdentifier = "stable-channels-payment"
+
         // Parse direction from push payload
         let userInfo = request.content.userInfo
         let direction: String
@@ -83,6 +86,20 @@ class NotificationService: UNNotificationServiceExtension {
         } else {
             direction = "lsp_to_user"
         }
+
+        // Tag with a direction-specific type for logic checks in foreground app
+        let notificationType: String
+        switch direction {
+        case "user_to_lsp":
+            notificationType = "payment_sent"
+        case "incoming_payment":
+            notificationType = "payment_received"
+        default: // "lsp_to_user"
+            notificationType = "payment_received"
+        }
+        var updatedUserInfo = content.userInfo
+        updatedUserInfo["notification_type"] = notificationType
+        content.userInfo = updatedUserInfo
 
         nseLog("didReceive: direction=\(direction) userInfo=\(userInfo)")
 

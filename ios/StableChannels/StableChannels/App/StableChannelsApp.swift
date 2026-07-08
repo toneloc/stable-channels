@@ -104,10 +104,25 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     func userNotificationCenter(
         _: UNUserNotificationCenter,
-        willPresent _: UNNotification,
+        willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // Show banner + sound even when app is in foreground
+        let content = notification.request.content
+
+        // Suppress empty/silenced SYNC_V1 control messages
+        if content.title.isEmpty {
+            completionHandler([])
+            return
+        }
+
+        // Suppress foreground banners for payment notifications (handled via in-app UI)
+        if let type = content.userInfo["notification_type"] as? String,
+           type.hasPrefix("payment") {
+            print("[Push] Suppressing foreground banner for \(type) notification")
+            completionHandler([])
+            return
+        }
+
         completionHandler([.banner, .sound])
     }
 
