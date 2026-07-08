@@ -10,7 +10,7 @@ The Stable Channels Wallet lets users peg a portion of their bitcoin to a dollar
 
 <p align="center">
   <img width="280" src="https://github.com/user-attachments/assets/cb6c5508-0602-4348-9242-50e7b9f3d9c4" />
-  &#x2003;&#x2003;&#x2003;&#x2003; <!-- 4 em-spaces (~wide gap) -->
+  &#x2003; <!-- em-space (~wide gap) -->
   <img width="280" src="https://github.com/user-attachments/assets/6daf2249-4f76-423d-9632-fe135a0fbe6a" />
 </p>
 
