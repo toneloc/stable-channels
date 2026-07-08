@@ -52,7 +52,7 @@ struct HistoryView: View {
             }
             .navigationTitle(String(localized: "title_history", defaultValue: "History"))
             .navigationBarTitleDisplayMode(.inline)
-            .task {
+            .onAppear {
                 loadHistory()
             }
             .refreshable {
