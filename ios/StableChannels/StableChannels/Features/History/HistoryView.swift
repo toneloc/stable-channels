@@ -187,13 +187,13 @@ struct PaymentRowView: View {
 
     private var paymentTypeLabel: String {
         switch payment.paymentType {
-        case "stability": return "Settlement"
-        case "lightning": return "Lightning"
-        case "splice_in": return "Splice In"
-        case "splice_out": return "Splice Out"
-        case "onchain": return "Onchain"
-        case "channel_close": return "Channel Close"
-        case "bolt12": return "Bolt12"
+        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
+        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
+        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
+        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
+        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
+        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
+        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
         default: return payment.paymentType
         }
     }

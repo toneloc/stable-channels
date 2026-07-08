@@ -1635,7 +1635,77 @@
         }
       }
     },
-    "This recovery will restore onchain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close.": {},
+    "This recovery will restore onchain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "سيستعيد هذا الاسترداد أموالك على السلسلة ولكنه لن يستعيد حالة قناة Lightning. ستفقد أموال Lightning وقد يتطلب الأمر إغلاقًا قسريًا من مزود الخدمة (LSP)."
+          }
+        },
+        "bn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "এই পুনরুদ্ধারটি অনচেইন তহবিলগুলি পুনরুদ্ধার করবে তবে Lightning চ্যানেলের অবস্থা নয়। Lightning তহবিলগুলি হারিয়ে যাবে এবং LSP-কে জোরপূর্বক বন্ধ করার প্রয়োজন হতে পারে।"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Wiederherstellung stellt Onchain-Guthaben wieder her, jedoch NICHT den Lightning-Kanalstatus. Lightning-Guthaben geht verloren und erfordert möglicherweise eine LSP-Zwangsschließung."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This recovery will restore onchain funds but NOT Lightning channel state. Lightning funds will be lost and may require LSP force-close."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esta recuperación restaurará los fondos onchain, pero NO el estado del canal Lightning. Los fondos Lightning se perderán y pueden requerir un cierre forzoso por parte del LSP."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cette récupération restaurera les fonds onchain mais PAS l'état du canal Lightning. Les fonds Lightning seront perdus et pourraient nécessiter une fermeture forcée du LSP."
+          }
+        },
+        "hi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "यह पुनर्प्राप्ति ऑनचेन फंड को बहाल करेगी लेकिन Lightning चैनल स्थिति को नहीं। Lightning फंड खो जाएंगे और इसके लिए LSP को जबरन बंद करने की आवश्यकता हो सकती है।"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この復元ではオンチェーン資金は復元されますが、Lightningチャネルのステータスは復元されません。Lightning資金は失われ、LSPによる強制終了が必要になる場合があります。"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esta recuperação restaurará os fundos on-chain, mas NÃO o estado do canal Lightning. Os fundos da Lightning serão perdidos e podem exigir um fechamento forçado pelo LSP."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Это восстановление вернет ончейн средства, но НЕ состояние канала Lightning. Средства Lightning будут потеряны и могут потребовать принудительного закрытия LSP."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此恢复将恢复链上资金，但不会恢复 Lightning 通道状态。Lightning 资金将丢失，可能需要 LSP 强制关闭。"
+          }
+        }
+      }
+    },
     "Time": {
       "localizations": {
         "ar": {
@@ -10124,10 +10194,70 @@
     "hint_create_wallet": {
       "extractionState": "manual",
       "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "استلم عبر Lightning لإنشاء Stable Wallet الخاصة بك"
+          }
+        },
+        "bn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "আপনার Stable Wallet তৈরি করতে Lightning-এর মাধ্যমে গ্রহণ করুন"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Empfangen Sie über Lightning, um Ihre Stable Wallet zu erstellen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Receive over Lightning to create your Stable Wallet"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recibe a través de Lightning para crear tu Stable Wallet"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recevez via Lightning pour créer votre Stable Wallet"
+          }
+        },
+        "hi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "अपना Stable Wallet बनाने के लिए Lightning के माध्यम से प्राप्त करें"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightningで受け取ってStable Walletを作成します"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Receba via Lightning para criar sua Stable Wallet"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Получите через Lightning, чтобы создать свой Stable Wallet"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过 Lightning 接收以创建您的 Stable Wallet"
           }
         }
       }
@@ -19287,6 +19417,77 @@
           "stringUnit": {
             "state": "translated",
             "value": "\u901a\u9053\u5173\u95ed"
+          }
+        }
+      }
+    },
+    "payment_type_lightning": {
+      "extractionState": "manual",
+      "localizations": {
+        "ar": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "bn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "hi": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lightning"
           }
         }
       }

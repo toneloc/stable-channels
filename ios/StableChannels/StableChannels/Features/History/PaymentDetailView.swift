@@ -80,8 +80,8 @@ struct PaymentDetailView: View {
 
     private var paymentTypeLabel: String {
         switch payment.paymentType {
-        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability Payment")
-        case "lightning": return String(localized: "payment_type_settlement", defaultValue: "Settlement")
+        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
+        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
         case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
         case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
         case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
