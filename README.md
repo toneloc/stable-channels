@@ -6,7 +6,7 @@
 [![Android](https://github.com/toneloc/stable-channels/actions/workflows/android-build.yml/badge.svg)](https://github.com/toneloc/stable-channels/actions/workflows/android-build.yml)
 [![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./COPYING)
 
-The Stable Channels Wallet lets users maint a portion of their bitcoin to a dollar balance, all while staying self-custodial and 100% in bitcoin. 
+The Stable Channels Wallet lets users maintain a portion of their bitcoin to a dollar balance, all while staying self-custodial and 100% in bitcoin. 
 
 <p align="center">
   <img width="280" src="https://github.com/user-attachments/assets/cb6c5508-0602-4348-9242-50e7b9f3d9c4" />
