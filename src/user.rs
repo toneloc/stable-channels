@@ -4565,8 +4565,17 @@ impl UserApp {
             let btc_color = Color32::from_rgb(255, 149, 0);
 
             if has_active_channel && total_usd > 0.01 {
-                let native_usd = total_usd - stabilized_usd;
-                let synth_ratio = (stabilized_usd / total_usd).clamp(0.0, 1.0) as f32;
+                let (_, native_usd) = channel_native_split(
+                    balances.total_lightning_balance_sats,
+                    stabilized_usd,
+                    btc_price,
+                );
+                let bar_total_usd = stabilized_usd + native_usd;
+                let synth_ratio = if bar_total_usd > 0.0 {
+                    (stabilized_usd / bar_total_usd).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                };
 
                 // Draggable balance slider — drag thumb left to BUY BTC, drag
                 // right to SELL. Releases past the min-trade threshold prefill
@@ -4617,7 +4626,7 @@ impl UserApp {
                     } else {
                         0.0
                     };
-                    let trade_usd = fraction.abs() * total_usd;
+                    let trade_usd = fraction.abs() * bar_total_usd;
                     if trade_usd >= min_trade_usd {
                         if self.bar_slider_drag_offset > 0.0 {
                             // Drag right → SELL native BTC, grow USD position.
@@ -8792,7 +8801,7 @@ impl UserApp {
         }
 
         // Can't sell more BTC than you have
-        let available_btc_usd = total_usd - current_expected_usd;
+        let available_btc_usd = (total_usd - current_expected_usd).max(0.0);
         if amount_usd > available_btc_usd {
             self.trade_error = format!(
                 "Amount exceeds BTC holdings (${:.2} available)",
@@ -9265,5 +9274,56 @@ pub fn run() {
             eprintln!("Failed to initialize app: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+/// Mobile-parity channel split: native = channel sats above the peg target (saturating, never negative), valued at price. Mirrors iOS HomeView.
+fn channel_native_split(lightning_sats: u64, target_usd: f64, price: f64) -> (u64, f64) {
+    if price <= 0.0 {
+        return (0, 0.0);
+    }
+    let stable_sats = (target_usd / price * 100_000_000.0) as u64;
+    let native_sats = lightning_sats.saturating_sub(stable_sats);
+    let native_usd = native_sats as f64 / 100_000_000.0 * price;
+    (native_sats, native_usd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::channel_native_split;
+
+    #[test]
+    fn native_split_under_peg_is_zero() {
+        let (sats, usd) = channel_native_split(95_000, 100.0, 100_000.0);
+        assert_eq!(sats, 0);
+        assert!((usd - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_split_over_peg() {
+        let (sats, usd) = channel_native_split(150_000, 100.0, 100_000.0);
+        assert_eq!(sats, 50_000);
+        assert!((usd - 50.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn native_split_exactly_pegged() {
+        let (sats, usd) = channel_native_split(100_000, 100.0, 100_000.0);
+        assert_eq!(sats, 0);
+        assert!((usd - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn native_split_zero_price() {
+        let (sats, usd) = channel_native_split(150_000, 100.0, 0.0);
+        assert_eq!(sats, 0);
+        assert_eq!(usd, 0.0);
+    }
+
+    #[test]
+    fn native_split_zero_lightning() {
+        let (sats, usd) = channel_native_split(0, 100.0, 100_000.0);
+        assert_eq!(sats, 0);
+        assert_eq!(usd, 0.0);
     }
 }
