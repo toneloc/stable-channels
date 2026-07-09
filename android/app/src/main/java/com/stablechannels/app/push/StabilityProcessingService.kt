@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
+import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.TradeService
 import com.stablechannels.app.util.Constants
 import okhttp3.OkHttpClient
@@ -27,6 +28,7 @@ class StabilityProcessingService : Service() {
     /** Thrown when a stability payment DB write fails permanently; the polling catch re-throws
      *  this so it escapes handleLspToUser and reaches onStartCommand's flagPendingPayment path. */
     private class BackingUpdateFailed(msg: String) : Exception(msg)
+    private class NodeOwnerBusy(msg: String) : Exception(msg)
 
     companion object {
         private const val TAG = "StabilityBgService"
@@ -125,6 +127,9 @@ class StabilityProcessingService : Service() {
             try {
                 processStability(direction)
                 FCMService.clearPendingPayment(this)
+            } catch (e: NodeOwnerBusy) {
+                Log.d(TAG, "Deferring stability processing: ${e.message}")
+                FCMService.flagPendingPayment(this)
             } catch (e: Exception) {
                 Log.e(TAG, "Stability processing failed", e)
                 FCMService.flagPendingPayment(this)
@@ -149,57 +154,65 @@ class StabilityProcessingService : Service() {
             return
         }
 
-        // Strip gossip from SQLite to avoid OOM in the foreground service.
-        // The NSE doesn't need gossip (it only routes to the LSP, a direct peer).
-        stripGossipFromDB(dataDir)
+        if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.STABILITY_SERVICE)) {
+            throw NodeOwnerBusy(
+                "LDK node data is already owned by ${LdkNodeOwner.currentOwner() ?: "another owner"}"
+            )
+        }
 
-        // Build lightweight LDK node (no RGS, no LSPS2)
-        val anchorConfig = AnchorChannelsConfig(
-            trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
-            perChannelReserveSats = 25_000UL
-        )
+        var node: Node? = null
+        try {
+            // Strip gossip from SQLite to avoid OOM in the foreground service.
+            // The service doesn't need gossip (it only routes to the LSP, a direct peer).
+            stripGossipFromDB(dataDir)
 
-        val config = Config(
-            storageDirPath = dataDir.absolutePath,
-            network = Network.BITCOIN,
-            listeningAddresses = null,
-            announcementAddresses = null,
-            nodeAlias = null,
-            trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
-            probingLiquidityLimitMultiplier = 3UL,
-            anchorChannelsConfig = anchorConfig,
-            routeParameters = null,
-            torConfig = null,
-            hrnConfig = HumanReadableNamesConfig(
-                HrnResolverConfig.Dns(
-                    dnsServerAddress = "8.8.8.8:53",
-                    enableHrnResolutionService = false
+            // Build lightweight LDK node (no RGS, no LSPS2)
+            val anchorConfig = AnchorChannelsConfig(
+                trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                perChannelReserveSats = 25_000UL
+            )
+
+            val config = Config(
+                storageDirPath = dataDir.absolutePath,
+                network = Network.BITCOIN,
+                listeningAddresses = null,
+                announcementAddresses = null,
+                nodeAlias = null,
+                trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                probingLiquidityLimitMultiplier = 3UL,
+                anchorChannelsConfig = anchorConfig,
+                routeParameters = null,
+                torConfig = null,
+                hrnConfig = HumanReadableNamesConfig(
+                    HrnResolverConfig.Dns(
+                        dnsServerAddress = "8.8.8.8:53",
+                        enableHrnResolutionService = false
+                    )
                 )
             )
-        )
 
-        val builder = Builder.fromConfig(config)
-        builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
+            val builder = Builder.fromConfig(config)
+            builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
 
-        // Derive node entropy (entropy is now passed to build()): prefer the seed_phrase
-        // mnemonic if present, otherwise fall back to the existing keys_seed file.
-        val seedWords = if (seedPhraseFile.exists()) seedPhraseFile.readText().trim() else ""
-        val nodeEntropy = if (seedWords.isNotEmpty()) {
-            Log.d(TAG, "Using seed_phrase mnemonic")
-            NodeEntropy.fromBip39Mnemonic(seedWords, null)
-        } else {
-            NodeEntropy.fromSeedPath(keySeedFile.absolutePath)
-        }
-        // No RGS gossip (saves ~5s startup + ~8MB RAM)
-        // No LSPS2 (not needed for stability payments)
+            // Derive node entropy (entropy is now passed to build()): prefer the seed_phrase
+            // mnemonic if present, otherwise fall back to the existing keys_seed file.
+            val seedWords = if (seedPhraseFile.exists()) seedPhraseFile.readText().trim() else ""
+            val nodeEntropy = if (seedWords.isNotEmpty()) {
+                Log.d(TAG, "Using seed_phrase mnemonic")
+                NodeEntropy.fromBip39Mnemonic(seedWords, null)
+            } else {
+                NodeEntropy.fromSeedPath(keySeedFile.absolutePath)
+            }
+            // No RGS gossip (saves ~5s startup + ~8MB RAM)
+            // No LSPS2 (not needed for stability payments)
 
-        val node = builder.build(nodeEntropy)
-        node.start()
+            val startedNode = builder.build(nodeEntropy)
+            node = startedNode
+            startedNode.start()
 
-        try {
             // Connect to LSP
             try {
-                node.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+                startedNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
             } catch (e: Exception) {
                 Log.w(TAG, "LSP connect: ${e.message}")
             }
@@ -207,13 +220,17 @@ class StabilityProcessingService : Service() {
             val dbPath = File(dataDir, "stablechannels.db").absolutePath
 
             when (direction) {
-                "lsp_to_user" -> handleLspToUser(node, dbPath)
-                "user_to_lsp" -> handleUserToLsp(node, dbPath)
-                "incoming_payment" -> handleIncomingPayment(node, dbPath)
+                "lsp_to_user" -> handleLspToUser(startedNode, dbPath)
+                "user_to_lsp" -> handleUserToLsp(startedNode, dbPath)
+                "incoming_payment" -> handleIncomingPayment(startedNode, dbPath)
                 else -> Log.w(TAG, "Unknown direction: $direction")
             }
         } finally {
-            node.stop()
+            try {
+                node?.stop()
+            } finally {
+                LdkNodeOwner.release(LdkNodeOwner.STABILITY_SERVICE)
+            }
         }
     }
 

@@ -137,6 +137,7 @@ class AppState(private val context: Context) : ViewModel() {
     private var stabilityJob: Job? = null
     private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
+    private var nodeStartRetryJob: Job? = null
 
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
@@ -197,9 +198,15 @@ class AppState(private val context: Context) : ViewModel() {
                     } else {
                         _phase.value = Phase.SYNCING
                     }
-                    waitForBackgroundService()
+                    if (!waitForBackgroundService()) {
+                        _isSyncing.value = false
+                        scheduleNodeStartRetry()
+                        return@launch
+                    }
                     loadChannelFromDB()  // reload — SPS may have incremented backingSats while we waited
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeStartRetryJob?.cancel()
+                    nodeStartRetryJob = null
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
                     refreshBalances()
@@ -268,6 +275,8 @@ class AppState(private val context: Context) : ViewModel() {
         stabilityJob?.cancel()
         heartbeatJob?.cancel()
         pendingDepositJob?.cancel()
+        nodeStartRetryJob?.cancel()
+        nodeStartRetryJob = null
         priceService.stopAutoRefresh()
         nodeService.stop()
     }
@@ -321,6 +330,8 @@ class AppState(private val context: Context) : ViewModel() {
         stabilityJob = null
         pendingDepositJob?.cancel()
         pendingDepositJob = null
+        nodeStartRetryJob?.cancel()
+        nodeStartRetryJob = null
         if (!nodeService.isRunning) return
         Log.d("AppState", "Stopping node for background")
         nodeService.stop()
@@ -344,11 +355,16 @@ class AppState(private val context: Context) : ViewModel() {
                 return@launch
             }
             Log.d("AppState", "Restarting node from foreground")
-            waitForBackgroundService()
+            if (!waitForBackgroundService()) {
+                scheduleNodeStartRetry()
+                return@launch
+            }
             try {
                 loadChannelFromDB()
                 _phase.value = Phase.SYNCING
                 nodeService.start(Network.BITCOIN, chainUrl, null)
+                nodeStartRetryJob?.cancel()
+                nodeStartRetryJob = null
                 _phase.value = Phase.WALLET
                 refreshBalances()
                 updateStableBalances()
@@ -1331,15 +1347,37 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun waitForBackgroundService() {
-        if (!StabilityProcessingService.isRunning) return
+    private fun backgroundServiceOwnsLdk(): Boolean =
+        StabilityProcessingService.isRunning ||
+            LdkNodeOwner.isOwnedBy(LdkNodeOwner.STABILITY_SERVICE)
+
+    private fun waitForBackgroundService(): Boolean {
+        if (!backgroundServiceOwnsLdk()) return true
         Log.d("AppState", "Waiting for background stability service to finish...")
         val deadline = System.currentTimeMillis() + 30_000
-        while (StabilityProcessingService.isRunning && System.currentTimeMillis() < deadline) {
+        while (backgroundServiceOwnsLdk() && System.currentTimeMillis() < deadline) {
             Thread.sleep(500)
         }
-        if (StabilityProcessingService.isRunning) {
-            Log.w("AppState", "Background service still running after 30s, proceeding anyway")
+        if (backgroundServiceOwnsLdk()) {
+            val owner = LdkNodeOwner.currentOwner() ?: "background service"
+            Log.w("AppState", "Background service still owns LDK after 30s (owner=$owner); skipping node start")
+            _statusMessage.value = "Finishing background sync..."
+            FCMService.flagPendingPayment(context)
+            return false
+        }
+        return true
+    }
+
+    private fun scheduleNodeStartRetry() {
+        if (nodeStartRetryJob?.isActive == true) return
+        nodeStartRetryJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive && backgroundServiceOwnsLdk()) {
+                delay(1_000)
+            }
+            if (!isActive || nodeService.isRunning) return@launch
+            Log.d("AppState", "Retrying node start after LDK owner released")
+            _statusMessage.value = "Syncing wallet..."
+            restartNodeFromForeground()
         }
     }
 
