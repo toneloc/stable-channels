@@ -20,7 +20,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
-import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -288,8 +287,13 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 if (hasChannel) {
                                     if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value
-                                    appState.pendingSplice = PendingSplice("out", sats, addr)
-                                    appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
+                                    appState.beginSpliceOut(sats, addr)
+                                    try {
+                                        appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
+                                    } catch (e: Exception) {
+                                        appState.cancelPendingSpliceStart()
+                                        throw e
+                                    }
                                     result = "Splice-out initiated for ${sats.satsFormatted()} sats."
                                     successTxid = null
                                 } else {

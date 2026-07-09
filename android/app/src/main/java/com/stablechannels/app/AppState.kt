@@ -138,6 +138,8 @@ class AppState(private val context: Context) : ViewModel() {
     private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
     private var nodeStartRetryJob: Job? = null
+    private var spliceConfirmationJob: Job? = null
+    private var monitoredSpliceTxid: String? = null
 
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
@@ -214,17 +216,11 @@ class AppState(private val context: Context) : ViewModel() {
                     // Restore fundingTxid
                     fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
                         .getString("funding_txid", null)
-                    val pendingSpliceTxid = databaseService?.getPendingSpliceTxid()
-                    val spliceCompletionCandidate = pendingSpliceTxid ?: fundingTxid
-                    if (!spliceCompletionCandidate.isNullOrBlank() &&
-                        currentChannelFundingTxidMatches(spliceCompletionCandidate)
-                    ) {
-                        databaseService?.completeSplice(spliceCompletionCandidate)
-                    }
                     // Restore pending splice state
                     if (databaseService?.hasPendingSplice() == true) {
                         isSweeping = true
                         spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
+                        spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
                     }
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
@@ -277,6 +273,9 @@ class AppState(private val context: Context) : ViewModel() {
         pendingDepositJob?.cancel()
         nodeStartRetryJob?.cancel()
         nodeStartRetryJob = null
+        spliceConfirmationJob?.cancel()
+        spliceConfirmationJob = null
+        monitoredSpliceTxid = null
         priceService.stopAutoRefresh()
         nodeService.stop()
     }
@@ -332,6 +331,9 @@ class AppState(private val context: Context) : ViewModel() {
         pendingDepositJob = null
         nodeStartRetryJob?.cancel()
         nodeStartRetryJob = null
+        spliceConfirmationJob?.cancel()
+        spliceConfirmationJob = null
+        monitoredSpliceTxid = null
         if (!nodeService.isRunning) return
         Log.d("AppState", "Stopping node for background")
         nodeService.stop()
@@ -397,37 +399,31 @@ class AppState(private val context: Context) : ViewModel() {
             }
             is Event.ChannelReady -> {
                 val sc = _stableChannel.value.copy()
-                // Splices keep the channel_id stable in current LDK, so a changed
-                // channel_id can't be the splice signal. Match the channel's actual
-                // funding txid against a recorded splice row instead; completeSplice
-                // is exact-match and idempotent, so replayed events are no-ops.
+                // In 0-conf channels, ChannelReady can fire before the splice tx confirms.
+                // Treat it as metadata only; the splice stays pending until the tx has 1 conf.
                 val channelIdChanged = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
                 sc.channelId = event.channelId
-                var completedSplice = false
+                var pendingSpliceCandidate: String? = null
                 if (sc.userChannelId == event.userChannelId) {
                     nodeService.refreshChannels()
                     val channelFundingTxid = nodeService.channels
                         .firstOrNull { it.userChannelId == event.userChannelId }
                         ?.fundingTxo?.txid
-                    for (candidate in listOfNotNull(channelFundingTxid, spliceTxid)) {
-                        if (candidate.isNotEmpty() && databaseService?.completeSplice(candidate) == true) {
-                            completedSplice = true
-                            break
-                        }
+                    pendingSpliceCandidate = listOfNotNull(
+                        databaseService?.getPendingSpliceTxid(),
+                        spliceTxid
+                    ).firstOrNull { candidate ->
+                        candidate.isNotEmpty() && candidate == channelFundingTxid
                     }
                 }
-                val isSplice = completedSplice || channelIdChanged
+                val isSplice = pendingSpliceCandidate != null || channelIdChanged
                 if (isSplice) {
-                    isSweeping = false
-                    spliceTxid = null
-                    if (!completedSplice) databaseService?.completeLatestSplice(fundingTxid)
-                    val price = priceService.currentPrice.value
-                    val result = StabilityService.reconcileOutgoing(sc, price)
-                    val reconciled = result.first
-                    if (result.second != null) {
-                        reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
-                    }
-                    _stableChannel.value = reconciled
+                    isSweeping = true
+                    val txid = pendingSpliceCandidate ?: spliceTxid ?: fundingTxid
+                    spliceTxid = txid
+                    txid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
+                    _stableChannel.value = sc
+                    _statusMessage.value = "Swap pending confirmation"
                 } else {
                     _stableChannel.value = sc
                 }
@@ -489,6 +485,9 @@ class AppState(private val context: Context) : ViewModel() {
             is Event.SpliceNegotiationFailed -> {
                 isSweeping = false
                 spliceTxid = null
+                spliceConfirmationJob?.cancel()
+                spliceConfirmationJob = null
+                monitoredSpliceTxid = null
                 pendingSplice = null
                 databaseService?.failLatestPendingSplice()
                 AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
@@ -757,6 +756,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun handleSplicePending(channelId: String, userChannelId: String, newFundingTxo: String) {
         val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
+        isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
         val splice = pendingSplice
@@ -784,6 +784,90 @@ class AppState(private val context: Context) : ViewModel() {
         }
         refreshBalances()
         updateStableBalances()
+        _statusMessage.value = "Swap pending confirmation"
+        startSpliceConfirmationMonitor(txid)
+    }
+
+    fun beginSpliceOut(amountSats: Long, address: String) {
+        if (isSweeping) {
+            throw IllegalStateException("A splice is already in progress — try again shortly")
+        }
+        isSweeping = true
+        pendingSplice = PendingSplice("out", amountSats, address)
+        _statusMessage.value = "Swap pending..."
+    }
+
+    fun cancelPendingSpliceStart() {
+        if (spliceTxid == null) {
+            isSweeping = false
+            pendingSplice = null
+            _statusMessage.value = ""
+        }
+    }
+
+    private fun startSpliceConfirmationMonitor(txid: String) {
+        val normalizedTxid = txid.trim()
+        if (normalizedTxid.isEmpty()) return
+        if (spliceConfirmationJob?.isActive == true && monitoredSpliceTxid == normalizedTxid) return
+
+        spliceConfirmationJob?.cancel()
+        monitoredSpliceTxid = normalizedTxid
+        spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                if (isTxConfirmed(normalizedTxid)) {
+                    completeConfirmedSplice(normalizedTxid)
+                    break
+                }
+                delay(30_000)
+            }
+        }
+    }
+
+    private fun isTxConfirmed(txid: String): Boolean {
+        val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        for (baseUrl in urls) {
+            try {
+                val request = Request.Builder()
+                    .url("${baseUrl.trimEnd('/')}/tx/$txid/status")
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = response.body?.string() ?: return@use
+                    if (JSONObject(body).optBoolean("confirmed", false)) return true
+                }
+            } catch (e: Exception) {
+                Log.w("AppState", "Splice confirmation check failed: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    private fun completeConfirmedSplice(txid: String) {
+        val completed = databaseService?.completeSplice(txid) == true
+        refreshBalances()
+        updateStableBalances()
+
+        val price = priceService.currentPrice.value
+        val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
+        val reconciled = result.first
+        if (result.second != null) {
+            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+        }
+        _stableChannel.value = reconciled
+        saveChannelToDB()
+
+        isSweeping = false
+        pendingSplice = null
+        sweepOnchainStart = 0
+        if (spliceTxid == txid) spliceTxid = null
+        monitoredSpliceTxid = null
+        spliceConfirmationJob = null
+        _statusMessage.value = "Swap confirmed"
+
+        AuditService.log("SPLICE_CONFIRMED", mapOf(
+            "txid" to txid,
+            "completed_row" to completed
+        ))
     }
 
     private fun handleChannelClosed(channelId: String, userChannelId: String, reason: String?) {
