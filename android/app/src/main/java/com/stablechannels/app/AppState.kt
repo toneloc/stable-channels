@@ -216,12 +216,7 @@ class AppState(private val context: Context) : ViewModel() {
                     // Restore fundingTxid
                     fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
                         .getString("funding_txid", null)
-                    // Restore pending splice state
-                    if (databaseService?.hasPendingSplice() == true) {
-                        isSweeping = true
-                        spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
-                        spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
-                    }
+                    resumePendingSpliceConfirmation()
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
@@ -354,6 +349,7 @@ class AppState(private val context: Context) : ViewModel() {
                 ensureLSPConnected()
                 refreshBalances()
                 updateStableBalances()
+                resumePendingSpliceConfirmation()
                 return@launch
             }
             Log.d("AppState", "Restarting node from foreground")
@@ -373,6 +369,7 @@ class AppState(private val context: Context) : ViewModel() {
                 val sc = StabilityService.reconcileIncoming(_stableChannel.value)
                 _stableChannel.value = sc
                 saveChannelToDB()
+                resumePendingSpliceConfirmation()
                 reregisterPushTokenIfNeeded()
                 startStabilityTimer()
             } catch (e: Exception) {
@@ -821,6 +818,13 @@ class AppState(private val context: Context) : ViewModel() {
                 delay(30_000)
             }
         }
+    }
+
+    private fun resumePendingSpliceConfirmation() {
+        if (databaseService?.hasPendingSplice() != true) return
+        isSweeping = true
+        spliceTxid = databaseService?.getPendingSpliceTxid() ?: spliceTxid ?: fundingTxid
+        spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
     }
 
     private fun isTxConfirmed(txid: String): Boolean {
