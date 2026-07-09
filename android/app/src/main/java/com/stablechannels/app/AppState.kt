@@ -768,7 +768,7 @@ class AppState(private val context: Context) : ViewModel() {
                         amountUSD = (splice.amountSats.toDouble() / Constants.SATS_IN_BTC) * price,
                         // bare txid (not the "txid:vout" outpoint) so completeSplice
                         // txid lookups match this row
-                        btcPrice = price, txid = txid, address = splice.address
+                        btcPrice = price, status = "pending", txid = txid, address = splice.address
                     )
                 }
             }
