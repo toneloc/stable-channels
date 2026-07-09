@@ -80,6 +80,15 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _spendableOnchainSats = MutableStateFlow(0L)
     val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
+    private var localSpentOnchainSats = 0L
+
+    private fun saveLocalSpentOnchainSats(value: Long) {
+        localSpentOnchainSats = value
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+            .edit()
+            .putLong("local_spent_onchain_sats", value)
+            .apply()
+    }
 
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
@@ -92,6 +101,7 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
         _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
+        localSpentOnchainSats = prefs.getLong("local_spent_onchain_sats", 0L)
 
         // Restore cached channel state so UI shows correct slider position immediately
         val cachedChannelId = prefs.getString("cached_channel_id", null)
@@ -128,9 +138,9 @@ class AppState(private val context: Context) : ViewModel() {
 
     var onchainReceiveAddress: String? = null
 
-    private var isSweeping = false
+    private val _isSpliceInFlight = MutableStateFlow(false)
     /** True when any splice (in or out) is in flight — prevents concurrent splices. */
-    val isSpliceInFlight: Boolean get() = isSweeping
+    val isSpliceInFlight: StateFlow<Boolean> get() = _isSpliceInFlight
     private var sweepOnchainStart: Long = 0
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
@@ -216,7 +226,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     // Restore pending splice state
                     if (databaseService?.hasPendingSplice() == true) {
-                        isSweeping = true
+                        _isSpliceInFlight.value = true
                         spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
                     }
                     reregisterPushTokenIfNeeded()
@@ -1055,7 +1065,7 @@ class AppState(private val context: Context) : ViewModel() {
     internal fun detectOnchainDeposit() {
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
-        if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
+        if (currentSats > prevOnchainSats && !_isSpliceInFlight.value && pendingSplice == null) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
                 prevOnchainSats = currentSats
@@ -1204,7 +1214,11 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
-        _spendableOnchainSats.value = balances.spendableOnchainBalanceSats.toLong()
+        val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
+        if (rawSpendable == 0L || rawSpendable <= _spendableOnchainSats.value - localSpentOnchainSats) {
+            saveLocalSpentOnchainSats(0L)
+        }
+        _spendableOnchainSats.value = maxOf(0L, rawSpendable - localSpentOnchainSats)
 
         // Clear closing flag once lightning balance fully resolves
         // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
@@ -1215,7 +1229,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         _totalBalanceSats.value = when {
             isChannelClosing -> onchain
-            isSweeping -> lightning
+            _isSpliceInFlight.value -> lightning
             // No open channel but both balances present: lightning is pending-close claimable
             // that overlaps with on-chain — avoid double-count
             !hasReady && lightning > 0 && onchain > 0 -> onchain

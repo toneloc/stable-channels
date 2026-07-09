@@ -307,7 +307,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // On-chain section
             if (onchainSats > 0) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                val isSweeping = appState.isSpliceInFlight
+                val isSweeping by appState.isSpliceInFlight.collectAsState()
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -364,9 +364,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 }
                                 FilledTonalButton(
                                     onClick = {
-                                        scope.launch(Dispatchers.IO) {
-                                            appState.sweepToChannel()
-                                        }
+                                        appState.sweepToChannel()
                                     },
                                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
                                 ) {
@@ -483,7 +481,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     }
     if (showReceive) {
         ModalBottomSheet(
-            onDismissRequest = { showReceive = false },
+            onDismissRequest = {
+                showReceive = false
+                appState.isWaitingForPayment = false
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
@@ -515,7 +516,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 onDispose {}
             }
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
-                ReceiveScreen(appState) { showReceive = false }
+                ReceiveScreen(appState) {
+                    showReceive = false
+                    appState.isWaitingForPayment = false
+                }
             }
         }
     }

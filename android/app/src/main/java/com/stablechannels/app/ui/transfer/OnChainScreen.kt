@@ -286,10 +286,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
                                 val sats = if (price > 0) (usd / price * Constants.SATS_IN_BTC).toLong() else throw Exception("No price available")
                                 if (hasChannel) {
-                                    if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
-                                    val sc = appState.stableChannel.value
-                                    appState.pendingSplice = PendingSplice("out", sats, addr)
-                                    appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
+                                    appState.spliceOut(addr, sats)
                                     result = "Splice-out initiated for ${sats.satsFormatted()} sats."
                                     successTxid = null
                                 } else {
