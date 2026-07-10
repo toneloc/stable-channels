@@ -77,7 +77,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
             }
             Text(
-                text = if (step == TradeStep.CONFIRM) "Confirm Conversion" else if (step == TradeStep.DONE) "Conversion Confirmed" else "USD → BTC",
+                text = "USD → BTC",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.Center)
@@ -229,7 +229,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isExecuting) CircularProgressIndicator(Modifier.size(20.dp))
-                    else Text("Confirm Conversion")
+                    else Text("Confirm Order")
                 }
                 Spacer(Modifier.height(8.dp))
                 TextButton(onClick = { step = TradeStep.AMOUNT }) { Text("Back") }
@@ -247,19 +247,19 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Conversion Confirmed", style = MaterialTheme.typography.headlineMedium)
+                    Text("Order Confirmed", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your conversion has been confirmed.",
+                        "Your order has been confirmed.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
                     CircularProgressIndicator(Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text("Conversion Pending", style = MaterialTheme.typography.headlineMedium)
+                    Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your conversion is being processed. Balance will update when the payment confirms.",
+                        "Your order is being processed. Balance will update when the payment confirms.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
