@@ -113,7 +113,20 @@ class AppState(private val context: Context) : ViewModel() {
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
     var isChannelClosing: Boolean
         get() = _isChannelClosing.value
-        set(value) { _isChannelClosing.value = value }
+        set(value) { 
+            _isChannelClosing.value = value
+            if (value) {
+                channelCloseJob?.cancel()
+                channelCloseJob = viewModelScope.launch(Dispatchers.IO) {
+                    while (isActive && _isChannelClosing.value) {
+                        delay(10_000)
+                        refreshBalances()
+                    }
+                }
+            } else {
+                channelCloseJob?.cancel()
+            }
+        }
     var pendingClosePaymentId: String? = null
     var spliceTxid: String? = null
     var fundingTxid: String? = null
@@ -137,7 +150,7 @@ class AppState(private val context: Context) : ViewModel() {
     private var stabilityJob: Job? = null
     private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
-
+    private var channelCloseJob: Job? = null
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
         private set
