@@ -78,7 +78,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 }
             }
             Text(
-                text = if (step == TradeStep.CONFIRM) "Confirm Order" else if (step == TradeStep.DONE) "Order Confirmed" else "BTC → USD",
+                text = if (step == TradeStep.CONFIRM) "Confirm Conversion" else if (step == TradeStep.DONE) "Conversion Confirmed" else "BTC → USD",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.Center)
@@ -231,7 +231,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isExecuting) CircularProgressIndicator(Modifier.size(20.dp))
-                    else Text("Confirm Order")
+                    else Text("Confirm Conversion")
                 }
                 Spacer(Modifier.height(8.dp))
                 TextButton(onClick = { step = TradeStep.AMOUNT }) { Text("Back") }
@@ -249,24 +249,26 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Trade Confirmed", style = MaterialTheme.typography.headlineMedium)
+                    Text("Conversion Confirmed", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your sell order has been confirmed.",
+                        "Your conversion has been confirmed.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
                     CircularProgressIndicator(Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text("Trade Pending", style = MaterialTheme.typography.headlineMedium)
+                    Text("Conversion Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your sell order is being processed. Balance will update when the payment confirms.",
+                        "Your conversion is being processed. Balance will update when the payment confirms.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = onDismiss) { Text("Done") }
+                if (isConfirmed) {
+                    Button(onClick = onDismiss) { Text("Done") }
+                }
             }
         }
     }

@@ -359,7 +359,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column {
-                                    Text("Move to Trading", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Move to Stability", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text("and Spending Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 FilledTonalButton(
@@ -649,7 +649,7 @@ private fun PendingRow(text: String, txid: String?, context: android.content.Con
         txid?.let {
             TextButton(
                 onClick = {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/$it"))
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${it.substringBefore(":")}"))
                     context.startActivity(intent)
                 },
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
