@@ -1614,7 +1614,7 @@ mod tests {
         GetBalancesResponse, ListPeersRequest, ListPeersResponse,
     };
     use ldk_server_client::ldk_server_grpc::types::{
-        Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment,
+        Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment, HtlcLocator,
         PendingSweepBalance as GrpcPendingSweepBalance, Peer as GrpcPeer,
     };
     use std::sync::Mutex as StdMutex;
@@ -2865,12 +2865,16 @@ mod tests {
 
     fn fwd(prev: &str, next: &str, amt: u64) -> GrpcForwardedPayment {
         GrpcForwardedPayment {
-            prev_channel_id: prev.into(),
-            next_channel_id: next.into(),
-            prev_user_channel_id: "10".into(),
-            prev_node_id: "02aa".into(),
-            next_node_id: "02bb".into(),
-            next_user_channel_id: Some("20".into()),
+            prev_htlcs: vec![HtlcLocator {
+                channel_id: prev.into(),
+                user_channel_id: Some("10".into()),
+                node_id: Some("02aa".into()),
+            }],
+            next_htlcs: vec![HtlcLocator {
+                channel_id: next.into(),
+                user_channel_id: Some("20".into()),
+                node_id: Some("02bb".into()),
+            }],
             total_fee_earned_msat: Some(7),
             skimmed_fee_msat: None,
             claim_from_onchain_tx: false,
