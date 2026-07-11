@@ -306,13 +306,18 @@ struct OnChainSendView: View {
                         )]
                     )
                 }
-                try appState.nodeService.spliceOut(
-                    userChannelId: channel.userChannelId,
-                    counterpartyNodeId: channel.counterpartyNodeId,
-                    address: address,
-                    amountSats: sats
-                )
-                appState.pendingSplice = PendingSplice(direction: "out", amountSats: sats, address: address)
+                try appState.beginSpliceOut(amountSats: sats, address: address)
+                do {
+                    try appState.nodeService.spliceOut(
+                        userChannelId: channel.userChannelId,
+                        counterpartyNodeId: channel.counterpartyNodeId,
+                        address: address,
+                        amountSats: sats
+                    )
+                } catch {
+                    appState.cancelPendingSpliceStart()
+                    throw error
+                }
                 spliceSuccess = true
             } else if sendAll {
                 let result = try appState.nodeService.sendAllOnchain(address: address)

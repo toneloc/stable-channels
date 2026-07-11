@@ -122,6 +122,8 @@ class AppState {
     // Auto-sweep state
     private(set) var isSweeping = false
     var spliceTxid: String?
+    private var spliceConfirmationTask: Task<Void, Never>?
+    private var monitoredSpliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
     private var prevOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -265,6 +267,9 @@ class AppState {
         isOpeningChannel = false
         isSweeping = false
         spliceTxid = nil
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
         sweepOnchainStart = 0
         prevOnchainSats = 0
         fundingTxid = nil
@@ -389,21 +394,7 @@ class AppState {
                     // Restore fundingTxid from UserDefaults
                     fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .string(forKey: "funding_txid")
-                    let pendingSpliceTxid: String? = {
-                        guard let databaseService else { return nil }
-                        return try? databaseService.getPendingSpliceTxid()
-                    }()
-                    let spliceCompletionCandidate = pendingSpliceTxid ?? fundingTxid
-                    if let txid = spliceCompletionCandidate,
-                       !txid.isEmpty,
-                       currentChannelFundingTxidMatches(txid) {
-                        databaseService?.completeSplice(txid: txid)
-                    }
-                    // Restore pending splice state from DB
-                    if let hasSplice = try? databaseService?.hasPendingSplice(), hasSplice {
-                        isSweeping = true
-                        spliceTxid = (try? databaseService?.getPendingSpliceTxid()) ?? fundingTxid
-                    }
+                    resumePendingSpliceConfirmation()
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -533,6 +524,9 @@ class AppState {
         stabilityTimer = nil
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
         if let observer = eventObserver {
             NotificationCenter.default.removeObserver(observer)
             eventObserver = nil
@@ -590,6 +584,9 @@ class AppState {
         stabilityTimer = nil
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -615,6 +612,7 @@ class AppState {
             ensureLSPConnected()
             refreshBalances()
             updateStableBalances()
+            resumePendingSpliceConfirmation()
             return
         }
         print("[App] Restarting node from foreground")
@@ -629,6 +627,7 @@ class AppState {
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
+            resumePendingSpliceConfirmation()
             reregisterPushTokenIfNeeded()
             startStabilityTimer()
             await processPendingPushPayment()
@@ -959,48 +958,39 @@ class AppState {
             ])
 
         case .channelReady(let channelId, let userChannelId, _, _):
-            // Splices keep the channel_id stable in current LDK, so a changed
-            // channel_id can't be the splice signal. Instead, match the channel's
-            // actual funding txid against a recorded splice row; completeSplice is
-            // exact-match and idempotent, so replayed events are no-ops.
+            // In 0-conf channels, ChannelReady can fire before the splice tx confirms.
+            // Treat it as metadata only; the splice stays pending until the tx has 1 conf.
             let channelIdChanged = stableChannel.userChannelId == userChannelId
+                && !stableChannel.channelId.isEmpty
                 && stableChannel.channelId != channelId
 
             stableChannel.channelId = channelId
             refreshBalances()
             updateStableBalances()
 
-            var completedSplice = false
+            var pendingSpliceCandidate: String?
             if stableChannel.userChannelId == userChannelId {
                 nodeService.refreshChannels()
                 let fundingTxid: String? = nodeService.channels
                     .first(where: { "\($0.userChannelId)" == "\(userChannelId)" })
                     .flatMap { $0.fundingTxo.map { "\($0.txid)" } }
-                for candidate in [fundingTxid, spliceTxid].compactMap({ $0 }) where !candidate.isEmpty {
-                    if databaseService?.completeSplice(txid: candidate) == true {
-                        completedSplice = true
-                        break
+                let pendingDbTxid = (try? databaseService?.getPendingSpliceTxid()) ?? nil
+                pendingSpliceCandidate = [pendingDbTxid, spliceTxid]
+                    .compactMap { $0 }
+                    .first { candidate in
+                        !candidate.isEmpty && candidate == fundingTxid
                     }
-                }
             }
-            let isSplice = completedSplice || channelIdChanged
+            let isSplice = pendingSpliceCandidate != nil || channelIdChanged
 
-            // After splice confirms, reconcile outgoing and clear sweep state
             if isSplice {
-                isSweeping = false
-                if !completedSplice {
-                    databaseService?.completeLatestSplice(txid: spliceTxid)
+                isSweeping = true
+                let txid = pendingSpliceCandidate ?? spliceTxid ?? fundingTxid
+                spliceTxid = txid
+                if let txid, !txid.isEmpty {
+                    startSpliceConfirmationMonitor(txid: txid)
                 }
-                spliceTxid = nil
-                sweepOnchainStart = 0
-                let price = stableChannel.latestPrice
-                if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
-                    AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
-                        "usd_deducted": "\(usdDeducted)",
-                        "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
-                        "btc_price": "\(price)"
-                    ])
-                }
+                statusMessage = "Swap pending confirmation"
             }
 
             saveChannelToDB()
@@ -1009,7 +999,9 @@ class AppState {
                 "channel_id": channelId,
                 "user_channel_id": userChannelId
             ])
-            statusMessage = "Channel is ready"
+            if !isSplice {
+                statusMessage = "Channel is ready"
+            }
 
         case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
             handlePaymentReceived(
@@ -1077,6 +1069,9 @@ class AppState {
         case .spliceNegotiationFailed(let channelId, let userChannelId, _):
             isSweeping = false
             spliceTxid = nil
+            spliceConfirmationTask?.cancel()
+            spliceConfirmationTask = nil
+            monitoredSpliceTxid = nil
             sweepOnchainStart = 0
             pendingSplice = nil
             databaseService?.failLatestPendingSplice()
@@ -1592,6 +1587,7 @@ class AppState {
         newFundingTxo: OutPoint
     ) {
         fundingTxid = "\(newFundingTxo.txid)"
+        isSweeping = true
 
         AuditService.log("SPLICE_PENDING", data: [
             "channel_id": "\(channelId)",
@@ -1636,6 +1632,117 @@ class AppState {
         refreshBalances()
         updateStableBalances()
         statusMessage = "Splice pending"
+        startSpliceConfirmationMonitor(txid: txidStr)
+    }
+
+    func beginSpliceOut(amountSats: UInt64, address: String) throws {
+        guard !isSweeping else {
+            throw NSError(
+                domain: "",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
+            )
+        }
+        isSweeping = true
+        pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address)
+        statusMessage = "Swap pending..."
+    }
+
+    func cancelPendingSpliceStart() {
+        guard spliceTxid == nil else { return }
+        isSweeping = false
+        pendingSplice = nil
+        statusMessage = ""
+    }
+
+    private func startSpliceConfirmationMonitor(txid: String) {
+        let normalizedTxid = txid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTxid.isEmpty else { return }
+        if monitoredSpliceTxid == normalizedTxid, spliceConfirmationTask != nil {
+            return
+        }
+
+        spliceConfirmationTask?.cancel()
+        monitoredSpliceTxid = normalizedTxid
+        spliceConfirmationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await self.isTxConfirmed(normalizedTxid) {
+                    self.completeConfirmedSplice(txid: normalizedTxid)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+
+    private func resumePendingSpliceConfirmation() {
+        guard let hasSplice = try? databaseService?.hasPendingSplice(), hasSplice else { return }
+        isSweeping = true
+        spliceTxid = (try? databaseService?.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
+        if let txid = spliceTxid, !txid.isEmpty {
+            startSpliceConfirmationMonitor(txid: txid)
+        }
+    }
+
+    private func isTxConfirmed(_ txid: String) async -> Bool {
+        var urls: [String] = []
+        for url in [chainURL, Constants.primaryChainURL, Constants.fallbackChainURL] where !urls.contains(url) {
+            urls.append(url)
+        }
+        for baseURL in urls {
+            guard let url = URL(string: "\(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/tx/\(txid)/status") else {
+                continue
+            }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    continue
+                }
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if json?["confirmed"] as? Bool == true {
+                    return true
+                }
+            } catch {
+                AuditService.log("SPLICE_CONFIRMATION_CHECK_FAILED", data: [
+                    "txid": txid,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+        return false
+    }
+
+    private func completeConfirmedSplice(txid: String) {
+        let completed = databaseService?.completeSplice(txid: txid) == true
+        refreshBalances()
+        updateStableBalances()
+
+        let price = stableChannel.latestPrice
+        if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
+            stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
+            AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
+                "usd_deducted": "\(usdDeducted)",
+                "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
+                "btc_price": "\(price)"
+            ])
+        }
+        saveChannelToDB()
+
+        isSweeping = false
+        pendingSplice = nil
+        sweepOnchainStart = 0
+        if spliceTxid == txid {
+            spliceTxid = nil
+        }
+        monitoredSpliceTxid = nil
+        spliceConfirmationTask = nil
+        statusMessage = "Swap confirmed"
+
+        AuditService.log("SPLICE_CONFIRMED", data: [
+            "txid": txid,
+            "completed_row": "\(completed)"
+        ])
     }
 
     // MARK: - Stability Timer
