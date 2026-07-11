@@ -147,19 +147,24 @@ async fn dispatch(
         },
         Some(EventVariant::PaymentForwarded(e)) => {
             if let Some(fp) = e.forwarded_payment {
+                // ForwardedPayment now carries per-HTLC locators; take the first of each list as the representative channel/node.
+                let prev = fp.prev_htlcs.first();
+                let next = fp.next_htlcs.first();
+                let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
+                let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
                 let fp_key = stable_channels::db::forward_fingerprint(
-                    &fp.prev_channel_id,
-                    &fp.next_channel_id,
+                    &prev_channel_id,
+                    &next_channel_id,
                     fp.outbound_amount_forwarded_msat,
                     fp.total_fee_earned_msat,
                 );
                 mgr.handle_payment_forwarded(
-                    fp.prev_user_channel_id,
-                    fp.next_user_channel_id,
-                    fp.prev_channel_id,
-                    fp.next_channel_id,
-                    fp.prev_node_id,
-                    fp.next_node_id,
+                    prev.and_then(|h| h.user_channel_id.clone()).unwrap_or_default(),
+                    next.and_then(|h| h.user_channel_id.clone()),
+                    prev_channel_id,
+                    next_channel_id,
+                    prev.and_then(|h| h.node_id.clone()).unwrap_or_default(),
+                    next.and_then(|h| h.node_id.clone()).unwrap_or_default(),
                     fp.outbound_amount_forwarded_msat.unwrap_or(0),
                     fp.total_fee_earned_msat.unwrap_or(0),
                     ldk,

@@ -25,9 +25,14 @@ pub async fn backfill_forwards(ldk: &dyn LdkServerCalls, db: &Database) -> usize
             }
         };
         for fp in &resp.forwarded_payments {
+            // ForwardedPayment now carries per-HTLC locators; take the first of each list as the representative channel/node.
+            let prev = fp.prev_htlcs.first();
+            let next = fp.next_htlcs.first();
+            let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
+            let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
             let key = forward_fingerprint(
-                &fp.prev_channel_id,
-                &fp.next_channel_id,
+                &prev_channel_id,
+                &next_channel_id,
                 fp.outbound_amount_forwarded_msat,
                 fp.total_fee_earned_msat,
             );
@@ -36,12 +41,12 @@ pub async fn backfill_forwards(ldk: &dyn LdkServerCalls, db: &Database) -> usize
                 stable_channels::audit::audit_event(
                     "PAYMENT_FORWARDED_BACKFILL",
                     serde_json::json!({
-                        "prev_channel_id": fp.prev_channel_id,
-                        "next_channel_id": fp.next_channel_id,
-                        "prev_user_channel_id": fp.prev_user_channel_id,
-                        "next_user_channel_id": fp.next_user_channel_id,
-                        "prev_node_id": fp.prev_node_id,
-                        "next_node_id": fp.next_node_id,
+                        "prev_channel_id": prev_channel_id,
+                        "next_channel_id": next_channel_id,
+                        "prev_user_channel_id": prev.and_then(|h| h.user_channel_id.clone()),
+                        "next_user_channel_id": next.and_then(|h| h.user_channel_id.clone()),
+                        "prev_node_id": prev.and_then(|h| h.node_id.clone()),
+                        "next_node_id": next.and_then(|h| h.node_id.clone()),
                         "outbound_amount_msat": fp.outbound_amount_forwarded_msat,
                         "total_fee_msat": fp.total_fee_earned_msat,
                     }),
