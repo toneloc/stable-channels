@@ -222,7 +222,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         readChannelState()?.userChannelId
     }
 
-    func applySyncMessage(expectedUSD: Double, payloadUserChannelId: String?) -> Bool {
+    func applySyncMessage(expectedUSD: Double, payloadUserChannelId: String?, priceFetcher: PriceFetcher) -> Bool {
         let ucid: String
         if let payloadUserChannelId, !payloadUserChannelId.isEmpty {
             ucid = payloadUserChannelId
@@ -258,13 +258,18 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         }
         let currentBacking = UInt64(sqlite3_column_int64(selectStmt, 0))
         let receiverSats = UInt64(sqlite3_column_int64(selectStmt, 1))
-        var price = sqlite3_column_double(selectStmt, 2)
+        let price = sqlite3_column_double(selectStmt, 2)
         sqlite3_finalize(selectStmt)
 
         // Calculate new backing
+        var finalPrice = price
+        if finalPrice <= 0 {
+            finalPrice = priceFetcher.fetchPrice()
+        }
+
         let newBacking: UInt64
-        if price > 0 {
-            newBacking = UInt64(max(0.0, expectedUSD / price * Self.satsInBTC))
+        if finalPrice > 0 {
+            newBacking = UInt64(max(0.0, expectedUSD / finalPrice * Self.satsInBTC))
         } else {
             newBacking = currentBacking
         }
@@ -286,7 +291,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         sqlite3_bind_double(updateStmt, 1, expectedUSD)
         sqlite3_bind_int64(updateStmt, 2, Int64(newBacking))
         sqlite3_bind_int64(updateStmt, 3, Int64(newNative))
-        sqlite3_bind_double(updateStmt, 4, price)
+        sqlite3_bind_double(updateStmt, 4, finalPrice)
         sqlite3_bind_text(
             updateStmt,
             5,
@@ -377,14 +382,12 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         guard var pending = loadPendingSend() else { return true }
 
         if pending.paymentId.isEmpty {
-            guard let candidates = try? node.listPayments().filter({ payment in
+            let candidates = node.listPayments().filter { payment in
                 guard payment.direction == .outbound,
                       payment.amountMsat == pending.amountMsat,
                       Int64(payment.latestUpdateTimestamp) >= pending.createdAt - 10,
                       case .spontaneous = payment.kind else { return false }
                 return true
-            }) else {
-                return false
             }
 
             if let succeeded = candidates.first(where: { $0.status == .succeeded }) {
