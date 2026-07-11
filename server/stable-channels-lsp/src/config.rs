@@ -10,6 +10,8 @@ pub struct Config {
     pub ldk_server: LdkServerSection,
     #[serde(default)]
     pub push: Option<PushConfig>,
+    #[serde(default)]
+    pub tls: TlsSection,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -38,6 +40,13 @@ pub struct LdkServerSection {
     pub cert_path: Option<String>,
     /// Explicit override for LDK Server's API key file.
     pub api_key_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TlsSection {
+    /// Extra hostnames/IPs added to the self-signed cert's SAN (localhost + 127.0.0.1 are always included).
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

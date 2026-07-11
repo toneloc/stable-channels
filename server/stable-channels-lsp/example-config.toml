@@ -17,6 +17,13 @@ network = "regtest"
 #   - stable_channels.db (sqlite)
 dir_path = "./data/stable-channels-lsp"
 
+# TLS for the SC daemon's own REST endpoint (auto-generated self-signed cert).
+[tls]
+# Extra hostnames/IPs added to the cert's SAN. localhost + 127.0.0.1 are always
+# included; add the public address remote clients (GUI/wallets) dial so they pass
+# hostname validation. Omit the section entirely for a localhost-only cert.
+# hosts = ["13.202.119.2"]
+
 [ldk_server]
 # Path to LDK Server's own config.toml. The SC daemon uses LDK Server's config
 # helpers to find its TLS cert and api_key.

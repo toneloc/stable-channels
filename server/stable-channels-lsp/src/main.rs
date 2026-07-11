@@ -75,7 +75,8 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&network_dir)
         .with_context(|| format!("Failed to create network dir {}", network_dir.display()))?;
 
-    let tls_config = tls::get_or_generate_tls_config(None, &cfg.storage.disk.dir_path)
+    let tls_opts = tls::TlsConfig { cert_path: None, key_path: None, hosts: cfg.tls.hosts.clone() };
+    let tls_config = tls::get_or_generate_tls_config(Some(tls_opts), &cfg.storage.disk.dir_path)
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let api_key = ensure_local_api_key(&cfg)?;
