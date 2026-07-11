@@ -298,7 +298,6 @@ fn payment_hash(kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind) -> S
 	match &kind.kind {
 		Some(Kind::Onchain(o)) => o.txid.clone(),
 		Some(Kind::Bolt11(b)) => b.hash.clone(),
-		Some(Kind::Bolt11Jit(j)) => j.hash.clone(),
 		Some(Kind::Bolt12Offer(o)) => o.hash.clone().unwrap_or_default(),
 		Some(Kind::Bolt12Refund(r)) => r.hash.clone().unwrap_or_default(),
 		Some(Kind::Spontaneous(s)) => s.hash.clone(),
@@ -312,7 +311,6 @@ fn format_payment_kind(kind: &sc_rest_client::ldk_server_grpc::types::PaymentKin
 	match &kind.kind {
 		Some(Kind::Onchain(_)) => "On-chain".to_string(),
 		Some(Kind::Bolt11(_)) => "BOLT11".to_string(),
-		Some(Kind::Bolt11Jit(_)) => "BOLT11 JIT".to_string(),
 		Some(Kind::Bolt12Offer(_)) => "BOLT12 Offer".to_string(),
 		Some(Kind::Bolt12Refund(_)) => "BOLT12 Refund".to_string(),
 		Some(Kind::Spontaneous(_)) => "Spontaneous".to_string(),
@@ -387,15 +385,6 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 				.and_then(|p| p.fee_paid_msat)
 				.map(|f| app.fmt_msat(f))
 				.unwrap_or_else(|| "-".to_string());
-			let lsp_fee_str = app
-				.state
-				.payment_details
-				.as_ref()
-				.and_then(|r| r.payment.as_ref())
-				.and_then(|p| p.kind.as_ref())
-				.and_then(jit_max_total_fee_msat)
-				.map(|m| app.fmt_msat(m));
-
 			if app.state.tasks.payment_details.is_some() {
 				ui.horizontal(|ui| {
 					ui.spinner();
@@ -465,7 +454,7 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 
 								// Kind-specific details
 								if let Some(kind) = &payment.kind {
-									render_payment_kind_details(ui, kind, &lsp_fee_str);
+									render_payment_kind_details(ui, kind);
 								}
 							});
 					});
@@ -487,22 +476,8 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 		});
 }
 
-// Extract the BOLT11-JIT LSP max-total opening fee (msat) for unit-aware formatting.
-fn jit_max_total_fee_msat(
-	kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind,
-) -> Option<u64> {
-	use sc_rest_client::ldk_server_grpc::types::payment_kind::Kind;
-	match &kind.kind {
-		Some(Kind::Bolt11Jit(jit)) => {
-			jit.lsp_fee_limits.as_ref().and_then(|f| f.max_total_opening_fee_msat)
-		},
-		_ => None,
-	}
-}
-
 fn render_payment_kind_details(
 	ui: &mut egui::Ui, kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind,
-	lsp_fee_str: &Option<String>,
 ) {
 	use sc_rest_client::ldk_server_grpc::types::payment_kind::Kind;
 
@@ -556,40 +531,6 @@ fn render_payment_kind_details(
 					}
 				});
 				ui.end_row();
-			}
-		},
-		Some(Kind::Bolt11Jit(jit)) => {
-			ui.strong("Payment Hash:");
-			ui.horizontal(|ui| {
-				ui.monospace(truncate_id(&jit.hash, 8, 8));
-				if ui.small_button("Copy").clicked() {
-					ui.output_mut(|o| o.copied_text = jit.hash.clone());
-				}
-			});
-			ui.end_row();
-
-			if let Some(preimage) = &jit.preimage {
-				ui.strong("Preimage:");
-				ui.horizontal(|ui| {
-					ui.monospace(truncate_id(preimage, 8, 8));
-					if ui.small_button("Copy").clicked() {
-						ui.output_mut(|o| o.copied_text = preimage.clone());
-					}
-				});
-				ui.end_row();
-			}
-
-			if let Some(lsp_fee) = jit.lsp_fee_limits.as_ref() {
-				if let Some(fee_str) = lsp_fee_str {
-					ui.strong("LSP Max Total Fee:");
-					ui.label(fee_str);
-					ui.end_row();
-				}
-				if let Some(max_proportional) = lsp_fee.max_proportional_opening_fee_ppm_msat {
-					ui.strong("LSP Max Proportional Fee:");
-					ui.label(format!("{} ppm", max_proportional));
-					ui.end_row();
-				}
 			}
 		},
 		Some(Kind::Bolt12Offer(offer)) => {
