@@ -11,7 +11,7 @@ protocol PaymentHandler {
         priceFetcher: PriceFetcher,
         baseContent: UNMutableNotificationContent,
         mutator: NotificationContentMutator,
-        completion: @escaping (UNMutableNotificationContent, Bool) -> Void
+        completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     )
 }
 

@@ -97,13 +97,6 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        // Acquire lock
-        guard acquireDBLock(container: container) else {
-            cleanup()
-            contentHandler(content)
-            return
-        }
-
         let dataDir = container
             .appendingPathComponent("StableChannels")
             .appendingPathComponent("user")
@@ -111,7 +104,6 @@ class NotificationService: UNNotificationServiceExtension {
         // Check for seed
         guard hasSeed(dataDir: dataDir) else {
             logger.log("FAILED: No seed found")
-            releaseLock()
             cleanup()
             contentHandler(content)
             return
@@ -164,12 +156,14 @@ class NotificationService: UNNotificationServiceExtension {
         let handler = PaymentHandlerFactory.handler(for: direction)
         handler
             .handle(node: node, db: db, priceFetcher: priceFetcher, baseContent: content,
-                    mutator: contentMutator) { [weak self] resultContent, shouldPersist in
+                    mutator: contentMutator) { [weak self] resultContent, newPendingState in
                 guard let self else { return }
-                self.logger.log("Payment handled: persist=\(shouldPersist)")
+                self.logger.log("Payment handled: newPendingState=\(String(describing: newPendingState))")
 
                 let shared = UserDefaults(suiteName: Constants.appGroup)
-                shared?.set(shouldPersist, forKey: "pending_push_payment")
+                if let newPendingState {
+                    shared?.set(newPendingState, forKey: "pending_push_payment")
+                }
                 shared?.synchronize()
 
                 self.stopHeartbeat()
@@ -182,7 +176,6 @@ class NotificationService: UNNotificationServiceExtension {
         content: UNMutableNotificationContent,
         contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
-        releaseLock()
         cleanup()
         content.title = "Payment Pending"
         content.body = "Open app to process your payment"
@@ -216,29 +209,6 @@ class NotificationService: UNNotificationServiceExtension {
             || FileManager.default.fileExists(atPath: seedPhrasePath.path)
     }
 
-    // MARK: - Lock Management
-
-    private var lockFD: Int32 = -1
-
-    private func acquireDBLock(container: URL) -> Bool {
-        let lockFile = container.appendingPathComponent("stablechannels.db.lock")
-        lockFile.withUnsafeFileSystemRepresentation { path in
-            if let path {
-                lockFD = open(path, O_WRONLY | O_CREAT, 0o644)
-            }
-        }
-        guard lockFD >= 0 else { return false }
-        return flock(lockFD, LOCK_EX) == 0
-    }
-
-    private func releaseLock() {
-        if lockFD >= 0 {
-            flock(lockFD, LOCK_UN)
-            close(lockFD)
-            lockFD = -1
-        }
-    }
-
     // MARK: - Heartbeat
 
     private var heartbeatTimer: DispatchSourceTimer?
@@ -268,7 +238,6 @@ class NotificationService: UNNotificationServiceExtension {
 
     private func cleanup() {
         logger.log("CLEANUP")
-        releaseLock()
         try? node?.stop()
         node = nil
         UserDefaults(suiteName: Constants.appGroup)?.set(false, forKey: "nse_processing")

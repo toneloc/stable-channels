@@ -12,7 +12,7 @@ final class IncomingPaymentHandler: PaymentHandler {
         priceFetcher: PriceFetcher,
         baseContent: UNMutableNotificationContent,
         mutator: NotificationContentMutator,
-        completion: @escaping (UNMutableNotificationContent, Bool) -> Void
+        completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
         let startTime = Date()
         let timeout: TimeInterval = 22
@@ -24,80 +24,82 @@ final class IncomingPaymentHandler: PaymentHandler {
         var price = 0.0
 
         eventLoop: while Date().timeIntervalSince(startTime) < timeout {
-            while let event = node.nextEvent() {
-                switch event {
-                case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
-                    if price <= 0 { price = priceFetcher.fetchPrice() }
-                    let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
-
-                    let stableControl = StableControlParser.handleStableControl(
-                        node: node,
-                        db: db,
-                        customRecords: customRecords
-                    )
-                    switch stableControl {
-                    case .handled:
-                        try? node.eventHandled()
-                        handledStableControl = true
-                        deferStableControlToForeground = false
-                        break eventLoop
-                    case .deferToForeground:
-                        deferStableControlToForeground = true
-                        handledStableControl = false
-                        break eventLoop
-                    case .none: break
-                    }
-
-                    guard amountMsat >= 1000 else {
-                        try? node.eventHandled()
-                        break
-                    }
-
-                    if StableControlParser.isStabilityPayment(customRecords) {
-                        let result = db.recordPayment(
-                            paymentId: payId,
-                            paymentType: "stability",
-                            direction: "received",
-                            amountMsat: amountMsat,
-                            amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
-                            btcPrice: price,
-                            backingDeltaSats: Int64(amountMsat / 1000),
-                            userChannelId: db.activeUserChannelId()
-                        )
-                        switch result {
-                        case .inserted, .duplicate:
-                            try? node.eventHandled()
-                            received = true
-                            totalMsat += amountMsat
-                        case .failed, .missingChannelRow:
-                            persistenceFailed = true
-                        }
-                    } else {
-                        let result = db.recordPayment(
-                            paymentId: payId,
-                            paymentType: "lightning",
-                            direction: "received",
-                            amountMsat: amountMsat,
-                            amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
-                            btcPrice: price,
-                            backingDeltaSats: nil,
-                            userChannelId: nil
-                        )
-                        switch result {
-                        case .inserted, .duplicate:
-                            try? node.eventHandled()
-                            totalMsat += amountMsat
-                            received = true
-                        case .failed, .missingChannelRow:
-                            persistenceFailed = true
-                        }
-                    }
-                default:
-                    try? node.eventHandled()
-                }
+            guard let event = node.nextEvent() else {
+                Thread.sleep(forTimeInterval: 0.5)
+                continue
             }
-            if received { break eventLoop }
-            Thread.sleep(forTimeInterval: 0.5)
+            switch event {
+            case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
+                if price <= 0 { price = priceFetcher.fetchPrice() }
+                let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
+
+                let stableControl = StableControlParser.handleStableControl(
+                    node: node,
+                    db: db,
+                    priceFetcher: priceFetcher,
+                    customRecords: customRecords
+                )
+                switch stableControl {
+                case .handled:
+                    try? node.eventHandled()
+                    handledStableControl = true
+                    deferStableControlToForeground = false
+                    break eventLoop
+                case .deferToForeground:
+                    deferStableControlToForeground = true
+                    handledStableControl = false
+                    break eventLoop
+                case .none: break
+                }
+
+                guard amountMsat >= 1000 else {
+                    try? node.eventHandled()
+                    break
+                }
+
+                if StableControlParser.isStabilityPayment(customRecords) {
+                    let result = db.recordPayment(
+                        paymentId: payId,
+                        paymentType: "stability",
+                        direction: "received",
+                        amountMsat: amountMsat,
+                        amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
+                        btcPrice: price,
+                        backingDeltaSats: Int64(amountMsat / 1000),
+                        userChannelId: db.activeUserChannelId()
+                    )
+                    switch result {
+                    case .inserted, .duplicate:
+                        try? node.eventHandled()
+                        received = true
+                        totalMsat += amountMsat
+                    case .failed, .missingChannelRow:
+                        persistenceFailed = true
+                    }
+                } else {
+                    let result = db.recordPayment(
+                        paymentId: payId,
+                        paymentType: "lightning",
+                        direction: "received",
+                        amountMsat: amountMsat,
+                        amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
+                        btcPrice: price,
+                        backingDeltaSats: nil,
+                        userChannelId: nil
+                    )
+                    switch result {
+                    case .inserted, .duplicate:
+                        try? node.eventHandled()
+                        totalMsat += amountMsat
+                        received = true
+                    case .failed, .missingChannelRow:
+                        persistenceFailed = true
+                    }
+                }
+            default:
+                try? node.eventHandled()
+            }
+            if persistenceFailed { break eventLoop }
         }
 
         self.finishHandling(
@@ -122,10 +124,10 @@ final class IncomingPaymentHandler: PaymentHandler {
         price: Double,
         baseContent: UNMutableNotificationContent,
         mutator: NotificationContentMutator,
-        completion: @escaping (UNMutableNotificationContent, Bool) -> Void
+        completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
         var content: UNMutableNotificationContent
-        var shouldPersist = false
+        var shouldPersist: Bool? = nil
 
         if deferStableControlToForeground {
             content = mutator.buildPending(
@@ -136,6 +138,7 @@ final class IncomingPaymentHandler: PaymentHandler {
             shouldPersist = true
         } else if handledStableControl {
             content = mutator.buildEmpty(base: baseContent)
+            shouldPersist = false
         } else if !received && persistenceFailed {
             content = mutator.buildPending(
                 base: baseContent,
@@ -144,16 +147,13 @@ final class IncomingPaymentHandler: PaymentHandler {
             )
             shouldPersist = true
         } else if !received {
-            content = mutator.buildPending(
-                base: baseContent,
-                title: "Payment Pending",
-                body: "Open app to receive your payment"
-            )
-            shouldPersist = true
+            content = mutator.buildEmpty(base: baseContent)
+            shouldPersist = nil
         } else {
             let totalSats = totalMsat / 1000
             let usd = Double(totalSats) / 100_000_000.0 * price
             content = mutator.buildForReceived(base: baseContent, amountSats: totalSats, usd: usd, btcPrice: price)
+            shouldPersist = false
         }
 
         completion(content, shouldPersist)

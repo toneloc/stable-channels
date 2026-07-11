@@ -17,7 +17,7 @@ protocol PaymentDatabase {
     func paymentExists(paymentId: String) -> Bool
     func readChannelState() -> ChannelState?
     func activeUserChannelId() -> String?
-    func applySyncMessage(expectedUSD: Double, payloadUserChannelId: String?) -> Bool
+    func applySyncMessage(expectedUSD: Double, payloadUserChannelId: String?, priceFetcher: PriceFetcher) -> Bool
     func setPendingSendPaymentId(paymentId: String) -> Bool
     func claimPendingSend(amountMsat: UInt64, price: Double) -> Bool
     func loadPendingSend() -> PendingOutgoingStabilityPayment?

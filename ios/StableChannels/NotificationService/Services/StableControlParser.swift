@@ -11,6 +11,7 @@ enum StableControlParser {
     static func handleStableControl(
         node: LDKNode.Node,
         db: PaymentDatabase,
+        priceFetcher: PriceFetcher,
         customRecords: [CustomTlvRecord]
     ) -> StableControlResult {
         for record in customRecords where record.typeNum == Constants.stableChannelTLVType {
@@ -34,7 +35,8 @@ enum StableControlParser {
             }
             let ucid = payload["user_channel_id"] as? String
             return db
-                .applySyncMessage(expectedUSD: expectedUSD, payloadUserChannelId: ucid) ? .handled : .deferToForeground
+                .applySyncMessage(expectedUSD: expectedUSD, payloadUserChannelId: ucid, priceFetcher: priceFetcher) ?
+                .handled : .deferToForeground
         }
         return .none
     }

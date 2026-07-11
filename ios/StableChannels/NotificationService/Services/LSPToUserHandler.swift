@@ -12,7 +12,7 @@ final class LSPToUserHandler: PaymentHandler {
         priceFetcher: PriceFetcher,
         baseContent: UNMutableNotificationContent,
         mutator: NotificationContentMutator,
-        completion: @escaping (UNMutableNotificationContent, Bool) -> Void
+        completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
         let startTime = Date()
         let timeout: TimeInterval = 22
@@ -23,82 +23,83 @@ final class LSPToUserHandler: PaymentHandler {
         var receivedAmountSats: UInt64 = 0
 
         eventLoop: while Date().timeIntervalSince(startTime) < timeout {
-            while let event = node.nextEvent() {
-                switch event {
-                case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
-                    let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
-                    if price <= 0 { price = priceFetcher.fetchPrice() }
-
-                    let stableControl = StableControlParser.handleStableControl(
-                        node: node,
-                        db: db,
-                        customRecords: customRecords
-                    )
-                    switch stableControl {
-                    case .handled:
-                        try? node.eventHandled()
-                        handledStableControl = true
-                        deferStableControlToForeground = false
-                        break eventLoop
-                    case .deferToForeground:
-                        deferStableControlToForeground = true
-                        handledStableControl = false
-                        break eventLoop
-                    case .none:
-                        break
-                    }
-
-                    guard amountMsat >= 1000 else {
-                        try? node.eventHandled()
-                        break
-                    }
-
-                    let isStability = StableControlParser.isStabilityPayment(customRecords)
-                    if isStability {
-                        let amountSats = amountMsat / 1000
-                        switch db.recordPayment(
-                            paymentId: payId,
-                            paymentType: "stability",
-                            direction: "received",
-                            amountMsat: amountMsat,
-                            amountUSD: self.calculateUSD(amountSats, price: price),
-                            btcPrice: price,
-                            backingDeltaSats: Int64(amountSats),
-                            userChannelId: db.activeUserChannelId()
-                        ) {
-                        case .inserted, .duplicate:
-                            try? node.eventHandled()
-                            received = true
-                            receivedAmountSats = amountSats
-                            deferStableControlToForeground = false
-                        case .failed, .missingChannelRow:
-                            deferStableControlToForeground = true
-                        }
-                    } else {
-                        // Regular payment - just record it
-                        let result = db.recordPayment(
-                            paymentId: payId,
-                            paymentType: "lightning",
-                            direction: "received",
-                            amountMsat: amountMsat,
-                            amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
-                            btcPrice: price,
-                            backingDeltaSats: nil,
-                            userChannelId: nil
-                        )
-                        switch result {
-                        case .inserted, .duplicate:
-                            try? node.eventHandled()
-                        case .failed, .missingChannelRow:
-                            break
-                        }
-                    }
-                default:
-                    try? node.eventHandled()
-                }
+            guard let event = node.nextEvent() else {
+                Thread.sleep(forTimeInterval: 0.5)
+                continue
             }
-            if received { break eventLoop }
-            Thread.sleep(forTimeInterval: 0.5)
+            switch event {
+            case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
+                let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
+                if price <= 0 { price = priceFetcher.fetchPrice() }
+
+                let stableControl = StableControlParser.handleStableControl(
+                    node: node,
+                    db: db,
+                    priceFetcher: priceFetcher,
+                    customRecords: customRecords
+                )
+                switch stableControl {
+                case .handled:
+                    try? node.eventHandled()
+                    handledStableControl = true
+                    deferStableControlToForeground = false
+                    break eventLoop
+                case .deferToForeground:
+                    deferStableControlToForeground = true
+                    handledStableControl = false
+                    break eventLoop
+                case .none:
+                    break
+                }
+
+                guard amountMsat >= 1000 else {
+                    try? node.eventHandled()
+                    break
+                }
+
+                let isStability = StableControlParser.isStabilityPayment(customRecords)
+                if isStability {
+                    let amountSats = amountMsat / 1000
+                    switch db.recordPayment(
+                        paymentId: payId,
+                        paymentType: "stability",
+                        direction: "received",
+                        amountMsat: amountMsat,
+                        amountUSD: self.calculateUSD(amountSats, price: price),
+                        btcPrice: price,
+                        backingDeltaSats: Int64(amountSats),
+                        userChannelId: db.activeUserChannelId()
+                    ) {
+                    case .inserted, .duplicate:
+                        try? node.eventHandled()
+                        received = true
+                        receivedAmountSats = amountSats
+                        deferStableControlToForeground = false
+                    case .failed, .missingChannelRow:
+                        deferStableControlToForeground = true
+                    }
+                } else {
+                    // Regular payment - just record it
+                    let result = db.recordPayment(
+                        paymentId: payId,
+                        paymentType: "lightning",
+                        direction: "received",
+                        amountMsat: amountMsat,
+                        amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
+                        btcPrice: price,
+                        backingDeltaSats: nil,
+                        userChannelId: nil
+                    )
+                    switch result {
+                    case .inserted, .duplicate:
+                        try? node.eventHandled()
+                    case .failed, .missingChannelRow:
+                        break
+                    }
+                }
+            default:
+                try? node.eventHandled()
+            }
         }
 
         self.finishHandling(
@@ -121,10 +122,10 @@ final class LSPToUserHandler: PaymentHandler {
         receivedAmountSats: UInt64,
         baseContent: UNMutableNotificationContent,
         mutator: NotificationContentMutator,
-        completion: @escaping (UNMutableNotificationContent, Bool) -> Void
+        completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
         var content: UNMutableNotificationContent
-        var shouldPersist = false
+        var shouldPersist: Bool? = nil
 
         if deferStableControlToForeground {
             content = mutator.buildPending(
@@ -135,6 +136,7 @@ final class LSPToUserHandler: PaymentHandler {
             shouldPersist = true
         } else if handledStableControl {
             content = mutator.buildEmpty(base: baseContent)
+            shouldPersist = false
         } else if received {
             let usd = calculateUSD(receivedAmountSats, price: price)
             content = mutator.buildForStabilityReceived(
@@ -145,12 +147,8 @@ final class LSPToUserHandler: PaymentHandler {
             )
             shouldPersist = false
         } else {
-            content = mutator.buildPending(
-                base: baseContent,
-                title: "Payment Pending",
-                body: "Open app to receive your payment"
-            )
-            shouldPersist = true
+            content = mutator.buildEmpty(base: baseContent)
+            shouldPersist = nil
         }
 
         completion(content, shouldPersist)

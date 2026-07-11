@@ -12,7 +12,7 @@ final class UserToLSPHandler: PaymentHandler {
         priceFetcher: PriceFetcher,
         baseContent: UNMutableNotificationContent,
         mutator: NotificationContentMutator,
-        completion: @escaping (UNMutableNotificationContent, Bool) -> Void
+        completion: @escaping (UNMutableNotificationContent, Bool?) -> Void
     ) {
         // Check pending outgoing
         guard db.reconcilePendingOutgoingPayment(node: node) else {
@@ -32,7 +32,7 @@ final class UserToLSPHandler: PaymentHandler {
         shared?.synchronize()
         let lastSent = shared?.double(forKey: "nse_last_stability_sent") ?? 0
         if lastSent > 0 && Date().timeIntervalSince1970 - lastSent < 120 {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), false)
+            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
 
@@ -51,7 +51,7 @@ final class UserToLSPHandler: PaymentHandler {
 
         let backingSats = channelState.backingSats
         guard channelState.expectedUSD >= 0.01 else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), false)
+            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
 
@@ -77,13 +77,13 @@ final class UserToLSPHandler: PaymentHandler {
 
         // Within threshold - no payment needed
         guard percentFromPar >= Constants.stabilityThresholdPercent && abs(dollarsFromPar) >= 0.25 else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), false)
+            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
 
         // User is above expected (price rose) - should pay LSP
         guard stableUSDValue > targetUSD else {
-            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), false)
+            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
 
@@ -150,7 +150,7 @@ final class UserToLSPHandler: PaymentHandler {
             switch result {
             case .inserted, .duplicate:
                 db.clearPendingSend()
-                completion(mutator.buildForSent(base: baseContent, amountSats: amountSats, dollars: dollarsAbs), false)
+                completion(mutator.buildForSent(base: baseContent, amountSats: amountSats, dollars: dollarsAbs), nil)
             case .failed, .missingChannelRow:
                 completion(
                     mutator
