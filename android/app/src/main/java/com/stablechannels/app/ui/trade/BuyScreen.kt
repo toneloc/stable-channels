@@ -95,7 +95,16 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
                         onClick = { amountText = String.format(Locale.US, "%.2f", maxBuyUSD) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        colors = ButtonDefaults.textButtonColors(
+                            containerColor = if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                androidx.compose.ui.graphics.Color(0xFFE5E5EA)
+                            },
+                            contentColor = MaterialTheme.colorScheme.primary
+                        ),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Text("Max", style = MaterialTheme.typography.labelMedium)
                     }
