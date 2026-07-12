@@ -333,6 +333,9 @@ class AppState {
         // Load saved channel state from DB
         loadChannelFromDB()
 
+        // Refresh payment status from DB (NSE may have recorded payments while app was closed)
+        refreshLatestPaymentStatus()
+
         // Seed historical price data for charts
         seedHistoricalPrices()
 

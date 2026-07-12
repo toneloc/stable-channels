@@ -27,6 +27,19 @@
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
 		4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */; };
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
+		499127782FFEB4FB00D9C81F /* PaymentDirection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127772FFEB4FB00D9C81F /* PaymentDirection.swift */; };
+		499127802FFEB50B00D9C81F /* IncomingPaymentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */; };
+		499127812FFEB50B00D9C81F /* Logger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277A2FFEB50B00D9C81F /* Logger.swift */; };
+		499127822FFEB50B00D9C81F /* NodeStarter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277C2FFEB50B00D9C81F /* NodeStarter.swift */; };
+		499127832FFEB50B00D9C81F /* UserToLSPHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277F2FFEB50B00D9C81F /* UserToLSPHandler.swift */; };
+		499127842FFEB50B00D9C81F /* LSPToUserHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */; };
+		499127862FFEB50B00D9C81F /* SQLitePaymentDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */; };
+		4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127882FFEB51600D9C81F /* PaymentHandler.swift */; };
+		4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127892FFEB51600D9C81F /* PriceFetcher.swift */; };
+		4991278C2FFEB51600D9C81F /* PaymentDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127872FFEB51600D9C81F /* PaymentDatabase.swift */; };
+		4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278D2FFEC05D00D9C81F /* Constants.swift */; };
+		499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278E2FFEC05D00D9C81F /* StableControlParser.swift */; };
+		499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */; };
 		49948C312FBB9DF900327290 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 49948C302FBB9DF900327290 /* Localizable.xcstrings */; };
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
 		499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */; };
@@ -142,6 +155,19 @@
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
 		4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheetPresenter.swift; sourceTree = "<group>"; };
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
+		499127772FFEB4FB00D9C81F /* PaymentDirection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDirection.swift; sourceTree = "<group>"; };
+		499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingPaymentHandler.swift; sourceTree = "<group>"; };
+		4991277A2FFEB50B00D9C81F /* Logger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logger.swift; sourceTree = "<group>"; };
+		4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LSPToUserHandler.swift; sourceTree = "<group>"; };
+		4991277C2FFEB50B00D9C81F /* NodeStarter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStarter.swift; sourceTree = "<group>"; };
+		4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLitePaymentDatabase.swift; sourceTree = "<group>"; };
+		4991277F2FFEB50B00D9C81F /* UserToLSPHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserToLSPHandler.swift; sourceTree = "<group>"; };
+		499127872FFEB51600D9C81F /* PaymentDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDatabase.swift; sourceTree = "<group>"; };
+		499127882FFEB51600D9C81F /* PaymentHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentHandler.swift; sourceTree = "<group>"; };
+		499127892FFEB51600D9C81F /* PriceFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceFetcher.swift; sourceTree = "<group>"; };
+		4991278D2FFEC05D00D9C81F /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
+		4991278E2FFEC05D00D9C81F /* StableControlParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableControlParser.swift; sourceTree = "<group>"; };
+		499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationContentMutator.swift; sourceTree = "<group>"; };
 		49948C302FBB9DF900327290 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
 		499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainTxidResolver.swift; sourceTree = "<group>"; };
@@ -271,6 +297,41 @@
 				F11CF0F21D3319E86AF791B6 /* StableChannelsTests */,
 				052E4A6FC61BFB06E0A2A974 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		499127742FFEB4BF00D9C81F /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				4991278D2FFEC05D00D9C81F /* Constants.swift */,
+				499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */,
+				4991277A2FFEB50B00D9C81F /* Logger.swift */,
+				4991277B2FFEB50B00D9C81F /* LSPToUserHandler.swift */,
+				4991277C2FFEB50B00D9C81F /* NodeStarter.swift */,
+				499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */,
+				4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */,
+				4991278E2FFEC05D00D9C81F /* StableControlParser.swift */,
+				4991277F2FFEB50B00D9C81F /* UserToLSPHandler.swift */,
+				499127752FFEB4D600D9C81F /* Models */,
+				499127762FFEB4DB00D9C81F /* Protocols */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		499127752FFEB4D600D9C81F /* Models */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		499127762FFEB4DB00D9C81F /* Protocols */ = {
+			isa = PBXGroup;
+			children = (
+				499127872FFEB51600D9C81F /* PaymentDatabase.swift */,
+				499127882FFEB51600D9C81F /* PaymentHandler.swift */,
+				499127892FFEB51600D9C81F /* PriceFetcher.swift */,
+			);
+			path = Protocols;
 			sourceTree = "<group>";
 		};
 		49FC3EEB2FDC8A9E0054CD38 /* App */ = {
@@ -411,6 +472,8 @@
 				07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */,
 				E9358B0D20BFCDFAF7128834 /* Info.plist */,
 				6DCB92A88D9FEEAE6BF49737 /* NotificationService.swift */,
+				499127772FFEB4FB00D9C81F /* PaymentDirection.swift */,
+				499127742FFEB4BF00D9C81F /* Services */,
 			);
 			path = NotificationService;
 			sourceTree = "<group>";
@@ -693,7 +756,20 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				499127782FFEB4FB00D9C81F /* PaymentDirection.swift in Sources */,
+				4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */,
+				4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */,
+				499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */,
+				4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */,
+				4991278C2FFEB51600D9C81F /* PaymentDatabase.swift in Sources */,
+				499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */,
 				6CC27037A08B1EC6BC4E3B4F /* NotificationService.swift in Sources */,
+				499127802FFEB50B00D9C81F /* IncomingPaymentHandler.swift in Sources */,
+				499127812FFEB50B00D9C81F /* Logger.swift in Sources */,
+				499127822FFEB50B00D9C81F /* NodeStarter.swift in Sources */,
+				499127832FFEB50B00D9C81F /* UserToLSPHandler.swift in Sources */,
+				499127842FFEB50B00D9C81F /* LSPToUserHandler.swift in Sources */,
+				499127862FFEB50B00D9C81F /* SQLitePaymentDatabase.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
