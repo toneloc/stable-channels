@@ -220,7 +220,6 @@ class AppState(private val context: Context) : ViewModel() {
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
                     refreshBalances()
-                    detectOnchainDeposit()
                     // Restore fundingTxid
                     fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
                         .getString("funding_txid", null)
@@ -231,11 +230,13 @@ class AppState(private val context: Context) : ViewModel() {
                     ) {
                         databaseService?.completeSplice(spliceCompletionCandidate)
                     }
-                    // Restore pending splice state
+                    // Restore pending splice state BEFORE detectOnchainDeposit() so the
+                    // deposit detector correctly ignores unconfirmed splice outputs on startup
                     if (databaseService?.hasPendingSplice() == true) {
                         isSweeping = true
                         spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
                     }
+                    detectOnchainDeposit()
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
