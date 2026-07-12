@@ -532,7 +532,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      *  so callers can use the result as the "this ChannelReady was a splice" signal. */
     fun completeSplice(txid: String): Boolean {
         val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET status = 'completed' WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')"
+            "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')"
         )
         stmt.bindString(1, txid)
         return stmt.executeUpdateDelete() > 0
@@ -556,7 +556,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // If the app died before SpliceNegotiated delivered a txid, there is no
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
         // Keep with-txid rows pending: confirmation can outlive the app process,
-        // and ChannelReady is the authoritative success signal.
+        // and the splice confirmation monitor completes them after 1 conf.
         val noTxidCutoff = System.currentTimeMillis() / 1000 - 600
         writableDatabase.execSQL(
             "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ?",

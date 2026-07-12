@@ -5,6 +5,7 @@ import android.content.Intent
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.util.Constants
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -108,6 +109,12 @@ class FCMService : FirebaseMessagingService() {
         if (now - lastActive < HEARTBEAT_THRESHOLD_SECS) {
             // Main app is running — let it handle on next stability cycle
             Log.d(TAG, "Main app active, flagging pending payment")
+            flagPendingPayment(this)
+            return
+        }
+
+        if (LdkNodeOwner.isOwnedBy(LdkNodeOwner.MAIN_APP) || StabilityProcessingService.isRunning) {
+            Log.d(TAG, "LDK node already owned in-process, flagging pending payment")
             flagPendingPayment(this)
             return
         }

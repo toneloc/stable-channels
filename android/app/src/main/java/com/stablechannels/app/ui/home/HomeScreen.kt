@@ -308,8 +308,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             if (onchainSats > 0) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                 val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
-                val spliceJustCompleted by appState.spliceJustCompletedFlow.collectAsState()
-                val showSwapPending = isSweeping || spliceJustCompleted
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -329,7 +327,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        if (showSwapPending) {
+                        if (isSweeping) {
                             // 1. Splice-in in progress
                             Spacer(Modifier.height(8.dp))
                             PendingRow("Swap pending...", appState.spliceTxid, context)

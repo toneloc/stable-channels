@@ -553,8 +553,13 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         if (hasChannel) {
                                             if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                             val sc = appState.stableChannel.value
-                                            appState.pendingSplice = com.stablechannels.app.models.PendingSplice("out", sats, trimmed)
-                                            appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
+                                            appState.beginSpliceOut(sats, trimmed)
+                                            try {
+                                                appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
+                                            } catch (e: Exception) {
+                                                appState.cancelPendingSpliceStart()
+                                                throw e
+                                            }
                                             result = "Splice-out initiated"
                                         } else {
                                             val txid = if (isSendMax) {
