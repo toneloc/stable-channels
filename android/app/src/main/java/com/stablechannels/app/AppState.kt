@@ -1134,11 +1134,16 @@ class AppState(private val context: Context) : ViewModel() {
         }
         val sweepAmount = spendable
 
+        // Set isSweeping=true BEFORE calling spliceInWithAll so that if LDK fires
+        // a ChannelReady event synchronously during the call, the event handler
+        // correctly identifies it as still in-flight and does not prematurely clear
+        // the sweep state and re-show the Swap button.
+        isSweeping = true
+        pendingSplice = PendingSplice("in", sweepAmount)
+
         try {
             nodeService.spliceInWithAll(channel.userChannelId, channel.counterpartyNodeId)
-            isSweeping = true
             sweepOnchainStart = spendable
-            pendingSplice = PendingSplice("in", sweepAmount)
             _statusMessage.value = "Moving all onchain funds to channel..."
             val price = priceService.currentPrice.value
             val amountUSD = if (price > 0) (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price else null
@@ -1153,6 +1158,7 @@ class AppState(private val context: Context) : ViewModel() {
             ))
         } catch (e: Exception) {
             isSweeping = false
+            pendingSplice = null
             _statusMessage.value = "Sweep failed: ${e.message}"
             AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
             return
