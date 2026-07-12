@@ -30,8 +30,7 @@ enum Constants {
     static let privacyPolicyURL = "https://stablechannels.com/privacy.html"
 
     static func txExplorerLink(for txid: String) -> URL? {
-        let cleanTxid = txid.components(separatedBy: ":").first ?? txid
-        return URL(string: "\(txExplorerURL)/\(cleanTxid)")
+        URL(string: "\(txExplorerURL)/\(txid)")
     }
 
     static let defaultLSPPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
