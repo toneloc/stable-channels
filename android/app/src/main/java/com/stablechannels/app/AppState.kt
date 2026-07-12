@@ -148,6 +148,10 @@ class AppState(private val context: Context) : ViewModel() {
     private var isSweeping: Boolean
         get() = _isSpliceInFlight.value
         set(value) { _isSpliceInFlight.value = value }
+    // True after a splice completes but before LDK's on-chain balance settles to 0.
+    // Keeps the UI in 'Swap pending...' instead of re-showing the Swap button.
+    private val _spliceJustCompleted = MutableStateFlow(false)
+    val spliceJustCompletedFlow: StateFlow<Boolean> get() = _spliceJustCompleted
     private var sweepOnchainStart: Long = 0
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
@@ -422,6 +426,7 @@ class AppState(private val context: Context) : ViewModel() {
                 if (isSplice) {
                     isSweeping = false
                     spliceTxid = null
+                    _spliceJustCompleted.value = true
                     if (!completedSplice) databaseService?.completeLatestSplice(fundingTxid)
                     val price = priceService.currentPrice.value
                     val result = StabilityService.reconcileOutgoing(sc, price)
@@ -1228,7 +1233,12 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
-        _spendableOnchainSats.value = balances.spendableOnchainBalanceSats.toLong()
+        val spendable = balances.spendableOnchainBalanceSats.toLong()
+        _spendableOnchainSats.value = spendable
+        // Once LDK confirms the on-chain balance is zero after a splice, clear the flag
+        if (_spliceJustCompleted.value && spendable == 0L) {
+            _spliceJustCompleted.value = false
+        }
 
         // Clear closing flag once lightning balance fully resolves
         // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
