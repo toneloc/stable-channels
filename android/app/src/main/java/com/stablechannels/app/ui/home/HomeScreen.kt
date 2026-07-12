@@ -379,7 +379,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(8.dp))
-                            PendingRow("Deposit confirming...", appState.fundingTxid, context)
+                            val pendingCloseId = appState.pendingClosePaymentId
+                            val text = if (pendingCloseId != null) {
+                                "Channel closed - pending confirmation"
+                            } else {
+                                "Deposit confirming..."
+                            }
+                            PendingRow(text, appState.fundingTxid, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,
