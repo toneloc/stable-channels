@@ -307,7 +307,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // On-chain section
             if (onchainSats > 0) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                val isSweeping = appState.isSpliceInFlight
+                val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),

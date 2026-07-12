@@ -141,9 +141,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     var onchainReceiveAddress: String? = null
 
-    private var isSweeping = false
+    private val _isSpliceInFlight = MutableStateFlow(false)
+    val isSpliceInFlightFlow: StateFlow<Boolean> get() = _isSpliceInFlight
     /** True when any splice (in or out) is in flight — prevents concurrent splices. */
-    val isSpliceInFlight: Boolean get() = isSweeping
+    val isSpliceInFlight: Boolean get() = _isSpliceInFlight.value
+    private var isSweeping: Boolean
+        get() = _isSpliceInFlight.value
+        set(value) { _isSpliceInFlight.value = value }
     private var sweepOnchainStart: Long = 0
     private var prevOnchainSats: Long = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         .getLong("cached_onchain_sats", 0L)
