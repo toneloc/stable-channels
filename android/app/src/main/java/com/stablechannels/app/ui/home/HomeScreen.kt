@@ -363,7 +363,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     Text("Move to Stability", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text("and Spending Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                FilledTonalButton(
+                                Button(
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
                                             appState.sweepToChannel()
