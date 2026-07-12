@@ -240,6 +240,12 @@ class AppState(private val context: Context) : ViewModel() {
                         isSweeping = true
                         spliceTxid = databaseService?.getPendingSpliceTxid() ?: fundingTxid
                     }
+                    // Restore channel-closing state if a close is still pending on-chain
+                    val pendingCloseId = databaseService?.getPendingChannelClosePaymentId()
+                    if (pendingCloseId != null) {
+                        pendingClosePaymentId = pendingCloseId
+                        isChannelClosing = true
+                    }
                     detectOnchainDeposit()
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
