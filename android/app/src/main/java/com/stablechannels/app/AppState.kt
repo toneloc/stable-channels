@@ -1201,6 +1201,7 @@ class AppState(private val context: Context) : ViewModel() {
             if (closeId != null) {
                 databaseService?.updatePaymentStatus(closeId, "completed")
                 pendingClosePaymentId = null
+                isChannelClosing = false
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 // No pending close — record as new on-chain deposit
