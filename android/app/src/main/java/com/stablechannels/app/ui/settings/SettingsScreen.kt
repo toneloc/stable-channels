@@ -127,7 +127,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             TextButton(onClick = {
                                 val intent = android.content.Intent(
                                     android.content.Intent.ACTION_VIEW,
-                                    android.net.Uri.parse("https://mempool.space/tx/$txid")
+                                    android.net.Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}")
                                 )
                                 context.startActivity(intent)
                             }) {

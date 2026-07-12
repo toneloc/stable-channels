@@ -15,7 +15,7 @@
 
     <application
         android:name=".StableChannelsApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="Stable Channels"
         android:roundIcon="@mipmap/ic_launcher_round"

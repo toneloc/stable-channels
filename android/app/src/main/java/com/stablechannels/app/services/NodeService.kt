@@ -45,103 +45,132 @@ class NodeService(private val context: Context) {
     val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Boolean>>> = _eventChannel
 
     fun start(network: Network, esploraURL: String, mnemonic: String?) {
+        if (node != null || _isRunning.value) {
+            throw IllegalStateException("LDK node already running")
+        }
+        if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
+            throw IllegalStateException(
+                "LDK node data is already owned by ${LdkNodeOwner.currentOwner() ?: "another owner"}"
+            )
+        }
+
         val dataDir = Constants.userDataDir(context)
+        var ldkNode: Node? = null
 
-        val anchorConfig = AnchorChannelsConfig(
-            trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
-            perChannelReserveSats = 25_000UL
-        )
+        try {
+            val anchorConfig = AnchorChannelsConfig(
+                trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                perChannelReserveSats = 25_000UL
+            )
 
-        val config = Config(
-            storageDirPath = dataDir.absolutePath,
-            network = network,
-            listeningAddresses = null,
-            announcementAddresses = null,
-            nodeAlias = null,
-            trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
-            probingLiquidityLimitMultiplier = 3UL,
-            anchorChannelsConfig = anchorConfig,
-            routeParameters = null,
-            torConfig = null,
-            hrnConfig = HumanReadableNamesConfig(
-                HrnResolverConfig.Dns(
-                    dnsServerAddress = "8.8.8.8:53",
-                    enableHrnResolutionService = false
+            val config = Config(
+                storageDirPath = dataDir.absolutePath,
+                network = network,
+                listeningAddresses = null,
+                announcementAddresses = null,
+                nodeAlias = null,
+                trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                probingLiquidityLimitMultiplier = 3UL,
+                anchorChannelsConfig = anchorConfig,
+                routeParameters = null,
+                torConfig = null,
+                hrnConfig = HumanReadableNamesConfig(
+                    HrnResolverConfig.Dns(
+                        dnsServerAddress = "8.8.8.8:53",
+                        enableHrnResolutionService = false
+                    )
                 )
             )
-        )
 
-        val builder = Builder.fromConfig(config)
-        builder.setChainSourceEsplora(esploraURL, null)
+            val builder = Builder.fromConfig(config)
+            builder.setChainSourceEsplora(esploraURL, null)
 
-        val rgsUrl = when (network) {
-            Network.BITCOIN -> Constants.RGSServer.BITCOIN
-            Network.SIGNET -> Constants.RGSServer.SIGNET
-            Network.TESTNET -> Constants.RGSServer.TESTNET
-            else -> Constants.RGSServer.BITCOIN
-        }
-        builder.setGossipSourceRgs(rgsUrl)
+            val rgsUrl = when (network) {
+                Network.BITCOIN -> Constants.RGSServer.BITCOIN
+                Network.SIGNET -> Constants.RGSServer.SIGNET
+                Network.TESTNET -> Constants.RGSServer.TESTNET
+                else -> Constants.RGSServer.BITCOIN
+            }
+            builder.setGossipSourceRgs(rgsUrl)
 
-        builder.setLiquiditySourceLsps2(
-            Constants.DEFAULT_LSP_PUBKEY,
-            Constants.DEFAULT_LSP_ADDRESS,
-            null
-        )
+            builder.setLiquiditySourceLsps2(
+                Constants.DEFAULT_LSP_PUBKEY,
+                Constants.DEFAULT_LSP_ADDRESS,
+                null
+            )
 
-        val seedPhrasePath = File(Constants.userDataDir(context), "seed_phrase")
-        val keySeedPath = File(Constants.userDataDir(context), "keys_seed")
+            val seedPhrasePath = File(Constants.userDataDir(context), "seed_phrase")
+            val keySeedPath = File(Constants.userDataDir(context), "keys_seed")
 
-        // Determine which mnemonic to use
-        val words: String = if (mnemonic != null) {
-            // Restore — wipe ALL wallet data so new seed takes effect
-            wipeWalletData(context)
-            mnemonic.trim()
-        } else if (seedPhrasePath.exists()) {
-            // Existing wallet — re-read saved mnemonic
-            seedPhrasePath.readText().trim()
-        } else if (!keySeedPath.exists()) {
-            // Truly new wallet — no seed_phrase, no keys_seed
-            wipeWalletData(context)
-            generateEntropyMnemonic(null)
-        } else {
-            // Pre-upgrade wallet with only keys_seed, no mnemonic available
-            ""
-        }
+            // Determine which mnemonic to use
+            val words: String = if (mnemonic != null) {
+                // Restore — wipe ALL wallet data so new seed takes effect
+                wipeWalletData(context)
+                mnemonic.trim()
+            } else if (seedPhrasePath.exists()) {
+                // Existing wallet — re-read saved mnemonic
+                seedPhrasePath.readText().trim()
+            } else if (!keySeedPath.exists()) {
+                // Truly new wallet — no seed_phrase, no keys_seed
+                wipeWalletData(context)
+                generateEntropyMnemonic(null)
+            } else {
+                // Pre-upgrade wallet with only keys_seed, no mnemonic available
+                ""
+            }
 
-        // Save mnemonic to file and derive node entropy (entropy now passed to build()).
-        val nodeEntropy = if (words.isNotEmpty()) {
-            seedPhrasePath.writeText(words)
-            savedMnemonic = words
-            NodeEntropy.fromBip39Mnemonic(words, null)
-        } else {
-            // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
-            NodeEntropy.fromSeedPath(keySeedPath.absolutePath)
-        }
+            // Save mnemonic to file and derive node entropy (entropy now passed to build()).
+            val nodeEntropy = if (words.isNotEmpty()) {
+                seedPhrasePath.writeText(words)
+                savedMnemonic = words
+                NodeEntropy.fromBip39Mnemonic(words, null)
+            } else {
+                // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
+                NodeEntropy.fromSeedPath(keySeedPath.absolutePath)
+            }
 
-        val ldkNode = builder.build(nodeEntropy)
-        ldkNode.start()
+            val startedNode = builder.build(nodeEntropy)
+            ldkNode = startedNode
+            startedNode.start()
 
-        node = ldkNode
-        _isRunning.value = true
-        nodeId = ldkNode.nodeId()
+            node = startedNode
+            _isRunning.value = true
+            nodeId = startedNode.nodeId()
 
-        // Connect to LSP
-        try {
-            ldkNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+            // Connect to LSP
+            try {
+                startedNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+            } catch (e: Exception) {
+                Log.w("NodeService", "LSP connect failed: ${e.message}")
+            }
+
+            refreshChannels()
+            startEventLoop()
         } catch (e: Exception) {
-            Log.w("NodeService", "LSP connect failed: ${e.message}")
+            eventJob?.cancel()
+            eventJob = null
+            try {
+                ldkNode?.stop()
+            } catch (stopError: Exception) {
+                Log.w("NodeService", "Failed to stop node after start failure: ${stopError.message}")
+            }
+            node = null
+            _isRunning.value = false
+            LdkNodeOwner.release(LdkNodeOwner.MAIN_APP)
+            throw e
         }
-
-        refreshChannels()
-        startEventLoop()
     }
 
     fun stop() {
-        eventJob?.cancel()
-        eventJob = null
-        node?.stop()
-        node = null
-        _isRunning.value = false
+        try {
+            eventJob?.cancel()
+            eventJob = null
+            node?.stop()
+        } finally {
+            node = null
+            _isRunning.value = false
+            LdkNodeOwner.release(LdkNodeOwner.MAIN_APP)
+        }
     }
 
     private fun startEventLoop() {

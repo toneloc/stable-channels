@@ -57,6 +57,7 @@ enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
 fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var input by remember { mutableStateOf("") }
     var amountUSDStr by remember { mutableStateOf("") }
+    var isSendMax by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -336,10 +337,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            Button(
-                onClick = onDismiss
-            ) {
-                Text("Done")
+            if (!isSending) {
+                Button(
+                    onClick = onDismiss
+                ) {
+                    Text("Done")
+                }
             }
         } else {
             // Loading indicator during photo QR extraction
@@ -409,6 +412,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 }
                             }
                             amountUSDStr = String.format(java.util.Locale.US, "%.2f", maxUSD)
+                            isSendMax = true
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
@@ -426,7 +430,10 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Spacer(Modifier.width(2.dp))
                     BasicTextField(
                         value = amountUSDStr,
-                        onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = { 
+                            amountUSDStr = it.filter { c -> c.isDigit() || c == '.' }
+                            isSendMax = false
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         textStyle = TextStyle(
                             fontSize = 44.sp,
@@ -548,11 +555,20 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         if (hasChannel) {
                                             if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                             val sc = appState.stableChannel.value
-                                            appState.pendingSplice = com.stablechannels.app.models.PendingSplice("out", sats, trimmed)
-                                            appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
+                                            appState.beginSpliceOut(sats, trimmed)
+                                            try {
+                                                appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
+                                            } catch (e: Exception) {
+                                                appState.cancelPendingSpliceStart()
+                                                throw e
+                                            }
                                             result = "Splice-out initiated"
                                         } else {
-                                            val txid = appState.nodeService.sendOnchain(trimmed, sats)
+                                            val txid = if (isSendMax) {
+                                                appState.nodeService.sendAllOnchain(trimmed)
+                                            } else {
+                                                appState.nodeService.sendOnchain(trimmed, sats)
+                                            }
                                             appState.databaseService?.recordPayment(
                                                 paymentId = null, paymentType = "onchain",
                                                 direction = "sent", amountMsat = sats * 1000,

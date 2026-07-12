@@ -77,7 +77,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
             }
             Text(
-                text = if (step == TradeStep.CONFIRM) "Confirm Order" else if (step == TradeStep.DONE) "Order Confirmed" else "USD → BTC",
+                text = "USD → BTC",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.Center)
@@ -95,7 +95,16 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
                         onClick = { amountText = String.format(Locale.US, "%.2f", maxBuyUSD) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        colors = ButtonDefaults.textButtonColors(
+                            containerColor = if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                androidx.compose.ui.graphics.Color(0xFFE5E5EA)
+                            },
+                            contentColor = MaterialTheme.colorScheme.primary
+                        ),
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Text("Max", style = MaterialTheme.typography.labelMedium)
                     }
@@ -247,24 +256,26 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Trade Confirmed", style = MaterialTheme.typography.headlineMedium)
+                    Text("Order Confirmed", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your buy order has been confirmed.",
+                        "Your order has been confirmed.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
                     CircularProgressIndicator(Modifier.size(48.dp))
                     Spacer(Modifier.height(8.dp))
-                    Text("Trade Pending", style = MaterialTheme.typography.headlineMedium)
+                    Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your buy order is being processed. Balance will update when the payment confirms.",
+                        "Your order is being processed. Balance will update when the payment confirms.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = onDismiss) { Text("Done") }
+                if (isConfirmed) {
+                    Button(onClick = onDismiss) { Text("Done") }
+                }
             }
         }
     }

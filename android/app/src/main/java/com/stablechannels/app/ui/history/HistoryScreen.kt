@@ -65,7 +65,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         Spacer(Modifier.height(12.dp))
 
         // Segmented control (like iOS Picker .segmented)
-        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+        val isDark = MaterialTheme.colorScheme.background == Color(0xFF000000)
         val activeBg = if (isDark) Color(0xFF3A3A3C) else Color.White
         val inactiveBg = if (isDark) Color(0xFF1C1C1E) else Color(0xFFE5E5EA)
         Row(

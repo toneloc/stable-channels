@@ -307,11 +307,12 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // On-chain section
             if (onchainSats > 0) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                val isSweeping = appState.isSpliceInFlight
+                val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
                     Column(Modifier.padding(12.dp)) {
                         Row(
@@ -359,10 +360,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column {
-                                    Text("Move to Trading", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Move to Stability", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text("and Spending Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                FilledTonalButton(
+                                Button(
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
                                             appState.sweepToChannel()
@@ -376,7 +377,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(8.dp))
-                            PendingRow("Deposit confirming...", appState.fundingTxid, context)
+                            val pendingCloseId = appState.pendingClosePaymentId
+                            val text = if (pendingCloseId != null) {
+                                "Channel closed - pending confirmation"
+                            } else {
+                                "Deposit confirming..."
+                            }
+                            PendingRow(text, appState.fundingTxid, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,
@@ -649,7 +656,7 @@ private fun PendingRow(text: String, txid: String?, context: android.content.Con
         txid?.let {
             TextButton(
                 onClick = {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/$it"))
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${it.substringBefore(":")}"))
                     context.startActivity(intent)
                 },
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
