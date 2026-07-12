@@ -1,6 +1,5 @@
 import Foundation
 import SQLite3
-import Darwin
 
 struct PaymentPersistenceResult {
     let isNewPayment: Bool
@@ -10,15 +9,10 @@ struct PaymentPersistenceResult {
 /// SQLite database layer — port of src/db.rs
 /// Uses raw SQLite3 C API to avoid external dependencies initially.
 /// Can be migrated to GRDB later for convenience.
-///
-/// File-based lock (`stablechannels.db.lock` in the App Group container) is held
-/// for the process lifetime to serialize writes with the Notification Service
-/// Extension. Both sides must use the same path.
 class DatabaseService {
     private var db: OpaquePointer?
 
     static let dbFilename = "stablechannels.db"
-    static let appGroup = "group.com.stablechannels.app"
 
     init(dataDir: URL) throws {
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)

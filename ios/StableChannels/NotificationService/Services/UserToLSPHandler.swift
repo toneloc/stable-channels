@@ -150,7 +150,7 @@ final class UserToLSPHandler: PaymentHandler {
             switch result {
             case .inserted, .duplicate:
                 db.clearPendingSend()
-                completion(mutator.buildForSent(base: baseContent, amountSats: amountSats, dollars: dollarsAbs), nil)
+                completion(mutator.buildForSent(base: baseContent, amountSats: amountSats, dollars: dollarsAbs), false)
             case .failed, .missingChannelRow:
                 completion(
                     mutator

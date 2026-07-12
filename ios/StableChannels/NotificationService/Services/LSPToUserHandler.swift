@@ -76,7 +76,7 @@ final class LSPToUserHandler: PaymentHandler {
                         receivedAmountSats = amountSats
                         deferStableControlToForeground = false
                     case .failed, .missingChannelRow:
-                        deferStableControlToForeground = true
+                        break eventLoop
                     }
                 } else {
                     // Regular payment - just record it
@@ -94,7 +94,7 @@ final class LSPToUserHandler: PaymentHandler {
                     case .inserted, .duplicate:
                         try? node.eventHandled()
                     case .failed, .missingChannelRow:
-                        break
+                        break eventLoop
                     }
                 }
             default:
@@ -147,8 +147,12 @@ final class LSPToUserHandler: PaymentHandler {
             )
             shouldPersist = false
         } else {
-            content = mutator.buildEmpty(base: baseContent)
-            shouldPersist = nil
+            content = mutator.buildPending(
+                base: baseContent,
+                title: "Payment Pending",
+                body: "Open app to receive your payment"
+            )
+            shouldPersist = true
         }
 
         completion(content, shouldPersist)
