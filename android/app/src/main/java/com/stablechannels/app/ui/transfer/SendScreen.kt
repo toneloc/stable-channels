@@ -337,10 +337,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            Button(
-                onClick = onDismiss
-            ) {
-                Text("Done")
+            if (!isSending) {
+                Button(
+                    onClick = onDismiss
+                ) {
+                    Text("Done")
+                }
             }
         } else {
             // Loading indicator during photo QR extraction
