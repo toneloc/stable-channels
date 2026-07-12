@@ -858,8 +858,9 @@ class AppState(private val context: Context) : ViewModel() {
         val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
         for (baseUrl in urls) {
             try {
+                val normalizedTxid = txid.substringBefore(":")
                 val request = Request.Builder()
-                    .url("${baseUrl.trimEnd('/')}/tx/$txid/status")
+                    .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
                     .build()
                 httpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use
