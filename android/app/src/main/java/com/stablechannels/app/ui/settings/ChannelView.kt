@@ -95,7 +95,7 @@ fun ChannelView(appState: AppState) {
                             Spacer(Modifier.height(8.dp))
                             TextButton(
                                 onClick = {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://mempool.space/tx/$txid"))
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}"))
                                     context.startActivity(intent)
                                 },
                                 contentPadding = PaddingValues(0.dp)
