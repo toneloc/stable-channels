@@ -1,6 +1,7 @@
 //! REST handler infrastructure: error mapping, response encoding.
 
 pub mod audit_log;
+pub mod channel_exists;
 pub mod channels;
 pub mod graph;
 pub mod ldk_log;

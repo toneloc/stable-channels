@@ -157,11 +157,18 @@ class AppState {
 
     enum WalletRestoreError: LocalizedError {
         case invalidMnemonic
+        case activeChannelDetected
+        case walletBusy
 
         var errorDescription: String? {
             switch self {
             case .invalidMnemonic:
                 return "Enter a valid 12 or 24-word seed phrase."
+            case .activeChannelDetected:
+                return "This wallet still has an open Lightning channel with the LSP. "
+                    + "Restoring from seed alone will force-close it on-chain."
+            case .walletBusy:
+                return "Wallet is busy in another process. Please try again."
             }
         }
     }
@@ -206,13 +213,14 @@ class AppState {
     /// Restore is destructive for the current local wallet state, so AppState
     /// owns the full sequence: stop LDK, drop DB handles, wipe LDK + app DB
     /// files, clear in-memory/app-group cache, then start the node fresh.
-    func restoreWalletFromMnemonic(_ mnemonic: String) async throws {
+    func restoreWalletFromMnemonic(_ mnemonic: String, acknowledgeForceClose: Bool = false) async throws {
         let words = MnemonicUtils.formatForDisplay(mnemonic)
         guard MnemonicUtils.isValidWordCount(words),
               MnemonicUtils.hasValidCharacterFormat(words) else {
             throw WalletRestoreError.invalidMnemonic
         }
 
+        let priorPhase = phase
         phase = .syncing
         isSyncing = true
         statusMessage = "Restoring wallet..."
@@ -220,8 +228,49 @@ class AppState {
             isSyncing = false
         }
 
+        // Restore-divergence guard: a seed-only restore wipes LDK channel
+        // state; if this node_id still has a channel with the LSP, the next
+        // reestablish presents empty state and force-closes it. Detect that
+        // and require explicit acknowledgement. Fails open if the LSP is
+        // unreachable or derivation fails.
+        if !acknowledgeForceClose {
+            statusMessage = "Checking for an existing channel..."
+            let derivedNodeId = await Task.detached(priority: .utility) {
+                AppState.deriveNodeId(mnemonic: words)
+            }.value
+            if let nodeId = derivedNodeId {
+                let channelExists = await lspChannelExists(nodeId: nodeId)
+                if channelExists == nil {
+                    // Fail-open: the guard couldn't run (LSP unreachable,
+                    // proxy misroute, …). Leave a trace so a silently dead
+                    // guard is visible in the audit log.
+                    AuditService.log("RESTORE_GUARD_UNAVAILABLE", data: ["node_id": nodeId])
+                }
+                if channelExists == true {
+                    AuditService.log("RESTORE_ACTIVE_CHANNEL_DETECTED", data: ["node_id": nodeId])
+                    phase = priorPhase
+                    statusMessage = ""
+                    throw WalletRestoreError.activeChannelDetected
+                }
+            } else {
+                AuditService.log("RESTORE_GUARD_UNAVAILABLE", data: ["reason": "derive_failed"])
+            }
+            statusMessage = "Restoring wallet..."
+        }
+
         cancelBackgroundStop()
         await waitForNSE()
+
+        // Own the wallet dir before stopping/wiping: restore can be reached
+        // while the lock is not held (e.g. after a startup failure released
+        // it), and wiping under a live NSE node would corrupt its state.
+        if !(await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restoreWalletFromMnemonic"])
+            phase = priorPhase
+            statusMessage = ""
+            throw WalletRestoreError.walletBusy
+        }
+
         stabilityTimer?.cancel()
         stabilityTimer = nil
         closeLauncher.cancelAll()
@@ -253,6 +302,13 @@ class AppState {
             reregisterPushTokenIfNeeded()
             statusMessage = ""
         } catch {
+            // If we failed before the node came up (e.g. DB init threw), no
+            // node owns the wallet dir — release so the NSE isn't blocked.
+            // On node-start failure NodeService already released; if the node
+            // somehow IS running, the lock must stay held.
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
             phase = .error("Wallet restore failed: \(error.localizedDescription)")
             statusMessage = ""
             throw error
@@ -315,6 +371,57 @@ class AppState {
         }
     }
 
+    /// Derive the node_id a mnemonic maps to by building (never starting) a
+    /// throwaway node in a temp directory. Returns nil on any failure so the
+    /// restore guard fails open.
+    nonisolated private static func deriveNodeId(mnemonic: String) -> String? {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var config = defaultConfig()
+        config.storageDirPath = tmp.path
+        config.network = .bitcoin
+        let builder = Builder.fromConfig(config: config)
+        // A chain source is required to build; nothing syncs without start().
+        let syncConfig = EsploraSyncConfig(
+            backgroundSyncConfig: BackgroundSyncConfig(
+                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
+                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
+                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
+            ),
+            timeoutsConfig: SyncTimeoutsConfig(
+                onchainWalletSyncTimeoutSecs: 60,
+                lightningWalletSyncTimeoutSecs: 60,
+                feeRateCacheUpdateTimeoutSecs: 60,
+                txBroadcastTimeoutSecs: 30,
+                perRequestTimeoutSecs: 15
+            )
+        )
+        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: syncConfig)
+        let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
+        guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
+        return node.nodeId()
+    }
+
+    /// Ask the LSP whether this node_id still has channels open with it.
+    /// Returns nil (unknown) on any network/parse failure — callers fail open.
+    private func lspChannelExists(nodeId: String) async -> Bool? {
+        guard let url = URL(string: Constants.lspChannelExistsURL) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["node_id": nodeId])
+        request.timeoutInterval = 8
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exists = json["exists"] as? Bool else {
+            return nil
+        }
+        return exists
+    }
+
     // MARK: - Startup
 
     func start() async {
@@ -324,6 +431,14 @@ class AppState {
         // Wait for NSE to finish if it was recently active
         await waitForNSE()
 
+        // Take the wallet-dir lock before any DB access (network-graph purge,
+        // database init, node start). Kernel-enforced; outlasts a live NSE.
+        if !(await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
+            await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
+            return
+        }
+
         // Pick best esplora endpoint
         chainURL = await resolveChainURL()
 
@@ -331,6 +446,9 @@ class AppState {
         do {
             try initializeDatabaseServices()
         } catch {
+            // No node will run — free the wallet dir so the NSE isn't blocked
+            // for the lifetime of a broken app process.
+            NodeDirLock.shared.release()
             await MainActor.run { phase = .error("Database init failed: \(error.localizedDescription)") }
             return
         }
@@ -540,6 +658,7 @@ class AppState {
         }
         priceService.stopAutoRefresh()
         nodeService.stop()
+        NodeDirLock.shared.release()
     }
 
     private var backgroundStopWorkItem: DispatchWorkItem?
@@ -576,6 +695,13 @@ class AppState {
     private func performBackgroundStop() {
         backgroundStopWorkItem = nil
         guard nodeService.isRunning else {
+            // Backgrounded before the node came up. If no start is in flight,
+            // a held lock serves no one — release it so the NSE isn't starved
+            // of stability pushes for the suspended app's lifetime. Mid-start
+            // the lock stays: the in-flight start owns it.
+            if !nodeService.isStarting {
+                NodeDirLock.shared.release()
+            }
             if backgroundTaskID != .invalid {
                 UIApplication.shared.endBackgroundTask(backgroundTaskID)
                 backgroundTaskID = .invalid
@@ -594,6 +720,8 @@ class AppState {
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        // Last DB write is done — hand the wallet dir to the NSE.
+        NodeDirLock.shared.release()
         if backgroundTaskID != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTaskID)
             backgroundTaskID = .invalid
@@ -610,8 +738,10 @@ class AppState {
         // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
         refreshLatestPaymentStatus()
         if nodeService.isRunning {
-            print("[App] Node still running (grace period), restoring gossip + reconnecting")
-            restoreGossipToDB()
+            // Node never stopped, so gossip was never extracted — do NOT touch
+            // ldk_node_data.sqlite while LDK has it open (a stale
+            // network_graph.bin would otherwise be written into the live DB).
+            print("[App] Node still running (grace period), reconnecting")
             ensureLSPConnected()
             refreshBalances()
             updateStableBalances()
@@ -619,6 +749,11 @@ class AppState {
             return
         }
         print("[App] Restarting node from foreground")
+        // Reclaim the wallet dir before writing gossip back into the LDK DB.
+        if !(await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restartNodeFromForeground"])
+            return
+        }
         restoreGossipToDB()
         do {
             try await nodeService.start(

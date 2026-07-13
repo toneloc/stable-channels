@@ -1,5 +1,71 @@
 import Foundation
+import Darwin
 import LDKNode
+
+/// Cross-process exclusive lock on the LDK wallet data directory.
+///
+/// Both the main app and the Notification Service Extension run LDK nodes
+/// against the same App Group directory. Two live nodes (or any out-of-band
+/// write to ldk_node_data.sqlite while a node has it open) can regress
+/// channel state by a commitment and force-close the channel. UserDefaults
+/// heartbeats are advisory and racy; this is a kernel-enforced flock that is
+/// automatically released if the holding process dies.
+///
+/// Rules:
+/// - Acquire BEFORE building/starting a node or touching ldk_node_data.sqlite
+///   (gossip strip/restore, purge, wipe).
+/// - Hold for the node's entire lifetime, including the background grace
+///   period; release only after the last post-stop DB write.
+///
+/// Keep in sync with the copy in NotificationService/NotificationService.swift.
+final class NodeDirLock: @unchecked Sendable {
+    static let shared = NodeDirLock()
+    static let lockFilename = "ldk-node.lock"
+
+    private var fd: Int32 = -1
+    private let queue = DispatchQueue(label: "com.stablechannels.nodedirlock")
+
+    /// Take the lock without blocking. Returns true if acquired or already
+    /// held by this process.
+    func tryAcquire(dataDir: URL) -> Bool {
+        queue.sync { tryAcquireLocked(dataDir: dataDir) }
+    }
+
+    /// Poll for the lock up to `timeout` seconds (the NSE's execution window
+    /// is ~30s, so 35s outlasts any live extension). Returns true when held.
+    func acquire(dataDir: URL, timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if tryAcquire(dataDir: dataDir) { return true }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+
+    /// Release if held. Safe to call when not holding (no-op).
+    func release() {
+        queue.sync {
+            guard fd >= 0 else { return }
+            flock(fd, LOCK_UN)
+            close(fd)
+            fd = -1
+        }
+    }
+
+    private func tryAcquireLocked(dataDir: URL) -> Bool {
+        if fd >= 0 { return true } // already held by this process
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        let path = dataDir.appendingPathComponent(Self.lockFilename).path
+        let f = open(path, O_CREAT | O_RDWR, 0o644)
+        guard f >= 0 else { return false }
+        guard flock(f, LOCK_EX | LOCK_NB) == 0 else {
+            close(f)
+            return false
+        }
+        fd = f
+        return true
+    }
+}
 
 /// Passed in notification userInfo so the handler can veto the eventHandled() call.
 /// NotificationCenter.post() is synchronous on MainActor, so all observers run
@@ -23,6 +89,10 @@ class NodeService: NodeServiceProtocol {
 
     private(set) var node: Node?
     private(set) var isRunning = false
+    /// True while start() is in flight (incl. lock acquisition and build).
+    /// Lets background-stop logic distinguish "abandoned before node came up"
+    /// (safe to release the wallet-dir lock) from "start owns the lock".
+    private(set) var isStarting = false
     private(set) var nodeId: String = ""
     private(set) var channels: [ChannelDetails] = []
     private(set) var savedMnemonic: String?
@@ -46,6 +116,18 @@ class NodeService: NodeServiceProtocol {
 
     func start(network: Network, esploraURL: String, mnemonic: String) async throws {
         guard !isRunning else { throw NodeServiceError.alreadyRunning }
+        isStarting = true
+        defer { isStarting = false }
+
+        // Cross-process exclusivity: never open the wallet dir while another
+        // process (the NSE) has a node on it. No-op if already held.
+        guard await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35) else {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "NodeService.start"])
+            throw NodeServiceError.dataDirLocked
+        }
+        // A failed start leaves no node; free the dir for the NSE.
+        var startSucceeded = false
+        defer { if !startSucceeded { NodeDirLock.shared.release() } }
 
         let dataDir = Constants.userDataDir.path
 
@@ -151,8 +233,12 @@ class NodeService: NodeServiceProtocol {
 
         refreshChannels()
         startEventLoop()
+        startSucceeded = true
     }
 
+    /// Stops the node WITHOUT releasing the data-dir lock: callers do
+    /// post-stop DB writes (gossip extract) and then release via
+    /// `NodeDirLock.shared.release()` — see AppState.performBackgroundStop.
     func stop() {
         eventTask?.cancel()
         eventTask = nil
@@ -448,11 +534,13 @@ class NodeService: NodeServiceProtocol {
 enum NodeServiceError: LocalizedError {
     case notRunning
     case alreadyRunning
+    case dataDirLocked
 
     var errorDescription: String? {
         switch self {
         case .notRunning: return "Node is not running"
         case .alreadyRunning: return "Node is already running"
+        case .dataDirLocked: return "Wallet is busy in another process. Please try again."
         }
     }
 }
