@@ -848,17 +848,19 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun completeConfirmedSplice(txid: String) {
         val completed = databaseService?.completeSplice(txid) == true
-        refreshBalances()
-        updateStableBalances()
+        if (completed) {
+            refreshBalances()
+            updateStableBalances()
 
-        val price = priceService.currentPrice.value
-        val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-        val reconciled = result.first
-        if (result.second != null) {
-            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+            val price = priceService.currentPrice.value
+            val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
+            val reconciled = result.first
+            if (result.second != null) {
+                reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+            }
+            _stableChannel.value = reconciled
+            saveChannelToDB()
         }
-        _stableChannel.value = reconciled
-        saveChannelToDB()
 
         isSweeping = false
         pendingSplice = null

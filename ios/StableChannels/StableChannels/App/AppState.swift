@@ -1715,19 +1715,21 @@ class AppState {
 
     private func completeConfirmedSplice(txid: String) {
         let completed = databaseService?.completeSplice(txid: txid) == true
-        refreshBalances()
-        updateStableBalances()
+        if completed {
+            refreshBalances()
+            updateStableBalances()
 
-        let price = stableChannel.latestPrice
-        if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
-            stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
-            AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
-                "usd_deducted": "\(usdDeducted)",
-                "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
-                "btc_price": "\(price)"
-            ])
+            let price = stableChannel.latestPrice
+            if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
+                stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
+                AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
+                    "usd_deducted": "\(usdDeducted)",
+                    "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
+                    "btc_price": "\(price)"
+                ])
+            }
+            saveChannelToDB()
         }
-        saveChannelToDB()
 
         isSweeping = false
         pendingSplice = nil
