@@ -618,7 +618,7 @@ class DatabaseService {
         // If the app died before SpliceNegotiated delivered a txid, there is no
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
         // Keep with-txid rows pending: confirmation can outlive the app process,
-        // and ChannelReady is the authoritative success signal.
+        // and the splice confirmation monitor completes them after 1 conf.
         let noTxidCutoff = Int64(Date().timeIntervalSince1970) - 600
         try execute(
             """
@@ -676,7 +676,7 @@ class DatabaseService {
             try execute(
                 """
                 UPDATE payments
-                SET status = 'completed'
+                SET status = 'completed', confirmations = 1
                 WHERE payment_type IN ('splice_in', 'splice_out')
                   AND txid = ?
                   AND status IN ('pending', 'failed')
