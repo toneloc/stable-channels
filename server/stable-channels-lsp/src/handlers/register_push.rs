@@ -73,7 +73,7 @@ pub async fn register_push(State(state): State<AppState>, body: Bytes) -> Respon
 
     {
         let push = state.push.lock().await;
-        push.register_token(&req.token, &req.platform, &req.node_id, &req.environment);
+        push.register_token(&req.token, &req.platform, &req.node_id, &req.environment, true);
     }
     stable_channels::audit::audit_event(
         "REGISTER_PUSH_OK",
@@ -82,7 +82,18 @@ pub async fn register_push(State(state): State<AppState>, body: Bytes) -> Respon
     ok_response(RegisterPushResponse { ok: true })
 }
 
-/// The unsigned registration body every deployed wallet build sends (fork contract).
+/// Short, non-reversible fingerprint of a device token for audit logs, so a
+/// token change is traceable without persisting the raw token in the clear.
+fn token_fp(token: &str) -> String {
+    use bitcoin_hashes::{sha256, Hash};
+    let h = sha256::Hash::hash(token.as_bytes());
+    format!("{:x}", h)[..12].to_string()
+}
+
+/// The registration body deployed wallet builds send. Historically unsigned
+/// (fork contract); `signature`/`timestamp` are optional so a signing-capable
+/// wallet can prove node ownership over the SAME route (the signed proto route
+/// sits behind HMAC and is unreachable from mobile). See issue #162.
 #[derive(serde::Deserialize)]
 pub struct LegacyPushRequest {
     pub device_token: String,
@@ -91,12 +102,19 @@ pub struct LegacyPushRequest {
     pub node_id: String,
     #[serde(default)]
     pub environment: String,
+    /// zbase32 secp256k1 signature over register_push_signed_bytes(node_id, device_token, timestamp).
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<u64>,
 }
 
-/// Legacy push registration: deployed wallets POST unsigned JSON to /api/register-push
-/// (Apache-proxied, no HMAC, no node-ownership proof). Mounted OUTSIDE the auth layer.
-/// Response shape mirrors the fork byte-for-byte: 200 `"ok"` or 400 with the parse error.
-/// Remove once every install signs registrations (see verify_push_registration).
+/// Legacy push registration: deployed wallets POST JSON to /api/register-push
+/// (Apache-proxied, no HMAC). Mounted OUTSIDE the auth layer so mobile can reach it.
+/// If a valid node signature is present the token is stored as VERIFIED and wins
+/// over any unsigned token for the node; otherwise it is stored unverified (and
+/// can never override a verified token). Response shape mirrors the fork
+/// byte-for-byte: 200 `"ok"` or 400 with the parse error.
 pub async fn register_push_legacy(State(state): State<AppState>, body: Bytes) -> Response {
     let req: LegacyPushRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -113,19 +131,75 @@ pub async fn register_push_legacy(State(state): State<AppState>, body: Bytes) ->
         }
     };
 
+    // If a signature is supplied, verify it; a valid one upgrades this token to
+    // verified. Absent/invalid signatures fall back to the unsigned path.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let verified = match (&req.signature, req.timestamp) {
+        (Some(sig), Some(ts)) => {
+            let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
+            verify_push_registration(
+                ldk,
+                &req.node_id,
+                &req.device_token,
+                sig,
+                ts,
+                now,
+                PUSH_SIG_WINDOW_SECS,
+            )
+            .await
+        }
+        _ => false,
+    };
+    // A signature was presented but did not verify — flag it, still store unsigned.
+    if req.signature.is_some() && !verified {
+        stable_channels::audit::audit_event(
+            "REGISTER_PUSH_SIGNATURE_INVALID",
+            serde_json::json!({ "node_id": req.node_id, "route": "legacy" }),
+        );
+    }
+
+    // Detect a token change / hijack attempt before writing.
     {
         let push = state.push.lock().await;
+        let prior = push.node_token_state(&req.node_id);
+        if let Some(active) = prior.active_token.as_deref() {
+            if active != req.device_token {
+                // A different token is being registered for a node that already
+                // has one. Unsigned-over-verified can never win (load prefers
+                // verified), but surface it so a targeted hijack is visible.
+                let hijack_blocked = prior.has_verified && !verified;
+                stable_channels::audit::audit_event(
+                    if hijack_blocked {
+                        "REGISTER_PUSH_HIJACK_BLOCKED"
+                    } else {
+                        "REGISTER_PUSH_TOKEN_CHANGED"
+                    },
+                    serde_json::json!({
+                        "node_id": req.node_id,
+                        "platform": req.platform,
+                        "old_token_fp": token_fp(active),
+                        "new_token_fp": token_fp(&req.device_token),
+                        "new_verified": verified,
+                        "had_verified": prior.has_verified,
+                    }),
+                );
+            }
+        }
         push.register_token(
             &req.device_token,
             &req.platform,
             &req.node_id,
             &req.environment,
+            verified,
         );
     }
-    // Flagged as LEGACY: this token was stored without a node-ownership proof.
+
     stable_channels::audit::audit_event(
-        "REGISTER_PUSH_LEGACY_OK",
-        serde_json::json!({ "node_id": req.node_id, "platform": req.platform }),
+        if verified { "REGISTER_PUSH_SIGNED_OK" } else { "REGISTER_PUSH_LEGACY_OK" },
+        serde_json::json!({ "node_id": req.node_id, "platform": req.platform, "verified": verified }),
     );
     Response::builder()
         .status(axum::http::StatusCode::OK)
@@ -212,6 +286,28 @@ mod tests {
             serde_json::from_str(r#"{"device_token":"tok","platform":"android"}"#).unwrap();
         assert_eq!(minimal.node_id, "");
         assert_eq!(minimal.environment, "");
+        // Existing unsigned builds send no signature — stays the unsigned path.
+        assert!(minimal.signature.is_none());
+        assert!(minimal.timestamp.is_none());
+    }
+
+    #[test]
+    fn legacy_body_parses_optional_signature() {
+        let signed: LegacyPushRequest = serde_json::from_str(
+            r#"{"device_token":"tok","platform":"ios","node_id":"02ab","signature":"zsig","timestamp":1717000000}"#,
+        )
+        .unwrap();
+        assert_eq!(signed.signature.as_deref(), Some("zsig"));
+        assert_eq!(signed.timestamp, Some(1717000000));
+    }
+
+    #[test]
+    fn token_fp_is_stable_and_truncated() {
+        let a = token_fp("device-token-abc");
+        let b = token_fp("device-token-abc");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 12);
+        assert_ne!(a, token_fp("device-token-xyz"));
     }
 
     #[test]

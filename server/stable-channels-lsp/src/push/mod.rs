@@ -31,8 +31,23 @@ impl PushService {
     }
 
     /// Persist a wallet's device token. Called by the RegisterPush handler.
-    pub fn register_token(&self, token: &str, platform: &str, node_id: &str, environment: &str) {
-        tokens::save_token(&self.data_dir, token, platform, node_id, environment);
+    /// `verified` marks a node-signature-proven registration; verified tokens
+    /// win over unsigned ones at notify time (hijack protection, issue #162).
+    pub fn register_token(
+        &self,
+        token: &str,
+        platform: &str,
+        node_id: &str,
+        environment: &str,
+        verified: bool,
+    ) {
+        tokens::save_token(&self.data_dir, token, platform, node_id, environment, verified);
+    }
+
+    /// Registration state for a node, so handlers can detect and audit a
+    /// token change (potential hijack) before overwriting.
+    pub fn node_token_state(&self, node_id: &str) -> tokens::NodeTokenState {
+        tokens::node_token_state(&self.data_dir, node_id)
     }
 
     /// Whether enough time has elapsed since the last push to this node.
