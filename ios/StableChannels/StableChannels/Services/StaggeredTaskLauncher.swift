@@ -21,7 +21,9 @@ final class StaggeredTaskLauncher {
                 // Unit: seconds. Caller passes e.g. UInt64(i) where i is a per-op index
                 // in a burst-replay loop, e.g. 0s, 2s, 4s, 6s for 4 ops.
                 try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
-                if Task.isCancelled { return }
+                if Task.isCancelled {
+                    return
+                }
             }
             await task()
             if self?.generations[opId] == generation {

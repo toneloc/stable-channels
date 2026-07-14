@@ -22,7 +22,9 @@ final class NodeDirLock: @unchecked Sendable {
     /// held by this process.
     func tryAcquire(dataDir: URL) -> Bool {
         queue.sync {
-            if fd >= 0 { return true }
+            if fd >= 0 {
+                return true
+            }
             try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
             let path = dataDir.appendingPathComponent(Self.lockFilename).path
             let f = open(path, O_CREAT | O_RDWR, 0o644)
@@ -309,7 +311,7 @@ class NotificationService: UNNotificationServiceExtension {
 
     private func finishWithError(
         content: UNMutableNotificationContent,
-        contentHandler: @escaping (UNNotificationContent) -> Void
+        contentHandler _: @escaping (UNNotificationContent) -> Void
     ) {
         cleanup()
         content.title = "Payment Pending"

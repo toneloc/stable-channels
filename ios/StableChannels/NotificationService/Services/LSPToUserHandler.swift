@@ -30,7 +30,9 @@ final class LSPToUserHandler: PaymentHandler {
             switch event {
             case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
                 let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
-                if price <= 0 { price = priceFetcher.fetchPrice() }
+                if price <= 0 {
+                    price = priceFetcher.fetchPrice()
+                }
 
                 let stableControl = StableControlParser.handleStableControl(
                     node: node,

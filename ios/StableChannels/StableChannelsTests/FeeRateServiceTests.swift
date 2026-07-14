@@ -16,8 +16,12 @@ struct StubFeeRateSource: FeeRateSource {
     }
 
     func fetchRate() async throws -> UInt64 {
-        if delay > .zero { try? await Task.sleep(for: delay) }
-        if let err = throwsError { throw err }
+        if delay > .zero {
+            try? await Task.sleep(for: delay)
+        }
+        if let err = throwsError {
+            throw err
+        }
         guard let rate else { throw FeeRateError.parseFailed(source: "stub") }
         return rate
     }
@@ -180,8 +184,12 @@ struct CountingSource: FeeRateSource {
 
     func fetchRate() async throws -> UInt64 {
         counter.bump()
-        if delay > .zero { try? await Task.sleep(for: delay) }
-        if let err = throwsError { throw err }
+        if delay > .zero {
+            try? await Task.sleep(for: delay)
+        }
+        if let err = throwsError {
+            throw err
+        }
         return rate
     }
 }

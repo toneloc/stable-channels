@@ -92,7 +92,9 @@ struct PaymentDetailView: View {
     }
 
     private var displayUSD: Double? {
-        if let amountUSD = payment.amountUSD { return amountUSD }
+        if let amountUSD = payment.amountUSD {
+            return amountUSD
+        }
         guard shouldPreferUSDDisplay else { return nil }
         let price = (payment.btcPrice ?? 0) > 0 ? (payment.btcPrice ?? 0) : displayPrice
         guard price > 0 else { return nil }

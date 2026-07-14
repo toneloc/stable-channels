@@ -40,7 +40,9 @@ final class StaggeredTaskLauncherTests: XCTestCase {
             aStarted.fulfill()
             // Sleep long enough that B's launch() definitely calls cancel()
             try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if Task.isCancelled { aCancelled.fulfill() }
+            if Task.isCancelled {
+                aCancelled.fulfill()
+            }
         }
         await fulfillment(of: [aStarted], timeout: 1)
 
@@ -84,17 +86,23 @@ final class StaggeredTaskLauncherTests: XCTestCase {
         sut.launch(opId: "1", delaySeconds: 0) {
             s1.fulfill()
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            if Task.isCancelled { saw1 = true; c1.fulfill() }
+            if Task.isCancelled {
+                saw1 = true; c1.fulfill()
+            }
         }
         sut.launch(opId: "2", delaySeconds: 0) {
             s2.fulfill()
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            if Task.isCancelled { saw2 = true; c2.fulfill() }
+            if Task.isCancelled {
+                saw2 = true; c2.fulfill()
+            }
         }
         sut.launch(opId: "3", delaySeconds: 0) {
             s3.fulfill()
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            if Task.isCancelled { saw3 = true; c3.fulfill() }
+            if Task.isCancelled {
+                saw3 = true; c3.fulfill()
+            }
         }
         await fulfillment(of: [s1, s2, s3], timeout: 1)
         sut.cancelAll()
@@ -115,7 +123,9 @@ final class StaggeredTaskLauncherTests: XCTestCase {
         sut.launch(opId: "g", delaySeconds: 0) {
             aStarted.fulfill()
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if Task.isCancelled { aCancelled.fulfill() }
+            if Task.isCancelled {
+                aCancelled.fulfill()
+            }
         }
         await fulfillment(of: [aStarted], timeout: 1)
 

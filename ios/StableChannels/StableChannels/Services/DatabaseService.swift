@@ -365,7 +365,9 @@ class DatabaseService {
                 "SELECT id FROM payments WHERE payment_id = ?",
                 params: [.text(pid)]
             )
-            if !existing.isEmpty { return false }
+            if !existing.isEmpty {
+                return false
+            }
         }
 
         let sql = """

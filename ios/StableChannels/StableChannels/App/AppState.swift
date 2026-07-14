@@ -91,9 +91,15 @@ class AppState {
     var hasReadyChannel: Bool = false
 
     var totalBalanceSats: UInt64 {
-        if isChannelClosing { return onchainBalanceSats }
-        if isOpeningChannel { return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats }
-        if isSweeping { return lightningBalanceSats }
+        if isChannelClosing {
+            return onchainBalanceSats
+        }
+        if isOpeningChannel {
+            return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats
+        }
+        if isSweeping {
+            return lightningBalanceSats
+        }
         // If no open channels but both balances exist, lightning balance is
         // pending-close claimable that overlaps with on-chain — avoid double-count.
         if !hasReadyChannel && lightningBalanceSats > 0 && onchainBalanceSats > 0 {
@@ -279,7 +285,7 @@ class AppState {
         // Own the wallet dir before stopping/wiping: restore can be reached
         // while the lock is not held (e.g. after a startup failure released
         // it), and wiping under a live NSE node would corrupt its state.
-        if !(await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restoreWalletFromMnemonic"])
             phase = priorPhase
             statusMessage = ""
@@ -389,7 +395,7 @@ class AppState {
     /// Derive the node_id a mnemonic maps to by building (never starting) a
     /// throwaway node in a temp directory. Returns nil on any failure so the
     /// restore guard fails open.
-    nonisolated private static func deriveNodeId(mnemonic: String) -> String? {
+    private nonisolated static func deriveNodeId(mnemonic: String) -> String? {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -458,7 +464,7 @@ class AppState {
 
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
-        if !(await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
@@ -510,7 +516,9 @@ class AppState {
             let hasCachedData = !stableChannel.userChannelId.isEmpty
             await MainActor.run {
                 phase = hasCachedData ? .wallet : .syncing
-                if hasCachedData { isSyncing = true }
+                if hasCachedData {
+                    isSyncing = true
+                }
             }
 
             // Purge empty network graph from DB to force fresh RGS sync
@@ -655,7 +663,9 @@ class AppState {
         while shared?.bool(forKey: "nse_processing") == true {
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             waited += 1
-            if waited >= 30 { break } // NSE has an approximately 30-second execution window
+            if waited >= 30 {
+                break
+            } // NSE has an approximately 30-second execution window
         }
         if waited > 0 {
             AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
@@ -780,7 +790,7 @@ class AppState {
         }
         print("[App] Restarting node from foreground")
         // Reclaim the wallet dir before writing gossip back into the LDK DB.
-        if !(await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restartNodeFromForeground"])
             return
         }
@@ -1859,7 +1869,9 @@ class AppState {
             urls.append(url)
         }
         for baseURL in urls {
-            guard let url = URL(string: "\(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/tx/\(txid)/status") else {
+            guard let url =
+                URL(string: "\(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/tx/\(txid)/status")
+            else {
                 continue
             }
             do {

@@ -36,8 +36,12 @@ final class NodeDirLock: @unchecked Sendable {
     func acquire(dataDir: URL, timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            if tryAcquire(dataDir: dataDir) { return true }
-            if Date() >= deadline { return false }
+            if tryAcquire(dataDir: dataDir) {
+                return true
+            }
+            if Date() >= deadline {
+                return false
+            }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
     }
@@ -53,7 +57,9 @@ final class NodeDirLock: @unchecked Sendable {
     }
 
     private func tryAcquireLocked(dataDir: URL) -> Bool {
-        if fd >= 0 { return true } // already held by this process
+        if fd >= 0 {
+            return true
+        } // already held by this process
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         let path = dataDir.appendingPathComponent(Self.lockFilename).path
         let f = open(path, O_CREAT | O_RDWR, 0o644)
@@ -127,7 +133,11 @@ class NodeService: NodeServiceProtocol {
         }
         // A failed start leaves no node; free the dir for the NSE.
         var startSucceeded = false
-        defer { if !startSucceeded { NodeDirLock.shared.release() } }
+        defer {
+            if !startSucceeded {
+                NodeDirLock.shared.release()
+            }
+        }
 
         let dataDir = Constants.userDataDir.path
 
@@ -262,7 +272,9 @@ class NodeService: NodeServiceProtocol {
             var retryDelayNanoseconds: UInt64 = 1_000_000_000
             while !Task.isCancelled {
                 let event = await node.nextEventAsync()
-                if Task.isCancelled { break }
+                if Task.isCancelled {
+                    break
+                }
 
                 let shouldAck = await MainActor.run {
                     let token = EventAckToken()

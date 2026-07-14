@@ -20,7 +20,9 @@ final class MockURLProtocol: URLProtocol {
             return
         }
         Self.callCount += 1
-        if let url = request.url { Self.seenURLs.append(url) }
+        if let url = request.url {
+            Self.seenURLs.append(url)
+        }
         let (response, data) = handler(request)
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)

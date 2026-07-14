@@ -34,7 +34,13 @@ struct AppAccessSettingsView: View {
             Section(String(localized: "section_wallet_security", defaultValue: "Wallet Security")) {
                 Toggle(isOn: Binding(
                     get: { isEnabled(.appUnlock) },
-                    set: { if $0 { enable(.appUnlock) } else { requestAuth(for: .appUnlock) } }
+                    set: {
+                        if $0 {
+                            enable(.appUnlock)
+                        } else {
+                            requestAuth(for: .appUnlock)
+                        }
+                    }
                 )) {
                     Label { Text(String(localized: "label_app_unlock", defaultValue: "App Unlock")) }
                         icon: { Image(systemName: "faceid").foregroundStyle(.green) }
@@ -43,7 +49,13 @@ struct AppAccessSettingsView: View {
 
                 Toggle(isOn: Binding(
                     get: { isEnabled(.transaction) },
-                    set: { if $0 { enable(.transaction) } else { requestAuth(for: .transaction) } }
+                    set: {
+                        if $0 {
+                            enable(.transaction)
+                        } else {
+                            requestAuth(for: .transaction)
+                        }
+                    }
                 )) {
                     Label {
                         Text(String(localized: "label_payment_confirmation", defaultValue: "Payment Confirmation"))
