@@ -66,6 +66,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val sc by appState.stableChannel.collectAsState()
     val nativeSatsCached by appState.nativeSats.collectAsState()
+    val lastRxTxid by appState.lastReceiveTxid.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
@@ -151,7 +152,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(scrollState)
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Title
@@ -314,7 +315,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Column(Modifier.padding(12.dp)) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -383,7 +384,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             } else {
                                 "Deposit confirming..."
                             }
-                            PendingRow(text, null, context)
+                            PendingRow(text, lastRxTxid, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,
@@ -398,7 +399,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         }
                     }
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
             }
 
             // Price chart
@@ -408,7 +409,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     databaseService = appState.databaseService,
                     currentPrice = btcPrice
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
             }
 
             // Hint text when no channel
@@ -439,7 +440,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             // Status capsule
             if (statusMessage.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
                 StatusCapsule(
                     message = statusMessage
                 )
@@ -659,7 +660,7 @@ private fun PendingRow(text: String, txid: String?, context: android.content.Con
                     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${it.substringBefore(":")}"))
                     context.startActivity(intent)
                 },
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                contentPadding = PaddingValues(0.dp)
             ) {
                 Text("View on explorer", fontSize = 12.sp)
             }
