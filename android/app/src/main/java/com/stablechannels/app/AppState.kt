@@ -76,9 +76,15 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _totalBalanceSats: MutableStateFlow<Long>
     val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
-
     private val _hasReadyChannel = MutableStateFlow(false)
     val hasReadyChannel: StateFlow<Boolean> get() = _hasReadyChannel
+
+    private val _onchainReceiveAddress = MutableStateFlow<String?>(null)
+    val onchainReceiveAddress: StateFlow<String?> get() = _onchainReceiveAddress
+
+    private val _lastReceiveTxid = MutableStateFlow<String?>(null)
+    val lastReceiveTxid: StateFlow<String?> get() = _lastReceiveTxid
+
 
     private val _spendableOnchainSats = MutableStateFlow(0L)
     val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
@@ -93,7 +99,10 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
-        _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
+                _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
+        _onchainReceiveAddress.value = prefs.getString("onchain_receive_address", null)
+        _lastReceiveTxid.value = prefs.getString("last_receive_txid", null)
+
 
         // Restore cached channel state so UI shows correct slider position immediately
         val cachedChannelId = prefs.getString("cached_channel_id", null)
