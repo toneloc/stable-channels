@@ -727,7 +727,12 @@ impl UserApp {
 
             loop {
                 // Fetch price (network call) OUTSIDE of lock
-                let price = match stable_channels::price_feeds::get_latest_price(&ureq::Agent::new())
+                // Bounded timeouts so a geo-blocked/hanging price feed can't freeze this loop.
+                let price_agent = ureq::AgentBuilder::new()
+                    .timeout_connect(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(10))
+                    .build();
+                let price = match stable_channels::price_feeds::get_latest_price(&price_agent)
                 {
                     Ok(p) if p > 0.0 => p,
                     _ => stable_channels::price_feeds::get_cached_price(),
@@ -2919,7 +2924,7 @@ impl UserApp {
     fn lookup_funding_output_sats_esplora(txid: &str, vout: u32) -> Option<u64> {
         let url = format!("{}/tx/{}", DEFAULT_CHAIN_URL, txid);
 
-        let response = ureq::Agent::new().get(&url).call().ok()?;
+        let response = stable_channels::price_feeds::bounded_agent().get(&url).call().ok()?;
 
         let json: serde_json::Value = response.into_json().ok()?;
         let vouts = json["vout"].as_array()?;
@@ -3247,7 +3252,7 @@ impl UserApp {
     /// Fetch daily OHLC data from Kraken API (up to 720 days)
     fn fetch_kraken_daily_data(&mut self) {
         println!("[Chart] Fetching Kraken OHLC data...");
-        let agent = ureq::Agent::new();
+        let agent = stable_channels::price_feeds::bounded_agent();
 
         // Fetch without 'since' to get the most recent 720 days
         match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
@@ -3288,7 +3293,7 @@ impl UserApp {
             "[Chart] Backfilling intraday prices from Kraken (have {} points)...",
             existing.len()
         );
-        let agent = ureq::Agent::new();
+        let agent = stable_channels::price_feeds::bounded_agent();
         match stable_channels::price_feeds::fetch_kraken_intraday(&agent) {
             Ok(prices) => {
                 // Build a set of existing timestamps (rounded to nearest minute) to avoid dupes
@@ -3390,7 +3395,7 @@ impl UserApp {
         let db = self.db.clone();
 
         std::thread::spawn(move || {
-            let agent = ureq::Agent::new();
+            let agent = stable_channels::price_feeds::bounded_agent();
             match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, since) {
                 Ok(prices) => {
                     for (date, open, high, low, close, volume) in prices {
@@ -4450,8 +4455,11 @@ impl UserApp {
                         // Force a fresh price fetch in the background, then
                         // refresh balances from LDK + recompute USD values.
                         std::thread::spawn(|| {
-                            let _ =
-                                stable_channels::price_feeds::get_latest_price(&ureq::Agent::new());
+                            let agent = ureq::AgentBuilder::new()
+                                .timeout_connect(Duration::from_secs(5))
+                                .timeout(Duration::from_secs(10))
+                                .build();
+                            let _ = stable_channels::price_feeds::get_latest_price(&agent);
                         });
                         self.update_balances();
                         self.show_toast("Refreshing…", "~");
@@ -8716,7 +8724,7 @@ impl UserApp {
         self.fee_rate_receiver = Some(rx);
 
         std::thread::spawn(move || {
-            let agent = ureq::Agent::new();
+            let agent = stable_channels::price_feeds::bounded_agent();
             let url = format!("{}/fee-estimates", DEFAULT_CHAIN_URL);
             if let Ok(response) = agent.get(&url).call() {
                 if let Ok(json) = response.into_json::<serde_json::Value>() {
