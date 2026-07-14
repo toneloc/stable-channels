@@ -75,6 +75,19 @@ class NotificationService: UNNotificationServiceExtension {
     private let lifecycleLock = NSLock()
     private var buildInFlight = false
     private var timeExpired = false
+    private var didFinish = false
+
+    /// Deliver notification content exactly once. Expiry and the async
+    /// processing pipeline can race to finish; whichever loses becomes a
+    /// no-op instead of double-calling the content handler.
+    private func finish(_ content: UNNotificationContent) {
+        lifecycleLock.lock()
+        let alreadyFinished = didFinish
+        didFinish = true
+        lifecycleLock.unlock()
+        guard !alreadyFinished, let handler = contentHandler else { return }
+        handler(content)
+    }
 
     // MARK: - Entry Point
 
@@ -86,7 +99,7 @@ class NotificationService: UNNotificationServiceExtension {
         self.bestAttemptContent = (request.content.mutableCopy() as? UNMutableNotificationContent)
 
         guard let content = bestAttemptContent else {
-            contentHandler(request.content)
+            finish(request.content)
             return
         }
 
@@ -112,7 +125,7 @@ class NotificationService: UNNotificationServiceExtension {
             logger.log("Main app is active, skipping node start")
             shared?.set(false, forKey: "nse_processing")
             shared?.set(true, forKey: "pending_push_payment")
-            contentHandler(content)
+            finish(content)
             return
         }
 
@@ -131,21 +144,27 @@ class NotificationService: UNNotificationServiceExtension {
         lifecycleLock.lock()
         timeExpired = true
         let deferToBuilder = buildInFlight
+        let alreadyFinished = didFinish
         lifecycleLock.unlock()
+        if !alreadyFinished {
+            // Whatever was in flight did not complete — flag it so the main
+            // app processes the payment on next open. (Every timeout path
+            // must set this; a completed run has already finished and skips.)
+            UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
+        }
         if deferToBuilder {
             // A node build owns the flock right now. Don't release it here:
             // the builder will stop+release when the build returns, and if
             // iOS kills us first the kernel releases. Releasing early would
             // reopen the dual-node force-close window.
             logger.log("Expire during node build; deferring stop/release to builder")
-            UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
         } else {
             cleanup()
         }
-        if let content = bestAttemptContent, let handler = contentHandler {
+        if let content = bestAttemptContent {
             content.title = "Payment Pending"
             content.body = "Open app to process your payment"
-            handler(content)
+            finish(content)
         }
     }
 
@@ -160,7 +179,7 @@ class NotificationService: UNNotificationServiceExtension {
             .containerURL(forSecurityApplicationGroupIdentifier: Constants.appGroup) else {
             logger.log("FAILED: No shared container")
             cleanup()
-            contentHandler(content)
+            finish(content)
             return
         }
 
@@ -172,7 +191,7 @@ class NotificationService: UNNotificationServiceExtension {
         guard hasSeed(dataDir: dataDir) else {
             logger.log("FAILED: No seed found")
             cleanup()
-            contentHandler(content)
+            finish(content)
             return
         }
 
@@ -192,7 +211,7 @@ class NotificationService: UNNotificationServiceExtension {
             logger.log("Wallet dir locked by main app; deferring payment")
             UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
             cleanup()
-            contentHandler(content)
+            finish(content)
             return
         }
 
@@ -254,7 +273,7 @@ class NotificationService: UNNotificationServiceExtension {
             cleanup()
             content.title = "Payment Pending"
             content.body = "Open app to process your payment"
-            contentHandler(content)
+            finish(content)
         }
     }
 
@@ -284,7 +303,7 @@ class NotificationService: UNNotificationServiceExtension {
 
                 self.stopHeartbeat()
                 self.cleanup()
-                contentHandler(resultContent)
+                self.finish(resultContent)
             }
     }
 
@@ -295,7 +314,7 @@ class NotificationService: UNNotificationServiceExtension {
         cleanup()
         content.title = "Payment Pending"
         content.body = "Open app to process your payment"
-        contentHandler(content)
+        finish(content)
     }
 
     // MARK: - Helpers

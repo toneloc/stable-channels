@@ -158,6 +158,7 @@ class AppState {
     enum WalletRestoreError: LocalizedError {
         case invalidMnemonic
         case activeChannelDetected
+        case channelCheckUnavailable
         case walletBusy
 
         var errorDescription: String? {
@@ -167,6 +168,8 @@ class AppState {
             case .activeChannelDetected:
                 return "This wallet still has an open Lightning channel with the LSP. "
                     + "Restoring from seed alone will force-close it on-chain."
+            case .channelCheckUnavailable:
+                return "Could not verify whether this wallet has an open Lightning channel."
             case .walletBusy:
                 return "Wallet is busy in another process. Please try again."
             }
@@ -224,8 +227,10 @@ class AppState {
         phase = .syncing
         isSyncing = true
         statusMessage = "Restoring wallet..."
+        nodeFlowInProgress = true
         defer {
             isSyncing = false
+            nodeFlowInProgress = false
         }
 
         // Restore-divergence guard: a seed-only restore wipes LDK channel
@@ -238,22 +243,32 @@ class AppState {
             let derivedNodeId = await Task.detached(priority: .utility) {
                 AppState.deriveNodeId(mnemonic: words)
             }.value
+            var channelExists: Bool?
             if let nodeId = derivedNodeId {
-                let channelExists = await lspChannelExists(nodeId: nodeId)
-                if channelExists == nil {
-                    // Fail-open: the guard couldn't run (LSP unreachable,
-                    // proxy misroute, …). Leave a trace so a silently dead
-                    // guard is visible in the audit log.
-                    AuditService.log("RESTORE_GUARD_UNAVAILABLE", data: ["node_id": nodeId])
-                }
-                if channelExists == true {
-                    AuditService.log("RESTORE_ACTIVE_CHANNEL_DETECTED", data: ["node_id": nodeId])
-                    phase = priorPhase
-                    statusMessage = ""
-                    throw WalletRestoreError.activeChannelDetected
-                }
-            } else {
-                AuditService.log("RESTORE_GUARD_UNAVAILABLE", data: ["reason": "derive_failed"])
+                channelExists = await lspChannelExists(nodeId: nodeId)
+            }
+            switch channelExists {
+            case .some(true):
+                AuditService.log(
+                    "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                    data: ["node_id": derivedNodeId ?? ""]
+                )
+                phase = priorPhase
+                statusMessage = ""
+                throw WalletRestoreError.activeChannelDetected
+            case .none:
+                // Guard couldn't run (LSP unreachable, proxy misroute, derive
+                // failed). Fail-warn: surface it and require the user to opt
+                // in, since a hidden open channel would be force-closed.
+                AuditService.log(
+                    "RESTORE_GUARD_UNAVAILABLE",
+                    data: ["node_id": derivedNodeId ?? "derive_failed"]
+                )
+                phase = priorPhase
+                statusMessage = ""
+                throw WalletRestoreError.channelCheckUnavailable
+            case .some(false):
+                break // verified: no open channel — safe to proceed
             }
             statusMessage = "Restoring wallet..."
         }
@@ -425,11 +440,21 @@ class AppState {
     // MARK: - Startup
 
     func start() async {
+        // Guard the whole flow: performBackgroundStop must not release the
+        // wallet-dir lock while this startup is still live (there is a window
+        // between our acquire and NodeService.start setting isStarting).
+        nodeFlowInProgress = true
+        defer { nodeFlowInProgress = false }
+
         // Migrate data from old Application Support dir to shared App Group container
         migrateDataDirIfNeeded()
 
         // Wait for NSE to finish if it was recently active
         await waitForNSE()
+
+        // Pick best esplora endpoint BEFORE taking the lock — pure network,
+        // no DB access, and it can stall; no reason to hold the dir for it.
+        chainURL = await resolveChainURL()
 
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
@@ -438,9 +463,6 @@ class AppState {
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
         }
-
-        // Pick best esplora endpoint
-        chainURL = await resolveChainURL()
 
         // Initialize database
         do {
@@ -662,6 +684,11 @@ class AppState {
     }
 
     private var backgroundStopWorkItem: DispatchWorkItem?
+    /// True while a whole node-owning flow (start / foreground restart /
+    /// restore) is live — including the stretch before NodeService.start sets
+    /// isStarting. performBackgroundStop must not release the wallet-dir lock
+    /// out from under such a flow.
+    private var nodeFlowInProgress = false
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     /// Stop the node and extract gossip data so the NSE can open the lightweight DB.
@@ -695,11 +722,12 @@ class AppState {
     private func performBackgroundStop() {
         backgroundStopWorkItem = nil
         guard nodeService.isRunning else {
-            // Backgrounded before the node came up. If no start is in flight,
-            // a held lock serves no one — release it so the NSE isn't starved
-            // of stability pushes for the suspended app's lifetime. Mid-start
-            // the lock stays: the in-flight start owns it.
-            if !nodeService.isStarting {
+            // Backgrounded before the node came up. If no start/restore flow
+            // is live, a held lock serves no one — release it so the NSE isn't
+            // starved of stability pushes for the suspended app's lifetime.
+            // While a flow IS live (even pre-isStarting, e.g. stalled in DB
+            // init), the lock stays: that flow owns it and may still resume.
+            if !nodeService.isStarting && !nodeFlowInProgress {
                 NodeDirLock.shared.release()
             }
             if backgroundTaskID != .invalid {
@@ -731,6 +759,8 @@ class AppState {
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
+        nodeFlowInProgress = true
+        defer { nodeFlowInProgress = false }
         cancelBackgroundStop()
         await waitForNSE()
         loadChannelFromDB()

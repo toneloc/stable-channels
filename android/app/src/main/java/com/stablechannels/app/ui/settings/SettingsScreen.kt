@@ -49,6 +49,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
     var showRestoreForceCloseConfirm by remember { mutableStateOf(false) }
+    var restoreGuardUnavailable by remember { mutableStateOf(false) }
     var isCheckingRestore by remember { mutableStateOf(false) }
     var showClipboardWarning by remember { mutableStateOf(false) }
     var seedCopied by remember { mutableStateOf(false) }
@@ -409,14 +410,22 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                             withContext(Dispatchers.Main) {
                                 isCheckingRestore = false
-                                if (exists == true) {
-                                    AuditService.log(
-                                        "RESTORE_ACTIVE_CHANNEL_DETECTED",
-                                        mapOf("node_id" to nodeId)
-                                    )
-                                    showRestoreForceCloseConfirm = true
-                                } else {
-                                    performRestore(input)
+                                when (exists) {
+                                    true -> {
+                                        AuditService.log(
+                                            "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                                            mapOf("node_id" to nodeId)
+                                        )
+                                        restoreGuardUnavailable = false
+                                        showRestoreForceCloseConfirm = true
+                                    }
+                                    // Guard couldn't run — fail-warn: require
+                                    // explicit opt-in instead of proceeding.
+                                    null -> {
+                                        restoreGuardUnavailable = true
+                                        showRestoreForceCloseConfirm = true
+                                    }
+                                    false -> performRestore(input)
                                 }
                             }
                         }
@@ -441,20 +450,37 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showRestoreForceCloseConfirm = false },
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
-            title = { Text("Open Channel Detected") },
+            title = {
+                Text(
+                    if (restoreGuardUnavailable) "Couldn't Verify Channel Status"
+                    else "Open Channel Detected"
+                )
+            },
             text = {
                 Text(
-                    "This wallet still has an open Lightning channel with the LSP. " +
-                        "Restoring from seed alone cannot restore the channel and it will " +
-                        "be force-closed on-chain; funds return after a timelock. Only " +
-                        "continue if this is your only way back into the wallet."
+                    if (restoreGuardUnavailable) {
+                        "The server couldn't be reached to check whether this wallet " +
+                            "still has an open Lightning channel. If it does, restoring " +
+                            "from seed alone will force-close it on-chain. Continue only " +
+                            "if you're sure, or try again with a network connection."
+                    } else {
+                        "This wallet still has an open Lightning channel with the LSP. " +
+                            "Restoring from seed alone cannot restore the channel and it will " +
+                            "be force-closed on-chain; funds return after a timelock. Only " +
+                            "continue if this is your only way back into the wallet."
+                    }
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     showRestoreForceCloseConfirm = false
                     performRestore(restoreMnemonic.trim())
-                }) { Text("Restore Anyway", color = MaterialTheme.colorScheme.error) }
+                }) {
+                    Text(
+                        if (restoreGuardUnavailable) "Continue Anyway" else "Restore Anyway",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             },
             dismissButton = {
                 TextButton(onClick = {
