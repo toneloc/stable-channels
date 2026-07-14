@@ -383,7 +383,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             } else {
                                 "Deposit confirming..."
                             }
-                            PendingRow(text, appState.fundingTxid, context)
+                            PendingRow(text, null, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,
