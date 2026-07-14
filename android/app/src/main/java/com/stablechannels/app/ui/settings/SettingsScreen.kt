@@ -19,6 +19,7 @@ import java.io.File
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.services.AuditService
+import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
 import com.stablechannels.app.util.satsFormatted
@@ -47,6 +48,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showRestore by remember { mutableStateOf(false) }
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
+    var showRestoreForceCloseConfirm by remember { mutableStateOf(false) }
+    var isCheckingRestore by remember { mutableStateOf(false) }
     var showClipboardWarning by remember { mutableStateOf(false) }
     var seedCopied by remember { mutableStateOf(false) }
 
@@ -54,6 +57,26 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
     val hasReadyChannel = channels.any { it.isChannelReady }
     val stabilityResult = remember(sc, btcPrice) {
         StabilityService.checkStabilityAction(sc, btcPrice)
+    }
+
+    /** Wipe + restart the node with the entered seed (post restore-guard). */
+    fun performRestore(input: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                appState.nodeService.stop()
+                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
+                withContext(Dispatchers.Main) {
+                    showRestore = false
+                    restoreMnemonic = ""
+                    restoreError = null
+                    appState.refreshBalances()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    restoreError = e.message ?: "Restore failed"
+                }
+            }
+        }
     }
 
     Column(
@@ -369,31 +392,73 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             restoreError = "Seed phrase must be 12 or 24 words"
                             return@TextButton
                         }
+                        // Restore guard: a seed-only restore wipes LDK state;
+                        // if this seed's node still has an LSP channel it will
+                        // be force-closed at the next reestablish. Detect that
+                        // and require explicit opt-in. Fails open if the LSP
+                        // is unreachable or derivation fails.
+                        isCheckingRestore = true
                         scope.launch(Dispatchers.IO) {
-                            try {
-                                appState.nodeService.stop()
-                                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
-                                withContext(Dispatchers.Main) {
-                                    showRestore = false
-                                    restoreMnemonic = ""
-                                    restoreError = null
-                                    appState.refreshBalances()
-                                }
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    restoreError = e.message ?: "Restore failed"
+                            val nodeId = NodeService.deriveNodeId(context, input)
+                            val exists = nodeId?.let { appState.lspChannelExists(it) }
+                            if (exists == null) {
+                                AuditService.log(
+                                    "RESTORE_GUARD_UNAVAILABLE",
+                                    mapOf("node_id" to (nodeId ?: "derive_failed"))
+                                )
+                            }
+                            withContext(Dispatchers.Main) {
+                                isCheckingRestore = false
+                                if (exists == true) {
+                                    AuditService.log(
+                                        "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                                        mapOf("node_id" to nodeId)
+                                    )
+                                    showRestoreForceCloseConfirm = true
+                                } else {
+                                    performRestore(input)
                                 }
                             }
                         }
                     },
-                    enabled = restoreMnemonic.trim().isNotEmpty()
-                ) { Text("Restore") }
+                    enabled = restoreMnemonic.trim().isNotEmpty() && !isCheckingRestore
+                ) { Text(if (isCheckingRestore) "Checking..." else "Restore") }
             },
             dismissButton = {
                 TextButton(onClick = {
                     showRestore = false
                     restoreMnemonic = ""
                     restoreError = null
+                }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Restore guard: explicit opt-in when the seed's node still has an open
+    // LSP channel that a seed-only restore would force-close.
+    if (showRestoreForceCloseConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRestoreForceCloseConfirm = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            title = { Text("Open Channel Detected") },
+            text = {
+                Text(
+                    "This wallet still has an open Lightning channel with the LSP. " +
+                        "Restoring from seed alone cannot restore the channel and it will " +
+                        "be force-closed on-chain; funds return after a timelock. Only " +
+                        "continue if this is your only way back into the wallet."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRestoreForceCloseConfirm = false
+                    performRestore(restoreMnemonic.trim())
+                }) { Text("Restore Anyway", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showRestoreForceCloseConfirm = false
                 }) { Text("Cancel") }
             }
         )

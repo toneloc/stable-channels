@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.StateFlow
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.*
 import java.io.File
@@ -1279,6 +1281,32 @@ class AppState(private val context: Context) : ViewModel() {
             _statusMessage.value = "Sweep failed: ${e.message}"
             AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
             return
+        }
+    }
+
+    /**
+     * Ask the LSP whether this node_id still has channels open with it.
+     * Restore guard: called before a seed-only restore wipes LDK state (which
+     * would force-close a live channel at the next reestablish).
+     * Returns null (unknown) on any failure — callers fail open.
+     * Blocking; call from Dispatchers.IO.
+     */
+    fun lspChannelExists(nodeId: String): Boolean? {
+        return try {
+            val body = JSONObject(mapOf("node_id" to nodeId)).toString()
+                .toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url(Constants.LSP_CHANNEL_EXISTS_URL)
+                .post(body)
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val json = JSONObject(response.body?.string() ?: return null)
+                if (!json.has("exists")) return null
+                json.getBoolean("exists")
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 

@@ -324,6 +324,49 @@ class NodeService(private val context: Context) {
                 "ldk_node_data.sqlite-shm",
             ).forEach { File(dir, it).delete() }
         }
+
+        /**
+         * Derive the node_id a mnemonic maps to by building (never starting) a
+         * throwaway node in a temp directory. Used by the restore guard to ask
+         * the LSP whether this wallet still has an open channel BEFORE the
+         * restore wipes LDK state (which would force-close it at reestablish).
+         * Returns null on any failure so the guard fails open. Never touches
+         * the real wallet data directory.
+         */
+        fun deriveNodeId(context: Context, mnemonic: String): String? {
+            val tmp = File(context.cacheDir, "nodeid-probe-${java.util.UUID.randomUUID()}")
+            return try {
+                tmp.mkdirs()
+                val config = Config(
+                    storageDirPath = tmp.absolutePath,
+                    network = Network.BITCOIN,
+                    listeningAddresses = null,
+                    announcementAddresses = null,
+                    nodeAlias = null,
+                    trustedPeers0conf = emptyList(),
+                    probingLiquidityLimitMultiplier = 3UL,
+                    anchorChannelsConfig = null,
+                    routeParameters = null,
+                    torConfig = null,
+                    hrnConfig = HumanReadableNamesConfig(
+                        HrnResolverConfig.Dns(
+                            dnsServerAddress = "8.8.8.8:53",
+                            enableHrnResolutionService = false
+                        )
+                    )
+                )
+                val builder = Builder.fromConfig(config)
+                // A chain source is required to build; nothing syncs without start().
+                builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
+                val probe = builder.build(NodeEntropy.fromBip39Mnemonic(mnemonic.trim(), null))
+                probe.nodeId() // available without start(); node is discarded
+            } catch (e: Exception) {
+                Log.w("NodeService", "deriveNodeId failed: ${e.message}")
+                null
+            } finally {
+                tmp.deleteRecursively()
+            }
+        }
     }
 
     class NodeServiceError : Exception("Node not running")

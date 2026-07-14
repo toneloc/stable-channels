@@ -16,6 +16,7 @@ object Constants {
     const val DEFAULT_LSP_PORT = 9735
 
     const val LSP_PUSH_REGISTER_URL = "https://stablechannels.com/api/register-push"
+    const val LSP_CHANNEL_EXISTS_URL = "https://stablechannels.com/api/channel-exists"
 
     const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
     const val FALLBACK_CHAIN_URL = "https://mempool.space/api"
