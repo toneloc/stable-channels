@@ -15,7 +15,9 @@ enum StableControlParser {
         customRecords: [CustomTlvRecord]
     ) -> StableControlResult {
         for record in customRecords where record.typeNum == Constants.stableChannelTLVType {
-            if record.value == Data([1]) { continue }
+            if record.value == Data([1]) {
+                continue
+            }
             guard let envelopeStr = String(data: record.value, encoding: .utf8),
                   let envelopeData = envelopeStr.data(using: .utf8),
                   let envelope = try? JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],

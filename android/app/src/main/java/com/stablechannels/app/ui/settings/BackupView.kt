@@ -20,7 +20,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.BiometricService
+import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.Dispatchers
@@ -41,6 +43,32 @@ fun BackupView(appState: AppState) {
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
     var isRestoring by remember { mutableStateOf(false) }
+    var showRestoreForceCloseConfirm by remember { mutableStateOf(false) }
+    var restoreGuardUnavailable by remember { mutableStateOf(false) }
+
+    /** Wipe + restart the node with the entered seed (post restore-guard). */
+    fun performRestore(input: String) {
+        isRestoring = true
+        restoreError = null
+        scope.launch(Dispatchers.IO) {
+            try {
+                appState.nodeService.stop()
+                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
+                withContext(Dispatchers.Main) {
+                    isRestoring = false
+                    showRestore = false
+                    restoreMnemonic = ""
+                    restoreError = null
+                    appState.refreshBalances()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    isRestoring = false
+                    restoreError = e.message ?: "Restore failed"
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -326,23 +354,41 @@ fun BackupView(appState: AppState) {
                             restoreError = "Seed phrase must be 12 or 24 words"
                             return@TextButton
                         }
+                        // Restore guard: a seed-only restore wipes LDK state;
+                        // if this seed's node still has an LSP channel it will
+                        // be force-closed at the next reestablish. Detect that
+                        // and require explicit opt-in; fail-warn if the LSP is
+                        // unreachable or derivation fails.
                         isRestoring = true
                         restoreError = null
                         scope.launch(Dispatchers.IO) {
-                            try {
-                                appState.nodeService.stop()
-                                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
-                                withContext(Dispatchers.Main) {
-                                    isRestoring = false
-                                    showRestore = false
-                                    restoreMnemonic = ""
-                                    restoreError = null
-                                    appState.refreshBalances()
-                                }
-                            } catch (e: Exception) {
-                                withContext(Dispatchers.Main) {
-                                    isRestoring = false
-                                    restoreError = e.message ?: "Restore failed"
+                            val nodeId = NodeService.deriveNodeId(context, input)
+                            val exists = nodeId?.let { appState.lspChannelExists(it) }
+                            if (exists == null) {
+                                AuditService.log(
+                                    "RESTORE_GUARD_UNAVAILABLE",
+                                    mapOf("node_id" to (nodeId ?: "derive_failed"))
+                                )
+                            }
+                            withContext(Dispatchers.Main) {
+                                when (exists) {
+                                    true -> {
+                                        AuditService.log(
+                                            "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                                            mapOf("node_id" to nodeId)
+                                        )
+                                        isRestoring = false
+                                        restoreGuardUnavailable = false
+                                        showRestoreForceCloseConfirm = true
+                                    }
+                                    // Guard couldn't run — fail-warn: require
+                                    // explicit opt-in instead of proceeding.
+                                    null -> {
+                                        isRestoring = false
+                                        restoreGuardUnavailable = true
+                                        showRestoreForceCloseConfirm = true
+                                    }
+                                    false -> performRestore(input)
                                 }
                             }
                         }
@@ -368,6 +414,54 @@ fun BackupView(appState: AppState) {
                     },
                     enabled = !isRestoring
                 ) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Restore guard: explicit opt-in when the seed's node still has an open
+    // LSP channel that a seed-only restore would force-close (or when the
+    // check could not run).
+    if (showRestoreForceCloseConfirm) {
+        AlertDialog(
+            onDismissRequest = { showRestoreForceCloseConfirm = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            title = {
+                Text(
+                    if (restoreGuardUnavailable) "Couldn't Verify Channel Status"
+                    else "Open Channel Detected"
+                )
+            },
+            text = {
+                Text(
+                    if (restoreGuardUnavailable) {
+                        "The server couldn't be reached to check whether this wallet " +
+                            "still has an open Lightning channel. If it does, restoring " +
+                            "from seed alone will force-close it on-chain. Continue only " +
+                            "if you're sure, or try again with a network connection."
+                    } else {
+                        "This wallet still has an open Lightning channel with the LSP. " +
+                            "Restoring from seed alone cannot restore the channel and it will " +
+                            "be force-closed on-chain; funds return after a timelock. Only " +
+                            "continue if this is your only way back into the wallet."
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRestoreForceCloseConfirm = false
+                    performRestore(restoreMnemonic.trim())
+                }) {
+                    Text(
+                        if (restoreGuardUnavailable) "Continue Anyway" else "Restore Anyway",
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showRestoreForceCloseConfirm = false
+                }) { Text("Cancel") }
             }
         )
     }

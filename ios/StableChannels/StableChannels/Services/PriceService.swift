@@ -84,14 +84,22 @@ class PriceService {
             return candles.compactMap { candle -> (Int64, Double)? in
                 guard candle.count >= 5 else { return nil }
                 let ts: Int64
-                if let t = candle[0] as? Int64 { ts = t }
-                else if let t = candle[0] as? Int { ts = Int64(t) }
-                else if let t = candle[0] as? Double { ts = Int64(t) }
-                else { return nil }
+                if let t = candle[0] as? Int64 {
+                    ts = t
+                } else if let t = candle[0] as? Int {
+                    ts = Int64(t)
+                } else if let t = candle[0] as? Double {
+                    ts = Int64(t)
+                } else {
+                    return nil
+                }
 
                 let closeStr: String
-                if let s = candle[4] as? String { closeStr = s }
-                else { return nil }
+                if let s = candle[4] as? String {
+                    closeStr = s
+                } else {
+                    return nil
+                }
                 guard let close = Double(closeStr) else { return nil }
 
                 return (ts, close)

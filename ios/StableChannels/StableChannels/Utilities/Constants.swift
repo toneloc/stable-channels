@@ -27,6 +27,7 @@ enum Constants {
     // MARK: - Service Endpoints
 
     static let lspPushRegisterURL = "https://stablechannels.com/api/register-push"
+    static let lspChannelExistsURL = "https://stablechannels.com/api/channel-exists"
     static let privacyPolicyURL = "https://stablechannels.com/privacy.html"
 
     static func txExplorerLink(for txid: String) -> URL? {

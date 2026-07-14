@@ -13,6 +13,9 @@ struct RestoreSeedSheet: View {
     let onCancel: () -> Void
     let onSuccess: () -> Void
 
+    @State private var showForceCloseConfirm = false
+    @State private var showGuardUnavailableConfirm = false
+
     private var wordCount: Int {
         MnemonicUtils.detectWordCount(restoreMnemonic)
     }
@@ -89,6 +92,40 @@ struct RestoreSeedSheet: View {
                         dismiss()
                     }
                 }
+            }
+            .alert(
+                String(localized: "title_open_channel_detected", defaultValue: "Open Channel Detected"),
+                isPresented: $showForceCloseConfirm
+            ) {
+                Button(String(localized: "button_cancel", defaultValue: "Cancel"), role: .cancel) {}
+                Button(
+                    String(localized: "button_restore_anyway", defaultValue: "Restore Anyway"),
+                    role: .destructive
+                ) {
+                    Task { await restoreWallet(acknowledgeForceClose: true) }
+                }
+            } message: {
+                Text(String(
+                    localized: "message_restore_force_close",
+                    defaultValue: "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain; funds return after a timelock. Only continue if this is your only way back into the wallet."
+                ))
+            }
+            .alert(
+                String(localized: "title_channel_check_unavailable", defaultValue: "Couldn't Verify Channel Status"),
+                isPresented: $showGuardUnavailableConfirm
+            ) {
+                Button(String(localized: "button_cancel", defaultValue: "Cancel"), role: .cancel) {}
+                Button(
+                    String(localized: "button_continue_anyway", defaultValue: "Continue Anyway"),
+                    role: .destructive
+                ) {
+                    Task { await restoreWallet(acknowledgeForceClose: true) }
+                }
+            } message: {
+                Text(String(
+                    localized: "message_channel_check_unavailable",
+                    defaultValue: "The server couldn't be reached to check whether this wallet still has an open Lightning channel. If it does, restoring from seed alone will force-close it on-chain. Continue only if you're sure, or try again with a network connection."
+                ))
             }
         }
     }
@@ -177,7 +214,7 @@ struct RestoreSeedSheet: View {
         restoreMnemonic = wordFields.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
-    private func restoreWallet() async {
+    private func restoreWallet(acknowledgeForceClose: Bool = false) async {
         isRestoring = true
         restoreError = nil
 
@@ -190,13 +227,25 @@ struct RestoreSeedSheet: View {
         }
 
         do {
-            try await appState.restoreWalletFromMnemonic(input)
+            try await appState.restoreWalletFromMnemonic(
+                input,
+                acknowledgeForceClose: acknowledgeForceClose
+            )
             restoreMnemonic = ""
             wordFields = Array(repeating: "", count: SeedConstants.maxWordCount)
             isWordFieldsReadOnly = false
             isRestoring = false
             onSuccess()
             dismiss()
+        } catch AppState.WalletRestoreError.activeChannelDetected {
+            // Divergence guard tripped: restoring would force-close a live
+            // channel. Ask the user to opt in explicitly.
+            isRestoring = false
+            showForceCloseConfirm = true
+        } catch AppState.WalletRestoreError.channelCheckUnavailable {
+            // Guard couldn't run — fail-warn instead of silently proceeding.
+            isRestoring = false
+            showGuardUnavailableConfirm = true
         } catch {
             restoreError = String(localized: "error_restore_failed") + error.localizedDescription
             isRestoring = false

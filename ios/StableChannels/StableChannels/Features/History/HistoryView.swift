@@ -220,7 +220,9 @@ private extension PaymentRecord {
     }
 
     func displayUSD(fallbackPrice: Double) -> Double? {
-        if let amountUSD { return amountUSD }
+        if let amountUSD {
+            return amountUSD
+        }
         guard shouldPreferUSDDisplay else { return nil }
         let price = (btcPrice ?? 0) > 0 ? (btcPrice ?? 0) : fallbackPrice
         guard price > 0 else { return nil }

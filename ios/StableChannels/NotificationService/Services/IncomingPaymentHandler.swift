@@ -30,7 +30,9 @@ final class IncomingPaymentHandler: PaymentHandler {
             }
             switch event {
             case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
-                if price <= 0 { price = priceFetcher.fetchPrice() }
+                if price <= 0 {
+                    price = priceFetcher.fetchPrice()
+                }
                 let payId = paymentId.map { "\($0)" } ?? "\(paymentHash)"
 
                 let stableControl = StableControlParser.handleStableControl(
@@ -99,7 +101,9 @@ final class IncomingPaymentHandler: PaymentHandler {
             default:
                 try? node.eventHandled()
             }
-            if persistenceFailed { break eventLoop }
+            if persistenceFailed {
+                break eventLoop
+            }
         }
 
         self.finishHandling(

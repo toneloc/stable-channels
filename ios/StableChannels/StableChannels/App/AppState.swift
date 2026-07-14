@@ -91,9 +91,15 @@ class AppState {
     var hasReadyChannel: Bool = false
 
     var totalBalanceSats: UInt64 {
-        if isChannelClosing { return onchainBalanceSats }
-        if isOpeningChannel { return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats }
-        if isSweeping { return lightningBalanceSats }
+        if isChannelClosing {
+            return onchainBalanceSats
+        }
+        if isOpeningChannel {
+            return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats
+        }
+        if isSweeping {
+            return lightningBalanceSats
+        }
         // If no open channels but both balances exist, lightning balance is
         // pending-close claimable that overlaps with on-chain — avoid double-count.
         if !hasReadyChannel && lightningBalanceSats > 0 && onchainBalanceSats > 0 {
@@ -122,6 +128,8 @@ class AppState {
     // Auto-sweep state
     private(set) var isSweeping = false
     var spliceTxid: String?
+    private var spliceConfirmationTask: Task<Void, Never>?
+    private var monitoredSpliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
     private var prevOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -155,11 +163,21 @@ class AppState {
 
     enum WalletRestoreError: LocalizedError {
         case invalidMnemonic
+        case activeChannelDetected
+        case channelCheckUnavailable
+        case walletBusy
 
         var errorDescription: String? {
             switch self {
             case .invalidMnemonic:
                 return "Enter a valid 12 or 24-word seed phrase."
+            case .activeChannelDetected:
+                return "This wallet still has an open Lightning channel with the LSP. "
+                    + "Restoring from seed alone will force-close it on-chain."
+            case .channelCheckUnavailable:
+                return "Could not verify whether this wallet has an open Lightning channel."
+            case .walletBusy:
+                return "Wallet is busy in another process. Please try again."
             }
         }
     }
@@ -204,22 +222,76 @@ class AppState {
     /// Restore is destructive for the current local wallet state, so AppState
     /// owns the full sequence: stop LDK, drop DB handles, wipe LDK + app DB
     /// files, clear in-memory/app-group cache, then start the node fresh.
-    func restoreWalletFromMnemonic(_ mnemonic: String) async throws {
+    func restoreWalletFromMnemonic(_ mnemonic: String, acknowledgeForceClose: Bool = false) async throws {
         let words = MnemonicUtils.formatForDisplay(mnemonic)
         guard MnemonicUtils.isValidWordCount(words),
               MnemonicUtils.hasValidCharacterFormat(words) else {
             throw WalletRestoreError.invalidMnemonic
         }
 
+        let priorPhase = phase
         phase = .syncing
         isSyncing = true
         statusMessage = "Restoring wallet..."
+        nodeFlowInProgress = true
         defer {
             isSyncing = false
+            nodeFlowInProgress = false
+        }
+
+        // Restore-divergence guard: a seed-only restore wipes LDK channel
+        // state; if this node_id still has a channel with the LSP, the next
+        // reestablish presents empty state and force-closes it. Detect that
+        // and require explicit acknowledgement. Fails open if the LSP is
+        // unreachable or derivation fails.
+        if !acknowledgeForceClose {
+            statusMessage = "Checking for an existing channel..."
+            let derivedNodeId = await Task.detached(priority: .utility) {
+                AppState.deriveNodeId(mnemonic: words)
+            }.value
+            var channelExists: Bool?
+            if let nodeId = derivedNodeId {
+                channelExists = await lspChannelExists(nodeId: nodeId)
+            }
+            switch channelExists {
+            case .some(true):
+                AuditService.log(
+                    "RESTORE_ACTIVE_CHANNEL_DETECTED",
+                    data: ["node_id": derivedNodeId ?? ""]
+                )
+                phase = priorPhase
+                statusMessage = ""
+                throw WalletRestoreError.activeChannelDetected
+            case .none:
+                // Guard couldn't run (LSP unreachable, proxy misroute, derive
+                // failed). Fail-warn: surface it and require the user to opt
+                // in, since a hidden open channel would be force-closed.
+                AuditService.log(
+                    "RESTORE_GUARD_UNAVAILABLE",
+                    data: ["node_id": derivedNodeId ?? "derive_failed"]
+                )
+                phase = priorPhase
+                statusMessage = ""
+                throw WalletRestoreError.channelCheckUnavailable
+            case .some(false):
+                break // verified: no open channel — safe to proceed
+            }
+            statusMessage = "Restoring wallet..."
         }
 
         cancelBackgroundStop()
         await waitForNSE()
+
+        // Own the wallet dir before stopping/wiping: restore can be reached
+        // while the lock is not held (e.g. after a startup failure released
+        // it), and wiping under a live NSE node would corrupt its state.
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restoreWalletFromMnemonic"])
+            phase = priorPhase
+            statusMessage = ""
+            throw WalletRestoreError.walletBusy
+        }
+
         stabilityTimer?.cancel()
         stabilityTimer = nil
         closeLauncher.cancelAll()
@@ -251,6 +323,13 @@ class AppState {
             reregisterPushTokenIfNeeded()
             statusMessage = ""
         } catch {
+            // If we failed before the node came up (e.g. DB init threw), no
+            // node owns the wallet dir — release so the NSE isn't blocked.
+            // On node-start failure NodeService already released; if the node
+            // somehow IS running, the lock must stay held.
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
             phase = .error("Wallet restore failed: \(error.localizedDescription)")
             statusMessage = ""
             throw error
@@ -265,6 +344,9 @@ class AppState {
         isOpeningChannel = false
         isSweeping = false
         spliceTxid = nil
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
         sweepOnchainStart = 0
         prevOnchainSats = 0
         fundingTxid = nil
@@ -310,22 +392,91 @@ class AppState {
         }
     }
 
+    /// Derive the node_id a mnemonic maps to by building (never starting) a
+    /// throwaway node in a temp directory. Returns nil on any failure so the
+    /// restore guard fails open.
+    private nonisolated static func deriveNodeId(mnemonic: String) -> String? {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var config = defaultConfig()
+        config.storageDirPath = tmp.path
+        config.network = .bitcoin
+        let builder = Builder.fromConfig(config: config)
+        // A chain source is required to build; nothing syncs without start().
+        let syncConfig = EsploraSyncConfig(
+            backgroundSyncConfig: BackgroundSyncConfig(
+                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
+                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
+                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
+            ),
+            timeoutsConfig: SyncTimeoutsConfig(
+                onchainWalletSyncTimeoutSecs: 60,
+                lightningWalletSyncTimeoutSecs: 60,
+                feeRateCacheUpdateTimeoutSecs: 60,
+                txBroadcastTimeoutSecs: 30,
+                perRequestTimeoutSecs: 15
+            )
+        )
+        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: syncConfig)
+        let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
+        guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
+        return node.nodeId()
+    }
+
+    /// Ask the LSP whether this node_id still has channels open with it.
+    /// Returns nil (unknown) on any network/parse failure — callers fail open.
+    private func lspChannelExists(nodeId: String) async -> Bool? {
+        guard let url = URL(string: Constants.lspChannelExistsURL) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["node_id": nodeId])
+        request.timeoutInterval = 8
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exists = json["exists"] as? Bool else {
+            return nil
+        }
+        return exists
+    }
+
     // MARK: - Startup
 
     func start() async {
+        // Guard the whole flow: performBackgroundStop must not release the
+        // wallet-dir lock while this startup is still live (there is a window
+        // between our acquire and NodeService.start setting isStarting).
+        nodeFlowInProgress = true
+        defer { nodeFlowInProgress = false }
+
         // Migrate data from old Application Support dir to shared App Group container
         migrateDataDirIfNeeded()
 
         // Wait for NSE to finish if it was recently active
         await waitForNSE()
 
-        // Pick best esplora endpoint
+        // Pick best esplora endpoint BEFORE taking the lock — pure network,
+        // no DB access, and it can stall; no reason to hold the dir for it.
         chainURL = await resolveChainURL()
+
+        // Take the wallet-dir lock before any DB access (network-graph purge,
+        // database init, node start). Kernel-enforced; outlasts a live NSE.
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
+            await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
+            return
+        }
 
         // Initialize database
         do {
             try initializeDatabaseServices()
         } catch {
+            // No node will run — free the wallet dir so the NSE isn't blocked
+            // for the lifetime of a broken app process.
+            NodeDirLock.shared.release()
             await MainActor.run { phase = .error("Database init failed: \(error.localizedDescription)") }
             return
         }
@@ -365,7 +516,9 @@ class AppState {
             let hasCachedData = !stableChannel.userChannelId.isEmpty
             await MainActor.run {
                 phase = hasCachedData ? .wallet : .syncing
-                if hasCachedData { isSyncing = true }
+                if hasCachedData {
+                    isSyncing = true
+                }
             }
 
             // Purge empty network graph from DB to force fresh RGS sync
@@ -392,21 +545,7 @@ class AppState {
                     // Restore fundingTxid from UserDefaults
                     fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .string(forKey: "funding_txid")
-                    let pendingSpliceTxid: String? = {
-                        guard let databaseService else { return nil }
-                        return try? databaseService.getPendingSpliceTxid()
-                    }()
-                    let spliceCompletionCandidate = pendingSpliceTxid ?? fundingTxid
-                    if let txid = spliceCompletionCandidate,
-                       !txid.isEmpty,
-                       currentChannelFundingTxidMatches(txid) {
-                        databaseService?.completeSplice(txid: txid)
-                    }
-                    // Restore pending splice state from DB
-                    if let hasSplice = try? databaseService?.hasPendingSplice(), hasSplice {
-                        isSweeping = true
-                        spliceTxid = (try? databaseService?.getPendingSpliceTxid()) ?? fundingTxid
-                    }
+                    resumePendingSpliceConfirmation()
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -524,7 +663,9 @@ class AppState {
         while shared?.bool(forKey: "nse_processing") == true {
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             waited += 1
-            if waited >= 30 { break } // NSE has an approximately 30-second execution window
+            if waited >= 30 {
+                break
+            } // NSE has an approximately 30-second execution window
         }
         if waited > 0 {
             AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
@@ -536,6 +677,9 @@ class AppState {
         stabilityTimer = nil
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
         if let observer = eventObserver {
             NotificationCenter.default.removeObserver(observer)
             eventObserver = nil
@@ -546,9 +690,15 @@ class AppState {
         }
         priceService.stopAutoRefresh()
         nodeService.stop()
+        NodeDirLock.shared.release()
     }
 
     private var backgroundStopWorkItem: DispatchWorkItem?
+    /// True while a whole node-owning flow (start / foreground restart /
+    /// restore) is live — including the stretch before NodeService.start sets
+    /// isStarting. performBackgroundStop must not release the wallet-dir lock
+    /// out from under such a flow.
+    private var nodeFlowInProgress = false
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     /// Stop the node and extract gossip data so the NSE can open the lightweight DB.
@@ -582,6 +732,14 @@ class AppState {
     private func performBackgroundStop() {
         backgroundStopWorkItem = nil
         guard nodeService.isRunning else {
+            // Backgrounded before the node came up. If no start/restore flow
+            // is live, a held lock serves no one — release it so the NSE isn't
+            // starved of stability pushes for the suspended app's lifetime.
+            // While a flow IS live (even pre-isStarting, e.g. stalled in DB
+            // init), the lock stays: that flow owns it and may still resume.
+            if !nodeService.isStarting && !nodeFlowInProgress {
+                NodeDirLock.shared.release()
+            }
             if backgroundTaskID != .invalid {
                 UIApplication.shared.endBackgroundTask(backgroundTaskID)
                 backgroundTaskID = .invalid
@@ -593,10 +751,15 @@ class AppState {
         stabilityTimer = nil
         heartbeatTimer?.cancel()
         heartbeatTimer = nil
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        // Last DB write is done — hand the wallet dir to the NSE.
+        NodeDirLock.shared.release()
         if backgroundTaskID != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTaskID)
             backgroundTaskID = .invalid
@@ -606,6 +769,8 @@ class AppState {
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
+        nodeFlowInProgress = true
+        defer { nodeFlowInProgress = false }
         cancelBackgroundStop()
         await waitForNSE()
         loadChannelFromDB()
@@ -613,14 +778,22 @@ class AppState {
         // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
         refreshLatestPaymentStatus()
         if nodeService.isRunning {
-            print("[App] Node still running (grace period), restoring gossip + reconnecting")
-            restoreGossipToDB()
+            // Node never stopped, so gossip was never extracted — do NOT touch
+            // ldk_node_data.sqlite while LDK has it open (a stale
+            // network_graph.bin would otherwise be written into the live DB).
+            print("[App] Node still running (grace period), reconnecting")
             ensureLSPConnected()
             refreshBalances()
             updateStableBalances()
+            resumePendingSpliceConfirmation()
             return
         }
         print("[App] Restarting node from foreground")
+        // Reclaim the wallet dir before writing gossip back into the LDK DB.
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restartNodeFromForeground"])
+            return
+        }
         restoreGossipToDB()
         do {
             try await nodeService.start(
@@ -632,6 +805,7 @@ class AppState {
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
+            resumePendingSpliceConfirmation()
             reregisterPushTokenIfNeeded()
             startStabilityTimer()
             await processPendingPushPayment()
@@ -962,48 +1136,39 @@ class AppState {
             ])
 
         case .channelReady(let channelId, let userChannelId, _, _):
-            // Splices keep the channel_id stable in current LDK, so a changed
-            // channel_id can't be the splice signal. Instead, match the channel's
-            // actual funding txid against a recorded splice row; completeSplice is
-            // exact-match and idempotent, so replayed events are no-ops.
+            // In 0-conf channels, ChannelReady can fire before the splice tx confirms.
+            // Treat it as metadata only; the splice stays pending until the tx has 1 conf.
             let channelIdChanged = stableChannel.userChannelId == userChannelId
+                && !stableChannel.channelId.isEmpty
                 && stableChannel.channelId != channelId
 
             stableChannel.channelId = channelId
             refreshBalances()
             updateStableBalances()
 
-            var completedSplice = false
+            var pendingSpliceCandidate: String?
             if stableChannel.userChannelId == userChannelId {
                 nodeService.refreshChannels()
                 let fundingTxid: String? = nodeService.channels
                     .first(where: { "\($0.userChannelId)" == "\(userChannelId)" })
                     .flatMap { $0.fundingTxo.map { "\($0.txid)" } }
-                for candidate in [fundingTxid, spliceTxid].compactMap({ $0 }) where !candidate.isEmpty {
-                    if databaseService?.completeSplice(txid: candidate) == true {
-                        completedSplice = true
-                        break
+                let pendingDbTxid = (try? databaseService?.getPendingSpliceTxid()) ?? nil
+                pendingSpliceCandidate = [pendingDbTxid, spliceTxid]
+                    .compactMap { $0 }
+                    .first { candidate in
+                        !candidate.isEmpty && candidate == fundingTxid
                     }
-                }
             }
-            let isSplice = completedSplice || channelIdChanged
+            let isSplice = pendingSpliceCandidate != nil || channelIdChanged
 
-            // After splice confirms, reconcile outgoing and clear sweep state
             if isSplice {
-                isSweeping = false
-                if !completedSplice {
-                    databaseService?.completeLatestSplice(txid: spliceTxid)
+                isSweeping = true
+                let txid = pendingSpliceCandidate ?? spliceTxid ?? fundingTxid
+                spliceTxid = txid
+                if let txid, !txid.isEmpty {
+                    startSpliceConfirmationMonitor(txid: txid)
                 }
-                spliceTxid = nil
-                sweepOnchainStart = 0
-                let price = stableChannel.latestPrice
-                if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
-                    AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
-                        "usd_deducted": "\(usdDeducted)",
-                        "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
-                        "btc_price": "\(price)"
-                    ])
-                }
+                statusMessage = "Swap pending confirmation"
             }
 
             saveChannelToDB()
@@ -1012,7 +1177,9 @@ class AppState {
                 "channel_id": channelId,
                 "user_channel_id": userChannelId
             ])
-            statusMessage = "Channel is ready"
+            if !isSplice {
+                statusMessage = "Channel is ready"
+            }
 
         case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
             handlePaymentReceived(
@@ -1080,6 +1247,9 @@ class AppState {
         case .spliceNegotiationFailed(let channelId, let userChannelId, _):
             isSweeping = false
             spliceTxid = nil
+            spliceConfirmationTask?.cancel()
+            spliceConfirmationTask = nil
+            monitoredSpliceTxid = nil
             sweepOnchainStart = 0
             pendingSplice = nil
             databaseService?.failLatestPendingSplice()
@@ -1595,6 +1765,7 @@ class AppState {
         newFundingTxo: OutPoint
     ) {
         fundingTxid = "\(newFundingTxo.txid)"
+        isSweeping = true
 
         AuditService.log("SPLICE_PENDING", data: [
             "channel_id": "\(channelId)",
@@ -1639,6 +1810,121 @@ class AppState {
         refreshBalances()
         updateStableBalances()
         statusMessage = "Splice pending"
+        startSpliceConfirmationMonitor(txid: txidStr)
+    }
+
+    func beginSpliceOut(amountSats: UInt64, address: String) throws {
+        guard !isSweeping else {
+            throw NSError(
+                domain: "",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
+            )
+        }
+        isSweeping = true
+        pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address)
+        statusMessage = "Swap pending..."
+    }
+
+    func cancelPendingSpliceStart() {
+        guard spliceTxid == nil else { return }
+        isSweeping = false
+        pendingSplice = nil
+        statusMessage = ""
+    }
+
+    private func startSpliceConfirmationMonitor(txid: String) {
+        let normalizedTxid = txid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTxid.isEmpty else { return }
+        if monitoredSpliceTxid == normalizedTxid, spliceConfirmationTask != nil {
+            return
+        }
+
+        spliceConfirmationTask?.cancel()
+        monitoredSpliceTxid = normalizedTxid
+        spliceConfirmationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await self.isTxConfirmed(normalizedTxid) {
+                    self.completeConfirmedSplice(txid: normalizedTxid)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+    }
+
+    private func resumePendingSpliceConfirmation() {
+        guard let hasSplice = try? databaseService?.hasPendingSplice(), hasSplice else { return }
+        isSweeping = true
+        spliceTxid = (try? databaseService?.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
+        if let txid = spliceTxid, !txid.isEmpty {
+            startSpliceConfirmationMonitor(txid: txid)
+        }
+    }
+
+    private func isTxConfirmed(_ txid: String) async -> Bool {
+        var urls: [String] = []
+        for url in [chainURL, Constants.primaryChainURL, Constants.fallbackChainURL] where !urls.contains(url) {
+            urls.append(url)
+        }
+        for baseURL in urls {
+            guard let url =
+                URL(string: "\(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/tx/\(txid)/status")
+            else {
+                continue
+            }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                    continue
+                }
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                if json?["confirmed"] as? Bool == true {
+                    return true
+                }
+            } catch {
+                AuditService.log("SPLICE_CONFIRMATION_CHECK_FAILED", data: [
+                    "txid": txid,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+        return false
+    }
+
+    private func completeConfirmedSplice(txid: String) {
+        let completed = databaseService?.completeSplice(txid: txid) == true
+        if completed {
+            refreshBalances()
+            updateStableBalances()
+
+            let price = stableChannel.latestPrice
+            if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
+                stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
+                AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
+                    "usd_deducted": "\(usdDeducted)",
+                    "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
+                    "btc_price": "\(price)"
+                ])
+            }
+            saveChannelToDB()
+        }
+
+        isSweeping = false
+        pendingSplice = nil
+        sweepOnchainStart = 0
+        if spliceTxid == txid {
+            spliceTxid = nil
+        }
+        monitoredSpliceTxid = nil
+        spliceConfirmationTask = nil
+        statusMessage = "Swap confirmed"
+
+        AuditService.log("SPLICE_CONFIRMED", data: [
+            "txid": txid,
+            "completed_row": "\(completed)"
+        ])
     }
 
     // MARK: - Stability Timer

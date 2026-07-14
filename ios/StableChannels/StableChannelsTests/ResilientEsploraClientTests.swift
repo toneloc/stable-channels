@@ -294,7 +294,9 @@ final class ResilientEsploraClientTests: XCTestCase {
         }
         // Skip primary, build for fallback.
         let builder: ResilientEsploraClient.EndpointBuilder = { base in
-            if base.contains("primary") { return [] }
+            if base.contains("primary") {
+                return []
+            }
             return ["\(ResilientEsploraClient.trimSlash(base))/tx/abc"]
         }
 

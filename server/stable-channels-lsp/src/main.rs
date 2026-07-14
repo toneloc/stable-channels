@@ -245,6 +245,12 @@ async fn main() -> Result<()> {
             "/api/register-push",
             post(handlers::register_push::register_push_legacy),
         )
+        // Restore guard for wallets: "does my node_id still have a channel?"
+        // asked before a seed-only restore wipes LDK state and force-closes it.
+        .route(
+            "/api/channel-exists",
+            post(handlers::channel_exists::channel_exists),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

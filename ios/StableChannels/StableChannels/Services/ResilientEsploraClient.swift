@@ -79,8 +79,12 @@ struct ResilientEsploraClient {
     ) async {
         let start = Date()
         for attempt in 0..<config.maxAttempts {
-            if Task.isCancelled { return }
-            if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds { break }
+            if Task.isCancelled {
+                return
+            }
+            if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds {
+                break
+            }
             if attempt > 0 {
                 let base = config.backoffSeconds[
                     min(attempt - 1, config.backoffSeconds.count - 1)
@@ -88,20 +92,30 @@ struct ResilientEsploraClient {
                 let sleepNs = Self.jitteredBackoff(base: base) * 1_000_000_000
                 // Skip the sleep if it would blow the wall-clock budget.
                 if Date().timeIntervalSince(start) + (Double(sleepNs) / 1_000_000_000)
-                    >= config.wallClockBudgetSeconds { break }
+                    >= config.wallClockBudgetSeconds {
+                    break
+                }
                 do {
                     try await Task.sleep(nanoseconds: sleepNs)
                 } catch {
                     return
                 }
-                if Task.isCancelled { return }
-                if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds { break }
+                if Task.isCancelled {
+                    return
+                }
+                if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds {
+                    break
+                }
             }
             for base in config.chainURLs {
-                if Task.isCancelled { return }
+                if Task.isCancelled {
+                    return
+                }
                 let paths = endpointBuilder(base)
                 for path in paths {
-                    if Task.isCancelled { return }
+                    if Task.isCancelled {
+                        return
+                    }
                     guard let data = await fetchJSON(path: path) else { continue }
                     do {
                         if let hit = try resultParser(data) {

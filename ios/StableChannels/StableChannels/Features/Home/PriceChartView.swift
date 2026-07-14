@@ -235,8 +235,12 @@ struct PriceChartView: View {
         var lo = Double.infinity
         var hi = -Double.infinity
         for r in priceHistory {
-            if r.price < lo { lo = r.price }
-            if r.price > hi { hi = r.price }
+            if r.price < lo {
+                lo = r.price
+            }
+            if r.price > hi {
+                hi = r.price
+            }
         }
         return (lo * 0.98, hi * 1.02)
     }

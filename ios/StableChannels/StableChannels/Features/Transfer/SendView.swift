@@ -431,13 +431,18 @@ struct SendView: View {
                             userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
                         )
                     }
-                    try appState.nodeService.spliceOut(
-                        userChannelId: channel.userChannelId,
-                        counterpartyNodeId: channel.counterpartyNodeId,
-                        address: trimmed,
-                        amountSats: sats
-                    )
-                    appState.pendingSplice = PendingSplice(direction: "out", amountSats: sats, address: trimmed)
+                    try appState.beginSpliceOut(amountSats: sats, address: trimmed)
+                    do {
+                        try appState.nodeService.spliceOut(
+                            userChannelId: channel.userChannelId,
+                            counterpartyNodeId: channel.counterpartyNodeId,
+                            address: trimmed,
+                            amountSats: sats
+                        )
+                    } catch {
+                        appState.cancelPendingSpliceStart()
+                        throw error
+                    }
                 } else {
                     let txid = try appState.nodeService.sendOnchain(address: trimmed, amountSats: sats)
                     _ = try? appState.databaseService?.recordPayment(
