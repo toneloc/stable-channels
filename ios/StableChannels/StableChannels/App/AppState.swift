@@ -2016,9 +2016,13 @@ class AppState {
         // Send stability payment
         let paymentId: PaymentId
         do {
-            paymentId = try nodeService.sendKeysend(
+            // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
+            // this as a settlement (operator GUI) and runs reconcile_incoming_stability
+            // immediately, matching every other sender. See issue #161.
+            paymentId = try nodeService.sendKeysendWithTLV(
                 amountMsat: amountMsat,
-                to: stableChannel.counterparty
+                to: stableChannel.counterparty,
+                tlvs: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))]
             )
         } catch {
             databaseService.clearPendingSend()
