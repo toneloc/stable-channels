@@ -264,7 +264,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
 
             // Balance bar
             if (lightningSats > 0) {
@@ -273,14 +273,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     nativeSats = nativeSatsCached,
                     totalSats = lightningSats,
                     btcPrice = btcPrice,
-                    modifier = Modifier.padding(horizontal = 24.dp),
+                    modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
                     onTradeRequest = if (hasReadyChannel) { direction, amountUSD ->
                         prefillTradeAmount = amountUSD
                         if (direction == TradeDirection.BUY) showBuy = true else showSell = true
                     } else null
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(4.dp))
             }
 
             // Syncing indicator
@@ -315,7 +315,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -409,7 +409,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     databaseService = appState.databaseService,
                     currentPrice = btcPrice
                 )
-                Spacer(Modifier.height(8.dp))
             }
 
             // Hint text when no channel
@@ -425,8 +424,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("Send", Icons.Default.ArrowCircleUp, Color(0xFF3B82F6), Modifier.weight(1f)) { showSend = true }
-                ActionButton("Receive", Icons.Default.ArrowCircleDown, Color(0xFF10B981), Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
+                val sendColor = if (isSystemInDarkTheme()) Color(0xFF0A84FF) else Color(0xFF007AFF)
+                val receiveColor = if (isSystemInDarkTheme()) Color(0xFF30D158) else Color(0xFF34C759)
+                ActionButton("Send", Icons.Default.ArrowCircleUp, sendColor, Modifier.weight(1f)) { showSend = true }
+                ActionButton("Receive", Icons.Default.ArrowCircleDown, receiveColor, Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -434,8 +435,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, Color(0xFFF59E0B), Modifier.weight(1f), rotation = 45f, enabled = hasReadyChannel) { showBuy = true }
-                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, Color(0xFF8B5CF6), Modifier.weight(1f), rotation = -45f, enabled = hasReadyChannel) { showSell = true }
+                val buyColor = if (isSystemInDarkTheme()) Color(0xFFFF9F0A) else Color(0xFFFF9500)
+                val sellColor = if (isSystemInDarkTheme()) Color(0xFFBF5AF2) else Color(0xFFAF52DE)
+                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, buyColor, Modifier.weight(1f), rotation = 45f, enabled = hasReadyChannel) { showBuy = true }
+                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, sellColor, Modifier.weight(1f), rotation = -45f, enabled = hasReadyChannel) { showSell = true }
             }
 
             // Status capsule

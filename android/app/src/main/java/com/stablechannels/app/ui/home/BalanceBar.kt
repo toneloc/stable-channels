@@ -59,8 +59,8 @@ fun BalanceBar(
 
     val stableFraction = (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat()
     val interactive = onTradeRequest != null
-    val barHeight = if (interactive) 20.dp else 12.dp
-    val thumbDiameter = 28.dp
+    val barHeight = if (interactive) 12.dp else 8.dp
+    val thumbDiameter = 22.dp
     val minTradeUSD = 1.0
 
     var barWidthPx by remember { mutableFloatStateOf(0f) }
