@@ -59,13 +59,39 @@ class FCMService : FirebaseMessagingService() {
             getPrefs(context).edit().putLong(KEY_MAIN_APP_LAST_ACTIVE, now).apply()
         }
 
-        fun registerTokenWithLSP(token: String, nodeId: String) {
+        /**
+         * Canonical REGISTER_PUSH_V1 bytes — MUST byte-match the server's
+         * register_push_signed_bytes: serde_json field order type,node_id,token,ts
+         * with no whitespace and ts as a bare number. See issue #162.
+         */
+        fun pushSignedBytes(nodeId: String, token: String, ts: Long): ByteArray {
+            fun esc(s: String) = s.replace("\\", "\\\\").replace("\"", "\\\"")
+            val json =
+                "{\"type\":\"REGISTER_PUSH_V1\",\"node_id\":\"${esc(nodeId)}\"," +
+                    "\"token\":\"${esc(token)}\",\"ts\":$ts}"
+            return json.toByteArray(Charsets.UTF_8)
+        }
+
+        fun registerTokenWithLSP(
+            token: String,
+            nodeId: String,
+            signature: String? = null,
+            timestamp: Long? = null
+        ) {
             try {
                 val json = JSONObject().apply {
                     put("device_token", token)
                     put("platform", "android")
                     put("node_id", nodeId)
                     put("environment", "production")
+                    // Node-ownership proof (issue #162): a valid signature makes the
+                    // LSP store this token as verified so it can't be hijacked by an
+                    // unsigned registration. Optional — the background onNewToken path
+                    // has no running node and registers unsigned.
+                    if (signature != null && timestamp != null) {
+                        put("signature", signature)
+                        put("timestamp", timestamp)
+                    }
                 }
                 val body = json.toString()
                     .toRequestBody("application/json".toMediaType())

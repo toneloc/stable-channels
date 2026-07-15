@@ -1546,7 +1546,15 @@ class AppState(private val context: Context) : ViewModel() {
             FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
                 FCMService.saveToken(context, token)
                 viewModelScope.launch(Dispatchers.IO) {
-                    FCMService.registerTokenWithLSP(token, nodeId)
+                    // Node-ownership proof (issue #162). Best-effort: the node is
+                    // running here, so sign; fall back to unsigned if signing fails.
+                    val ts = System.currentTimeMillis() / 1000
+                    val sig = try {
+                        nodeService.signMessage(FCMService.pushSignedBytes(nodeId, token, ts))
+                    } catch (_: Exception) {
+                        null
+                    }
+                    FCMService.registerTokenWithLSP(token, nodeId, sig, if (sig != null) ts else null)
                 }
             }
         } catch (_: Exception) {
