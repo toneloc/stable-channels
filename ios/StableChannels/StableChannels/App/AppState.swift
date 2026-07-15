@@ -2121,6 +2121,9 @@ class AppState {
         }
 
         if currentOnchain > prevOnchainSats && !isSweeping && pendingSplice == nil {
+            // We detected a balance increase, clear the old txid link so we don't show a stale one
+            transactionLinkService.clearReceiveTxid()
+
             let depositSats = currentOnchain - prevOnchainSats
             // Ignore tiny fluctuations from fee estimation changes
             guard depositSats >= 1000 else {

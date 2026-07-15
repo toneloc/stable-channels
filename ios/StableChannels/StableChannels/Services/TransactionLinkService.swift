@@ -7,13 +7,7 @@ import Observation
 final class TransactionLinkService {
     private let txidLinks = TxidLinkStore()
 
-    var onchainReceiveAddress: String? {
-        didSet {
-            if onchainReceiveAddress != nil {
-                setReceiveTxid(nil)
-            }
-        }
-    }
+    var onchainReceiveAddress: String?
 
     var lastCloseTxid: String? { txidLinks.lastCloseTxid }
     var lastReceiveTxid: String? { txidLinks.lastReceiveTxid }
