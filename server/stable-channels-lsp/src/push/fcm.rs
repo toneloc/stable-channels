@@ -71,7 +71,11 @@ impl FcmService {
             }
         });
 
-        match reqwest::Client::new()
+        let client = match http_client() {
+            Ok(c) => c,
+            Err(e) => { error!("[fcm] Failed to build HTTP client: {}", e); return; }
+        };
+        match client
             .post(&url)
             .bearer_auth(&access_token)
             .json(&body)
@@ -90,6 +94,14 @@ impl FcmService {
             Err(e) => error!("[fcm] Request failed: {}", e),
         }
     }
+}
+
+/// reqwest client with bounded connect + overall timeouts so a stalled FCM/OAuth endpoint can't hang the push task.
+fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
 }
 
 async fn generate_access_token(creds: &FcmCredentials) -> Option<String> {
@@ -111,7 +123,7 @@ async fn generate_access_token(creds: &FcmCredentials) -> Option<String> {
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(creds.private_key.as_bytes()).ok()?;
     let jwt = jsonwebtoken::encode(&header, &claims, &key).ok()?;
 
-    let client = reqwest::Client::new();
+    let client = http_client().ok()?;
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[

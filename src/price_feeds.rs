@@ -82,6 +82,14 @@ pub fn set_price_feeds() -> Vec<PriceFeed> {
     get_default_price_feeds()
 }
 
+/// ureq agent with bounded connect + overall timeouts so a hung/geo-blocked endpoint can't stall the caller.
+pub fn bounded_agent() -> Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .build()
+}
+
 pub fn fetch_prices(
     agent: &Agent,
     price_feeds: &[PriceFeed],
