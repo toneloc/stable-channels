@@ -150,7 +150,6 @@ class AppState(private val context: Context) : ViewModel() {
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
 
-    var onchainReceiveAddress: String? = null
 
     private val _isSpliceInFlight = MutableStateFlow(false)
     val isSpliceInFlightFlow: StateFlow<Boolean> get() = _isSpliceInFlight
@@ -1370,6 +1369,24 @@ class AppState(private val context: Context) : ViewModel() {
             node.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
         } catch (e: Exception) {
             AuditService.log("LSP_CONNECT_FAILED", mapOf("error" to (e.message ?: "")))
+        }
+    }
+
+    fun setOnchainReceiveAddress(address: String?) {
+        if (address == null) return
+        _onchainReceiveAddress.value = address
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+            .putString("onchain_receive_address", address).apply()
+        
+        // Start polling for this address to be hit
+        viewModelScope.launch {
+            val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
+            val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
+            if (txid != null) {
+                _lastReceiveTxid.value = txid
+                context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                    .putString("last_receive_txid", txid).apply()
+            }
         }
     }
 
