@@ -1003,12 +1003,20 @@ class AppState {
                 let apnsEnvironment = "production"
             #endif
 
-            let body: [String: String] = [
+            var body: [String: Any] = [
                 "device_token": token,
                 "platform": "ios",
                 "node_id": nodeId,
                 "environment": apnsEnvironment
             ]
+            // Node-ownership proof (issue #162): a valid signature makes the
+            // LSP store this token as verified so it can't be hijacked by an
+            // unsigned registration. Best-effort — node is running here.
+            let ts = UInt64(Date().timeIntervalSince1970)
+            if let sig = nodeService.signPushRegistration(nodeId: nodeId, token: token, ts: ts) {
+                body["signature"] = sig
+                body["timestamp"] = ts
+            }
 
             guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
             request.httpBody = httpBody

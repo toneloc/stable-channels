@@ -522,6 +522,25 @@ class NodeService: NodeServiceProtocol {
         return try node.signMessage(msg: message)
     }
 
+    /// Canonical REGISTER_PUSH_V1 bytes — MUST byte-match the server's
+    /// register_push_signed_bytes: serde_json field order type,node_id,token,ts
+    /// with no whitespace and ts as a bare number. See issue #162.
+    static func pushRegistrationSignedBytes(nodeId: String, token: String, ts: UInt64) -> [UInt8] {
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let json =
+            "{\"type\":\"REGISTER_PUSH_V1\",\"node_id\":\"\(esc(nodeId))\",\"token\":\"\(esc(token))\",\"ts\":\(ts)}"
+        return Array(json.utf8)
+    }
+
+    /// Best-effort node-ownership signature over a push registration.
+    /// Returns nil if the node isn't running (caller falls back to unsigned).
+    func signPushRegistration(nodeId: String, token: String, ts: UInt64) -> String? {
+        try? signMessage(Self.pushRegistrationSignedBytes(nodeId: nodeId, token: token, ts: ts))
+    }
+
     func verifySignature(message: [UInt8], signature: String, pubkey: PublicKey) -> Bool {
         node?.verifySignature(msg: message, sig: signature, pkey: pubkey) ?? false
     }
