@@ -184,8 +184,6 @@ fun PriceChart(
                 }
             }
 
-            Spacer(Modifier.height(4.dp))
-
             // Period selector pills — scrollable
             Row(
                 modifier = Modifier

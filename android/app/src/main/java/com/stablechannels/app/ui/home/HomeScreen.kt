@@ -45,6 +45,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.ui.history.OrderDetailBottomSheet
+import com.stablechannels.app.models.PaymentRecord
+import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
 import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.trade.BuyScreen
@@ -76,6 +80,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
+    var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
+    var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
     var showReceive by remember { mutableStateOf(false) }
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
@@ -392,14 +398,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                         } else {
                             // 4. No channel, confirmed deposit — just needs Lightning
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             Text("Receive over Lightning to create your Trading and Spending Account",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
-                Spacer(Modifier.height(8.dp))
             }
 
             // Price chart
@@ -443,9 +448,31 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             // Status capsule
             if (statusMessage.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
                 StatusCapsule(
-                    message = statusMessage
+                    message = statusMessage,
+                    onClick = {
+                        val msg = statusMessage.lowercase()
+                        val isTrade = msg.contains("buy") || msg.contains("sell") || msg.contains("trade") || msg.contains("order")
+                        val isPayment = msg.contains("payment") || msg.contains("swap") || msg.contains("channel") || msg.contains("moving")
+                        
+                        if (isTrade || isPayment) {
+                            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                if (isTrade) {
+                                    val trades = appState.databaseService?.getRecentTrades(1)
+                                    if (!trades.isNullOrEmpty()) {
+                                        selectedTrade = trades.first()
+                                    }
+                                } else {
+                                    val payments = appState.databaseService?.getRecentPayments(1)
+                                    if (!payments.isNullOrEmpty()) {
+                                        selectedPayment = payments.first()
+                                    }
+                                }
+                            }
+                        } else {
+                            appState.setStatus("")
+                        }
+                    }
                 )
             }
             // Bottom padding for nav bar
@@ -605,6 +632,17 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }
             }
         }
+    }
+
+    selectedTrade?.let { trade ->
+        OrderDetailBottomSheet(trade = trade, onDismiss = { selectedTrade = null })
+    }
+    selectedPayment?.let { payment ->
+        PaymentDetailBottomSheet(
+            payment = payment,
+            currentPrice = btcPrice,
+            onDismiss = { selectedPayment = null }
+        )
     }
 }
 
