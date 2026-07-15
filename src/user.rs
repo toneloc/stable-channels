@@ -1907,7 +1907,7 @@ impl UserApp {
                 // Store pending info so we can finalize or revert later.
                 let payment_id_str = format!("{payment_id}");
 
-                self.status_message = format!("Trade pending (fee: ${:.2})", fee_usd,);
+                self.status_message = format!("Order pending (fee: ${:.2})", fee_usd,);
                 audit_event(
                     "TRADE_MESSAGE_SENT",
                     json!({
@@ -1925,7 +1925,7 @@ impl UserApp {
                 Some(payment_id)
             }
             Err(e) => {
-                self.status_message = format!("Failed to send trade order: {}", e);
+                self.status_message = format!("Failed to send order: {}", e);
                 audit_event(
                     "TRADE_MESSAGE_FAILED",
                     json!({
@@ -2575,8 +2575,9 @@ impl UserApp {
                         );
 
                         self.update_balances();
-                        let verb = if trade.action == "buy" { "Buy" } else { "Sell" };
-                        self.show_toast(&format!("{} confirmed", verb), "OK");
+                        let verb =
+                            if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
+                        self.show_toast(&format!("{} order confirmed", verb), "OK");
                     } else {
                         // Normal (non-trade) outgoing payment
                         let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
@@ -2684,9 +2685,10 @@ impl UserApp {
                             }),
                         );
 
-                        let verb = if trade.action == "buy" { "Buy" } else { "Sell" };
-                        self.status_message = format!("{} trade failed: {:?}", verb, reason);
-                        self.show_toast(&format!("{} failed", verb), "X");
+                        let verb =
+                            if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
+                        self.status_message = format!("{} order failed: {:?}", verb, reason);
+                        self.show_toast(&format!("{} order failed", verb), "X");
                     } else {
                         // Check if this is a pending outgoing payment
                         let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
@@ -4103,13 +4105,13 @@ impl UserApp {
                     );
                     ui.add_space(12.0);
                     ui.label(
-                        egui::RichText::new("2. Trade into a stable dollar balance")
+                        egui::RichText::new("2. Convert into a stable dollar balance")
                             .size(18.0)
                             .color(egui::Color32::BLACK),
                     );
                     ui.add_space(12.0);
                     ui.label(
-                        egui::RichText::new("3. Trade out and withdraw anytime")
+                        egui::RichText::new("3. Convert out and withdraw anytime")
                             .size(18.0)
                             .color(egui::Color32::BLACK),
                     );
@@ -6514,7 +6516,7 @@ impl UserApp {
                     }
                 }
                 Err(_) => {
-                    ui.label(RichText::new("Error loading trades").color(theme::DANGER_HOVER));
+                    ui.label(RichText::new("Error loading orders").color(theme::DANGER_HOVER));
                 }
             }
 
@@ -8115,7 +8117,7 @@ impl UserApp {
         let mut should_confirm = false;
         ui.vertical_centered(|ui| {
             let confirm_btn = egui::Button::new(
-                RichText::new("Confirm Buy")
+                RichText::new("Confirm Order")
                     .size(16.0)
                     .color(Color32::WHITE)
                     .strong(),
@@ -8460,7 +8462,7 @@ impl UserApp {
         let mut should_confirm = false;
         ui.vertical_centered(|ui| {
             let confirm_btn = egui::Button::new(
-                RichText::new("Confirm Sell")
+                RichText::new("Confirm Order")
                     .size(16.0)
                     .color(Color32::WHITE)
                     .strong(),
@@ -8551,7 +8553,7 @@ impl UserApp {
                 .show(ctx, |ui| {
                     ui.label(RichText::new("Are you sure you want to close your wallet?").size(13.0).color(Color32::BLACK));
                     ui.add_space(5.0);
-                    ui.label(RichText::new("All funds will be sent to an onchain address you control. Your trade and payment history will be preserved.").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("All funds will be sent to an onchain address you control. Your order and payment history will be preserved.").size(12.0).color(Color32::DARK_GRAY));
                     ui.add_space(10.0);
 
                     // Show balance that will be received
@@ -8776,7 +8778,10 @@ impl UserApp {
                     action: "buy".to_string(),
                 },
             );
-            self.show_toast(&format!("Buy ${:.2} BTC pending...", net_amount), "...");
+            self.show_toast(
+                &format!("USD → BTC order pending (${:.2})...", net_amount),
+                "...",
+            );
         }
         self.trade_error.clear();
     }
@@ -8834,7 +8839,10 @@ impl UserApp {
                     action: "sell".to_string(),
                 },
             );
-            self.show_toast(&format!("Sell ${:.2} BTC pending...", net_amount), "...");
+            self.show_toast(
+                &format!("BTC → USD order pending (${:.2})...", net_amount),
+                "...",
+            );
         }
         self.trade_error.clear();
     }
