@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Workspace crates
-stable-channels   = { path = "../.." }
+stable-channels   = { path = "../..", default-features = false }
 sc-protos         = { path = "../sc-protos" }
 ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "0e4434d7083ae9926c73f26e7cd52f00bde44d37", features = ["serde"], default-features = false }
 # ldk-node is pulled transitively by stable-channels but we need it as a direct
