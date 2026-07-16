@@ -20,7 +20,11 @@ env:
 - assertVisible: "Amount (USD)"
 - tapOn: "0.00"
 - inputText: "5"
-- tapOn: "Send"
+- hideKeyboard
+# Two "Send" texts on this sheet (title + button) — index 1 = the button.
+- tapOn:
+    text: "Send"
+    index: 1
 
 - extendedWaitUntil:
     visible: "Splice-out initiated"

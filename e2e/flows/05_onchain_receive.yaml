@@ -31,14 +31,15 @@ env:
     timeout: 120000
 - tapOn: "Swap"
 
-# sweepToChannel() status (AppState.kt): splice-in of all onchain funds
-- extendedWaitUntil:
-    visible: "Moving all onchain funds to channel.*"
-    timeout: 30000
+# "Moving all onchain funds..." is transient — on regtest the splice
+# negotiates in ~1s and the status moves on. Assert it opportunistically.
+- assertVisible:
+    text: "Moving all onchain funds to channel.*"
+    optional: true
 - runScript:
     file: helpers/mine_blocks.js
 
-# Splice confirms; onchain card clears
+# Durable signal: splice confirms, onchain drains, the Swap button clears.
 - extendedWaitUntil:
     notVisible: "Swap"
     timeout: 180000

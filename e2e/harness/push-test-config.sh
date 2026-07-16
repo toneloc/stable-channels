@@ -33,7 +33,8 @@ cat > "$TMP" << EOF
   "fallback_chain_url": "http://${HOST}:30000",
   "lsp_pubkey": "${LSP_NODE_ID}",
   "lsp_address": "${HOST}:9735",
-  "price_feed_base": "http://${HOST}:9737"
+  "price_feed_base": "http://${HOST}:9737",
+  "disable_send_auth": true
 }
 EOF
 
