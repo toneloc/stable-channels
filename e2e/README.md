@@ -4,6 +4,58 @@ Automated versions of the 12 demo-script user flows, driven by
 [Maestro](https://maestro.mobile.dev) against the Android emulator and iOS
 simulator. Flow files map 1:1 to the demo-script steps.
 
+## Quickstart
+
+### Android (proven — 7 flows green)
+
+```bash
+# 1. Harness (skip if running — check: curl -s localhost:9737/info)
+cd e2e/harness && docker compose up -d
+
+# 2. Emulator + app
+emulator -avd Medium_Phone_API_36.1 &
+(cd android && ./gradlew :app:installDebug)
+
+# 3. The 7 green flows as one fresh lifecycle
+#    (run.sh wipes the wallet, re-pushes the regtest config, onboards new):
+cd e2e
+./run.sh flows/01_onboard_lightning.yaml flows/02_btc_to_usd.yaml \
+         flows/04_lightning_receive.yaml flows/05_onchain_receive.yaml \
+         flows/06_lightning_send.yaml flows/07_onchain_send.yaml \
+         flows/08_usd_to_btc.yaml
+
+# One flow, keeping current wallet state:
+RESET=0 ./run.sh flows/02_btc_to_usd.yaml
+```
+
+Screenshots + logs land in `~/.maestro/tests/<timestamp>/`;
+`maestro record <flow>` produces an mp4.
+
+Do NOT run bare `./run.sh` (whole folder) yet: flow 09 stops the suite at its
+navigation TODO, and flow 03 leaves the mock price at $102k.
+
+If a receive flow ever sticks with a pending payment, the LSP's onchain
+wallet may have depleted across many JIT opens — top it up:
+`curl -X POST localhost:9737/bootstrap -H 'Content-Type: application/json' -d '{}'`
+
+### iOS (override layer built; first shakedown pending)
+
+```bash
+cd ios/StableChannels
+xcodebuild -scheme StableChannels -sdk iphonesimulator -configuration Debug build
+xcrun simctl boot "iPhone 16" && open -a Simulator
+xcrun simctl install booted ~/Library/Developer/Xcode/DerivedData/StableChannels-*/Build/Products/Debug-iphonesimulator/StableChannels.app
+cd ../../e2e/harness && ./push-test-config-ios.sh
+xcrun simctl launch booted com.stablechannels.app
+# sanity: home screen must show $100,000 as the BTC price
+cd .. && maestro test flows/01_onboard_lightning.yaml
+```
+
+Maestro drives whichever device is booted — shut the Android emulator down
+first so it picks the simulator. Expect the first iOS run to surface selector
+mismatches on iOS-specific screens; fix them the same way the Android
+shakedown did (check `~/.maestro/tests/` screenshots).
+
 ## Status
 
 | Flow | Step | State |
