@@ -59,6 +59,8 @@
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
 		49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */; };
 		49DAFB3C2FDB6587003BE0EB /* FeeRateServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */; };
+		49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3080E30080B78009B0014 /* TransactionLinkService.swift */; };
+		49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3081030080F3C009B0014 /* TxidResolutionService.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
 		49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */; };
 		49E456822FCC596F00B0CA85 /* FullscreenQRZoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */; };
@@ -187,6 +189,8 @@
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
 		49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateService.swift; sourceTree = "<group>"; };
 		49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateServiceTests.swift; sourceTree = "<group>"; };
+		49E3080E30080B78009B0014 /* TransactionLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLinkService.swift; sourceTree = "<group>"; };
+		49E3081030080F3C009B0014 /* TxidResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidResolutionService.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
 		49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeUtility.swift; sourceTree = "<group>"; };
 		49E4D8A02FED848F002AF338 /* BackupError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupError.swift; sourceTree = "<group>"; };
@@ -415,7 +419,9 @@
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
 				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
+				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
+				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -690,6 +696,7 @@
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
 				499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */,
+				49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */,
 				499DBE712FD2DACF003E89F9 /* ResilientEsploraClient.swift in Sources */,
 				499DBE722FD2DACF003E89F9 /* StaggeredTaskLauncher.swift in Sources */,
 				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
@@ -734,6 +741,7 @@
 				49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */,
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
+				49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */,
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
 				49E4D8A32FED84B7002AF338 /* BackupServiceProtocol.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,

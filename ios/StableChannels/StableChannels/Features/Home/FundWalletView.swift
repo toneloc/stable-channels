@@ -28,7 +28,7 @@ struct FundWalletView: View {
                                 let addr = try await appState.nodeService.newOnchainAddress()
                                 address = addr
                                 bitcoinURI = QRCodeUtility.generateBitcoinURI(from: addr)
-                                appState.onchainReceiveAddress = addr
+                                appState.transactionLinkService.onchainReceiveAddress = addr
                             } catch {
                                 loadError = error
                             }
