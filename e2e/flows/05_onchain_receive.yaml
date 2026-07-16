@@ -22,14 +22,16 @@ env:
 - runScript:
     file: helpers/mine_blocks.js
 
-- tapOn: "Back"
-- tapOn: "Cancel"
+- tapOn: "(Back|Receive)"    # Android Back / iOS nav-back (labeled by prev screen)
+- tapOn:
+    text: "(Cancel|Done)"
+    optional: true
 
 # Deposit confirms -> the onchain card appears on Home with a Swap button
 - extendedWaitUntil:
-    visible: "Swap"
-    timeout: 120000
-- tapOn: "Swap"
+    visible: "(Swap|Move)"       # Android / iOS label
+    timeout: 240000              # iOS onchain sync interval is 120s
+- tapOn: "(Swap|Move)"
 
 # "Moving all onchain funds..." is transient — on regtest the splice
 # negotiates in ~1s and the status moves on. Assert it opportunistically.
@@ -41,5 +43,5 @@ env:
 
 # Durable signal: splice confirms, onchain drains, the Swap button clears.
 - extendedWaitUntil:
-    notVisible: "Swap"
-    timeout: 180000
+    notVisible: "(Swap|Move)"
+    timeout: 240000

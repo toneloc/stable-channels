@@ -13,15 +13,20 @@ env:
     file: helpers/create_address.js
 
 - tapOn: "Send"
-- tapOn: "Lightning invoice or Onchain address"
+- tapOn: "(Lightning invoice or Onchain address|lnbc1\\.\\.\\.)"   # Android label / iOS placeholder
 - inputText: ${output.address}
 
 # Onchain input needs an amount
-- assertVisible: "Amount (USD)"
+- assertVisible: "(Amount \\(USD\\)|Onchain Address)"   # Android label / iOS chip
 - tapOn: "0.00"
 - inputText: "5"
-- hideKeyboard
-# Two "Send" texts on this sheet (title + button) — index 1 = the button.
+# Both platforms label the button "Send", colliding with the sheet title
+# -> index 1. hideKeyboard is unreliable on iOS sims (Android-only).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn:
     text: "Send"
     index: 1
@@ -29,7 +34,11 @@ env:
 - extendedWaitUntil:
     visible: "Splice-out initiated"
     timeout: 60000
-- tapOn: "Done"
+# Android shows a success screen with Done; iOS shows the inline status —
+# dismiss the sheet either way.
+- tapOn:
+    text: "(Done|Cancel)"
+    optional: true
 
 - runScript:
     file: helpers/mine_blocks.js
