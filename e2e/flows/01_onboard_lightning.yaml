@@ -11,8 +11,10 @@ env:
 # (pm clear + re-push config) before maestro starts.
 - launchApp
 
-# TODO(navigation): if a first-run onboarding screen exists (create-wallet /
-# permissions), add its taps here. Record with `maestro studio`.
+# iOS first launch shows the notifications permission dialog; Android doesn't.
+- tapOn:
+    text: "Allow"
+    optional: true
 
 # Home reachable — Receive pulses when there is no channel yet
 - extendedWaitUntil:
@@ -21,7 +23,8 @@ env:
 - tapOn: "Receive"
 
 # No channel yet -> JIT notice is shown (ReceiveScreen.kt:167)
-- assertVisible: "First payment — a channel will be opened automatically via LSP"
+# Android and iOS word the JIT notice differently — match either.
+- assertVisible: "(First payment — a channel will be opened automatically via LSP|Make your first payment to activate the channel)"
 
 - tapOn: "0.00"       # amount placeholder (USD)
 - inputText: "85"     # canonical stable target — matches prod history, under the $100 JIT cap
@@ -38,7 +41,7 @@ env:
 # The app auto-dismisses the receive sheet when the payment lands — Cancel
 # only needs tapping if we beat the dismissal.
 - tapOn:
-    text: "Cancel"
+    text: "(Cancel|Done)"   # Android: Cancel; iOS: Done
     optional: true
 
 # Onboarded: payment banner + trade buttons enabled on Home.
