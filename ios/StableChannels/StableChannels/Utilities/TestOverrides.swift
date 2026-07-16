@@ -19,6 +19,7 @@ enum TestOverrides {
         var channelExistsUrl: String?
         var priceFeedBase: String?
         var disableSendAuth = false
+        var syncIntervalSecs: UInt64?
     }
 
     /// Loaded once on first access; thread-safe via `static let`.
@@ -44,6 +45,9 @@ enum TestOverrides {
             v.channelExistsUrl = opt("channel_exists_url")
             v.priceFeedBase = opt("price_feed_base")
             v.disableSendAuth = (json["disable_send_auth"] as? Bool) ?? false
+            if let secs = (json["sync_interval_secs"] as? NSNumber)?.uint64Value, secs > 0 {
+                v.syncIntervalSecs = secs
+            }
             print("[TestOverrides] E2E overrides ACTIVE: network=\(v.network ?? "-") lsp=\(v.lspAddress ?? "-") chain=\(v.primaryChainUrl ?? "-")")
         #endif
         return v

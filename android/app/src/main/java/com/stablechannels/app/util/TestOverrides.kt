@@ -46,6 +46,7 @@ object TestOverrides {
     @Volatile var channelExistsUrl: String? = null; private set
     @Volatile var priceFeedBase: String? = null; private set
     @Volatile var disableSendAuth: Boolean = false; private set
+    @Volatile var syncIntervalSecs: Long? = null; private set
 
     val active: Boolean get() = network != null || lspPubkey != null || primaryChainUrl != null
 
@@ -67,6 +68,7 @@ object TestOverrides {
             channelExistsUrl = opt("channel_exists_url")
             priceFeedBase = opt("price_feed_base")
             disableSendAuth = json.optBoolean("disable_send_auth", false)
+            syncIntervalSecs = json.optLong("sync_interval_secs", 0).takeIf { it > 0 }
             Log.w(TAG, "E2E overrides ACTIVE: network=$network lsp=$lspAddress chain=$primaryChainUrl")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load $FILE_NAME — using production endpoints", e)

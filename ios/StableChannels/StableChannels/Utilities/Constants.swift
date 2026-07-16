@@ -56,8 +56,13 @@ enum Constants {
     static let priceFetchRetryDelayMs: UInt64 = 300
     static let priceFetchMaxRetries = 3
 
-    static let onchainWalletSyncIntervalSecs: UInt64 = 120
-    static let lightningWalletSyncIntervalSecs: UInt64 = 60
+    // E2E override shortens both (regtest blocks are on demand).
+    static var onchainWalletSyncIntervalSecs: UInt64 {
+        TestOverrides.shared.syncIntervalSecs ?? 120
+    }
+    static var lightningWalletSyncIntervalSecs: UInt64 {
+        TestOverrides.shared.syncIntervalSecs ?? 60
+    }
     static let feeRateCacheUpdateIntervalSecs: UInt64 = 1200
 
     static let invoiceExpirySecs: UInt32 = 3600

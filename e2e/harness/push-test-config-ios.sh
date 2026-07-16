@@ -24,7 +24,8 @@ cat > "$CONTAINER/Documents/test_config.json" << EOF
   "lsp_pubkey": "${LSP_NODE_ID}",
   "lsp_address": "${HOST}:9735",
   "price_feed_base": "http://${HOST}:9737",
-  "disable_send_auth": true
+  "disable_send_auth": true,
+  "sync_interval_secs": 10
 }
 EOF
 echo "wrote test config (LSP ${LSP_NODE_ID:0:16}...) -> $CONTAINER/Documents/"

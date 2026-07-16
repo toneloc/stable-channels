@@ -34,8 +34,12 @@ object Constants {
     const val PRICE_FETCH_RETRY_DELAY_MS: Long = 300
     const val PRICE_FETCH_MAX_RETRIES = 3
 
-    const val ONCHAIN_WALLET_SYNC_INTERVAL_SECS: Long = 120
-    const val LIGHTNING_WALLET_SYNC_INTERVAL_SECS: Long = 60
+    // E2E override shortens both (regtest blocks are on demand; 120s syncs
+    // just add dead time to test runs).
+    val ONCHAIN_WALLET_SYNC_INTERVAL_SECS: Long get() =
+        TestOverrides.syncIntervalSecs ?: 120
+    val LIGHTNING_WALLET_SYNC_INTERVAL_SECS: Long get() =
+        TestOverrides.syncIntervalSecs ?: 60
     const val FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: Long = 1200
 
     const val INVOICE_EXPIRY_SECS: Int = 3600

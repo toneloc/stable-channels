@@ -1,29 +1,43 @@
 # Step 9 — Close Channel
 # "User initiates an onchain cooperative close."
-# Close dialog verified against ChannelView.kt (:120 "Close Channel",
-# :167 "Close Channel?", :183 "Close").
+# Identical labels on both platforms: Settings tab -> Channel row ->
+# Close Channel -> "Close Channel?" alert -> Close.
 appId: com.stablechannels.app
-tags: [android, close]
+tags: [android, ios, close]
 env:
   HARNESS_API: "http://localhost:9737"
   MINE_BLOCKS: "6"
 ---
 - launchApp
-
-# TODO(navigation): path to ChannelView — Settings tab -> Channel.
-# Record the exact taps with `maestro studio`, e.g.:
-# - tapOn: "Settings"
-# - tapOn: "Channel"
-
+- tapOn: "Settings"
+- tapOn: "Channel"
 - tapOn: "Close Channel"
 - assertVisible: "Close Channel?"
-- tapOn: "Close"
+# Confirm: Android alert button is "Close"; iOS localizes it to
+# "Close Channel" (second match — the settings button is behind the alert).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Close"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Close Channel"   # alert button; the settings one is occluded
 
-# Cooperative close broadcasts; confirm it
+# Cooperative close broadcasts; confirm it.
 - runScript:
     file: helpers/mine_blocks.js
 
-# Home shows the closing state until the close confirms, then funds land onchain
+# Back to Home and wait for the closing/closed state to surface. The funds
+# land onchain once the close confirms (sync interval up to 120s).
+- tapOn:
+    text: "(Back|Settings)"
+    optional: true
+- tapOn:
+    text: "Home"
+    optional: true
 - extendedWaitUntil:
-    visible: "Channel closed.*|Deposit confirming.*"
-    timeout: 180000
+    visible: "(Channel clos|Deposit confirming|Onchain).*"
+    timeout: 240000
