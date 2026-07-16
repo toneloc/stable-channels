@@ -1,0 +1,12 @@
+# Builds stable-channels-lsp from THIS repo (context = repo root).
+FROM rust:1.82-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler perl make && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+# GUI deps are feature-gated (PR #176); -p builds the daemon lean.
+RUN cargo build --release -p stable-channels-lsp
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/stable-channels-lsp /usr/local/bin/stable-channels-lsp
+EXPOSE 3002

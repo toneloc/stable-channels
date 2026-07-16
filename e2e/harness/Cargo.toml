@@ -1,0 +1,19 @@
+[package]
+name = "sc-e2e-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Regtest control harness for Stable Channels E2E flows: embeds the counterparty ldk-node and exposes the /pay /invoice /address /send /mine /price API the Maestro helpers call."
+
+[dependencies]
+# Same rev the wallet pins, so lightning protocol behavior matches.
+ldk-node = { git = "https://github.com/lightningdevkit/ldk-node", rev = "47dad6d909af0fbb53e76d07740c04df5abdde3b" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.10", features = ["json"] }
+base64 = "0.22"
+
+# Standalone crate — deliberately NOT a member of the repo workspace so the
+# heavy e2e-only deps don't affect wallet/daemon feature unification.
+[workspace]

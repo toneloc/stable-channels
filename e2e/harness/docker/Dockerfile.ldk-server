@@ -1,0 +1,12 @@
+# Builds upstream ldk-server at the exact rev the production bidaemon runs.
+FROM rust:1.82-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends git protobuf-compiler && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
+    && git checkout 0e4434d7083ae9926c73f26e7cd52f00bde44d37
+RUN cargo build --release -p ldk-server
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/ldk-server /usr/local/bin/ldk-server
+EXPOSE 9735 3536

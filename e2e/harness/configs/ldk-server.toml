@@ -1,0 +1,36 @@
+# ldk-server (LSP backend) — regtest E2E config.
+# Derived from contrib/ldk-server-config.toml at rev 0e4434d.
+
+[node]
+network = "regtest"
+listening_addresses = ["0.0.0.0:9735"]
+grpc_service_address = "0.0.0.0:3536"
+alias = "sc_e2e_lsp"
+
+[storage.disk]
+dir_path = "/data/ldk-server"
+
+[log]
+level = "Debug"
+log_to_file = true
+
+# Chain source: the local esplora (electrs) — do NOT also set [bitcoind]/[electrum].
+[esplora]
+server_url = "http://electrs:3000"
+
+# LSPS2 service: this is what makes the LSP open JIT channels for the app's
+# first receive (Step 1 of the demo script).
+[liquidity.lsps2_service]
+advertise_service = false
+channel_opening_fee_ppm = 1000            # 0.1%
+channel_over_provisioning_ppm = 500000    # 50% extra capacity
+min_channel_opening_fee_msat = 1000000    # 1,000 sats (lower than prod for small test amounts)
+min_channel_lifetime = 100
+max_client_to_self_delay = 1440
+min_payment_size_msat = 1000000           # 1,000 sats
+max_payment_size_msat = 25000000000       # 0.25 BTC
+client_trusts_lsp = false
+disable_client_reserve = false
+
+[metrics]
+enabled = false
