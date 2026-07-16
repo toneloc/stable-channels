@@ -1,0 +1,31 @@
+# Step 11 — Import Keys
+# "User recovers onchain bitcoin."
+# Restore labels verified against BackupView.kt (:262 "Restore from Seed",
+# :310 "word1 word2 word3 ...", :404 "Restore").
+#
+# NOTE: restore-from-seed while a channel exists is the force-close class the
+# restore guard (/api/channel-exists) protects against — this flow expects the
+# guard's warning if a channel is still open. Run AFTER 09_close_channel.
+appId: com.stablechannels.app
+tags: [android, keys]
+env:
+  RESTORE_SEED: ""          # pass with -e RESTORE_SEED="word1 ... word12"
+---
+- clearState                # simulate a fresh device
+- launchApp
+
+# TODO(navigation): reach the restore entry point (Settings -> Backup ->
+# Restore from Seed on a fresh install; adjust to actual onboarding).
+- extendedWaitUntil:
+    visible: "Restore from Seed"
+    timeout: 60000
+- tapOn: "Restore from Seed"
+
+- tapOn: "word1 word2 word3 ..."
+- inputText: ${RESTORE_SEED}
+- tapOn: "Restore"
+
+# Wallet restores; the closed channel's funds are onchain
+- extendedWaitUntil:
+    visible: "\\$.*"        # balance rendered
+    timeout: 120000

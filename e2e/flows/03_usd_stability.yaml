@@ -1,0 +1,33 @@
+# Step 3 — USD Stability
+# "Settlement payments occur."
+# The harness moves the mocked price; the app's stability tick (60s interval,
+# 120s cooldown, 0.1% AND $0.25 thresholds) should settle the drift.
+appId: com.stablechannels.app
+tags: [android, ios, stability]
+env:
+  HARNESS_API: "http://10.0.2.2:9737"
+  PRICE_USD: "102000"       # +2% over the harness's base 100000
+---
+- launchApp
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+
+# Price up 2%: the user's backing is now worth more than par -> the APP owes
+# the LSP a stability payment.
+- runScript:
+    file: helpers/set_price.js
+
+# Stability tick 60s + cooldown headroom.
+- extendedWaitUntil:
+    visible: "\\$.*"        # keep session alive; real assertion below
+    timeout: 5000
+- waitForAnimationToEnd:
+    timeout: 130000          # TODO: replace with a harness poll — see below
+
+# TODO(assertion): the decisive check is off-screen: poll the harness/LSP for
+# a received stability keysend (audit event STABILITY_* / settlement row), e.g.
+#   - runScript: { file: helpers/assert_settlement.js }
+# On-screen, the USD balance holding its target while the price moved is the
+# user-visible proof:
+# - assertVisible: "$25.00"   # stable balance unchanged after +2% price move

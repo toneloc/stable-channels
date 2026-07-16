@@ -1,0 +1,35 @@
+# Step 7 — Onchain Send
+# "User sends an onchain payment to another app." With a ready channel this
+# routes via splice-out (SendScreen.kt: result = "Splice-out initiated").
+appId: com.stablechannels.app
+tags: [android, ios, send, onchain]
+env:
+  HARNESS_API: "http://10.0.2.2:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+
+- runScript:
+    file: helpers/create_address.js
+
+- tapOn: "Send"
+- tapOn: "Lightning invoice or Onchain address"
+- inputText: ${output.address}
+
+# Onchain input needs an amount
+- assertVisible: "Amount (USD)"
+- tapOn: "0.00"
+- inputText: "5"
+- tapOn: "Send"
+
+- extendedWaitUntil:
+    visible: "Splice-out initiated"
+    timeout: 60000
+- tapOn: "Done"
+
+- runScript:
+    file: helpers/mine_blocks.js
+# Swap pending row clears once the splice confirms
+- extendedWaitUntil:
+    notVisible: "Swap pending.*"
+    timeout: 180000

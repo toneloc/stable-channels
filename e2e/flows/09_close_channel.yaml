@@ -1,0 +1,29 @@
+# Step 9 — Close Channel
+# "User initiates an onchain cooperative close."
+# Close dialog verified against ChannelView.kt (:120 "Close Channel",
+# :167 "Close Channel?", :183 "Close").
+appId: com.stablechannels.app
+tags: [android, close]
+env:
+  HARNESS_API: "http://10.0.2.2:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+
+# TODO(navigation): path to ChannelView — Settings tab -> Channel.
+# Record the exact taps with `maestro studio`, e.g.:
+# - tapOn: "Settings"
+# - tapOn: "Channel"
+
+- tapOn: "Close Channel"
+- assertVisible: "Close Channel?"
+- tapOn: "Close"
+
+# Cooperative close broadcasts; confirm it
+- runScript:
+    file: helpers/mine_blocks.js
+
+# Home shows the closing state until the close confirms, then funds land onchain
+- extendedWaitUntil:
+    visible: "Channel closed.*|Deposit confirming.*"
+    timeout: 180000

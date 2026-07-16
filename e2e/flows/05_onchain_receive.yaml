@@ -1,0 +1,44 @@
+# Step 5 — Onchain Receive
+# "User receives an onchain payment, first to the 'onchain box'; then spliced in."
+appId: com.stablechannels.app
+tags: [android, onchain, receive]
+env:
+  HARNESS_API: "http://10.0.2.2:9737"
+  SEND_SATS: "100000"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+- tapOn: "Receive"
+- tapOn: "Onchain"          # ReceiveScreen toolbar -> FundWalletScreen
+
+# Address on the Fund Wallet screen (regtest = bcrt1...)
+- extendedWaitUntil:
+    visible: "(bc|tb|bcrt)1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "(bc|tb|bcrt)1.*"
+- runScript:
+    file: helpers/send_onchain.js
+- runScript:
+    file: helpers/mine_blocks.js
+
+- tapOn: "Back"
+- tapOn: "Cancel"
+
+# Deposit confirms -> the onchain card appears on Home with a Swap button
+- extendedWaitUntil:
+    visible: "Swap"
+    timeout: 120000
+- tapOn: "Swap"
+
+# sweepToChannel() status (AppState.kt): splice-in of all onchain funds
+- extendedWaitUntil:
+    visible: "Moving all onchain funds to channel.*"
+    timeout: 30000
+- runScript:
+    file: helpers/mine_blocks.js
+
+# Splice confirms; onchain card clears
+- extendedWaitUntil:
+    notVisible: "Swap"
+    timeout: 180000

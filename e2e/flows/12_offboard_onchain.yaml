@@ -1,0 +1,33 @@
+# Step 12 — Offboard Onchain
+# "User sends an onchain payment to another app. Balance shows 0."
+# Uses "Send Max" (SendScreen.kt:419). No channel at this point (post-close),
+# so this is a plain onchain send, not a splice-out.
+appId: com.stablechannels.app
+tags: [android, ios, send, onchain, offboard]
+env:
+  HARNESS_API: "http://10.0.2.2:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+
+- runScript:
+    file: helpers/create_address.js
+
+- tapOn: "Send"
+- tapOn: "Lightning invoice or Onchain address"
+- inputText: ${output.address}
+- tapOn: "Send Max"
+- tapOn: "Send"
+
+- extendedWaitUntil:
+    visible: "Done"
+    timeout: 60000
+- tapOn: "Done"
+
+- runScript:
+    file: helpers/mine_blocks.js
+
+# The narrative's end state: balance shows 0
+- extendedWaitUntil:
+    visible: "\\$0(\\.00)?"
+    timeout: 120000

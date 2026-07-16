@@ -1,0 +1,26 @@
+# Step 10 — Back Up Keys
+# "User copies from the screen."
+# BackupView labels verified (Copy / Cancel / warning glyph).
+appId: com.stablechannels.app
+tags: [android, ios, keys]
+---
+- launchApp
+
+# TODO(navigation): path to BackupView — Settings tab -> Backup / Recovery.
+# Record with `maestro studio`, e.g.:
+# - tapOn: "Settings"
+# - tapOn: "Backup"
+
+# Seed reveal shows a warning and a Copy action (BackupView.kt:203/232)
+- assertVisible: "⚠️"
+- tapOn: "Copy"
+
+# The 12 words are now in maestro.copiedText — sanity-check the shape and
+# stash for 11_import_keys (pass back in via -e RESTORE_SEED for a clean run).
+- runScript:
+    script: |
+      const words = (maestro.copiedText || '').trim().split(/\s+/);
+      if (words.length !== 12) {
+        throw new Error(`expected 12 seed words, got ${words.length}`);
+      }
+- tapOn: "Cancel"

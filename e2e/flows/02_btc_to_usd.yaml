@@ -1,0 +1,28 @@
+# Step 2 — BTC -> USD
+# "User converts BTC into USD exposure."
+# Selectors verified against HomeScreen.kt / SellScreen.kt.
+appId: com.stablechannels.app
+tags: [android, ios, trade]
+---
+- launchApp
+- extendedWaitUntil:
+    visible: "BTC → USD"      # disabled until channel ready
+    timeout: 30000
+- tapOn: "BTC → USD"
+
+- assertVisible: "Amount (USD)"
+- tapOn: "0.00"
+- inputText: "25"
+- tapOn: "Continue"
+
+- assertVisible: "Confirm Order"
+- tapOn: "Confirm Order"
+
+# SellScreen success step (SellScreen.kt:~255)
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 30000
+- tapOn: "Done"
+
+# Back on Home
+- assertVisible: "USD → BTC"
