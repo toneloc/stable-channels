@@ -20,10 +20,9 @@ final class TxidResolutionService {
     var didResolveTxid: ((Event) -> Void)?
 
     func configureResolvers(urls: [String]) {
-        precondition(
-            closeTxidResolver == nil && onchainTxidResolver == nil,
-            "Resolvers should only be configured once"
-        )
+        guard closeTxidResolver == nil && onchainTxidResolver == nil else {
+            return
+        }
         let resolverConfig = URLSessionConfiguration.default
         resolverConfig.timeoutIntervalForRequest = 5
         resolverConfig.timeoutIntervalForResource = 10

@@ -332,6 +332,7 @@ class AppState {
         onchainBalanceSats = 0
         hasReadyChannel = false
         spendableOnchainSats = 0
+        transactionLinkService.onchainReceiveAddress = nil
         transactionLinkService.clearCloseTxid()
         transactionLinkService.clearReceiveTxid()
         pendingTradePayments.removeAll()
@@ -2121,15 +2122,15 @@ class AppState {
         }
 
         if currentOnchain > prevOnchainSats && !isSweeping && pendingSplice == nil {
-            // We detected a balance increase, clear the old txid link so we don't show a stale one
-            transactionLinkService.clearReceiveTxid()
-
             let depositSats = currentOnchain - prevOnchainSats
             // Ignore tiny fluctuations from fee estimation changes
             guard depositSats >= 1000 else {
                 prevOnchainSats = currentOnchain
                 return
             }
+
+            // We detected a balance increase, clear the old txid link so we don't show a stale one
+            transactionLinkService.clearReceiveTxid()
 
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
