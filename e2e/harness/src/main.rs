@@ -249,7 +249,7 @@ async fn feed_blockchain(State(st): State<Arc<AppState>>) -> Json<Value> {
 /// Funds the counterparty (mines its own coinbases mature) and opens a channel
 /// to the LSP so /pay has a route. Idempotent-ish: skips steps already done.
 async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
-    let channel_sats = body["channel_sats"].as_u64().unwrap_or(1_000_000);
+    let channel_sats = body["channel_sats"].as_u64().unwrap_or(5_000_000);
     let push_msat = body["push_msat"].as_u64();
     let lsp_id = st.lsp_node_id.clone().ok_or_else(|| bad_req("LSP_NODE_ID env not set"))?;
     let st2 = st.clone();

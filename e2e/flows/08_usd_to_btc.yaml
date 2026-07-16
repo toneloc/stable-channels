@@ -12,7 +12,7 @@ tags: [android, ios, trade]
 
 - assertVisible: "Amount (USD)"
 - tapOn: "0.00"
-- inputText: "10"
+- inputText: "25"
 - tapOn: "Continue"
 
 - assertVisible: "Confirm Order"

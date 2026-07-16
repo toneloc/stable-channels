@@ -29,5 +29,5 @@ env:
 # a received stability keysend (audit event STABILITY_* / settlement row), e.g.
 #   - runScript: { file: helpers/assert_settlement.js }
 # On-screen, the USD balance holding its target while the price moved is the
-# user-visible proof:
-# - assertVisible: "$25.00"   # stable balance unchanged after +2% price move
+# user-visible proof (~$1.70 settlement on the $85 target at +2%):
+# - assertVisible: "$85.00"   # stable balance unchanged after +2% price move

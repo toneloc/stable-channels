@@ -22,7 +22,7 @@ env:
 - assertVisible: "First payment — a channel will be opened automatically via LSP"
 
 - tapOn: "0.00"       # amount placeholder (USD)
-- inputText: "50"
+- inputText: "85"     # canonical stable target — matches prod history, under the $100 JIT cap
 - tapOn: "Generate Invoice"
 
 - extendedWaitUntil:

@@ -86,6 +86,23 @@ iOS simulator example:
 maestro test -e HARNESS_API=http://localhost:9737 flows/
 ```
 
+## Canonical test data
+
+Agreed 2026-07-15; every flow and the harness defaults use these. At the base
+price, **1,000 sats = $1** — all conversions are checkable by eye.
+
+| Parameter | Value | Why |
+|---|---|---|
+| Base mock price | **$100,000** | round sats↔USD math |
+| Stable target (Steps 1–2) | **$85** | matches prod tester channels (audit `expected_usd` ≈ 85), under the $100 JIT cap |
+| Bootstrap channel (counterparty↔LSP) | **5,000,000 sats** | routing headroom for many suite runs |
+| Onchain deposit (Step 5) | 100,000 sats (~$100) | |
+| Lightning receive (Step 4) | $10 | |
+| Lightning send (Step 6) | 5,000 sats ($5) | keep under native so the base run doesn't dip into USD; run variant b) above native for the overflow assertion |
+| Onchain send (Step 7) | $5 | |
+| Trades (Steps 2/8) | $25 each way | |
+| Stability move (Step 3) | ±2% → $102,000 / $98,000 | ~$1.70 settlement on the $85 target; clears the $0.25 AND 0.1% thresholds |
+
 ## Conventions
 
 - Text selectors are **regex** and must match the on-screen copy exactly —
