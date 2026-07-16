@@ -12,7 +12,9 @@ tags: [android, ios, trade]
 
 - assertVisible: "Amount (USD)"
 - tapOn: "0.00"
-- inputText: "25"
+# $20, not $25: the buy is capped at the stable position, and Step 2's $25
+# sell nets $24.75 after the trade fee — a $25 buy-back exceeds it.
+- inputText: "20"
 - tapOn: "Continue"
 
 - assertVisible: "Confirm Order"

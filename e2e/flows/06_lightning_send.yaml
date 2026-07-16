@@ -17,7 +17,11 @@ env:
 - tapOn: "Send"
 - tapOn: "Lightning invoice or Onchain address"
 - inputText: ${output.invoice}
-- tapOn: "Send"
+- hideKeyboard
+# Two "Send" texts exist here (sheet title + button) — index 1 = the button.
+- tapOn:
+    text: "Send"
+    index: 1
 
 # SendScreen success state ends with a Done button (SendScreen.kt:344)
 - extendedWaitUntil:

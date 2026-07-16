@@ -24,12 +24,13 @@ env:
 - runScript:
     file: helpers/pay_invoice.js
 
-# ReceiveScreen offers "New Invoice" alongside Copy once generated; payment
-# arrival returns the app to a paid state. The BTC (native) balance line on
-# Home increasing is the narrative's assertion.
-- tapOn: "Cancel"
+# The receive sheet auto-dismisses when the payment lands.
+- tapOn:
+    text: "Cancel"
+    optional: true
 - extendedWaitUntil:
-    visible: "Receive"
+    visible: "Payment received.*"
     timeout: 60000
+- assertVisible: "Receive"
 # TODO(assertion): capture Home BTC balance before/after via copyTextFrom and
 # compare in a runScript, or assert on the incoming payment row in History.

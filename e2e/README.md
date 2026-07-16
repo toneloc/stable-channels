@@ -100,7 +100,7 @@ price, **1,000 sats = $1** — all conversions are checkable by eye.
 | Lightning receive (Step 4) | $10 | |
 | Lightning send (Step 6) | 5,000 sats ($5) | keep under native so the base run doesn't dip into USD; run variant b) above native for the overflow assertion |
 | Onchain send (Step 7) | $5 | |
-| Trades (Steps 2/8) | $25 each way | |
+| Trades (Steps 2/8) | $25 sell, $20 buy-back | buy is capped at the stable position; the sell nets $24.75 after fee |
 | Stability move (Step 3) | ±2% → $102,000 / $98,000 | ~$1.70 settlement on the $85 target; clears the $0.25 AND 0.1% thresholds |
 
 ## Conventions
