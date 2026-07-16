@@ -14,6 +14,11 @@ dir_path = "/data/ldk-server"
 level = "Debug"
 log_to_file = true
 
+[tls]
+# Include the docker-network hostname in the cert SAN so sc-lsp's gRPC
+# connection to "ldk-server:3536" passes hostname validation.
+hosts = ["ldk-server"]
+
 # Chain source: the local esplora (electrs) — do NOT also set [bitcoind]/[electrum].
 [esplora]
 server_url = "http://electrs:3000"

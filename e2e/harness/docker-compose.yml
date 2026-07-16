@@ -28,9 +28,30 @@ services:
     volumes:
       - bitcoind-data:/home/bitcoin/.bitcoin
 
+  # One-shot: regtest starts at height 0 and electrs won't serve its HTTP API
+  # until a block exists — mine the first 101 (mature coinbase) at boot.
+  chain-init:
+    image: bitcoin/bitcoin:27.1
+    depends_on: [bitcoind]
+    restart: "no"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        until bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc getblockchaininfo; do sleep 1; done
+        bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc createwallet miner 2>/dev/null || \
+          bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc loadwallet miner 2>/dev/null || true
+        ADDR=$$(bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc -rpcwallet=miner getnewaddress)
+        HEIGHT=$$(bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc getblockcount)
+        if [ "$$HEIGHT" -lt 101 ]; then
+          bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc generatetoaddress $$((101 - HEIGHT)) "$$ADDR"
+        fi
+        echo "chain-init done at height $$(bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc getblockcount)"
+
   electrs:
     image: ghcr.io/vulpemventures/electrs:latest
     depends_on: [bitcoind]
+    restart: unless-stopped
     command:
       - -vvv
       - --network=regtest
@@ -50,6 +71,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.ldk-server
     depends_on: [electrs]
+    restart: unless-stopped   # retries until electrs serves (post chain-init)
     command: ["/usr/local/bin/ldk-server", "/etc/ldk-server/config.toml"]
     ports:
       - "9735:9735"     # lightning p2p — the wallets + harness dial this
@@ -63,11 +85,14 @@ services:
       context: ../..            # repo root — builds server/stable-channels-lsp
       dockerfile: e2e/harness/docker/Dockerfile.sc-lsp
     depends_on: [ldk-server]
+    restart: unless-stopped
     command: ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/config.toml"]
     ports:
       - "3002:3002"     # SC daemon REST — the wallets hit this
     volumes:
       - ./configs/sc-lsp.toml:/etc/sc-lsp/config.toml:ro
+      # sc-lsp reads ldk-server's config for connection defaults.
+      - ./configs/ldk-server.toml:/etc/ldk-server/config.toml:ro
       - sc-lsp-data:/data/stable-channels-lsp
       # Read ldk-server's auto-generated tls.crt + api_key.
       - ldk-server-data:/data/ldk-server:ro
@@ -77,6 +102,7 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on: [electrs, ldk-server]
+    restart: unless-stopped
     environment:
       HARNESS_LISTEN: 0.0.0.0:9737
       DATA_DIR: /data/harness
