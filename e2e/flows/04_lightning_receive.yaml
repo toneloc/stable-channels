@@ -4,7 +4,7 @@
 appId: com.stablechannels.app
 tags: [android, ios, receive]
 env:
-  HARNESS_API: "http://10.0.2.2:9737"
+  HARNESS_API: "http://localhost:9737"
 ---
 - launchApp
 - extendedWaitUntil:

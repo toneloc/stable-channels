@@ -118,6 +118,9 @@ services:
       - "9736:9736"     # counterparty p2p
     volumes:
       - harness-data:/data/harness
+      # Read ldk-server's TLS cert + api_key so /bootstrap can call its gRPC
+      # (OnchainReceive) to fund the LSP's JIT wallet.
+      - ldk-server-data:/data/ldk-server:ro
 
 volumes:
   bitcoind-data:

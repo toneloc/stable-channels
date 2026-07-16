@@ -11,7 +11,8 @@ tags: [android, keys]
 env:
   RESTORE_SEED: ""          # pass with -e RESTORE_SEED="word1 ... word12"
 ---
-- clearState                # simulate a fresh device
+# NOTE: no clearState (would wipe test_config.json too) — run ../run.sh
+# with RESET=1 to prepare fresh state before this flow.
 - launchApp
 
 # TODO(navigation): reach the restore entry point (Settings -> Backup ->

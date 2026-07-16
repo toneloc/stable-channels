@@ -7,6 +7,9 @@ description = "Regtest control harness for Stable Channels E2E flows: embeds the
 [dependencies]
 # Same rev the wallet pins, so lightning protocol behavior matches.
 ldk-node = { git = "https://github.com/lightningdevkit/ldk-node", rev = "47dad6d909af0fbb53e76d07740c04df5abdde3b" }
+# Same rev as server/stable-channels-lsp — used to ask the LSP for an onchain
+# address so /bootstrap can fund its JIT-channel wallet.
+ldk-server-client = { git = "https://github.com/lightningdevkit/ldk-server", rev = "0e4434d7083ae9926c73f26e7cd52f00bde44d37", features = ["serde"], default-features = false }
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

@@ -4,9 +4,11 @@
 appId: com.stablechannels.app
 tags: [android, ios, onboard]
 env:
-  HARNESS_API: "http://10.0.2.2:9737"
+  HARNESS_API: "http://localhost:9737"
 ---
-- clearState          # fresh install: wipes app data, new wallet on launch
+# NOTE: no clearState here — pm clear would also wipe test_config.json and
+# relaunch the app against MAINNET. Fresh state is prepared by ../run.sh
+# (pm clear + re-push config) before maestro starts.
 - launchApp
 
 # TODO(navigation): if a first-run onboarding screen exists (create-wallet /
@@ -33,9 +35,14 @@ env:
 - runScript:
     file: helpers/pay_invoice.js
 
-# JIT channel opens and the payment lands. Trade buttons enable once the
-# channel is ready — that is the strongest "onboarded" signal on Home.
-- tapOn: "Cancel"
+# The app auto-dismisses the receive sheet when the payment lands — Cancel
+# only needs tapping if we beat the dismissal.
+- tapOn:
+    text: "Cancel"
+    optional: true
+
+# Onboarded: payment banner + trade buttons enabled on Home.
 - extendedWaitUntil:
-    visible: "USD → BTC"
+    visible: "Payment received.*"
     timeout: 120000
+- assertVisible: "USD → BTC"

@@ -3,7 +3,7 @@
 appId: com.stablechannels.app
 tags: [android, onchain, receive]
 env:
-  HARNESS_API: "http://10.0.2.2:9737"
+  HARNESS_API: "http://localhost:9737"
   SEND_SATS: "100000"
   MINE_BLOCKS: "6"
 ---

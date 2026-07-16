@@ -7,6 +7,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Resolve adb even when it's not on PATH.
+if ! command -v adb > /dev/null 2>&1; then
+    ADB="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb"
+else
+    ADB=$(command -v adb)
+fi
+
 LSP_NODE_ID="${1:-}"
 if [ -z "$LSP_NODE_ID" ] && [ -f .env ]; then
     LSP_NODE_ID=$(grep '^LSP_NODE_ID=' .env | cut -d= -f2)
@@ -31,7 +38,7 @@ cat > "$TMP" << EOF
 EOF
 
 DEST="/sdcard/Android/data/com.stablechannels.app/files/test_config.json"
-adb push "$TMP" "$DEST"
+"$ADB" push "$TMP" "$DEST"
 rm -f "$TMP"
 echo "pushed test config (LSP ${LSP_NODE_ID:0:16}...) -> $DEST"
 echo "restart the app for it to take effect:  adb shell am force-stop com.stablechannels.app"
