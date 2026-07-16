@@ -764,8 +764,7 @@ class AppState {
     /// `statusMessage` would otherwise stay frozen on the last foreground-processed payment.
     private func refreshLatestPaymentStatus() {
         guard let db = databaseService,
-              let recent = try? db.getRecentPayments(limit: 10),
-              let latest = recent.first(where: { $0.direction == "received" }) else { return }
+              let latest = db.latestReceivedPayment() else { return }
         if let usd = latest.amountUSD {
             statusMessage = "Received \(usd.usdFormatted)"
         } else if let usd = usdValue(sats: latest.amountSats, rowPrice: latest.btcPrice) {

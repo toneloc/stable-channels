@@ -2,11 +2,11 @@ import SwiftUI
 
 struct HistoryView: View {
     @Environment(AppState.self) private var appState
+    @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
     @State private var trades: [TradeRecord] = []
     @State private var payments: [PaymentRecord] = []
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
-    @State private var selectedPayment: PaymentRecord?
 
     var body: some View {
         NavigationStack {
@@ -62,7 +62,10 @@ struct HistoryView: View {
             .sheet(item: $selectedTrade) { trade in
                 TradeDetailView(trade: trade)
             }
-            .sheet(item: $selectedPayment) { payment in
+            .sheet(item: Binding(
+                get: { paymentCoordinator.selectedPayment },
+                set: { paymentCoordinator.selectedPayment = $0 }
+            )) { payment in
                 PaymentDetailView(payment: payment, displayPrice: historyDisplayPrice)
             }
         }
@@ -87,7 +90,7 @@ struct HistoryView: View {
 
     private var paymentsList: some View {
         ForEach(payments) { payment in
-            Button { selectedPayment = payment } label: {
+            Button { paymentCoordinator.open(payment) } label: {
                 PaymentRowView(payment: payment, displayPrice: historyDisplayPrice)
             }
             .tint(.primary)
