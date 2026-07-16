@@ -112,6 +112,7 @@ fn main() {
         .route("/feeds/coinbase", get(feed_coinbase))
         .route("/feeds/blockchain", get(feed_blockchain))
         .route("/bootstrap", post(bootstrap))
+        .route("/audit-tail", get(audit_tail))
         .route("/info", get(info))
         .with_state(state);
 
@@ -344,6 +345,20 @@ async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> 
     })
     .await
     .map_err(err500)?
+}
+
+/// GET /audit-tail?n=50 — last N lines of the SC daemon's audit log (mounted
+/// read-only), so flows can assert LSP-side effects (settlements, trades).
+async fn audit_tail(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Resp {
+    let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let path = env_or("SC_LSP_AUDIT", "/data/sc-lsp/audit_log.txt");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| err500(format!("read {path}: {e}")))?;
+    let lines: Vec<&str> = text.lines().rev().take(n).collect();
+    let lines: Vec<&str> = lines.into_iter().rev().collect();
+    Ok(Json(json!({ "lines": lines })))
 }
 
 /// GET /info

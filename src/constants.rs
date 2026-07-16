@@ -139,6 +139,36 @@ impl PriceFeedConfig {
 }
 
 pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
+    // E2E hook: SC_PRICE_FEED_BASE replaces every feed with the regtest
+    // harness's /feeds/* mirrors (same JSON shapes as the real feeds), so
+    // tests can move the price deterministically. Unset in production.
+    if let Ok(base) = std::env::var("SC_PRICE_FEED_BASE") {
+        if !base.is_empty() {
+            return vec![
+                PriceFeedConfig::new("Bitstamp", &format!("{base}/feeds/bitstamp"), vec!["last"]),
+                PriceFeedConfig::new(
+                    "CoinGecko",
+                    &format!("{base}/feeds/coingecko"),
+                    vec!["bitcoin", "usd"],
+                ),
+                PriceFeedConfig::new(
+                    "Kraken",
+                    &format!("{base}/feeds/kraken"),
+                    vec!["result", "XXBTZUSD", "c"],
+                ),
+                PriceFeedConfig::new(
+                    "Coinbase",
+                    &format!("{base}/feeds/coinbase"),
+                    vec!["data", "amount"],
+                ),
+                PriceFeedConfig::new(
+                    "Blockchain.com",
+                    &format!("{base}/feeds/blockchain"),
+                    vec!["USD", "last"],
+                ),
+            ];
+        }
+    }
     vec![
         PriceFeedConfig::new(
             "Bitstamp",

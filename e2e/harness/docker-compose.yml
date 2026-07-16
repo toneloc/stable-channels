@@ -86,6 +86,10 @@ services:
       dockerfile: e2e/harness/docker/Dockerfile.sc-lsp
     depends_on: [ldk-server]
     restart: unless-stopped
+    environment:
+      # E2E: LSP prices from the harness mock instead of the real feeds, so
+      # flow 03 can move the price for BOTH sides of the stability dance.
+      SC_PRICE_FEED_BASE: http://harness:9737
     command: ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/config.toml"]
     ports:
       - "3002:3002"     # SC daemon REST — the wallets hit this
@@ -121,6 +125,8 @@ services:
       # Read ldk-server's TLS cert + api_key so /bootstrap can call its gRPC
       # (OnchainReceive) to fund the LSP's JIT wallet.
       - ldk-server-data:/data/ldk-server:ro
+      # Read sc-lsp's audit log for /audit-tail (flow assertions).
+      - sc-lsp-data:/data/sc-lsp:ro
 
 volumes:
   bitcoind-data:

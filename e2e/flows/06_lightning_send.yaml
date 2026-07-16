@@ -35,11 +35,14 @@ env:
           text: "Send"
           index: 1
 
-# SendScreen success state ends with a Done button (SendScreen.kt:344)
+# Success: Android shows a Done screen; iOS auto-dismisses to Home with a
+# "Payment confirmed" capsule (races the Done screen if it appears at all).
 - extendedWaitUntil:
-    visible: "Done"
+    visible: "(Done|Payment confirmed.*)"
     timeout: 60000
-- tapOn: "Done"
+- tapOn:
+    text: "Done"
+    optional: true
 
 # TODO(assertion, overflow): to test the BTC-first/overflow-from-USD ordering
 # (diff-findings.txt Finding on reconcileOutgoing), run this flow twice:
