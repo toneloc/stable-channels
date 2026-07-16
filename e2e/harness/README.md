@@ -56,10 +56,26 @@ curl localhost:9737/info              # sanity: channel_ready: true
   vulpemventures/electrs flag names; whether ldk-server logs its node id in
   the grep-able form above (fallback: `ldk-server-cli` or the gRPC GetNodeInfo).
 
+## Android test overrides (done)
+
+Android debug builds read an optional `test_config.json` from the app's
+external files dir (`util/TestOverrides.kt`; release builds never read it).
+After the stack is up and `.env` has `LSP_NODE_ID`:
+
+```bash
+./push-test-config.sh          # writes + adb-pushes the config
+adb shell am force-stop com.stablechannels.app   # restart to apply
+```
+
+This flips network to regtest (no RGS; P2P gossip), points chain source at
+electrs, LSP at ldk-server, and all five price feeds at `/feeds/*`.
+`/bootstrap` pushes half the channel to the LSP at open so BOTH directions
+have liquidity from the start (app->LSP->counterparty needs LSP-side balance).
+
 ## Known gaps (blocking full E2E, tracked in e2e/README.md)
 
-1. **App test flavor** — the wallets hardcode mainnet LSP/esplora/price URLs
-   in `Constants`; they need a debug flavor reading the table above.
+1. **iOS + desktop test overrides** — Android is done (above); the other two
+   platforms still hardcode mainnet endpoints.
 2. **LSP price injection** — the daemon prices via the shared
    `stable_channels::price_feeds` hardcoded feed list. It needs a small hook
    (env var or config key overriding the feed URLs) to follow `/price`.

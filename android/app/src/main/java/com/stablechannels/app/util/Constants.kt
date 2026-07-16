@@ -9,19 +9,26 @@ object Constants {
     const val TRADE_MESSAGE_TYPE = "TRADE_V1"
     const val SYNC_MESSAGE_TYPE = "SYNC_V1"
 
-    const val DEFAULT_NETWORK = "bitcoin"
+    // Overridable via TestOverrides (debug builds only) for E2E regtest runs.
+    val DEFAULT_NETWORK: String get() = TestOverrides.network ?: "bitcoin"
     const val DEFAULT_USER_ALIAS = "user"
     const val DEFAULT_USER_PORT = 9736
     const val DEFAULT_LSP_ALIAS = "lsp"
     const val DEFAULT_LSP_PORT = 9735
 
-    const val LSP_PUSH_REGISTER_URL = "https://stablechannels.com/api/register-push"
-    const val LSP_CHANNEL_EXISTS_URL = "https://stablechannels.com/api/channel-exists"
+    val LSP_PUSH_REGISTER_URL: String get() =
+        TestOverrides.pushRegisterUrl ?: "https://stablechannels.com/api/register-push"
+    val LSP_CHANNEL_EXISTS_URL: String get() =
+        TestOverrides.channelExistsUrl ?: "https://stablechannels.com/api/channel-exists"
 
-    const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
-    const val FALLBACK_CHAIN_URL = "https://mempool.space/api"
-    const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
-    const val DEFAULT_LSP_ADDRESS = "stablechannels.com:9735"
+    val PRIMARY_CHAIN_URL: String get() =
+        TestOverrides.primaryChainUrl ?: "https://blockstream.info/api"
+    val FALLBACK_CHAIN_URL: String get() =
+        TestOverrides.fallbackChainUrl ?: "https://mempool.space/api"
+    val DEFAULT_LSP_PUBKEY: String get() =
+        TestOverrides.lspPubkey ?: "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
+    val DEFAULT_LSP_ADDRESS: String get() =
+        TestOverrides.lspAddress ?: "stablechannels.com:9735"
 
     const val PRICE_CACHE_REFRESH_SECS: Long = 5
     const val PRICE_FETCH_RETRY_DELAY_MS: Long = 300
@@ -44,7 +51,10 @@ object Constants {
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000
 
-    val DEFAULT_PRICE_FEEDS = listOf(
+    val DEFAULT_PRICE_FEEDS: List<PriceFeedConfig> get() =
+        TestOverrides.priceFeedBase?.let { TestOverrides.priceFeeds(it) } ?: PROD_PRICE_FEEDS
+
+    private val PROD_PRICE_FEEDS = listOf(
         PriceFeedConfig("Bitstamp", "https://www.bitstamp.net/api/v2/ticker/btc{currency_lc}/", listOf("last")),
         PriceFeedConfig("CoinGecko", "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies={currency_lc}", listOf("bitcoin", "usd")),
         PriceFeedConfig("Kraken", "https://api.kraken.com/0/public/Ticker?pair=XBT{currency}", listOf("result", "XXBTZUSD", "c")),

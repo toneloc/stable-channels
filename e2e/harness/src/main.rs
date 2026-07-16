@@ -250,7 +250,11 @@ async fn feed_blockchain(State(st): State<Arc<AppState>>) -> Json<Value> {
 /// to the LSP so /pay has a route. Idempotent-ish: skips steps already done.
 async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
     let channel_sats = body["channel_sats"].as_u64().unwrap_or(5_000_000);
-    let push_msat = body["push_msat"].as_u64();
+    // Default: push HALF the channel to the LSP at open, so the LSP has
+    // outbound liquidity toward the counterparty from the start. Without it,
+    // app -> LSP -> counterparty payments (Step 6) have no route on a fresh
+    // harness until something first flows counterparty -> LSP.
+    let push_msat = Some(body["push_msat"].as_u64().unwrap_or(channel_sats / 2 * 1000));
     let lsp_id = st.lsp_node_id.clone().ok_or_else(|| bad_req("LSP_NODE_ID env not set"))?;
     let st2 = st.clone();
     tokio::task::spawn_blocking(move || {
