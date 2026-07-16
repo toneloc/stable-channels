@@ -86,8 +86,10 @@ class AppState(private val context: Context) : ViewModel() {
     val lastReceiveTxid: StateFlow<String?> get() = _lastReceiveTxid
 
 
-    private val _spendableOnchainSats = MutableStateFlow(0L)
-    val spendableOnchainSats: StateFlow<Long> get() = _spendableOnchainSats
+    private val _spendableOnchainSats = MutableStateFlow(
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).getLong("cached_spendable_sats", 0L)
+    )
+    val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
 
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
@@ -251,6 +253,12 @@ class AppState(private val context: Context) : ViewModel() {
                         isChannelClosing = true
                     }
                     detectOnchainDeposit()
+                    
+                    // Resume pending deposit polling if an unconfirmed deposit exists from a previous session
+                    if (_onchainBalanceSats.value > 0L && _spendableOnchainSats.value == 0L) {
+                        startPendingDepositPolling()
+                    }
+                    
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
@@ -1236,9 +1244,31 @@ class AppState(private val context: Context) : ViewModel() {
     private fun startPendingDepositPolling() {
         pendingDepositJob?.cancel()
         pendingDepositJob = viewModelScope.launch(Dispatchers.IO) {
+            // Attempt to resolve txid if we have an address but no txid yet (handles app restarts)
+            val address = _onchainReceiveAddress.value
+            if (address != null && _lastReceiveTxid.value == null) {
+                val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
+                val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
+                if (txid != null) {
+                    _lastReceiveTxid.value = txid
+                    context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                        .putString("last_receive_txid", txid).apply()
+                }
+            }
+
             while (isActive && _spendableOnchainSats.value == 0L && _onchainBalanceSats.value > 0) {
                 delay(10_000)
                 refreshBalances()
+            }
+            
+            // Deposit confirmed — aggressively clear stale txid and address from state and cache
+            if (isActive && _spendableOnchainSats.value > 0L) {
+                _lastReceiveTxid.value = null
+                _onchainReceiveAddress.value = null
+                context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                    .remove("last_receive_txid")
+                    .remove("onchain_receive_address")
+                    .apply()
             }
         }
     }
@@ -1431,6 +1461,7 @@ class AppState(private val context: Context) : ViewModel() {
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putLong("cached_lightning_sats", lightning)
             .putLong("cached_onchain_sats", onchain)
+            .putLong("cached_spendable_sats", spendable)
             .putLong("cached_native_sats", native)
             .apply()
     }
