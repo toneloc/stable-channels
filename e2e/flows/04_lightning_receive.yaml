@@ -17,7 +17,7 @@ env:
 - tapOn: "Generate Invoice"
 
 - extendedWaitUntil:
-    visible: "Copy"
+    visible: "(Copy|Your Lightning Invoice)"   # Android button / iOS label
     timeout: 20000
 - copyTextFrom:
     text: "ln.*"
@@ -26,10 +26,10 @@ env:
 
 # The receive sheet auto-dismisses when the payment lands.
 - tapOn:
-    text: "Cancel"
+    text: "(Cancel|Done)"
     optional: true
 - extendedWaitUntil:
-    visible: "Payment received.*"
+    visible: "(Payment received|Received).*"
     timeout: 60000
 - assertVisible: "Receive"
 # TODO(assertion): capture Home BTC balance before/after via copyTextFrom and

@@ -31,7 +31,7 @@ env:
 - tapOn: "Generate Invoice"
 
 - extendedWaitUntil:
-    visible: "Copy"
+    visible: "(Copy|Your Lightning Invoice)"   # Android button / iOS label
     timeout: 20000
 - copyTextFrom:
     text: "ln.*"      # the truncated invoice text element
@@ -46,6 +46,6 @@ env:
 
 # Onboarded: payment banner + trade buttons enabled on Home.
 - extendedWaitUntil:
-    visible: "Payment received.*"
+    visible: "(Payment received|Received).*"   # Android / iOS copy
     timeout: 120000
 - assertVisible: "USD → BTC"

@@ -15,13 +15,25 @@ env:
     file: helpers/create_invoice.js
 
 - tapOn: "Send"
-- tapOn: "Lightning invoice or Onchain address"
+- tapOn: "(Lightning invoice or Onchain address|lnbc1\\.\\.\\.)"   # Android label / iOS placeholder
 - inputText: ${output.invoice}
-- hideKeyboard
-# Two "Send" texts exist here (sheet title + button) — index 1 = the button.
-- tapOn:
-    text: "Send"
-    index: 1
+# Send button: Android has two "Send" texts (title + button, index 1);
+# iOS button is "Send Payment". hideKeyboard is unreliable on iOS sims.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+      - tapOn:
+          text: "Send"
+          index: 1
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          text: "Send"
+          index: 1
 
 # SendScreen success state ends with a Done button (SendScreen.kt:344)
 - extendedWaitUntil:

@@ -10,13 +10,26 @@ tags: [android, ios, trade]
     timeout: 30000
 - tapOn: "BTC → USD"
 
-- assertVisible: "Amount (USD)"
+- assertVisible: "(Amount \\(USD\\)|How much BTC to convert to USD\\?)"   # Android / iOS copy
 - tapOn: "0.00"
 - inputText: "25"
 - tapOn: "Continue"
 
-- assertVisible: "Confirm Order"
-- tapOn: "Confirm Order"
+- assertVisible: "(Confirm Order|Confirm BTC → USD)"
+# Confirm button: Android "Confirm Order"; iOS button is labeled "BTC → USD"
+# (which also matches the sheet title -> index 1).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Confirm Order"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          text: "BTC → USD"
+          index: 1
 
 # SellScreen success step (SellScreen.kt:~255)
 - extendedWaitUntil:
