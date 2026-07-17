@@ -2,11 +2,11 @@ import SwiftUI
 
 struct HistoryView: View {
     @Environment(AppState.self) private var appState
-    @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
     @State private var trades: [TradeRecord] = []
     @State private var payments: [PaymentRecord] = []
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
+    @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
 
     var body: some View {
         NavigationStack {
@@ -18,6 +18,11 @@ struct HistoryView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding()
+                .onChange(of: paymentCoordinator.selectedPayment) { _, newValue in
+                    if let payment = newValue {
+                        selectedSegment = payment.paymentType == "trade" ? 0 : 1
+                    }
+                }
 
                 // List
                 List {
