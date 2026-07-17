@@ -141,10 +141,16 @@ impl PriceFeedConfig {
 pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
     // E2E hook: SC_PRICE_FEED_BASE replaces every feed with the regtest
     // harness's /feeds/* mirrors (same JSON shapes as the real feeds), so
-    // tests can move the price deterministically. Unset in production.
-    if let Ok(base) = std::env::var("SC_PRICE_FEED_BASE") {
-        if !base.is_empty() {
-            return vec![
+    // tests can move the price deterministically. Price feeds drive settlement,
+    // so this is double-gated: it activates ONLY when the explicit E2E flag
+    // SC_E2E=1 is ALSO set. A prod daemon that accidentally inherits
+    // SC_PRICE_FEED_BASE (without SC_E2E) keeps the real feeds. Both unset in
+    // production.
+    let e2e_enabled = std::env::var("SC_E2E").map(|v| v == "1").unwrap_or(false);
+    if e2e_enabled {
+        if let Ok(base) = std::env::var("SC_PRICE_FEED_BASE") {
+            if !base.is_empty() {
+                return vec![
                 PriceFeedConfig::new("Bitstamp", &format!("{base}/feeds/bitstamp"), vec!["last"]),
                 PriceFeedConfig::new(
                     "CoinGecko",
@@ -166,7 +172,8 @@ pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
                     &format!("{base}/feeds/blockchain"),
                     vec!["USD", "last"],
                 ),
-            ];
+                ];
+            }
         }
     }
     vec![

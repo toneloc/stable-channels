@@ -24,7 +24,7 @@ services:
       - -blockfilterindex=1
       - -peerblockfilters=1
     ports:
-      - "18443:18443"   # RPC (regtest)
+      - "127.0.0.1:18443:18443"   # RPC (regtest) — localhost-only
     volumes:
       - bitcoind-data:/home/bitcoin/.bitcoin
 
@@ -62,7 +62,7 @@ services:
       - --cors=*
       - --jsonrpc-import
     ports:
-      - "30000:3000"    # esplora HTTP — the apps' chain source
+      - "127.0.0.1:30000:3000"    # esplora HTTP — the apps' chain source
     volumes:
       - electrs-data:/data
 
@@ -74,8 +74,8 @@ services:
     restart: unless-stopped   # retries until electrs serves (post chain-init)
     command: ["/usr/local/bin/ldk-server", "/etc/ldk-server/config.toml"]
     ports:
-      - "9735:9735"     # lightning p2p — the wallets + harness dial this
-      - "3536:3536"     # gRPC (sc-lsp uses the docker network; host port for debugging)
+      - "127.0.0.1:9735:9735"     # lightning p2p — the wallets + harness dial this
+      - "127.0.0.1:3536:3536"     # gRPC (sc-lsp uses the docker network; host port for debugging)
     volumes:
       - ./configs/ldk-server.toml:/etc/ldk-server/config.toml:ro
       - ldk-server-data:/data/ldk-server
@@ -89,10 +89,13 @@ services:
     environment:
       # E2E: LSP prices from the harness mock instead of the real feeds, so
       # flow 03 can move the price for BOTH sides of the stability dance.
+      # Double-gated in src/constants.rs: SC_PRICE_FEED_BASE only takes effect
+      # when SC_E2E=1 is ALSO set, so a prod daemon can't inherit mock feeds.
+      SC_E2E: "1"
       SC_PRICE_FEED_BASE: http://harness:9737
     command: ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/config.toml"]
     ports:
-      - "3002:3002"     # SC daemon REST — the wallets hit this
+      - "127.0.0.1:3002:3002"     # SC daemon REST — the wallets hit this
     volumes:
       - ./configs/sc-lsp.toml:/etc/sc-lsp/config.toml:ro
       # sc-lsp reads ldk-server's config for connection defaults.
@@ -118,8 +121,8 @@ services:
       LSP_NODE_ID: ${LSP_NODE_ID:-}
       LSP_P2P_ADDR: ldk-server:9735
     ports:
-      - "9737:9737"     # control API — Maestro helpers hit this
-      - "9736:9736"     # counterparty p2p
+      - "127.0.0.1:9737:9737"     # control API — Maestro helpers hit this
+      - "127.0.0.1:9736:9736"     # counterparty p2p
     volumes:
       - harness-data:/data/harness
       # Read ldk-server's TLS cert + api_key so /bootstrap can call its gRPC

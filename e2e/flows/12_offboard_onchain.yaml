@@ -10,6 +10,16 @@ env:
 ---
 - launchApp
 
+# Confirm the pending channel-close output BEFORE sweeping so Send Max spends
+# the full balance in a single tx (regtest doesn't auto-mine; an unconfirmed or
+# late-confirming output otherwise lingers as a non-zero remainder and makes the
+# final settle-to-zero slow/variable).
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    visible: "Send"      # home reachable + wallet synced to the confirmed balance
+    timeout: 30000
+
 - runScript:
     file: helpers/create_address.js
 
@@ -50,9 +60,10 @@ env:
     when:
       platform: Android
     commands:
-      # Balance drained to ~zero. Accept sub-dollar dust: Send Max leaves the
-      # onchain miner fee (and any late-confirming output) behind, so a real
-      # sweep of a ~$180 balance settles at "$0.00"–"$0.xx", not exactly $0.
+      # Balance drained to ~zero. Accept sub-dollar dust ($0.00–$0.xx: Send Max
+      # can leave the onchain miner fee / a late-confirming output). The sweep
+      # confirmation + wallet re-sync is slow and variable on regtest, so allow
+      # a generous window before settling to zero.
       - extendedWaitUntil:
           visible: "\\$0(\\.\\d\\d)?"
-          timeout: 180000
+          timeout: 240000
