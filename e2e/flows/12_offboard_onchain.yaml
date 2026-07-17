@@ -50,6 +50,9 @@ env:
     when:
       platform: Android
     commands:
+      # Balance drained to ~zero. Accept sub-dollar dust: Send Max leaves the
+      # onchain miner fee (and any late-confirming output) behind, so a real
+      # sweep of a ~$180 balance settles at "$0.00"–"$0.xx", not exactly $0.
       - extendedWaitUntil:
-          visible: "\\$0(\\.00)?"
-          timeout: 120000
+          visible: "\\$0(\\.\\d\\d)?"
+          timeout: 180000

@@ -1,0 +1,4 @@
+
+# E2E iOS build DerivedData
+.dd-ios/
+.last-run.log

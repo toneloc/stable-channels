@@ -12,7 +12,7 @@ tags: [android, ios, trade]
 
 - assertVisible: "(Amount \\(USD\\)|How much BTC to convert to USD\\?)"   # Android / iOS copy
 - tapOn: "0.00"
-- inputText: "25"
+- inputText: "75"      # large stable position — sized so a +1% move in flow 03 clears the $0.25 settlement threshold ($0.75 drift)
 - tapOn: "Continue"
 
 - assertVisible: "(Confirm Order|Confirm BTC → USD)"

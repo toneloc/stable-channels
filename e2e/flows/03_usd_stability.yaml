@@ -1,31 +1,36 @@
 # Step 3 — USD Stability
 # "Settlement payments occur."
-# The harness moves the mocked price +2%; the app's stability tick (60s
+# The harness moves the mocked price +1%; the app's stability tick (60s
 # interval, 120s cooldown, 0.1% AND $0.25 thresholds) must send a settlement
 # keysend to the LSP. Asserted SERVER-SIDE via the LSP audit log — the one
 # check the demo videos can't make.
 #
-# Precondition: run right after 02 (stable position ~$24.75; +2% drift =
-# ~$0.49, clearing both thresholds). A tiny stable position won't settle.
+# Both sides must agree on price: the harness /feeds/* drive BOTH the app
+# (SC_PRICE_FEED_BASE / TestOverrides) and the LSP (SC_PRICE_FEED_BASE env in
+# docker-compose). The LSP image must be built WITH the constants.rs hook or
+# it prices from real feeds and the settlement books won't reconcile.
+#
+# Precondition: run right after 02 (stable position ~$75; +1% drift = ~$0.75,
+# clearing both thresholds — ~743 sats). A small stable position won't settle.
 appId: com.stablechannels.app
 tags: [android, ios, stability]
 env:
   HARNESS_API: "http://localhost:9737"
-  PRICE_USD: "102000"       # +2% over the canonical 100000
+  PRICE_USD: "101000"       # +1% over the canonical 100000
 ---
 - launchApp
 - extendedWaitUntil:
     visible: "USD → BTC"
     timeout: 30000
 
-# Price up 2%: the user's fixed-sats backing is now worth more than par ->
-# the APP owes the LSP a stability payment.
+# Price up 1%: the user's fixed-sats backing ($75 -> ~$75.75) is now worth
+# more than par -> the APP owes the LSP a ~743-sat stability payment.
 - runScript:
     file: helpers/set_price_and_mark.js
 
 # App must see the new price (feeds refresh every ~5s).
 - extendedWaitUntil:
-    visible: "\\$102,000.*"
+    visible: "\\$101,000.*"
     timeout: 60000
 
 # Wait for the settlement to land on the LSP (polls /audit-tail).
@@ -34,8 +39,12 @@ env:
       SETTLEMENT_AFTER_ISO: ${output.settlementAfterIso}
     file: helpers/assert_settlement.js
 
-# Restore the canonical price so later flows keep round math.
+# Restore the canonical price so later flows keep round math. Force 100000
+# explicitly — the flow-level PRICE_USD (101000) would otherwise leak in and
+# make this a no-op (set_price.js reads PRICE_USD when present).
 - runScript:
+    env:
+      PRICE_USD: "100000"
     file: helpers/set_price.js
 - extendedWaitUntil:
     visible: "\\$100,000.*"

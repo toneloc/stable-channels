@@ -6,55 +6,57 @@ simulator. Flow files map 1:1 to the demo-script steps.
 
 ## Quickstart
 
-### Android (proven — 7 flows green)
+One command builds the regtest backend, builds + installs the app, preps the
+device, and runs the full lifecycle with a live checkmarked scoreboard:
 
 ```bash
-# 1. Harness (skip if running — check: curl -s localhost:9737/info)
-cd e2e/harness && docker compose up -d
-
-# 2. Emulator + app
-emulator -avd Medium_Phone_API_36.1 &
-(cd android && ./gradlew :app:installDebug)
-
-# 3. The 7 green flows as one fresh lifecycle
-#    (run.sh wipes the wallet, re-pushes the regtest config, onboards new):
 cd e2e
-./run.sh flows/01_onboard_lightning.yaml flows/02_btc_to_usd.yaml \
-         flows/04_lightning_receive.yaml flows/05_onchain_receive.yaml \
-         flows/06_lightning_send.yaml flows/07_onchain_send.yaml \
-         flows/08_usd_to_btc.yaml
-
-# One flow, keeping current wallet state:
-RESET=0 ./run.sh flows/02_btc_to_usd.yaml
+make ios         # full lifecycle on the iOS simulator
+make android     # full lifecycle on the Android emulator
 ```
+
+Backend-only helpers, and running a subset of flows:
+
+```bash
+make up          # build + start the docker backend, bootstrap the channel
+make down        # stop the backend (keeps volumes)
+make clean       # stop AND wipe volumes (fresh chain/channel next time)
+make logs        # follow backend logs
+make help        # list targets
+
+# A subset (state still carries across the listed flows):
+make ios FLOWS="01_onboard_lightning 02_btc_to_usd 03_usd_stability"
+```
+
+> **Why not `docker compose up ios`?** Device tests can't run inside Docker — a
+> simulator needs macOS+Xcode and the emulator needs the host. Docker hosts only
+> the backend (bitcoind, electrs, ldk-server, sc-lsp, harness); Maestro drives
+> the device from the host. `make ios`/`make android` orchestrate both halves.
 
 Screenshots + logs land in `~/.maestro/tests/<timestamp>/`;
 `maestro record <flow>` produces an mp4.
 
-Do NOT run bare `./run.sh` (whole folder) yet: flow 09 stops the suite at its
-navigation TODO, and flow 03 leaves the mock price at $102k.
+The runner reset-once-then-carry-state model means 01 onboards, 02 trades on
+that state, 03 settles, etc. `make ios`/`make android` handle device reset,
+so don't add `clearState` to a flow (it wipes the regtest `test_config.json`
+and the app silently falls back to MAINNET).
 
-If a receive flow ever sticks with a pending payment, the LSP's onchain
-wallet may have depleted across many JIT opens — top it up:
-`curl -X POST localhost:9737/bootstrap -H 'Content-Type: application/json' -d '{}'`
+### What the targets do for you
 
-### iOS (override layer built; first shakedown pending)
+- **backend**: `docker compose up -d --build`, sync the LSP node id into
+  `.env`, `POST /bootstrap` (idempotent — funds the LSP + opens the 5M-sat
+  channel only if needed), pin the mock price at $100k, and confirm the LSP is
+  reading the mock feed (not real ~$64k).
+- **iOS**: incremental `xcodebuild` → **verify the override code is actually in
+  `StableChannels.debug.dylib`** (guards the stale-incremental-build trap that
+  silently ships a MAINNET app) → clean-rebuild only if the check fails → erase
+  the sim (pinned by UDID, since two "iPhone 17" sims exist) → install → push
+  config before first launch.
+- **Android**: boot the AVD if needed → `./gradlew installDebug` → `pm clear` +
+  push config.
 
-```bash
-cd ios/StableChannels
-xcodebuild -scheme StableChannels -sdk iphonesimulator -configuration Debug build
-xcrun simctl boot "iPhone 16" && open -a Simulator
-xcrun simctl install booted ~/Library/Developer/Xcode/DerivedData/StableChannels-*/Build/Products/Debug-iphonesimulator/StableChannels.app
-cd ../../e2e/harness && ./push-test-config-ios.sh
-xcrun simctl launch booted com.stablechannels.app
-# sanity: home screen must show $100,000 as the BTC price
-cd .. && maestro test flows/01_onboard_lightning.yaml
-```
-
-Maestro drives whichever device is booted — shut the Android emulator down
-first so it picks the simulator. Expect the first iOS run to surface selector
-mismatches on iOS-specific screens; fix them the same way the Android
-shakedown did (check `~/.maestro/tests/` screenshots).
+Flows 10/11 (backup/import) are excluded from the canonical list — they still
+have navigation TODOs. Add them explicitly via `FLOWS=` once wired.
 
 ## Status
 
