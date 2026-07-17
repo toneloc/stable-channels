@@ -87,6 +87,7 @@ struct PaymentRecord: Codable, Equatable, Identifiable {
     let txid: String?
     let address: String?
     let confirmations: UInt32
+    let txBlockHeight: UInt32?
 
     var date: Date {
         Date(timeIntervalSince1970: TimeInterval(createdAt))

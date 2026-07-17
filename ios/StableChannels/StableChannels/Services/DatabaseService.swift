@@ -79,6 +79,7 @@ class DatabaseService {
                 address TEXT,
                 confirmations INTEGER NOT NULL DEFAULT 0,
                 resolution_id INTEGER,
+                tx_block_height INTEGER,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
@@ -175,13 +176,19 @@ class DatabaseService {
             try execute("ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0")
         }
 
-        // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
+        // Migrate: add tx_block_height to payments if missing (on-chain confirmation tracking)
         let paymentsCols = try query("PRAGMA table_info(payments)")
         let paymentsColNames = paymentsCols.compactMap { $0[1] as? String }
+        if !paymentsColNames.contains("tx_block_height") {
+            try execute("ALTER TABLE payments ADD COLUMN tx_block_height INTEGER")
+        }
+
+        // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
         if !paymentsColNames.contains("resolution_id") {
             try execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
     }
+
 
     // MARK: - Channel Operations
 
@@ -574,7 +581,8 @@ class DatabaseService {
             feeMsat: UInt64(row[10] as? Int64 ?? 0),
             txid: row[11] as? String,
             address: row[12] as? String,
-            confirmations: UInt32(row[13] as? Int64 ?? 0)
+            confirmations: UInt32(row[13] as? Int64 ?? 0),
+            txBlockHeight: (row[14] as? Int64).flatMap(UInt32.init)
         )
     }
 
@@ -583,7 +591,7 @@ class DatabaseService {
     func latestReceivedPayment() -> PaymentRecord? {
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
-        counterparty, status, created_at, fee_msat, txid, address, confirmations
+        counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
         FROM payments
         WHERE direction = "received"
         AND NOT (payment_type = 'lightning' AND amount_msat < 1000)
@@ -593,10 +601,41 @@ class DatabaseService {
         return paymentRecord(from: row)
     }
 
+    func paymentsNeedingConfirmation(currentBlockHeight: UInt32) throws -> [PaymentRecord] {
+        let sql = """
+        SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+        counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
+        FROM payments
+        WHERE txid IS NOT NULL
+        AND txid != ''
+        AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
+        AND status != 'failed'
+        AND (tx_block_height IS NULL OR tx_block_height < ?)
+        ORDER BY created_at DESC
+        LIMIT 50
+        """
+        let rows = try query(sql, params: [.integer(Int64(currentBlockHeight))])
+        return rows.compactMap { row in
+            guard row.count >= 15 else { return nil }
+            return paymentRecord(from: row)
+        }
+    }
+
+    func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
+        let confs = min(
+            max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0),
+            3
+        )
+        try execute(
+            "UPDATE payments SET tx_block_height = ?, confirmations = ? WHERE id = ?",
+            params: [.integer(Int64(txBlockHeight)), .integer(Int64(confs)), .integer(paymentId)]
+        )
+    }
+
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {
         let sql = """
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
-                   counterparty, status, created_at, fee_msat, txid, address, confirmations
+                   counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
             FROM payments
             WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000)
             ORDER BY id DESC LIMIT ?
