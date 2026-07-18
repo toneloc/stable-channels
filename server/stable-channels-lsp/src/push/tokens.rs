@@ -1,8 +1,8 @@
 //! sqlite-backed device-token store for push notifications.
 
-use tracing::{error, info};
 use rusqlite::Connection;
 use std::path::Path;
+use tracing::{error, info};
 
 pub struct TokenInfo {
     pub token: String,
@@ -69,10 +69,29 @@ pub fn save_token(
         .as_secs() as i64;
 
     match conn.execute(
-        "INSERT OR REPLACE INTO push_tokens
+        "INSERT INTO push_tokens
          (device_token, platform, registered_at, node_id, environment, last_seen, verified)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![token, platform, now, node_id, environment, now, verified as i64],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(device_token) DO UPDATE SET
+            platform = excluded.platform,
+            registered_at = excluded.registered_at,
+            node_id = excluded.node_id,
+            environment = excluded.environment,
+            last_seen = excluded.last_seen,
+            verified = CASE
+                WHEN excluded.verified = 1 THEN 1
+                WHEN push_tokens.node_id = excluded.node_id THEN push_tokens.verified
+                ELSE 0
+            END",
+        rusqlite::params![
+            token,
+            platform,
+            now,
+            node_id,
+            environment,
+            now,
+            verified as i64
+        ],
     ) {
         Ok(_) => info!(
             "[push-tokens] Saved token for node {} ({}, verified={})",
@@ -204,9 +223,71 @@ mod tests {
         init_db(dir.path());
         let data_dir = dir.path().to_string_lossy().to_string();
         save_token(&data_dir, "owner-tok", "ios", "node-v", "production", true);
-        save_token(&data_dir, "attacker-tok", "ios", "node-v", "production", false);
+        save_token(
+            &data_dir,
+            "attacker-tok",
+            "ios",
+            "node-v",
+            "production",
+            false,
+        );
         let info = load_token_for_node(&data_dir, "node-v").expect("token must exist");
         assert_eq!(info.token, "owner-tok");
+    }
+
+    #[test]
+    fn unsigned_reregister_does_not_downgrade_same_verified_token() {
+        let dir = tempdir().unwrap();
+        init_db(dir.path());
+        let data_dir = dir.path().to_string_lossy().to_string();
+        save_token(&data_dir, "owner-tok", "ios", "node-v", "production", true);
+        save_token(&data_dir, "owner-tok", "ios", "node-v", "production", false);
+
+        let state = node_token_state(&data_dir, "node-v");
+        assert_eq!(state.active_token.as_deref(), Some("owner-tok"));
+        assert!(state.has_verified);
+
+        save_token(
+            &data_dir,
+            "attacker-tok",
+            "ios",
+            "node-v",
+            "production",
+            false,
+        );
+        let info = load_token_for_node(&data_dir, "node-v").expect("token must exist");
+        assert_eq!(info.token, "owner-tok");
+    }
+
+    #[test]
+    fn verified_status_does_not_carry_to_different_node_for_same_device_token() {
+        let dir = tempdir().unwrap();
+        init_db(dir.path());
+        let data_dir = dir.path().to_string_lossy().to_string();
+        save_token(
+            &data_dir,
+            "same-device-token",
+            "ios",
+            "old-node",
+            "production",
+            true,
+        );
+        save_token(
+            &data_dir,
+            "same-device-token",
+            "ios",
+            "new-node",
+            "production",
+            false,
+        );
+
+        let old_state = node_token_state(&data_dir, "old-node");
+        assert!(old_state.active_token.is_none());
+        assert!(!old_state.has_verified);
+
+        let new_state = node_token_state(&data_dir, "new-node");
+        assert_eq!(new_state.active_token.as_deref(), Some("same-device-token"));
+        assert!(!new_state.has_verified);
     }
 
     #[test]
