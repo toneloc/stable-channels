@@ -559,6 +559,40 @@ class DatabaseService {
         try? execute("DELETE FROM pending_stability_send WHERE id = 1")
     }
 
+    private func paymentRecord(from row: [Any?]) -> PaymentRecord {
+        PaymentRecord(
+            id: row[0] as? Int64 ?? 0,
+            paymentId: row[1] as? String,
+            paymentType: row[2] as? String ?? "manual",
+            direction: row[3] as? String ?? "",
+            amountMsat: UInt64(row[4] as? Int64 ?? 0),
+            amountUSD: row[5] as? Double,
+            btcPrice: row[6] as? Double,
+            counterparty: row[7] as? String,
+            status: row[8] as? String ?? "",
+            createdAt: row[9] as? Int64 ?? 0,
+            feeMsat: UInt64(row[10] as? Int64 ?? 0),
+            txid: row[11] as? String,
+            address: row[12] as? String,
+            confirmations: UInt32(row[13] as? Int64 ?? 0)
+        )
+    }
+
+    /// Returns the single most recent received payment, or nil if none exists.
+    /// Used by the home status bubble to navigate to payment details.
+    func latestReceivedPayment() -> PaymentRecord? {
+        let sql = """
+        SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+        counterparty, status, created_at, fee_msat, txid, address, confirmations
+        FROM payments
+        WHERE direction = "received"
+        AND NOT (payment_type = 'lightning' AND amount_msat < 1000)
+        ORDER BY id DESC LIMIT 1
+        """
+        guard let row = try? query(sql, params: []).first else { return nil }
+        return paymentRecord(from: row)
+    }
+
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {
         let sql = """
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
@@ -569,22 +603,7 @@ class DatabaseService {
         """
         let rows = try query(sql, params: [.integer(Int64(limit))])
         return rows.map { row in
-            PaymentRecord(
-                id: row[0] as? Int64 ?? 0,
-                paymentId: row[1] as? String,
-                paymentType: row[2] as? String ?? "manual",
-                direction: row[3] as? String ?? "",
-                amountMsat: UInt64(row[4] as? Int64 ?? 0),
-                amountUSD: row[5] as? Double,
-                btcPrice: row[6] as? Double,
-                counterparty: row[7] as? String,
-                status: row[8] as? String ?? "",
-                createdAt: row[9] as? Int64 ?? 0,
-                feeMsat: UInt64(row[10] as? Int64 ?? 0),
-                txid: row[11] as? String,
-                address: row[12] as? String,
-                confirmations: UInt32(row[13] as? Int64 ?? 0)
-            )
+            paymentRecord(from: row)
         }
     }
 

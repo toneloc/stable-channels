@@ -3,6 +3,7 @@ import UserNotifications
 
 struct HomeView: View {
     @Environment(AppState.self) private var appState
+    @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
     @State private var showSendSheet = false
     @State private var showReceiveSheet = false
     @State private var showBuySheet = false
@@ -507,13 +508,21 @@ struct HomeView: View {
     // MARK: - Status Section
 
     private var statusSection: some View {
-        Text(appState.statusMessage)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+        Button(action: { openPaymentDetail() }) {
+            Text(appState.statusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func openPaymentDetail() {
+        guard let payment = appState.databaseService?.latestReceivedPayment() else { return }
+        paymentCoordinator.open(payment)
     }
 }
 
