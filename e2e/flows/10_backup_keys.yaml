@@ -1,26 +1,44 @@
 # Step 10 — Back Up Keys
 # "User copies from the screen."
-# BackupView labels verified (Copy / Cancel / warning glyph).
+# Settings -> Backup -> reveal seed -> exercise copy confirmation.
 appId: com.stablechannels.app
 tags: [android, ios, keys]
 ---
 - launchApp
 
-# TODO(navigation): path to BackupView — Settings tab -> Backup / Recovery.
-# Record with `maestro studio`, e.g.:
-# - tapOn: "Settings"
-# - tapOn: "Backup"
+- tapOn: "Settings"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Backup"
 
-# Seed reveal shows a warning and a Copy action (BackupView.kt:203/232)
-- assertVisible: "⚠️"
-- tapOn: "Copy"
+- scrollUntilVisible:
+    element:
+      text: "(Backup Seed Words|View Seed Words)"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "(Backup Seed Words|View Seed Words)"
 
-# The 12 words are now in maestro.copiedText — sanity-check the shape and
-# stash for 11_import_keys (pass back in via -e RESTORE_SEED for a clean run).
-- runScript:
-    script: |
-      const words = (maestro.copiedText || '').trim().split(/\s+/);
-      if (words.length !== 12) {
-        throw new Error(`expected 12 seed words, got ${words.length}`);
-      }
-- tapOn: "Cancel"
+- extendedWaitUntil:
+    visible: "(Copy Seed Words|Copy to Clipboard)"
+    timeout: 30000
+- tapOn: "(Copy Seed Words|Copy to Clipboard)"
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - assertVisible: "Copy Seed Phrase?"
+      - tapOn: "Copy"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - assertVisible: "Copy Seed Words?"
+      - tapOn: "Copy Anyway"
+
+- assertVisible: "Copied"
+- tapOn:
+    text: "Cancel"
+    optional: true

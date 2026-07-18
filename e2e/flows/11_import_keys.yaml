@@ -7,24 +7,47 @@
 # restore guard (/api/channel-exists) protects against — this flow expects the
 # guard's warning if a channel is still open. Run AFTER 09_close_channel.
 appId: com.stablechannels.app
-tags: [android, keys]
+tags: [android, ios, keys]
 env:
   RESTORE_SEED: ""          # pass with -e RESTORE_SEED="word1 ... word12"
 ---
-# NOTE: no clearState (would wipe test_config.json too) — run ../run.sh
-# with RESET=1 to prepare fresh state before this flow.
+# NOTE: no clearState (would wipe test_config.json too). Run after 09, and pass
+# RESTORE_SEED from the wallet shown in 10_backup_keys or a known test seed.
 - launchApp
 
-# TODO(navigation): reach the restore entry point (Settings -> Backup ->
-# Restore from Seed on a fresh install; adjust to actual onboarding).
+- runScript:
+    script: |
+      if (!RESTORE_SEED || RESTORE_SEED.trim().split(/\s+/).length < 12) {
+        throw new Error('RESTORE_SEED must be set to a 12 or 24 word mnemonic');
+      }
+
+- tapOn: "Settings"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Backup"
+
 - extendedWaitUntil:
     visible: "Restore from Seed"
     timeout: 60000
 - tapOn: "Restore from Seed"
 
-- tapOn: "word1 word2 word3 ..."
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "word1 word2 word3 ..."
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Paste your seed phrase here"
 - inputText: ${RESTORE_SEED}
 - tapOn: "Restore"
+- tapOn:
+    text: "(Restore Anyway|Continue Anyway)"
+    optional: true
 
 # Wallet restores; the closed channel's funds are onchain
 - extendedWaitUntil:

@@ -1,9 +1,11 @@
 # Stable Channels E2E flows (Maestro + native Mac)
 
-Automated versions of the 12 demo-script user flows, driven by
+Automated coverage for the demo-script user flows, driven by
 [Maestro](https://maestro.mobile.dev) against the Android emulator and iOS
 simulator, plus a native Rust Mac lifecycle runner that uses the same regtest
-harness.
+harness. The mobile canonical run covers the money-moving lifecycle; backup and
+import are opt-in because restore needs an explicit seed passed into a separate
+Maestro run.
 
 ## Quickstart
 
@@ -70,9 +72,12 @@ and the app silently falls back to MAINNET).
   `make mac-demo` opens the Mac app with a progress panel and drives the same
   lifecycle visibly against the regtest harness.
 
-Flows 10/11 (backup/import) are still excluded from the mobile canonical list
-because their Maestro navigation is unfinished. The native Mac runner covers
-the seed/restart path directly.
+Flows 10/11 (backup/import) are excluded from the mobile canonical list because
+`run-flows.sh` runs each flow in a separate Maestro process. Run
+`10_backup_keys` on its own to exercise the reveal/copy path, then run
+`11_import_keys` after the close flow with a known seed:
+`RESTORE_SEED="word1 ... word12"`. The native Mac runner covers the
+seed/restart path directly.
 
 ## Native Mac
 
@@ -128,8 +133,8 @@ it adds a desktop-native guard over the same money-moving lifecycle.
 | `07_onchain_send`       | Onchain Send | selectors verified (asserts "Splice-out initiated") |
 | `08_usd_to_btc`         | USD → BTC | **selectors verified** against BuyScreen |
 | `09_close_channel`      | Close Channel | Close dialog verified; settings navigation TODO |
-| `10_backup_keys`        | Back Up Keys | BackupView labels verified; navigation TODO |
-| `11_import_keys`        | Import Keys | Restore labels verified; onboarding TODO |
+| `10_backup_keys`        | Back Up Keys | runnable as an opt-in seed-copy flow |
+| `11_import_keys`        | Import Keys | runnable with `RESTORE_SEED="word1 ..."` |
 | `12_offboard_onchain`   | Offboard Onchain | selectors verified ("Send Max") |
 
 "Navigation TODO" = the settings/onboarding tap path needs to be filled in on a

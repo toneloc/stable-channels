@@ -1,6 +1,7 @@
 package com.stablechannels.app.util
 
 import android.content.Context
+import org.lightningdevkit.ldknode.Network
 import java.io.File
 
 object Constants {
@@ -11,6 +12,12 @@ object Constants {
 
     // Overridable via TestOverrides (debug builds only) for E2E regtest runs.
     val DEFAULT_NETWORK: String get() = TestOverrides.network ?: "bitcoin"
+    val LDK_NETWORK: Network get() = when (DEFAULT_NETWORK.lowercase()) {
+        "regtest" -> Network.REGTEST
+        "signet" -> Network.SIGNET
+        "testnet" -> Network.TESTNET
+        else -> Network.BITCOIN
+    }
     const val DEFAULT_USER_ALIAS = "user"
     const val DEFAULT_USER_PORT = 9736
     const val DEFAULT_LSP_ALIAS = "lsp"

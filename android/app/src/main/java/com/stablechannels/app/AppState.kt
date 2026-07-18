@@ -1326,12 +1326,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /** Network from Constants.DEFAULT_NETWORK — "regtest" only via TestOverrides (E2E). */
-    private fun ldkNetwork(): Network = when (Constants.DEFAULT_NETWORK.lowercase()) {
-        "regtest" -> Network.REGTEST
-        "signet" -> Network.SIGNET
-        "testnet" -> Network.TESTNET
-        else -> Network.BITCOIN
-    }
+    private fun ldkNetwork(): Network = Constants.LDK_NETWORK
 
     /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */
     private suspend fun resolveChainUrl(): String {

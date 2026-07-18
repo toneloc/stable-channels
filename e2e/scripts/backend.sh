@@ -58,6 +58,6 @@ for _ in $(seq 1 15); do
 done
 case "$lsp_price" in
     *100000*) ok "LSP prices from mock feed" ;;
-    *64*|*63*|*65*) die "LSP still prices from REAL feed (${lsp_price##*:}) — sc-lsp image lacks the SC_PRICE_FEED_BASE hook; 'make clean' then retry" ;;
+    *64*|*63*|*65*) die "LSP still prices from REAL feed (${lsp_price##*:}) — sc-lsp image lacks the E2E price-feed feature; run 'make rebuild' and retry" ;;
     *) info "LSP median not logged yet (${lsp_price:-none}); flows allow catch-up time" ;;
 esac

@@ -247,19 +247,38 @@ async fn feed_blockchain(State(st): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// Ask ldk-server (gRPC, TLS + api_key from the shared volume) for an onchain
-/// address, so bootstrap can fund the LSP's JIT-channel wallet. None if the
-/// cert/api_key aren't readable (volume not mounted) — funding is skipped.
-async fn lsp_onchain_address() -> Option<String> {
+/// address, so bootstrap can fund the LSP's JIT-channel wallet.
+async fn lsp_onchain_address_once() -> Result<String, String> {
     let url = env_or("LDK_GRPC_URL", "ldk-server:3536");
-    let cert = std::fs::read(env_or("LDK_CERT_PATH", "/data/ldk-server/tls.crt")).ok()?;
-    let key = std::fs::read(env_or("LDK_API_KEY_PATH", "/data/ldk-server/regtest/api_key")).ok()?;
+    let cert_path = env_or("LDK_CERT_PATH", "/data/ldk-server/tls.crt");
+    let key_path = env_or("LDK_API_KEY_PATH", "/data/ldk-server/regtest/api_key");
+    let cert = std::fs::read(&cert_path).map_err(|e| format!("read LDK cert {cert_path}: {e}"))?;
+    let key = std::fs::read(&key_path).map_err(|e| format!("read LDK api key {key_path}: {e}"))?;
     let api_key: String = key.iter().map(|b| format!("{b:02x}")).collect();
-    let client = ldk_server_client::client::LdkServerClient::new(url, api_key, &cert).ok()?;
+    let client = ldk_server_client::client::LdkServerClient::new(url, api_key, &cert)
+        .map_err(|e| format!("connect to ldk-server grpc: {e}"))?;
     let resp = client
         .onchain_receive(ldk_server_client::ldk_server_grpc::api::OnchainReceiveRequest {})
         .await
-        .ok()?;
-    Some(resp.address)
+        .map_err(|e| format!("ldk-server OnchainReceive: {e}"))?;
+    Ok(resp.address)
+}
+
+async fn lsp_onchain_address() -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=30 {
+        match lsp_onchain_address_once().await {
+            Ok(address) => return Ok(address),
+            Err(err) => {
+                last_err = err;
+                println!("[harness] waiting for LSP onchain address ({attempt}/30): {last_err}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    Err(format!(
+        "could not fetch LSP onchain address after 60s: {last_err}"
+    ))
 }
 
 /// POST /bootstrap {"channel_sats": N, "push_msat": M, "lsp_fund_sats": F}
@@ -268,7 +287,7 @@ async fn lsp_onchain_address() -> Option<String> {
 /// LSPS2 with "insufficient funds", the exact prod incident of 2026-06/07),
 /// and opens a channel to the LSP so /pay has a route.
 async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
-    let lsp_fund_addr = lsp_onchain_address().await;
+    let lsp_fund_addr = lsp_onchain_address().await.map_err(err500)?;
     let channel_sats = body["channel_sats"].as_u64().unwrap_or(5_000_000);
     // Default: push HALF the channel to the LSP at open, so the LSP has
     // outbound liquidity toward the counterparty from the start. Without it,
@@ -299,18 +318,14 @@ async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> 
 
         // 2) Fund the LSP's onchain wallet for JIT channel opens.
         let lsp_fund_sats = body["lsp_fund_sats"].as_u64().unwrap_or(10_000_000);
-        let mut lsp_funded = false;
-        if let Some(ref addr_str) = lsp_fund_addr {
-            let addr = Address::from_str(addr_str)
-                .map_err(bad_req)?
-                .require_network(Network::Regtest)
-                .map_err(bad_req)?;
-            node.onchain_payment().send_to_address(&addr, lsp_fund_sats, None).map_err(err500)?;
-            lsp_funded = true;
-            println!("[harness] funded LSP onchain: {lsp_fund_sats} sats -> {addr_str}");
-        } else {
-            println!("[harness] WARNING: could not fetch LSP onchain address — JIT opens will fail");
-        }
+        let addr = Address::from_str(&lsp_fund_addr)
+            .map_err(bad_req)?
+            .require_network(Network::Regtest)
+            .map_err(bad_req)?;
+        node.onchain_payment()
+            .send_to_address(&addr, lsp_fund_sats, None)
+            .map_err(err500)?;
+        println!("[harness] funded LSP onchain: {lsp_fund_sats} sats -> {lsp_fund_addr}");
 
         // 3) Channel to the LSP.
         if !node.list_channels().iter().any(|c| c.is_channel_ready) {
@@ -340,7 +355,7 @@ async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> 
             "node_id": st2.node.node_id().to_string(),
             "spendable_onchain_sats": st2.node.list_balances().spendable_onchain_balance_sats,
             "channel_ready": ready,
-            "lsp_funded_sats": if lsp_funded { lsp_fund_sats } else { 0 },
+            "lsp_funded_sats": lsp_fund_sats,
         })))
     })
     .await
