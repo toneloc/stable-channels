@@ -20,9 +20,11 @@ enum Constants {
     static var primaryChainURL: String {
         TestOverrides.shared.primaryChainUrl ?? "https://blockstream.info/api"
     }
+
     static var fallbackChainURL: String {
         TestOverrides.shared.fallbackChainUrl ?? "https://mempool.space/api"
     }
+
     static var esploraChainURLs: [String] { [primaryChainURL, fallbackChainURL] }
     static let txExplorerURL = "https://mempool.space/tx"
 
@@ -34,9 +36,11 @@ enum Constants {
     static var lspPushRegisterURL: String {
         TestOverrides.shared.pushRegisterUrl ?? "https://stablechannels.com/api/register-push"
     }
+
     static var lspChannelExistsURL: String {
         TestOverrides.shared.channelExistsUrl ?? "https://stablechannels.com/api/channel-exists"
     }
+
     static let privacyPolicyURL = "https://stablechannels.com/privacy.html"
 
     static func txExplorerLink(for txid: String) -> URL? {
@@ -46,6 +50,7 @@ enum Constants {
     static var defaultLSPPubkey: String {
         TestOverrides.shared.lspPubkey ?? "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     }
+
     static var defaultLSPAddress: String {
         TestOverrides.shared.lspAddress ?? "stablechannels.com:9735"
     }
@@ -60,9 +65,11 @@ enum Constants {
     static var onchainWalletSyncIntervalSecs: UInt64 {
         TestOverrides.shared.syncIntervalSecs ?? 120
     }
+
     static var lightningWalletSyncIntervalSecs: UInt64 {
         TestOverrides.shared.syncIntervalSecs ?? 60
     }
+
     static let feeRateCacheUpdateIntervalSecs: UInt64 = 1200
 
     static let invoiceExpirySecs: UInt32 = 3600

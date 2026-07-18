@@ -43,7 +43,9 @@ class AppState {
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
         // E2E harness bypass — debug builds with test_config.json only
         // (simulators have no biometrics; the prompt would fail instantly).
-        if TestOverrides.shared.disableSendAuth { return true }
+        if TestOverrides.shared.disableSendAuth {
+            return true
+        }
         guard !isAuthenticating else { return false }
         isAuthenticating = true
         defer { isAuthenticating = false }

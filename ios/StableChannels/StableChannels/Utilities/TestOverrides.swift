@@ -48,7 +48,9 @@ enum TestOverrides {
             if let secs = (json["sync_interval_secs"] as? NSNumber)?.uint64Value, secs > 0 {
                 v.syncIntervalSecs = secs
             }
-            print("[TestOverrides] E2E overrides ACTIVE: network=\(v.network ?? "-") lsp=\(v.lspAddress ?? "-") chain=\(v.primaryChainUrl ?? "-")")
+            print(
+                "[TestOverrides] E2E overrides ACTIVE: network=\(v.network ?? "-") lsp=\(v.lspAddress ?? "-") chain=\(v.primaryChainUrl ?? "-")"
+            )
         #endif
         return v
     }
