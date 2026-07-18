@@ -6,7 +6,7 @@ struct HistoryView: View {
     @State private var payments: [PaymentRecord] = []
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
-    @State private var selectedPayment: PaymentRecord?
+    @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
 
     var body: some View {
         NavigationStack {
@@ -18,6 +18,11 @@ struct HistoryView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding()
+                .onChange(of: paymentCoordinator.selectedPayment) { _, newValue in
+                    if let payment = newValue {
+                        selectedSegment = payment.paymentType == "trade" ? 0 : 1
+                    }
+                }
 
                 // List
                 List {
@@ -62,9 +67,6 @@ struct HistoryView: View {
             .sheet(item: $selectedTrade) { trade in
                 TradeDetailView(trade: trade)
             }
-            .sheet(item: $selectedPayment) { payment in
-                PaymentDetailView(payment: payment, displayPrice: historyDisplayPrice)
-            }
         }
     }
 
@@ -87,7 +89,7 @@ struct HistoryView: View {
 
     private var paymentsList: some View {
         ForEach(payments) { payment in
-            Button { selectedPayment = payment } label: {
+            Button { paymentCoordinator.open(payment) } label: {
                 PaymentRowView(payment: payment, displayPrice: historyDisplayPrice)
             }
             .tint(.primary)

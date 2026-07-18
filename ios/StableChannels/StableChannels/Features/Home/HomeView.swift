@@ -3,6 +3,7 @@ import UserNotifications
 
 struct HomeView: View {
     @Environment(AppState.self) private var appState
+    @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
     @State private var showSendSheet = false
     @State private var showReceiveSheet = false
     @State private var showBuySheet = false
@@ -339,7 +340,7 @@ struct HomeView: View {
                 // 1. Splice-in in progress
                 pendingRow(kind: .sweep(txid: appState.spliceTxid))
             } else if appState.isChannelClosing {
-                if let closeTxid = appState.txidLinks.lastCloseTxid, !closeTxid.isEmpty {
+                if let closeTxid = appState.transactionLinkService.lastCloseTxid, !closeTxid.isEmpty {
                     pendingRow(kind: .close(txid: closeTxid))
                 } else {
                     pendingRow(kind: .closeNoLink)
@@ -367,7 +368,7 @@ struct HomeView: View {
                 if appState.isOpeningChannel, let fundingTx = appState.fundingTxid {
                     pendingRow(kind: .deposit(txid: fundingTx))
                 } else {
-                    pendingRow(kind: .onchainReceive(txid: appState.txidLinks.lastReceiveTxid))
+                    pendingRow(kind: .onchainReceive(txid: appState.transactionLinkService.lastReceiveTxid))
                 }
                 if !hasReadyChannel {
                     Text(String(
@@ -507,13 +508,21 @@ struct HomeView: View {
     // MARK: - Status Section
 
     private var statusSection: some View {
-        Text(appState.statusMessage)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: Capsule())
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+        Button(action: { openPaymentDetail() }) {
+            Text(appState.statusMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func openPaymentDetail() {
+        guard let payment = appState.databaseService?.latestReceivedPayment() else { return }
+        paymentCoordinator.open(payment)
     }
 }
 

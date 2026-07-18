@@ -37,7 +37,7 @@ struct ChannelSettingsView: View {
                         Text(((channel.inboundCapacityMsat) / 1000).satsFormatted)
                     }
 
-                    if let closeTxid = appState.txidLinks.lastCloseTxid, !closeTxid.isEmpty {
+                    if let closeTxid = appState.transactionLinkService.lastCloseTxid, !closeTxid.isEmpty {
                         HStack {
                             Text(String(localized: "label_close_tx", defaultValue: "Close Tx"))
                                 .foregroundStyle(.secondary)

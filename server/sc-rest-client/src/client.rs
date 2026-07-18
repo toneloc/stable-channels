@@ -91,6 +91,8 @@ impl LspRestClient {
 
 		let client = Client::builder()
 			.add_root_certificate(cert)
+			.connect_timeout(std::time::Duration::from_secs(10))
+			.timeout(std::time::Duration::from_secs(60))
 			.build()
 			.map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 

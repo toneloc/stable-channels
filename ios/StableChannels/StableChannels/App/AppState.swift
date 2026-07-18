@@ -121,8 +121,6 @@ class AppState {
         return lightningBalanceSats + onchainBalanceSats
     }
 
-    var onchainReceiveAddress: String?
-
     var totalBalanceUSD: Double {
         guard btcPrice > 0 else { return 0 }
         return Double(totalBalanceSats) / Double(Constants.satsInBTC) * btcPrice
@@ -156,17 +154,10 @@ class AppState {
         }
     }
 
-    // MARK: - Close-txid resolver state
+    // MARK: - Transaction Link Service
 
-    let txidLinks = TxidLinkStore()
-    // Close metadata (balance, price, counterparty) is persisted to the
-    // pending_operations row at request time (NodeService.requestChannelClose)
-    // and read back at resolve time. No need for in-memory snapshot fields.
-
-    private var closeTxidResolver: CloseTxidResolver?
-    private var onchainTxidResolver: OnchainTxidResolver?
-    private var closeLauncher = StaggeredTaskLauncher()
-    private var onchainLauncher = StaggeredTaskLauncher()
+    let transactionLinkService = TransactionLinkService()
+    let txidResolutionService = TxidResolutionService()
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
@@ -199,29 +190,17 @@ class AppState {
         databaseService = try DatabaseService(dataDir: Constants.userDataDir)
         nodeService.databaseService = databaseService
 
-        let resolverConfig = URLSessionConfiguration.default
-        resolverConfig.timeoutIntervalForRequest = 5
-        resolverConfig.timeoutIntervalForResource = 10
-        let resolverSession = URLSession(configuration: resolverConfig)
-        closeTxidResolver = CloseTxidResolver(
-            chainURLs: Constants.esploraChainURLs,
-            onResolved: { [weak self] opId, closingTxid in
+        txidResolutionService.databaseService = databaseService
+        txidResolutionService.configureResolvers(urls: Constants.esploraChainURLs)
+
+        txidResolutionService.didResolveTxid = { [weak self] event in
+            switch event {
+            case .channelClose(let opId, let closingTxid):
                 self?.handleCloseTxidResolved(opId: opId, closingTxid: closingTxid)
-            },
-            urlSession: resolverSession
-        )
-        onchainTxidResolver = OnchainTxidResolver(
-            chainURLs: Constants.esploraChainURLs,
-            onResolved: { [weak self] workId, txid in
-                // workId is "res-<resolutionId>"; recover the Int64.
-                guard let idStr = workId.split(separator: "-", maxSplits: 1).last,
-                      let resolutionId = Int64(idStr) else { return }
+            case .onchainReceive(let resolutionId, let txid):
                 self?.handleOnchainReceiveResolved(resolutionId: resolutionId, txid: txid)
-            },
-            urlSession: resolverSession
-        )
-        // txidLinks (TxidLinkStore) restores its own lastClose/lastReceive
-        // from UserDefaults on init, with 7-day expiry.
+            }
+        }
 
         tradeService = TradeService(nodeService: nodeService)
 
@@ -307,8 +286,7 @@ class AppState {
 
         stabilityTimer?.cancel()
         stabilityTimer = nil
-        closeLauncher.cancelAll()
-        onchainLauncher.cancelAll()
+        txidResolutionService.cancelAllLaunchers()
         nodeService.stop()
 
         resetInMemoryWalletState()
@@ -363,15 +341,15 @@ class AppState {
         sweepOnchainStart = 0
         prevOnchainSats = 0
         fundingTxid = nil
-        onchainReceiveAddress = nil
         lightningBalanceSats = 0
         onchainBalanceSats = 0
         hasReadyChannel = false
         spendableOnchainSats = 0
+        transactionLinkService.onchainReceiveAddress = nil
+        transactionLinkService.clearCloseTxid()
+        transactionLinkService.clearReceiveTxid()
         pendingTradePayments.removeAll()
         pendingSplice = nil
-        txidLinks.setClose(nil)
-        txidLinks.setReceive(nil)
 
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.removeObject(forKey: "funding_txid")
@@ -386,8 +364,7 @@ class AppState {
         nodeService.clearSavedMnemonic()
         tradeService = nil
         databaseService = nil
-        closeTxidResolver = nil
-        onchainTxidResolver = nil
+        txidResolutionService.clearResolvers()
     }
 
     private func wipeWalletPersistence() {
@@ -570,8 +547,8 @@ class AppState {
                 reregisterPushTokenIfNeeded()
                 // Check if NSE flagged a pending payment while app was killed
                 await processPendingPushPayment()
-                replayPendingChannelCloses()
-                replayPendingOnchainReceives()
+                txidResolutionService.replayPendingChannelCloses()
+                txidResolutionService.replayPendingOnchainReceives()
             } catch {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
@@ -596,42 +573,10 @@ class AppState {
                 }
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
-                replayPendingChannelCloses()
-                replayPendingOnchainReceives()
+                txidResolutionService.replayPendingChannelCloses()
+                txidResolutionService.replayPendingOnchainReceives()
             } catch {
                 await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
-            }
-        }
-    }
-
-    private func replayPendingChannelCloses() {
-        guard let db = databaseService else { return }
-        let pending = db.fetchPendingOperations()
-        for (i, op) in pending.enumerated() where op.opType == "channel_close" {
-            // Stagger across close ops so a backlog of N pending closes does
-            // not hit Esplora with N concurrent requests. 1s per op = at
-            // most 1 req/sec on the public endpoints.
-            let delay = UInt64(i) // 1s per op
-            closeLauncher.launch(opId: op.opId, delaySeconds: delay) { [weak self] in
-                guard let self, let db = self.databaseService else { return }
-                await self.closeTxidResolver?.resolve(opId: op.opId, databaseService: db)
-            }
-        }
-    }
-
-    private func replayPendingOnchainReceives() {
-        guard let db = databaseService else { return }
-        let pending = db.fetchPendingOnchainReceives()
-        for (i, res) in pending.enumerated() {
-            let delay = UInt64(i) // 1s per resolution
-            let opId = "onchain-receive-\(res.id)"
-            onchainLauncher.launch(opId: opId, delaySeconds: delay) { [weak self] in
-                guard let self, let db = self.databaseService else { return }
-                await self.onchainTxidResolver?.resolve(
-                    resolutionId: res.id,
-                    address: res.address,
-                    databaseService: db
-                )
             }
         }
     }
@@ -832,8 +777,7 @@ class AppState {
     /// `statusMessage` would otherwise stay frozen on the last foreground-processed payment.
     private func refreshLatestPaymentStatus() {
         guard let db = databaseService,
-              let recent = try? db.getRecentPayments(limit: 10),
-              let latest = recent.first(where: { $0.direction == "received" }) else { return }
+              let latest = db.latestReceivedPayment() else { return }
         if let usd = latest.amountUSD {
             statusMessage = "Received \(usd.usdFormatted)"
         } else if let usd = usdValue(sats: latest.amountSats, rowPrice: latest.btcPrice) {
@@ -1698,33 +1642,18 @@ class AppState {
 
         // Cancel prior; new task only clears state if generation still matches
         let opId = "close-\(userChannelId)"
-        closeLauncher.launch(opId: opId) { [weak self] in
-            guard let self, let db = self.databaseService else { return }
-            await self.closeTxidResolver?.resolve(opId: opId, databaseService: db)
-        }
+        txidResolutionService.startCloseTxidResolver(opId: opId)
     }
 
-    private func setLastReceiveTxid(_ txid: String?) {
-        txidLinks.setReceive(txid)
-    }
-
-    private func setLastCloseTxid(_ txid: String?) {
-        txidLinks.setClose(txid)
-    }
-
-    @MainActor
-    func handleCloseTxidResolved(opId: String, closingTxid: String) {
-        // Read snapshot from DB row, not AppState globals (stale on re-tap, wrong on multi-channel)
+    private func handleCloseTxidResolved(opId: String, closingTxid: String) {
         let op = databaseService?.fetchPendingOperation(opId: opId)
         let balanceSats = op?.balanceSats ?? 0
         let balanceUSD = op?.balanceUsd
         let price = op?.btcPrice ?? 0
         let counterparty = op?.counterparty
 
-        // UI state first: if recordPayment throws, resolver swallows; user still sees the link
-        setLastCloseTxid(closingTxid)
+        transactionLinkService.setCloseTxid(closingTxid)
 
-        // recordPayment dedups on paymentId, so a re-run is a no-op
         do {
             try databaseService?.recordPayment(
                 paymentId: opId,
@@ -1751,18 +1680,16 @@ class AppState {
         ])
     }
 
-    @MainActor
-    func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
+    private func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
         if let db = databaseService,
            let row = db.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
             db.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
         }
-        // Latest resolved wins if a more recent resolver beat us to it.
         if let db = databaseService,
            let latest = db.fetchLatestResolvedOnchainTxid() {
-            setLastReceiveTxid(latest)
+            transactionLinkService.setReceiveTxid(latest)
         } else {
-            setLastReceiveTxid(txid)
+            transactionLinkService.setReceiveTxid(txid)
         }
         AuditService.log("ONCHAIN_RECEIVE_RESOLVED", data: [
             "resolution_id": "\(resolutionId)",
@@ -2214,6 +2141,9 @@ class AppState {
                 return
             }
 
+            // We detected a balance increase, clear the old txid link so we don't show a stale one
+            transactionLinkService.clearReceiveTxid()
+
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
 
@@ -2223,20 +2153,12 @@ class AppState {
             // Select recorder based on whether we know the current receive
             // address. Each strategy handles its own crash-safe ordering and
             // resolver launching. See DepositRecorder.swift for invariants.
-            let address = onchainReceiveAddress
+            let address = transactionLinkService.onchainReceiveAddress
             let recorder: DepositRecorder = (address?.isEmpty == false)
                 ? KnownAddressDepositRecorder(
                     databaseService: databaseService,
                     onLaunchResolver: { [weak self] resolutionId, addr in
-                        let opId = "onchain-receive-\(resolutionId)"
-                        self?.onchainLauncher.launch(opId: opId, delaySeconds: 0) {
-                            guard let self, let db = self.databaseService else { return }
-                            await self.onchainTxidResolver?.resolve(
-                                resolutionId: resolutionId,
-                                address: addr,
-                                databaseService: db
-                            )
-                        }
+                        self?.txidResolutionService.startOnchainTxidResolver(resolutionId: resolutionId, address: addr)
                     }
                 )
                 : UnknownAddressDepositRecorder(databaseService: databaseService)
@@ -2261,7 +2183,7 @@ class AppState {
                 "amount_sats": "\(depositSats)",
                 "prev_onchain": "\(prevOnchainSats)",
                 "new_onchain": "\(currentOnchain)",
-                "address_known": "\(onchainReceiveAddress != nil)"
+                "address_known": "\(transactionLinkService.onchainReceiveAddress != nil)"
             ])
         }
         prevOnchainSats = currentOnchain
