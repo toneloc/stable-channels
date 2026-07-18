@@ -1,8 +1,9 @@
-# Stable Channels E2E flows (Maestro)
+# Stable Channels E2E flows (Maestro + native Mac)
 
 Automated versions of the 12 demo-script user flows, driven by
 [Maestro](https://maestro.mobile.dev) against the Android emulator and iOS
-simulator. Flow files map 1:1 to the demo-script steps.
+simulator, plus a native Rust Mac lifecycle runner that uses the same regtest
+harness.
 
 ## Quickstart
 
@@ -13,6 +14,11 @@ device, and runs the full lifecycle with a live checkmarked scoreboard:
 cd e2e
 make ios         # full lifecycle on the iOS simulator
 make android     # full lifecycle on the Android emulator
+make mac         # backend + native desktop Mac lifecycle flows
+make mac-smoke   # backend + quick native desktop Mac config check
+make mac-ui      # backend + open native desktop Mac UI on regtest
+make mac-demo    # backend + visible native desktop Mac demo on regtest
+make mac-all     # backend + Mac smoke + lifecycle flows
 ```
 
 Backend-only helpers, and running a subset of flows:
@@ -54,9 +60,57 @@ and the app silently falls back to MAINNET).
   config before first launch.
 - **Android**: boot the AVD if needed → `./gradlew installDebug` → `pm clear` +
   push config.
+- **Mac desktop**: `make mac-smoke` runs Rust desktop config tests and validates
+  local regtest chain/LSP/price-feed configuration before any UI opens.
+  `make mac` runs the native Rust lifecycle runner with the same harness roles
+  as the mobile flows: counterparty wallet, miner, and mock price feed.
+  `make mac-ui` opens the actual Mac app window against that same regtest setup.
+  `make mac-demo` opens the Mac app with a progress panel and drives the same
+  lifecycle visibly against the regtest harness.
 
-Flows 10/11 (backup/import) are excluded from the canonical list — they still
-have navigation TODOs. Add them explicitly via `FLOWS=` once wired.
+Flows 10/11 (backup/import) are still excluded from the mobile canonical list
+because their Maestro navigation is unfinished. The native Mac runner covers
+the seed/restart path directly.
+
+## Native Mac
+
+`make mac` uses the same Docker regtest backend as the mobile flows, then runs
+`cargo run --bin stable-channels -- mac-flows`. It starts from a fresh dedicated
+wallet under `e2e/.mac-user-flows` and executes all 12 lifecycle steps.
+
+`make mac-smoke` runs the fast endpoint/config guard only:
+`cargo run --bin stable-channels -- mac-smoke`.
+
+`make mac-ui` starts the backend and then opens the real desktop app with:
+`cargo run --bin stable-channels`. It uses a persistent wallet at
+`e2e/.mac-user-ui`; pass `RESET=1` to wipe only that UI wallet before launch:
+
+```bash
+make mac-ui
+make mac-ui RESET=1
+```
+
+`make mac-demo` starts the backend, opens the real desktop app with
+`cargo run --bin stable-channels -- mac-demo`, and enables a debug-only
+`Mac Demo` progress panel. It resets a dedicated wallet at
+`e2e/.mac-user-demo` on each run so the visible lifecycle starts cleanly.
+The command keeps running after pass/fail until the app window is closed.
+The default step pause is 1800ms; override it with
+`SC_MAC_DEMO_PAUSE_MS=3000 make mac-demo`.
+
+The Mac runners set Mac-only environment overrides:
+
+- `SC_MAC_NETWORK=regtest`
+- `SC_MAC_CHAIN_URL=http://127.0.0.1:30000`
+- `SC_MAC_FALLBACK_CHAIN_URL=http://127.0.0.1:30000`
+- `SC_MAC_LSP_PUBKEY=<harness LSP node id>`
+- `SC_MAC_LSP_ADDRESS=127.0.0.1:9735`
+- `SC_MAC_USER_DATA_DIR=e2e/.mac-user` for smoke, `e2e/.mac-user-flows` for flows,
+  `e2e/.mac-user-ui` for the UI, and `e2e/.mac-user-demo` for the visible demo
+
+These overrides are ignored unless `SC_E2E=1` is set and the binary is a debug
+build. The native Mac path does not replace Maestro coverage for Android/iOS;
+it adds a desktop-native guard over the same money-moving lifecycle.
 
 ## Status
 
@@ -85,6 +139,7 @@ live emulator (`maestro studio` makes this a 2-minute job per flow).
    simulator. Maestro auto-detects whichever is running.
 3. **A debug build of the app installed** on the device.
 4. **The regtest harness** (see below) — flows that move money need it.
+5. **Rust toolchain** for native Mac targets.
 
 ## The regtest harness (REQUIRED for money-moving flows)
 
@@ -103,15 +158,13 @@ Expected endpoints (see `flows/helpers/*.js`):
 | `POST /mine`      | `{"blocks": N}` | mine regtest blocks |
 | `POST /price`     | `{"price": 100000.0}` | set the mocked BTC/USD price |
 
-The harness itself (bitcoind regtest + electrs + LSP bidaemon + counterparty
-ldk-node + price mock, docker-compose) is **not yet built** — it is the next
-work item. The repo already has the Rust ingredients (`electrsd`,
-`corepc-node` dev-deps).
+The harness itself lives under `e2e/harness/` and is started by the Make
+targets via Docker Compose: bitcoind regtest, electrs, ldk-server, sc-lsp, the
+counterparty ldk-node, and the mock price feed.
 
-**App-side prerequisite:** the apps currently hardcode mainnet endpoints
-(`Constants` on all three platforms: LSP pubkey/address, esplora URL, price
-feed URLs). A debug/test build flavor with injectable endpoints is required
-before any flow can pass end-to-end.
+**App-side prerequisite:** mobile debug builds use `test_config.json` overrides.
+The Rust Mac desktop wallet uses the `SC_MAC_*` environment overrides described
+above, gated by `SC_E2E=1` and debug builds.
 
 ## Environment variables
 
@@ -126,6 +179,10 @@ Pass with `-e KEY=VALUE`:
 
 ```bash
 cd e2e
+make mac                                             # native Mac full lifecycle
+make mac-smoke                                       # native Mac config smoke
+make mac-ui                                          # open native Mac UI
+make mac-demo                                        # watch the native Mac demo
 maestro test flows/                                   # full suite, filename order
 maestro test flows/02_btc_to_usd.yaml                 # single flow
 maestro test --include-tags=trade flows/              # by tag
