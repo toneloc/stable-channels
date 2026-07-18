@@ -67,12 +67,6 @@ struct HistoryView: View {
             .sheet(item: $selectedTrade) { trade in
                 TradeDetailView(trade: trade)
             }
-            .sheet(item: Binding(
-                get: { paymentCoordinator.selectedPayment },
-                set: { paymentCoordinator.selectedPayment = $0 }
-            )) { payment in
-                PaymentDetailView(payment: payment, displayPrice: historyDisplayPrice)
-            }
         }
     }
 
