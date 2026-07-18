@@ -89,8 +89,8 @@ services:
     environment:
       # E2E: LSP prices from the harness mock instead of the real feeds, so
       # flow 03 can move the price for BOTH sides of the stability dance.
-      # Double-gated in src/constants.rs: SC_PRICE_FEED_BASE only takes effect
-      # when SC_E2E=1 is ALSO set, so a prod daemon can't inherit mock feeds.
+      # Double-gated in src/constants.rs: the harness LSP image is built with
+      # the E2E Cargo feature, then SC_E2E=1 activates mock feeds at runtime.
       SC_E2E: "1"
       SC_PRICE_FEED_BASE: http://harness:9737
     command: ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/config.toml"]

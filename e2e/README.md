@@ -56,8 +56,10 @@ and the app silently falls back to MAINNET).
 - **iOS**: incremental `xcodebuild` → **verify the override code is actually in
   `StableChannels.debug.dylib`** (guards the stale-incremental-build trap that
   silently ships a MAINNET app) → clean-rebuild only if the check fails → erase
-  the sim (pinned by UDID, since two "iPhone 17" sims exist) → install → push
-  config before first launch.
+  the selected sim → install → push config before first launch. Set
+  `IOS_SIM_UDID` to pin a simulator exactly, or `IOS_SIM_NAME` to select one by
+  name; otherwise the runner uses a booted iPhone simulator or the first
+  available iPhone simulator.
 - **Android**: boot the AVD if needed → `./gradlew installDebug` → `pm clear` +
   push config.
 - **Mac desktop**: `make mac-smoke` runs Rust desktop config tests and validates
@@ -75,14 +77,15 @@ the seed/restart path directly.
 ## Native Mac
 
 `make mac` uses the same Docker regtest backend as the mobile flows, then runs
-`cargo run --bin stable-channels -- mac-flows`. It starts from a fresh dedicated
-wallet under `e2e/.mac-user-flows` and executes all 12 lifecycle steps.
+`cargo run --features e2e --bin stable-channels -- mac-flows`. It starts from a
+fresh dedicated wallet under `e2e/.mac-user-flows` and executes all 12 lifecycle
+steps.
 
 `make mac-smoke` runs the fast endpoint/config guard only:
-`cargo run --bin stable-channels -- mac-smoke`.
+`cargo run --features e2e --bin stable-channels -- mac-smoke`.
 
 `make mac-ui` starts the backend and then opens the real desktop app with:
-`cargo run --bin stable-channels`. It uses a persistent wallet at
+`cargo run --features e2e --bin stable-channels`. It uses a persistent wallet at
 `e2e/.mac-user-ui`; pass `RESET=1` to wipe only that UI wallet before launch:
 
 ```bash
@@ -91,7 +94,7 @@ make mac-ui RESET=1
 ```
 
 `make mac-demo` starts the backend, opens the real desktop app with
-`cargo run --bin stable-channels -- mac-demo`, and enables a debug-only
+`cargo run --features e2e --bin stable-channels -- mac-demo`, and enables a debug-only
 `Mac Demo` progress panel. It resets a dedicated wallet at
 `e2e/.mac-user-demo` on each run so the visible lifecycle starts cleanly.
 The command keeps running after pass/fail until the app window is closed.

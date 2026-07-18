@@ -20,9 +20,9 @@ CANONICAL_FLOWS=(
     09_close_channel 12_offboard_onchain
 )
 
-# iOS simulator UDID. There are historically TWO "iPhone 17" sims on this rig
-# (one stale with mainnet data) — pin by UDID, never by name. Override via env.
-IOS_SIM_UDID="${IOS_SIM_UDID:-87139ADD-9BAD-45E6-A2F5-5B351DAE37F3}"
+# iOS simulator selection is resolved lazily by iOS scripts so Android targets
+# can source this file on machines without Xcode. Set IOS_SIM_UDID to pin a
+# device exactly, or IOS_SIM_NAME to choose by simulator name.
 
 # --- tool resolution --------------------------------------------------------
 ADB="$(command -v adb || echo "${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb")"
@@ -45,6 +45,40 @@ bad()  { printf '   %s✗%s %s\n' "$C_RED" "$C_RESET" "$*"; }
 die()  { printf '%serror:%s %s\n' "$C_RED$C_BOLD" "$C_RESET" "$*" >&2; exit 1; }
 
 # --- helpers ----------------------------------------------------------------
+
+extract_first_sim_udid() {
+    sed -nE 's/.*\(([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\).*/\1/p' \
+        | head -n 1
+}
+
+resolve_ios_sim_udid() {
+    if [ -n "${IOS_SIM_UDID:-}" ]; then
+        printf '%s\n' "$IOS_SIM_UDID"
+        return 0
+    fi
+
+    command -v xcrun >/dev/null || die "xcrun not found (Xcode required for iOS); set IOS_SIM_UDID to a simulator UDID"
+
+    local devices requested udid
+    devices="$(xcrun simctl list devices available 2>/dev/null)" \
+        || die "could not list iOS simulators; set IOS_SIM_UDID to a simulator UDID"
+    requested="${IOS_SIM_NAME:-}"
+
+    if [ -n "$requested" ]; then
+        udid="$(printf '%s\n' "$devices" | grep -F "$requested" | extract_first_sim_udid || true)"
+        [ -n "$udid" ] || die "no available iOS simulator matched IOS_SIM_NAME=$requested; set IOS_SIM_UDID explicitly"
+        printf '%s\n' "$udid"
+        return 0
+    fi
+
+    udid="$(printf '%s\n' "$devices" | grep -E 'iPhone.*\(Booted\)' | extract_first_sim_udid || true)"
+    if [ -z "$udid" ]; then
+        udid="$(printf '%s\n' "$devices" | grep -E 'iPhone' | extract_first_sim_udid || true)"
+    fi
+
+    [ -n "$udid" ] || die "no available iPhone simulator found; create one or set IOS_SIM_UDID explicitly"
+    printf '%s\n' "$udid"
+}
 
 # Read the LSP (ldk-server) node id straight from its startup log line:
 #   "Starting up LDK Node with node ID <66-hex> on network: regtest"

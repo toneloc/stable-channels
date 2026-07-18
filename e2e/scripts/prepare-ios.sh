@@ -12,6 +12,7 @@ DD="$E2E_DIR/.dd-ios"                 # persistent DerivedData -> fast increment
 APP_GLOB="$DD/Build/Products/Debug-iphonesimulator/StableChannels.app"
 
 command -v xcodebuild >/dev/null || die "xcodebuild not found (Xcode required for iOS)"
+IOS_SIM_UDID="$(resolve_ios_sim_udid)"
 
 # The override code (TestOverrides.swift) lives in StableChannels.debug.dylib;
 # the main binary is a thin stub. If this string is missing the build silently

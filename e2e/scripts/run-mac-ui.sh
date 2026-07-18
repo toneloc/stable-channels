@@ -38,4 +38,4 @@ export SC_MAC_USER_DATA_DIR="$MAC_DATA_DIR"
 info "opening Stable Channels Mac UI against regtest …"
 info "this command keeps running until you close the app window"
 info "if the terminal pauses after price logs, check Dock/Mission Control for Stable Channels Wallet"
-cargo run --bin stable-channels
+cargo run --features e2e --bin stable-channels

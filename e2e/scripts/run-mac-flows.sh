@@ -33,7 +33,7 @@ export SC_MAC_LSP_ADDRESS=127.0.0.1:9735
 export SC_MAC_USER_PORT=19737
 export SC_MAC_USER_DATA_DIR="$MAC_DATA_DIR"
 
-info "cargo run --bin stable-channels -- mac-flows …"
-cargo run --bin stable-channels -- mac-flows
+info "cargo run --features e2e --bin stable-channels -- mac-flows …"
+cargo run --features e2e --bin stable-channels -- mac-flows
 
 ok "Mac desktop flows passed"

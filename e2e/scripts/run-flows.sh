@@ -14,7 +14,7 @@ PLAT_UP="$(printf '%s' "$PLATFORM" | tr '[:lower:]' '[:upper:]')"
 
 # Pin maestro to the intended device (both a sim and an emulator may be booted).
 if [ "$PLATFORM" = "ios" ]; then
-    DEVICE="$IOS_SIM_UDID"
+    DEVICE="$(resolve_ios_sim_udid)"
 else
     DEVICE="$("$ADB" get-serialno 2>/dev/null)" || die "no android device (run prepare-android.sh)"
 fi

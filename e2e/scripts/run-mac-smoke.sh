@@ -28,10 +28,10 @@ export SC_MAC_LSP_ADDRESS=127.0.0.1:9735
 export SC_MAC_USER_PORT=19736
 export SC_MAC_USER_DATA_DIR="$MAC_DATA_DIR"
 
-info "cargo test --lib desktop_config …"
-cargo test --lib desktop_config -- --nocapture
+info "cargo test --features e2e --lib desktop_config …"
+cargo test --features e2e --lib desktop_config -- --nocapture
 
-info "cargo run --bin stable-channels -- mac-smoke …"
-cargo run --bin stable-channels -- mac-smoke
+info "cargo run --features e2e --bin stable-channels -- mac-smoke …"
+cargo run --features e2e --bin stable-channels -- mac-smoke
 
 ok "Mac desktop smoke passed"

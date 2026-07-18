@@ -39,4 +39,4 @@ info "opening Stable Channels Mac demo against regtest ..."
 info "this command keeps running until you close the app window"
 info "the Mac Demo panel shows progress, pass/fail state, and the current harness action"
 info "demo step pause is ${SC_MAC_DEMO_PAUSE_MS}ms; override with SC_MAC_DEMO_PAUSE_MS=3000"
-cargo run --bin stable-channels -- mac-demo
+cargo run --features e2e --bin stable-channels -- mac-demo
