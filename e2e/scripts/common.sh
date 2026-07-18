@@ -87,11 +87,27 @@ lsp_node_id_from_logs() {
         | grep -oE 'node ID [0-9a-f]{66}' | tail -1 | awk '{print $3}'
 }
 
+# Wait until ldk-server has printed the node id that the harness must connect to.
+wait_for_lsp_node_id() {
+    local live
+    for _ in $(seq 1 60); do
+        live="$(lsp_node_id_from_logs || true)"
+        if [ -n "$live" ]; then
+            printf '%s\n' "$live"
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 # Ensure harness/.env's LSP_NODE_ID matches the running ldk-server. Rewrites it
 # if a fresh volume gave the node a new id.
 sync_lsp_node_id() {
     local env_file="$HARNESS_DIR/.env" live current
-    live="$(lsp_node_id_from_logs || true)"
+    SYNC_LSP_NODE_ID_UPDATED=0
+    live="${1:-}"
+    [ -n "$live" ] || live="$(lsp_node_id_from_logs || true)"
     [ -n "$live" ] || { info "ldk-server node id not in logs yet"; return 0; }
     current="$(grep -sE '^LSP_NODE_ID=' "$env_file" | cut -d= -f2 || true)"
     if [ "$current" != "$live" ]; then
@@ -102,6 +118,7 @@ sync_lsp_node_id() {
             mv "$env_file.tmp" "$env_file"
         fi
         printf 'LSP_NODE_ID=%s\n' "$live" >> "$env_file"
+        SYNC_LSP_NODE_ID_UPDATED=1
     fi
 }
 

@@ -26,6 +26,7 @@ fi
 # 10.0.2.2 = host loopback from the Android emulator.
 HOST="${HARNESS_HOST:-10.0.2.2}"
 TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
 cat > "$TMP" << EOF
 {
   "network": "regtest",
@@ -41,8 +42,9 @@ cat > "$TMP" << EOF
 }
 EOF
 
-DEST="/sdcard/Android/data/com.stablechannels.app/files/test_config.json"
+DEST_DIR="/sdcard/Android/data/com.stablechannels.app/files"
+DEST="$DEST_DIR/test_config.json"
+"$ADB" shell mkdir -p "$DEST_DIR" >/dev/null
 "$ADB" push "$TMP" "$DEST"
-rm -f "$TMP"
 echo "pushed test config (LSP ${LSP_NODE_ID:0:16}...) -> $DEST"
 echo "restart the app for it to take effect:  adb shell am force-stop com.stablechannels.app"

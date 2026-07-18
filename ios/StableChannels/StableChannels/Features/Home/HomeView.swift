@@ -219,6 +219,7 @@ struct HomeView: View {
                         .contentTransition(.numericText())
                         .animation(.default, value: appState.totalBalanceUSD)
                         .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
+                        .accessibilityIdentifier("home_total_balance_usd")
                     Text(String(localized: "label_usd", defaultValue: "USD"))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)

@@ -28,7 +28,23 @@ curl -fsS "$HARNESS_API/info" >/dev/null 2>&1 || die "harness API never came up 
 ok "harness API up"
 
 # A fresh ldk-server volume mints a new node id — keep .env in step with it.
-sync_lsp_node_id
+info "syncing LSP node id …"
+live_lsp_node_id="$(wait_for_lsp_node_id)" \
+    || die "ldk-server node id never appeared in logs (see: make logs)"
+sync_lsp_node_id "$live_lsp_node_id"
+
+if [ "${SYNC_LSP_NODE_ID_UPDATED:-0}" = "1" ]; then
+    info "recreating harness to load updated LSP_NODE_ID …"
+    docker compose up -d --no-deps --force-recreate harness
+
+    info "waiting for harness API after LSP node id sync …"
+    for _ in $(seq 1 60); do
+        curl -fsS "$HARNESS_API/info" >/dev/null 2>&1 && break || sleep 2
+    done
+    curl -fsS "$HARNESS_API/info" >/dev/null 2>&1 \
+        || die "harness API never came back after LSP node id sync (see: make logs)"
+    ok "harness API reloaded LSP node id"
+fi
 
 info "bootstrapping counterparty↔LSP channel (idempotent) …"
 curl -fsS -X POST "$HARNESS_API/bootstrap" \

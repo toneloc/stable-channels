@@ -124,21 +124,22 @@ it adds a desktop-native guard over the same money-moving lifecycle.
 
 | Flow | Step | State |
 |---|---|---|
-| `01_onboard_lightning`  | Onboard over Lightning | runnable after harness (onboarding taps TODO) |
-| `02_btc_to_usd`         | BTC → USD | **selectors verified** against SellScreen/HomeScreen |
-| `03_usd_stability`      | USD Stability | harness-driven price move; settlement assertion TODO |
+| `01_onboard_lightning`  | Onboard over Lightning | runnable after harness; pays invoice through the harness |
+| `02_btc_to_usd`         | BTC → USD | runnable; verifies SellScreen/HomeScreen selectors |
+| `03_usd_stability`      | USD Stability | runnable; asserts settlement via the LSP audit log |
 | `04_lightning_receive`  | Lightning Receive | **selectors verified** against ReceiveScreen |
 | `05_onchain_receive`    | Onchain Receive | selectors verified; needs harness send+mine |
 | `06_lightning_send`     | Lightning Send | **selectors verified** against SendScreen |
 | `07_onchain_send`       | Onchain Send | selectors verified (asserts "Splice-out initiated") |
 | `08_usd_to_btc`         | USD → BTC | **selectors verified** against BuyScreen |
-| `09_close_channel`      | Close Channel | Close dialog verified; settings navigation TODO |
+| `09_close_channel`      | Close Channel | runnable; verifies settings navigation and close dialog |
 | `10_backup_keys`        | Back Up Keys | runnable as an opt-in seed-copy flow |
 | `11_import_keys`        | Import Keys | runnable with `RESTORE_SEED="word1 ..."` |
-| `12_offboard_onchain`   | Offboard Onchain | selectors verified ("Send Max") |
+| `12_offboard_onchain`   | Offboard Onchain | runnable; Android sweeps to zero, iOS asserts a balance drop |
 
-"Navigation TODO" = the settings/onboarding tap path needs to be filled in on a
-live emulator (`maestro studio` makes this a 2-minute job per flow).
+Flows `10_backup_keys` and `11_import_keys` are opt-in because import needs a
+fresh app state plus a `RESTORE_SEED`; the canonical suite runs `01` through `09`
+and `12` in a single wallet lifecycle.
 
 ## Prerequisites
 
@@ -213,14 +214,14 @@ price, **1,000 sats = $1** — all conversions are checkable by eye.
 | Parameter | Value | Why |
 |---|---|---|
 | Base mock price | **$100,000** | round sats↔USD math |
-| Stable target (Steps 1–2) | **$85** | matches prod tester channels (audit `expected_usd` ≈ 85), under the $100 JIT cap |
+| Initial Lightning receive (Step 1) | **$85** | matches prod tester channels and stays under the $100 JIT cap |
 | Bootstrap channel (counterparty↔LSP) | **5,000,000 sats** | routing headroom for many suite runs |
 | Onchain deposit (Step 5) | 100,000 sats (~$100) | |
 | Lightning receive (Step 4) | $10 | |
 | Lightning send (Step 6) | 5,000 sats ($5) | keep under native so the base run doesn't dip into USD; run variant b) above native for the overflow assertion |
 | Onchain send (Step 7) | $5 | |
-| Trades (Steps 2/8) | $25 sell, $20 buy-back | buy is capped at the stable position; the sell nets $24.75 after fee |
-| Stability move (Step 3) | ±2% → $102,000 / $98,000 | ~$1.70 settlement on the $85 target; clears the $0.25 AND 0.1% thresholds |
+| Trades (Steps 2/8) | $75 sell, $20 buy-back | the sell creates a large enough stable position; the buy is capped below the remaining stable balance |
+| Stability move (Step 3) | +1% → $101,000 | ~$0.75 settlement on the $75 position; clears the $0.25 AND 0.1% thresholds |
 
 ## Conventions
 

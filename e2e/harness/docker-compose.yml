@@ -6,8 +6,8 @@
 #   sc-lsp     — stable-channels-lsp front daemon (built from this repo)
 #   harness    — counterparty wallet + miner + price mock (e2e/harness)
 #
-# First boot: see README.md — the LSP node id must be copied into .env
-# (LSP_NODE_ID) before the harness can /bootstrap a channel to it.
+# The runner syncs ldk-server's node id into .env, then recreates the harness if
+# needed so /bootstrap always connects to the live LSP node.
 
 services:
   bitcoind:
