@@ -1,30 +1,46 @@
 use egui::{Color32, RichText, Ui};
-
-const AMBER: Color32 = Color32::from_rgb(0xF7, 0x93, 0x1A);
+use crate::ui::layout::{AMBER, SECONDARY};
 
 /// A big headline figure with a small muted secondary line, in a framed card.
 pub fn stat_card(ui: &mut Ui, title: &str, big_value: &str, secondary: &str) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.vertical(|ui| {
-            ui.label(RichText::new(title).small().weak());
-            ui.label(RichText::new(big_value).size(24.0).strong());
-            if !secondary.is_empty() {
-                ui.label(RichText::new(secondary).small().weak());
-            }
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::same(12.0))
+        .rounding(egui::Rounding::same(8.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).small().color(SECONDARY));
+                ui.label(RichText::new(big_value).size(24.0).strong());
+                if !secondary.is_empty() {
+                    ui.label(RichText::new(secondary).small().color(SECONDARY));
+                }
+            });
         });
-    });
 }
 
-/// A small filled status pill.
+/// A small non-interactive status pill: white text on a dimmed color chip.
+/// Built as a Button (a Widget) so it stays content-sized and centers cleanly.
 pub fn status_pill(ui: &mut Ui, text: &str, color: Color32) {
-    let bg = color.linear_multiply(0.25);
-    egui::Frame::none()
-        .fill(bg)
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(8.0, 2.0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).color(color).small().strong());
-        });
+    let bg = Color32::from_rgb(color.r() / 2, color.g() / 2, color.b() / 2);
+    let prev = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = egui::vec2(8.0, 3.0);
+    ui.add(
+        egui::Button::new(RichText::new(text).color(Color32::WHITE).small())
+            .fill(bg)
+            .stroke(egui::Stroke::NONE)
+            .rounding(egui::Rounding::same(8.0))
+            .sense(egui::Sense::hover()),
+    );
+    ui.spacing_mut().button_padding = prev;
+}
+
+/// A destructive-action button: red outline + red text, transparent fill.
+pub fn danger_button(ui: &mut Ui, label: &str) -> egui::Response {
+    let btn = egui::Button::new(RichText::new(label).color(Color32::RED))
+        .small()
+        .fill(Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0, Color32::RED));
+    ui.add(btn)
 }
 
 /// Monospace truncated id + a copy button that confirms via the status bar.
