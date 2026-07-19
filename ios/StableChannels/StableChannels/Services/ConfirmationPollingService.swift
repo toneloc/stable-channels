@@ -1,9 +1,6 @@
 import Foundation
 import os.log
 
-/// Periodically resolves on-chain confirmations for pending payments and
-/// updates the DB. Owns its own polling task; started by `AppState` after
-/// node startup and stopped on shutdown / backgrounding.
 @MainActor
 final class ConfirmationPollingService {
     private let databaseService: DatabaseService
@@ -13,6 +10,10 @@ final class ConfirmationPollingService {
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
     private var pollTask: Task<Void, Never>?
+
+    /// Fires after each poll cycle. Observers should re-load their
+    /// payment list to reflect updated confirmation state.
+    var onUpdate: (@MainActor () -> Void)?
 
     init(
         databaseService: DatabaseService,
@@ -41,7 +42,6 @@ final class ConfirmationPollingService {
         pollTask = nil
     }
 
-    /// Single poll cycle. Exposed for testing and `forceRefresh`-style callers.
     func pollOnce() async {
         let currentHeight = blockHeightService.currentHeight
         guard currentHeight > 0 else { return }
@@ -58,6 +58,8 @@ final class ConfirmationPollingService {
             guard !Task.isCancelled else { return }
             await resolve(payment: payment, currentHeight: currentHeight)
         }
+
+        onUpdate?()
     }
 
     private func resolve(payment: PaymentRecord, currentHeight: UInt32) async {

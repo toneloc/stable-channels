@@ -222,6 +222,17 @@ struct PaymentRowView: View {
     }
 }
 
+extension PaymentRecord {
+    var confirmationStatusLabel: String {
+        guard shouldShowConfirmationProgress,
+              let blockHeight = txBlockHeight, blockHeight > 0 else { return "" }
+        if confirmations >= ConfirmationPolicy.requiredConfirmations {
+            return "Confirmed"
+        }
+        return "\(confirmations)/\(ConfirmationPolicy.requiredConfirmations) confirmations"
+    }
+}
+
 private extension PaymentRecord {
     var shouldPreferUSDDisplay: Bool {
         switch paymentType {
