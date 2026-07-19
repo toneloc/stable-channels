@@ -335,6 +335,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 TextButton(onClick = {
                     showCloseConfirm = false
                     appState.isChannelClosing = true
+                    appState.setLastCloseTxid(null) // Clear any previous close txid from cache
                     scope.launch(Dispatchers.IO) {
                         try {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
