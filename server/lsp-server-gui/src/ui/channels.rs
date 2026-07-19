@@ -1,6 +1,8 @@
-use egui::{Color32, Context, ScrollArea, Ui};
+use egui::{Color32, Context, Ui};
+use egui_extras::{Column, TableBuilder};
 
 use crate::app::LspServerApp;
+use crate::ui::layout::page_scrolled;
 use crate::ui::widgets;
 
 // Liquidity bar colors: amber = outbound (local funds), blue = inbound (remote funds).
@@ -24,10 +26,6 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 		}
 
 		ui.separator();
-
-		if ui.button("Connect Peer").clicked() {
-			app.state.show_connect_peer_dialog = true;
-		}
 
 		if ui.button("Open Channel").clicked() {
 			app.state.show_open_channel_dialog = true;
@@ -121,140 +119,159 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 				}
 			});
 
-			ui.label(format!("{} of {} channel(s)", view.len(), rows.len()));
-			ui.add_space(5.0);
+			page_scrolled(ui, |ui| {
+				ui.label(format!("{} of {} channel(s)", view.len(), rows.len()));
+				ui.add_space(5.0);
 
-			ScrollArea::both().max_height(400.0).show(ui, |ui| {
-				egui::Grid::new("channels_grid").striped(true).spacing([12.0, 6.0]).show(
-					ui,
-					|ui| {
-						// Header (values now carry their own unit).
-						ui.strong("Channel ID");
-						ui.strong("User Channel ID");
-						ui.strong("Counterparty");
-						ui.strong("Funding Tx");
-						if ui.button(sort_header("Capacity", &sort, 0)).clicked() {
-							sort = (0, if sort.0 == 0 { !sort.1 } else { true });
-						}
-						if ui.button(sort_header("Outbound", &sort, 1)).clicked() {
-							sort = (1, if sort.0 == 1 { !sort.1 } else { true });
-						}
-						if ui.button(sort_header("Inbound", &sort, 2)).clicked() {
-							sort = (2, if sort.0 == 2 { !sort.1 } else { true });
-						}
-						ui.strong("Liquidity");
-						ui.strong("Ready");
-						ui.strong("Use");
-						ui.strong("Actions");
-						ui.end_row();
-
-						for &i in &view {
-							let ch = &rows[i];
-							// Channel ID
-							widgets::id_with_copy(
-								ui,
-								&ch.channel_id,
-								&mut app.state.status_message,
-							);
-
-							// User Channel ID
-							widgets::id_with_copy(
-								ui,
-								&ch.user_channel_id,
-								&mut app.state.status_message,
-							);
-
-							// Counterparty
-							widgets::id_with_copy(
-								ui,
-								&ch.counterparty_node_id,
-								&mut app.state.status_message,
-							);
-
-							// Funding Txid
-							if let Some(txid) = &ch.funding_txid {
-								widgets::id_with_copy(ui, txid, &mut app.state.status_message);
-							} else {
-								ui.label("-");
-							}
-
-							// Capacity (unit-aware)
-							ui.label(app.fmt_sats(ch.channel_value_sats));
-
-							// Outbound capacity (unit-aware)
-							ui.label(app.fmt_msat(ch.outbound_capacity_msat));
-
-							// Inbound capacity (unit-aware)
-							ui.label(app.fmt_msat(ch.inbound_capacity_msat));
-
-							// Liquidity split bar (outbound vs inbound)
-							let total = ch.outbound_capacity_msat + ch.inbound_capacity_msat;
-							let frac = if total == 0 {
-								0.0
-							} else {
-								ch.outbound_capacity_msat as f32 / total as f32
-							};
-							let hover = format!(
-								"out {} / in {}",
-								app.fmt_msat(ch.outbound_capacity_msat),
-								app.fmt_msat(ch.inbound_capacity_msat)
-							);
-							liquidity_bar(ui, frac).on_hover_text(hover);
-
-							// Ready
-							if ch.is_channel_ready {
-								widgets::status_pill(ui, "Ready", Color32::GREEN);
-							} else {
-								widgets::status_pill(ui, "No", Color32::GRAY);
-							}
-
-							// Usable
-							if ch.is_usable {
-								widgets::status_pill(ui, "Yes", Color32::GREEN);
-							} else {
-								widgets::status_pill(ui, "No", Color32::GRAY);
-							}
-
-							// Actions (collapsed into a single menu)
-							ui.menu_button("⋮", |ui| {
-								if ui.button("Close").clicked() {
-									app.state.forms.close_channel.user_channel_id =
-										ch.user_channel_id.clone();
-									app.state.forms.close_channel.counterparty_node_id =
-										ch.counterparty_node_id.clone();
-									app.state.show_close_channel_dialog = true;
-									ui.close_menu();
-								}
-								if ui.button("Splice+").clicked() {
-									app.state.forms.splice_in.user_channel_id =
-										ch.user_channel_id.clone();
-									app.state.forms.splice_in.counterparty_node_id =
-										ch.counterparty_node_id.clone();
-									app.state.show_splice_in_dialog = true;
-									ui.close_menu();
-								}
-								if ui.button("Splice-").clicked() {
-									app.state.forms.splice_out.user_channel_id =
-										ch.user_channel_id.clone();
-									app.state.forms.splice_out.counterparty_node_id =
-										ch.counterparty_node_id.clone();
-									app.state.show_splice_out_dialog = true;
-									ui.close_menu();
-								}
-								if ui.button("Config").clicked() {
-									app.state.forms.update_channel_config.user_channel_id =
-										ch.user_channel_id.clone();
-									app.state.forms.update_channel_config.counterparty_node_id =
-										ch.counterparty_node_id.clone();
-									app.state.show_update_config_dialog = true;
-									ui.close_menu();
+				crate::ui::layout::h_scroll(ui, 1200.0, |ui| {
+					TableBuilder::new(ui)
+						.striped(true)
+						.resizable(false)
+						.vscroll(false)
+						.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+						.auto_shrink([false, true])
+						.column(Column::remainder().at_least(64.0).clip(true)) // Channel ID
+						.column(Column::remainder().at_least(64.0).clip(true)) // User Channel ID
+						.column(Column::remainder().at_least(64.0).clip(true)) // Counterparty
+						.column(Column::remainder().at_least(64.0).clip(true)) // Funding Tx
+						.column(Column::auto()) // Capacity
+						.column(Column::auto()) // Outbound
+						.column(Column::auto()) // Inbound
+						.column(Column::auto()) // Liquidity
+						.column(Column::auto()) // Ready
+						.column(Column::auto()) // Use
+						.column(Column::auto()) // Actions
+						.header(24.0, |mut h| {
+							h.col(|ui| { ui.strong("Channel ID"); });
+							h.col(|ui| { ui.strong("User Channel ID"); });
+							h.col(|ui| { ui.strong("Counterparty"); });
+							h.col(|ui| { ui.strong("Funding Tx"); });
+							h.col(|ui| {
+								if ui.button(sort_header("Capacity", &sort, 0)).clicked() {
+									sort = (0, if sort.0 == 0 { !sort.1 } else { true });
 								}
 							});
+							h.col(|ui| {
+								if ui.button(sort_header("Outbound", &sort, 1)).clicked() {
+									sort = (1, if sort.0 == 1 { !sort.1 } else { true });
+								}
+							});
+							h.col(|ui| {
+								if ui.button(sort_header("Inbound", &sort, 2)).clicked() {
+									sort = (2, if sort.0 == 2 { !sort.1 } else { true });
+								}
+							});
+							h.col(|ui| { ui.strong("Liquidity"); });
+							h.col(|ui| { ui.strong("Ready"); });
+							h.col(|ui| { ui.strong("Use"); });
+							h.col(|ui| { ui.strong("Actions"); });
+						})
+						.body(|mut body| {
+							for &i in &view {
+								let ch = &rows[i];
+								body.row(26.0, |mut r| {
+									// Channel ID
+									r.col(|ui| { widgets::id_with_copy(ui, &ch.channel_id, &mut app.state.status_message); });
 
-							ui.end_row();
-						}
-					},
-				);
+									// User Channel ID
+									r.col(|ui| { widgets::id_with_copy(ui, &ch.user_channel_id, &mut app.state.status_message); });
+
+									// Counterparty
+									r.col(|ui| { widgets::id_with_copy(ui, &ch.counterparty_node_id, &mut app.state.status_message); });
+
+									// Funding Txid
+									r.col(|ui| {
+										if let Some(txid) = &ch.funding_txid {
+											widgets::id_with_copy(ui, txid, &mut app.state.status_message);
+										} else {
+											ui.label("-");
+										}
+									});
+
+									// Capacity (unit-aware)
+									r.col(|ui| { ui.label(app.fmt_sats(ch.channel_value_sats)); });
+
+									// Outbound capacity (unit-aware)
+									r.col(|ui| { ui.label(app.fmt_msat(ch.outbound_capacity_msat)); });
+
+									// Inbound capacity (unit-aware)
+									r.col(|ui| { ui.label(app.fmt_msat(ch.inbound_capacity_msat)); });
+
+									// Liquidity split bar (outbound vs inbound)
+									r.col(|ui| {
+										let total = ch.outbound_capacity_msat + ch.inbound_capacity_msat;
+										let frac = if total == 0 {
+											0.0
+										} else {
+											ch.outbound_capacity_msat as f32 / total as f32
+										};
+										let hover = format!(
+											"out {} / in {}",
+											app.fmt_msat(ch.outbound_capacity_msat),
+											app.fmt_msat(ch.inbound_capacity_msat)
+										);
+										liquidity_bar(ui, frac).on_hover_text(hover);
+									});
+
+									// Ready
+									r.col(|ui| {
+										if ch.is_channel_ready {
+											widgets::status_pill(ui, "Ready", Color32::GREEN);
+										} else {
+											widgets::status_pill(ui, "No", Color32::GRAY);
+										}
+									});
+
+									// Usable
+									r.col(|ui| {
+										if ch.is_usable {
+											widgets::status_pill(ui, "Yes", Color32::GREEN);
+										} else {
+											widgets::status_pill(ui, "No", Color32::GRAY);
+										}
+									});
+
+									// Actions (collapsed into a single menu)
+									r.col(|ui| {
+										ui.menu_button("⋮", |ui| {
+											if ui.button("Close").clicked() {
+												app.state.forms.close_channel.user_channel_id =
+													ch.user_channel_id.clone();
+												app.state.forms.close_channel.counterparty_node_id =
+													ch.counterparty_node_id.clone();
+												app.state.show_close_channel_dialog = true;
+												ui.close_menu();
+											}
+											if ui.button("Splice+").clicked() {
+												app.state.forms.splice_in.user_channel_id =
+													ch.user_channel_id.clone();
+												app.state.forms.splice_in.counterparty_node_id =
+													ch.counterparty_node_id.clone();
+												app.state.show_splice_in_dialog = true;
+												ui.close_menu();
+											}
+											if ui.button("Splice-").clicked() {
+												app.state.forms.splice_out.user_channel_id =
+													ch.user_channel_id.clone();
+												app.state.forms.splice_out.counterparty_node_id =
+													ch.counterparty_node_id.clone();
+												app.state.show_splice_out_dialog = true;
+												ui.close_menu();
+											}
+											if ui.button("Config").clicked() {
+												app.state.forms.update_channel_config.user_channel_id =
+													ch.user_channel_id.clone();
+												app.state.forms.update_channel_config.counterparty_node_id =
+													ch.counterparty_node_id.clone();
+												app.state.show_update_config_dialog = true;
+												ui.close_menu();
+											}
+										});
+									});
+								});
+							}
+						});
+				});
 			});
 
 			ui.memory_mut(|m| {
@@ -323,54 +340,11 @@ struct ChannelRow {
 }
 
 pub fn render_dialogs(ctx: &Context, app: &mut LspServerApp) {
-	render_connect_peer_dialog(ctx, app);
 	render_open_channel_dialog(ctx, app);
 	render_close_channel_dialog(ctx, app);
 	render_splice_in_dialog(ctx, app);
 	render_splice_out_dialog(ctx, app);
 	render_update_config_dialog(ctx, app);
-}
-
-fn render_connect_peer_dialog(ctx: &Context, app: &mut LspServerApp) {
-	if !app.state.show_connect_peer_dialog {
-		return;
-	}
-
-	egui::Window::new("Connect Peer").collapsible(false).resizable(false).show(ctx, |ui| {
-		let form = &mut app.state.forms.connect_peer;
-
-		ui.label("Connect to a Lightning Network peer");
-		ui.add_space(5.0);
-
-		egui::Grid::new("connect_peer_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-			ui.label("Node Pubkey:");
-			ui.text_edit_singleline(&mut form.node_pubkey);
-			ui.end_row();
-
-			ui.label("Address:");
-			ui.text_edit_singleline(&mut form.address);
-			ui.end_row();
-
-			ui.label("Persist Connection:");
-			ui.checkbox(&mut form.persist, "");
-			ui.end_row();
-		});
-
-		ui.add_space(10.0);
-
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.connect_peer.is_some();
-			if is_pending {
-				ui.spinner();
-			} else if ui.button("Connect").clicked() {
-				app.connect_peer();
-			}
-			if ui.button("Cancel").clicked() {
-				app.state.show_connect_peer_dialog = false;
-				app.state.forms.connect_peer = Default::default();
-			}
-		});
-	});
 }
 
 fn render_open_channel_dialog(ctx: &Context, app: &mut LspServerApp) {

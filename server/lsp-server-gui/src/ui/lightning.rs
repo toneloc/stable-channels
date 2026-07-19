@@ -2,6 +2,7 @@ use egui::Ui;
 
 use crate::app::LspServerApp;
 use crate::state::{LightningTab, StatusMessage};
+use crate::ui::layout::{card, page_scrolled, FORM_WIDTH};
 
 pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.heading("Lightning Payments");
@@ -53,20 +54,24 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.separator();
 	ui.add_space(10.0);
 
-	match app.state.lightning_tab {
-		LightningTab::Bolt11Send => render_bolt11_send(ui, app),
-		LightningTab::Bolt11Receive => render_bolt11_receive(ui, app),
-		LightningTab::Bolt12Send => render_bolt12_send(ui, app),
-		LightningTab::Bolt12Receive => render_bolt12_receive(ui, app),
-		LightningTab::SpontaneousSend => render_spontaneous_send(ui, app),
-	}
+	// One outer scroll for the selected sub-form, bounded to FORM_WIDTH like the On-chain/Tools tabs.
+	page_scrolled(ui, |ui| {
+		let form_w = ui.available_width().min(FORM_WIDTH);
+		ui.vertical(|ui| {
+			ui.set_width(form_w);
+			match app.state.lightning_tab {
+				LightningTab::Bolt11Send => render_bolt11_send(ui, app),
+				LightningTab::Bolt11Receive => render_bolt11_receive(ui, app),
+				LightningTab::Bolt12Send => render_bolt12_send(ui, app),
+				LightningTab::Bolt12Receive => render_bolt12_receive(ui, app),
+				LightningTab::SpontaneousSend => render_spontaneous_send(ui, app),
+			}
+		});
+	});
 }
 
 fn render_bolt11_send(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Pay BOLT11 Invoice");
-		ui.add_space(5.0);
-
+	card(ui, "Pay BOLT11 Invoice", |ui| {
 		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt11_send;
 
@@ -114,10 +119,7 @@ fn render_bolt11_send(ui: &mut Ui, app: &mut LspServerApp) {
 }
 
 fn render_bolt11_receive(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Generate BOLT11 Invoice");
-		ui.add_space(5.0);
-
+	card(ui, "Generate BOLT11 Invoice", |ui| {
 		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt11_receive;
 
@@ -169,10 +171,7 @@ fn render_bolt11_receive(ui: &mut Ui, app: &mut LspServerApp) {
 }
 
 fn render_bolt12_send(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Pay BOLT12 Offer");
-		ui.add_space(5.0);
-
+	card(ui, "Pay BOLT12 Offer", |ui| {
 		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt12_send;
 
@@ -226,10 +225,7 @@ fn render_bolt12_send(ui: &mut Ui, app: &mut LspServerApp) {
 }
 
 fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Generate BOLT12 Offer");
-		ui.add_space(5.0);
-
+	card(ui, "Generate BOLT12 Offer", |ui| {
 		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.bolt12_receive;
 
@@ -285,10 +281,7 @@ fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
 }
 
 fn render_spontaneous_send(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Spontaneous Payment (Keysend)");
-		ui.add_space(5.0);
-
+	card(ui, "Spontaneous Payment (Keysend)", |ui| {
 		let unit_label = crate::ui::unit_label(app.state.display_unit);
 		let form = &mut app.state.forms.spontaneous_send;
 

@@ -26,17 +26,18 @@ pub fn controls(ui: &mut egui::Ui, id_salt: &str, copy_source: &str) -> (String,
 	(filter, wrap, follow)
 }
 
-/// Monospace, scrollable, read-only text area for already-built display text.
+/// Monospace, scrollable, read-only text area that fills the remaining panel width and height.
 pub fn text_area(ui: &mut egui::Ui, display: &str, wrap: bool, follow: bool) {
+	let avail = ui.available_size();
 	let scroll = egui::ScrollArea::both().auto_shrink([false, false]).stick_to_bottom(follow);
 	scroll.show(ui, |ui| {
 		let mut binding = display;
-		let desired_w = if wrap { ui.available_width() } else { f32::INFINITY };
+		let desired_w = if wrap { avail.x } else { f32::INFINITY };
 		ui.add(
 			egui::TextEdit::multiline(&mut binding)
 				.font(egui::TextStyle::Monospace)
 				.desired_width(desired_w)
-				.desired_rows(30),
+				.min_size(egui::vec2(avail.x, avail.y)),
 		);
 	});
 }
