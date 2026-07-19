@@ -1,0 +1,26 @@
+# Serves the lsp-server-gui wasm bundle, reverse-proxies the SC daemon REST,
+# and publishes the GUI API key at /setup (written by 40-publish-api-key.sh).
+# ${SC_LSP_UPSTREAM} is substituted at container start by the stock nginx
+# envsubst entrypoint (only defined env vars are substituted; $uri survives).
+server {
+    listen 80;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/ {
+        # Resolve the upstream per-request via docker's embedded DNS: a static
+        # proxy_pass caches the IP at nginx startup, which breaks (and blocks
+        # nginx from even starting) when the daemon container restarts or
+        # isn't up yet.
+        resolver 127.0.0.11 valid=30s;
+        set $sc_lsp_upstream "${SC_LSP_UPSTREAM}";
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $sc_lsp_upstream;
+        proxy_ssl_verify off;   # sc-lsp's cert is self-signed; traffic stays on the app's docker network
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

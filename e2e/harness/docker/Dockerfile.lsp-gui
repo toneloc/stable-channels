@@ -1,0 +1,19 @@
+# Builds the lsp-server-gui web (wasm) bundle from THIS repo (context = repo
+# root) and serves it as a static site. trunk drives the wasm build per
+# server/lsp-server-gui/index.html (web feature, no default features) and
+# auto-downloads matching wasm-bindgen/wasm-opt tooling.
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/* \
+ && rustup target add wasm32-unknown-unknown \
+ && cargo install --locked trunk --version ^0.21
+WORKDIR /src
+COPY . .
+WORKDIR /src/server/lsp-server-gui
+RUN trunk build --release
+
+FROM nginx:alpine
+COPY --from=build /src/server/lsp-server-gui/dist /usr/share/nginx/html
+# The wasm client requests /api/<path> relative to its own origin; nginx
+# proxies those to sc-lsp (see lsp-gui-nginx.conf).
+COPY e2e/harness/docker/lsp-gui-nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

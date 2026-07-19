@@ -12,8 +12,9 @@
 #
 # NOTE: iOS/Android device tests CANNOT run inside Docker (a simulator needs
 # macOS+Xcode; the emulator needs the host). Docker hosts only the backend
-# (bitcoind, electrs, ldk-server, sc-lsp, harness); Maestro drives the device
-# from the host. These targets orchestrate both halves.
+# (bitcoin-core, block-explorer, ldk-server, sc-lsp, ldk-node, optional
+# lsp-gui); Maestro drives the device from the host. These targets orchestrate
+# both halves.
 #
 # Backend-only helpers: make up / down / clean / logs.
 # Run a subset:  make ios FLOWS="01_onboard_lightning 02_btc_to_usd"
@@ -61,13 +62,13 @@ rebuild: ## force-rebuild backend images, then start (after LSP/harness source c
 	@REBUILD=1 $(S)/backend.sh 2>&1 | tee $(LOG)
 
 down: ## stop the docker backend (keeps volumes)
-	@cd harness && docker compose down
+	@cd harness && docker compose --profile gui down
 
 clean: ## stop the backend AND wipe volumes (fresh chain/channel next time)
-	@cd harness && docker compose down -v
+	@cd harness && docker compose --profile gui down -v
 
 logs: ## follow the backend logs
-	@cd harness && docker compose logs -f
+	@cd harness && docker compose --profile gui logs -f
 
 help: ## list targets
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) \

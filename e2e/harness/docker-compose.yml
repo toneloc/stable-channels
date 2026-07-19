@@ -1,16 +1,19 @@
 # Regtest-in-a-box for the Stable Channels E2E suite.
 #
-#   bitcoind   — regtest chain
-#   electrs    — esplora HTTP API (what the apps + nodes sync against)
-#   ldk-server — LDK backend of the LSP bidaemon (LSPS2 service enabled)
-#   sc-lsp     — stable-channels-lsp front daemon (built from this repo)
-#   harness    — counterparty wallet + miner + price mock (e2e/harness)
+#   bitcoin-core   — regtest chain
+#   chain-init     — one-shot: mines the first 101 blocks at boot
+#   block-explorer — electrs esplora HTTP API (what the apps + nodes sync against)
+#   ldk-server     — LDK backend of the LSP bidaemon (LSPS2 service enabled)
+#   sc-lsp         — stable-channels-lsp front daemon (built from this repo)
+#   ldk-node       — counterparty wallet + miner + price mock (e2e/harness)
+#   lsp-gui        — optional web build of server/lsp-server-gui (profile: gui)
 #
-# The runner syncs ldk-server's node id into .env, then recreates the harness if
+# The runner syncs ldk-server's node id into .env, then recreates ldk-node if
 # needed so /bootstrap always connects to the live LSP node.
 
 services:
-  bitcoind:
+  bitcoin-core:
+    container_name: bitcoin-core
     image: bitcoin/bitcoin:27.1
     command:
       - -regtest=1
@@ -31,31 +34,33 @@ services:
   # One-shot: regtest starts at height 0 and electrs won't serve its HTTP API
   # until a block exists — mine the first 101 (mature coinbase) at boot.
   chain-init:
+    container_name: chain-init
     image: bitcoin/bitcoin:27.1
-    depends_on: [bitcoind]
+    depends_on: [bitcoin-core]
     restart: "no"
     entrypoint: /bin/bash
     command:
       - -c
       - |
-        until bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc getblockchaininfo; do sleep 1; done
-        bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc createwallet miner 2>/dev/null || \
-          bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc loadwallet miner 2>/dev/null || true
-        ADDR=$$(bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc -rpcwallet=miner getnewaddress)
-        HEIGHT=$$(bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc getblockcount)
+        until bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc getblockchaininfo; do sleep 1; done
+        bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc createwallet miner 2>/dev/null || \
+          bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc loadwallet miner 2>/dev/null || true
+        ADDR=$$(bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc -rpcwallet=miner getnewaddress)
+        HEIGHT=$$(bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc getblockcount)
         if [ "$$HEIGHT" -lt 101 ]; then
-          bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc generatetoaddress $$((101 - HEIGHT)) "$$ADDR"
+          bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc generatetoaddress $$((101 - HEIGHT)) "$$ADDR"
         fi
-        echo "chain-init done at height $$(bitcoin-cli -regtest -rpcconnect=bitcoind -rpcuser=sc -rpcpassword=sc getblockcount)"
+        echo "chain-init done at height $$(bitcoin-cli -regtest -rpcconnect=bitcoin-core -rpcuser=sc -rpcpassword=sc getblockcount)"
 
-  electrs:
+  block-explorer:
+    container_name: block-explorer
     image: ghcr.io/vulpemventures/electrs:latest
-    depends_on: [bitcoind]
+    depends_on: [bitcoin-core]
     restart: unless-stopped
     command:
       - -vvv
       - --network=regtest
-      - --daemon-rpc-addr=bitcoind:18443
+      - --daemon-rpc-addr=bitcoin-core:18443
       - --cookie=sc:sc
       - --http-addr=0.0.0.0:3000
       - --electrum-rpc-addr=0.0.0.0:50001
@@ -67,10 +72,11 @@ services:
       - electrs-data:/data
 
   ldk-server:
+    container_name: ldk-server
     build:
       context: .
       dockerfile: docker/Dockerfile.ldk-server
-    depends_on: [electrs]
+    depends_on: [block-explorer]
     restart: unless-stopped   # retries until electrs serves (post chain-init)
     command: ["/usr/local/bin/ldk-server", "/etc/ldk-server/config.toml"]
     ports:
@@ -81,6 +87,7 @@ services:
       - ldk-server-data:/data/ldk-server
 
   sc-lsp:
+    container_name: sc-lsp
     build:
       context: ../..            # repo root — builds server/stable-channels-lsp
       dockerfile: e2e/harness/docker/Dockerfile.sc-lsp
@@ -92,7 +99,7 @@ services:
       # Double-gated in src/constants.rs: the harness LSP image is built with
       # the E2E Cargo feature, then SC_E2E=1 activates mock feeds at runtime.
       SC_E2E: "1"
-      SC_PRICE_FEED_BASE: http://harness:9737
+      SC_PRICE_FEED_BASE: http://ldk-node:9737
     command: ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/config.toml"]
     ports:
       - "127.0.0.1:3002:3002"     # SC daemon REST — the wallets hit this
@@ -104,17 +111,18 @@ services:
       # Read ldk-server's auto-generated tls.crt + api_key.
       - ldk-server-data:/data/ldk-server:ro
 
-  harness:
+  ldk-node:
+    container_name: ldk-node
     build:
       context: .
       dockerfile: Dockerfile
-    depends_on: [electrs, ldk-server]
+    depends_on: [block-explorer, ldk-server]
     restart: unless-stopped
     environment:
       HARNESS_LISTEN: 0.0.0.0:9737
       DATA_DIR: /data/harness
-      ESPLORA_URL: http://electrs:3000
-      BITCOIND_RPC: http://bitcoind:18443
+      ESPLORA_URL: http://block-explorer:3000
+      BITCOIND_RPC: http://bitcoin-core:18443
       BITCOIND_RPC_USER: sc
       BITCOIND_RPC_PASS: sc
       P2P_LISTEN: 0.0.0.0:9736
@@ -130,6 +138,21 @@ services:
       - ldk-server-data:/data/ldk-server:ro
       # Read sc-lsp's audit log for /audit-tail (flow assertions).
       - sc-lsp-data:/data/sc-lsp:ro
+
+  # Optional: the LSP operator GUI (server/lsp-server-gui) as a wasm web build,
+  # served as a static site. Off by default — enabled via the `gui` compose
+  # profile (backend.sh asks, or set E2E_LSP_GUI=1). Open http://127.0.0.1:3003
+  # and point the connection screen at the sc-lsp REST API (127.0.0.1:3002).
+  lsp-gui:
+    container_name: lsp-gui
+    profiles: [gui]
+    build:
+      context: ../..            # repo root — builds server/lsp-server-gui (web)
+      dockerfile: e2e/harness/docker/Dockerfile.lsp-gui
+    depends_on: [sc-lsp]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3003:80"       # GUI — open this in a browser
 
 volumes:
   bitcoind-data:

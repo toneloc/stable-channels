@@ -38,7 +38,7 @@ make ios FLOWS="01_onboard_lightning 02_btc_to_usd 03_usd_stability"
 
 > **Why not `docker compose up ios`?** Device tests can't run inside Docker — a
 > simulator needs macOS+Xcode and the emulator needs the host. Docker hosts only
-> the backend (bitcoind, electrs, ldk-server, sc-lsp, harness); Maestro drives
+> the backend (bitcoin-core, block-explorer, ldk-server, sc-lsp, ldk-node); Maestro drives
 > the device from the host. `make ios`/`make android` orchestrate both halves.
 
 Screenshots + logs land in `~/.maestro/tests/<timestamp>/`;
@@ -168,8 +168,11 @@ Expected endpoints (see `flows/helpers/*.js`):
 | `POST /price`     | `{"price": 100000.0}` | set the mocked BTC/USD price |
 
 The harness itself lives under `e2e/harness/` and is started by the Make
-targets via Docker Compose: bitcoind regtest, electrs, ldk-server, sc-lsp, the
-counterparty ldk-node, and the mock price feed.
+targets via Docker Compose: bitcoin-core regtest, the block-explorer (electrs),
+ldk-server, sc-lsp, and the counterparty ldk-node container (which also hosts
+the miner + mock price feed). An optional lsp-gui container (web build of the
+LSP operator GUI, http://127.0.0.1:3003) can be enabled when `backend.sh`
+asks, or with `E2E_LSP_GUI=1`.
 
 **App-side prerequisite:** mobile debug builds use `test_config.json` overrides.
 The Rust Mac desktop wallet uses the `SC_MAC_*` environment overrides described

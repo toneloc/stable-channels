@@ -57,7 +57,10 @@ xcrun simctl shutdown all >/dev/null 2>&1 || true
 xcrun simctl erase "$IOS_SIM_UDID"
 xcrun simctl boot "$IOS_SIM_UDID"
 xcrun simctl bootstatus "$IOS_SIM_UDID" -b >/dev/null 2>&1 || true
-ok "simulator booted"
+# simctl boots headless — open the Simulator window (without stealing focus)
+# so the run is watchable. Harmless if it's already open.
+open -g -a Simulator 2>/dev/null || true
+ok "simulator booted (window opened)"
 
 info "install app …"
 xcrun simctl install "$IOS_SIM_UDID" "$APP_GLOB"

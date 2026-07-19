@@ -31,15 +31,25 @@ MAESTRO="$(command -v maestro || echo "$HOME/.maestro/bin/maestro")"
 ANDROID_AVD="${ANDROID_AVD:-Medium_Phone_API_36.1}"
 
 # --- pretty output ----------------------------------------------------------
-if [ -t 1 ]; then
-    C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'; C_GREEN=$'\033[32m'
-    C_RED=$'\033[31m'; C_CYAN=$'\033[36m'; C_RESET=$'\033[0m'
+# Colors are ON by default: make pipes everything through `tee .last-run.log`,
+# so a tty check would strip color exactly where people watch (terminal and
+# `tail -f`). Opt out with NO_COLOR=1 (or TERM=dumb).
+if [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    C_DIM=$'\033[2m';  C_BOLD=$'\033[1m';   C_ITAL=$'\033[3m'
+    C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_CYAN=$'\033[36m'
+    C_YELLOW=$'\033[33m'; C_GRAY=$'\033[38;5;245m'
+    # chips: white text on colored background
+    B_STEP=$'\033[48;5;24;38;5;255;1m'   # deep teal-blue — flow badges
+    B_PASS=$'\033[48;5;22;38;5;255;1m'   # green — pass chip
+    B_FAIL=$'\033[48;5;88;38;5;255;1m'   # red — fail chip
+    C_RESET=$'\033[0m'
 else
-    C_DIM=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_CYAN=""; C_RESET=""
+    C_DIM=""; C_BOLD=""; C_ITAL=""; C_GREEN=""; C_RED=""; C_CYAN=""
+    C_YELLOW=""; C_GRAY=""; B_STEP=""; B_PASS=""; B_FAIL=""; C_RESET=""
 fi
 say()  { printf '%s\n' "$*"; }
-info() { printf '%s•%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
-step() { printf '\n%s━━━ %s ━━━%s\n' "$C_BOLD$C_CYAN" "$*" "$C_RESET"; }
+info() { printf '%s•%s %s\n' "$C_GRAY" "$C_RESET" "$*"; }
+step() { printf '\n%s━━━%s %s%s%s %s━━━%s\n' "$C_GRAY" "$C_RESET" "$C_BOLD$C_CYAN" "$*" "$C_RESET" "$C_GRAY" "$C_RESET"; }
 ok()   { printf '   %s✔%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
 bad()  { printf '   %s✗%s %s\n' "$C_RED" "$C_RESET" "$*"; }
 die()  { printf '%serror:%s %s\n' "$C_RED$C_BOLD" "$C_RESET" "$*" >&2; exit 1; }

@@ -327,8 +327,28 @@ async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> 
             .map_err(err500)?;
         println!("[harness] funded LSP onchain: {lsp_fund_sats} sats -> {lsp_fund_addr}");
 
-        // 3) Channel to the LSP.
-        if !node.list_channels().iter().any(|c| c.is_channel_ready) {
+        // 3) Channel to the LSP — liquidity-aware. Every lifecycle run drains
+        // ~90k sats from the counterparty's outbound side (onboard $85 + $10
+        // receive + ...) and nothing flows back over Lightning (offboards
+        // return onchain). "A ready channel exists" therefore eventually means
+        // "a DRY channel exists" and /pay dies with 500 "Failed to send the
+        // given payment". Instead: keep total outbound above a floor, opening
+        // an additional channel whenever it drops below.
+        let outbound_total = |node: &ldk_node::Node| -> u64 {
+            node.list_channels()
+                .iter()
+                .filter(|c| c.is_channel_ready)
+                .map(|c| c.outbound_capacity_msat)
+                .sum()
+        };
+        let min_outbound_msat = body["min_outbound_sats"].as_u64().unwrap_or(500_000) * 1000;
+        let outbound_before = outbound_total(&node);
+        if outbound_before < min_outbound_msat {
+            println!(
+                "[harness] outbound {}k sats below {}k floor — opening a top-up channel",
+                outbound_before / 1_000_000,
+                min_outbound_msat / 1_000_000
+            );
             let lsp_pk = PublicKey::from_str(&lsp_id).map_err(bad_req)?;
             let lsp_addr = SocketAddress::from_str(&st2.lsp_p2p_addr)
                 .map_err(|e| bad_req(format!("bad LSP_P2P_ADDR: {e:?}")))?;
@@ -339,7 +359,7 @@ async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> 
             rpc(&st2, "generatetoaddress", json!([6, addr.to_string()]))?;
             for _ in 0..60 {
                 let _ = node.sync_wallets();
-                if node.list_channels().iter().any(|c| c.is_channel_ready) {
+                if outbound_total(&node) >= min_outbound_msat {
                     break;
                 }
                 std::thread::sleep(Duration::from_secs(2));

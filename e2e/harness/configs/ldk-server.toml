@@ -14,7 +14,7 @@ dir_path = "/data/ldk-server"
 
 # Chain source: bitcoind RPC, same as prod (prod: 127.0.0.1:8332 mainnet).
 [bitcoind]
-rpc_address = "bitcoind:18443"
+rpc_address = "bitcoin-core:18443"
 rpc_user = "sc"
 rpc_password = "sc"
 
