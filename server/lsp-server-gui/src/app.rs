@@ -31,14 +31,35 @@ use crate::task;
 use crate::ui;
 
 fn install_theme(ctx: &egui::Context) {
-    const AMBER: egui::Color32 = egui::Color32::from_rgb(0xF7, 0x93, 0x1A); // bitcoin orange
+    use crate::ui::layout::{AMBER, PRIMARY};
     let mut visuals = egui::Visuals::dark();
+
+    // Darker panel so lighter cards separate from the background.
+    let panel = egui::Color32::from_rgb(0x14, 0x14, 0x16);
+    let card = egui::Color32::from_rgb(0x20, 0x21, 0x24);
+    let card_border = egui::Color32::from_rgb(0x33, 0x35, 0x3A);
+    visuals.panel_fill = panel;
+    visuals.window_fill = panel;
+    visuals.extreme_bg_color = egui::Color32::from_rgb(0x0E, 0x0E, 0x10);
+    visuals.faint_bg_color = egui::Color32::from_rgb(0x1B, 0x1C, 0x1F);
+
+    // Cards / groups (noninteractive frames) + primary text.
+    visuals.widgets.noninteractive.bg_fill = card;
+    visuals.widgets.noninteractive.weak_bg_fill = card;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, card_border);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, PRIMARY);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, PRIMARY);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, PRIMARY);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, PRIMARY);
+
+    // Amber selection / hover accents.
     visuals.selection.bg_fill = egui::Color32::from_rgb(0x4A, 0x39, 0x14);
     visuals.selection.stroke = egui::Stroke::new(1.0, AMBER);
     visuals.hyperlink_color = AMBER;
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, AMBER);
     visuals.widgets.hovered.expansion = 0.0;
     visuals.widgets.active.expansion = 0.0;
+
     let rounding = egui::Rounding::same(6.0);
     visuals.widgets.noninteractive.rounding = rounding;
     visuals.widgets.inactive.rounding = rounding;
@@ -48,8 +69,8 @@ fn install_theme(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 10.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
     ctx.set_style(style);
     ctx.set_pixels_per_point(1.1);
 }
@@ -172,6 +193,10 @@ impl LspServerApp {
 					self.fetch_balances();
 					self.fetch_channels();
 					self.fetch_price();
+					self.fetch_stable_channels();
+					self.fetch_payments();
+					self.fetch_forwarded_payments();
+					self.fetch_peers();
 				},
 				Err(e) => {
 					self.state.connection_status = ConnectionStatus::Error(e.clone());
@@ -198,6 +223,10 @@ impl LspServerApp {
 					self.fetch_balances();
 					self.fetch_channels();
 					self.fetch_price();
+					self.fetch_stable_channels();
+					self.fetch_payments();
+					self.fetch_forwarded_payments();
+					self.fetch_peers();
 				},
 				Err(e) => {
 					self.state.connection_status = ConnectionStatus::Error(e.clone());
@@ -1371,6 +1400,17 @@ impl App for LspServerApp {
 	fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
 		self.poll_tasks(ctx);
 
+		// After a tab switch (or on first render), force a short repaint burst so egui_extras
+		// tables settle their column widths within a frame or two instead of visibly widening.
+		let now = ctx.input(|i| i.time);
+		if self.state.last_rendered_tab != Some(self.state.active_tab) {
+			self.state.last_rendered_tab = Some(self.state.active_tab);
+			self.state.settle_until = now + 0.3;
+		}
+		if now < self.state.settle_until {
+			ctx.request_repaint();
+		}
+
 		// Auto-connect if config was loaded at startup
 		if self.state.auto_connect_pending {
 			self.state.auto_connect_pending = false;
@@ -1395,12 +1435,9 @@ impl App for LspServerApp {
 			}
 		}
 
-		if self.state.client.is_some() && self.state.tasks.get_price.is_none() {
-			let now = ctx.input(|i| i.time);
-			if now - self.state.last_price_fetch > 5.0 {
-				self.state.last_price_fetch = now;
-				self.fetch_price();
-			}
+		if self.state.client.is_some() && self.state.tasks.get_price.is_none() && now - self.state.last_price_fetch > 5.0 {
+			self.state.last_price_fetch = now;
+			self.fetch_price();
 		}
 
 		// Keep repainting while connected so the periodic price refresh fires even when idle.
@@ -1478,7 +1515,7 @@ impl App for LspServerApp {
 		});
 
 		egui::CentralPanel::default().show(ctx, |ui| {
-			egui::ScrollArea::vertical().show(ui, |ui| match self.state.active_tab {
+			match self.state.active_tab {
 				ActiveTab::NodeInfo => ui::node_info::render(ui, self),
 				ActiveTab::Balances => ui::balances::render(ui, self),
 				ActiveTab::Channels => ui::channels::render(ui, self),
@@ -1492,10 +1529,11 @@ impl App for LspServerApp {
 				ActiveTab::NetworkGraph => ui::network_graph::render(ui, self),
 				ActiveTab::Logs => ui::logs::render(ui, self),
 				ActiveTab::Settings => ui::settings::render(ui, self),
-			});
+			}
 		});
 
 		ui::channels::render_dialogs(ctx, self);
+		ui::peers::render_dialogs(ctx, self);
 		ui::connection::render_load_config_dialog(ctx, self);
 		ui::payments::render_dialogs(ctx, self);
 

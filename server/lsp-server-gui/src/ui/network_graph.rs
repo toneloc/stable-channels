@@ -1,6 +1,9 @@
 use eframe::egui;
+use egui::RichText;
+use egui_extras::{Column, TableBuilder};
 
 use crate::app::LspServerApp;
+use crate::ui::layout::{self, card, kv_grid_custom, page_scrolled};
 use crate::ui::widgets;
 
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
@@ -11,273 +14,288 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		return;
 	}
 
-	egui::ScrollArea::vertical().show(ui, |ui| {
-		render_channels_section(ui, app);
-		ui.add_space(20.0);
-		render_nodes_section(ui, app);
+	page_scrolled(ui, |ui| {
+		let n = layout::columns_for_width(ui.available_width()).min(2);
+		ui.columns(n, |cols| {
+			cols[0 % n].push_id("ng_channels", |ui| {
+				card(ui, "Graph Channels", |ui| render_channels_section(ui, app));
+			});
+			cols[1 % n].push_id("ng_nodes", |ui| {
+				card(ui, "Graph Nodes", |ui| render_nodes_section(ui, app));
+			});
+		});
 	});
 }
 
 fn render_channels_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Graph Channels");
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.graph_list_channels.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Loading...");
+		} else if ui.button("List Channels").clicked() {
+			app.fetch_graph_channels();
+		}
+	});
+
+	if let Some(resp) = &app.state.graph_channels {
 		ui.add_space(5.0);
+		ui.label(format!("{} channels in network graph", resp.short_channel_ids.len()));
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.graph_list_channels.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Loading...");
-			} else if ui.button("List Channels").clicked() {
-				app.fetch_graph_channels();
-			}
-		});
-
-		if let Some(resp) = &app.state.graph_channels {
+		if !resp.short_channel_ids.is_empty() {
 			ui.add_space(5.0);
-			ui.label(format!("{} channels in network graph", resp.short_channel_ids.len()));
 
-			if !resp.short_channel_ids.is_empty() {
-				ui.add_space(5.0);
+			// Filter box for scid list (temp memory, no AppState field)
+			let filter_id = ui.id().with("scid_filter");
+			let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
+			ui.horizontal(|ui| {
+				ui.label("Filter:");
+				ui.text_edit_singleline(&mut filter);
+			});
+			ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
 
-				// Filter box for scid list (temp memory, no AppState field)
-				let filter_id = ui.id().with("scid_filter");
-				let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
-				ui.horizontal(|ui| {
-					ui.label("Filter:");
-					ui.text_edit_singleline(&mut filter);
-				});
-				ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
+			let max_display = 100.min(resp.short_channel_ids.len());
+			// Apply filter to the already-capped slice
+			let visible: Vec<&u64> = resp.short_channel_ids
+				.iter()
+				.take(max_display)
+				.filter(|scid| filter.is_empty() || scid.to_string().contains(&filter))
+				.collect();
 
-				let max_display = 100.min(resp.short_channel_ids.len());
-				// Apply filter to the already-capped slice
-				let visible: Vec<&u64> = resp.short_channel_ids
-					.iter()
-					.take(max_display)
-					.filter(|scid| filter.is_empty() || scid.to_string().contains(&filter))
-					.collect();
-
-				egui::Grid::new("graph_channels_list").striped(true).show(ui, |ui| {
-					ui.label(egui::RichText::new("Short Channel ID").strong());
-					ui.end_row();
-
+			TableBuilder::new(ui)
+				.striped(true)
+				.resizable(false)
+				.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+				.auto_shrink([false, true])
+				.column(Column::remainder().at_least(64.0).clip(true))
+				.header(22.0, |mut header| {
+					header.col(|ui| { ui.strong("Short Channel ID"); });
+				})
+				.body(|mut body| {
 					for scid in &visible {
 						let scid_str = scid.to_string();
-						widgets::id_with_copy(ui, &scid_str, &mut app.state.status_message);
-						ui.end_row();
+						body.row(24.0, |mut row| {
+							row.col(|ui| { widgets::id_with_copy(ui, &scid_str, &mut app.state.status_message); });
+						});
 					}
 				});
 
-				if resp.short_channel_ids.len() > max_display {
-					ui.label(format!(
-						"... and {} more",
-						resp.short_channel_ids.len() - max_display
-					));
-				}
+			if resp.short_channel_ids.len() > max_display {
+				ui.label(format!(
+					"... and {} more",
+					resp.short_channel_ids.len() - max_display
+				));
 			}
 		}
+	}
 
-		ui.add_space(10.0);
-		ui.separator();
-		ui.heading("Lookup Channel");
-		ui.add_space(5.0);
+	ui.add_space(10.0);
+	ui.separator();
 
-		let form = &mut app.state.forms.graph_get_channel;
-		ui.horizontal(|ui| {
-			ui.label("Short Channel ID:");
-			ui.text_edit_singleline(&mut form.short_channel_id);
-		});
+	card(ui, "Lookup Channel", |ui| render_channel_lookup(ui, app));
+}
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.graph_get_channel.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Loading...");
-			} else if ui.button("Lookup").clicked() {
-				app.fetch_graph_channel();
-			}
-		});
+fn render_channel_lookup(ui: &mut egui::Ui, app: &mut LspServerApp) {
+	let form = &mut app.state.forms.graph_get_channel;
+	ui.horizontal(|ui| {
+		ui.label("Short Channel ID:");
+		ui.text_edit_singleline(&mut form.short_channel_id);
+	});
 
-		if let Some(resp) = &app.state.graph_channel_detail {
-			if let Some(ch) = &resp.channel {
-				ui.add_space(5.0);
-				// Pre-extract values before mixed borrows
-				let node_one = ch.node_one.clone();
-				let node_two = ch.node_two.clone();
-				let capacity = ch.capacity_sats;
-				let one_to_two = ch.one_to_two.clone();
-				let two_to_one = ch.two_to_one.clone();
-
-				let cap_str = capacity.map(|c| app.fmt_sats(c));
-
-				egui::Grid::new("graph_channel_detail").num_columns(2).spacing([10.0, 5.0]).show(
-					ui,
-					|ui| {
-						ui.label("Node One:");
-						widgets::id_with_copy(ui, &node_one, &mut app.state.status_message);
-						ui.end_row();
-
-						ui.label("Node Two:");
-						widgets::id_with_copy(ui, &node_two, &mut app.state.status_message);
-						ui.end_row();
-
-						if let Some(cap_fmt) = &cap_str {
-							ui.label("Capacity:");
-							ui.label(format!("{} sats", cap_fmt));
-							ui.end_row();
-						}
-
-						if let Some(update) = &one_to_two {
-							ui.label("1->2 Enabled:");
-							ui.label(if update.enabled { "Yes" } else { "No" });
-							ui.end_row();
-							ui.label("1->2 CLTV Delta:");
-							ui.label(format!("{}", update.cltv_expiry_delta));
-							ui.end_row();
-							ui.label("1->2 HTLC Min:");
-							ui.label(format!("{} msat", update.htlc_minimum_msat));
-							ui.end_row();
-							ui.label("1->2 HTLC Max:");
-							ui.label(format!("{} msat", update.htlc_maximum_msat));
-							ui.end_row();
-						}
-
-						if let Some(update) = &two_to_one {
-							ui.label("2->1 Enabled:");
-							ui.label(if update.enabled { "Yes" } else { "No" });
-							ui.end_row();
-							ui.label("2->1 CLTV Delta:");
-							ui.label(format!("{}", update.cltv_expiry_delta));
-							ui.end_row();
-							ui.label("2->1 HTLC Min:");
-							ui.label(format!("{} msat", update.htlc_minimum_msat));
-							ui.end_row();
-							ui.label("2->1 HTLC Max:");
-							ui.label(format!("{} msat", update.htlc_maximum_msat));
-							ui.end_row();
-						}
-					},
-				);
-			}
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.graph_get_channel.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Loading...");
+		} else if ui.button("Lookup").clicked() {
+			app.fetch_graph_channel();
 		}
 	});
+
+	if let Some(resp) = &app.state.graph_channel_detail {
+		if let Some(ch) = &resp.channel {
+			ui.add_space(5.0);
+			// Pre-extract values before mixed borrows
+			let node_one = ch.node_one.clone();
+			let node_two = ch.node_two.clone();
+			let capacity = ch.capacity_sats;
+			let one_to_two = ch.one_to_two.clone();
+			let two_to_one = ch.two_to_one.clone();
+
+			let cap_str = capacity.map(|c| app.fmt_sats(c));
+
+			// Node One/Two each need their own copy button, so they can't share one kv_grid_custom row vec (two closures can't both hold &mut app.state.status_message at once); rendered as their own rows instead.
+			ui.horizontal(|ui| {
+				ui.label(RichText::new("Node One:").color(layout::SECONDARY));
+				widgets::id_with_copy(ui, &node_one, &mut app.state.status_message);
+			});
+			ui.horizontal(|ui| {
+				ui.label(RichText::new("Node Two:").color(layout::SECONDARY));
+				widgets::id_with_copy(ui, &node_two, &mut app.state.status_message);
+			});
+			ui.add_space(4.0);
+
+			let mut rows: crate::ui::layout::KvRows = Vec::new();
+
+			if let Some(cap_fmt) = cap_str {
+				rows.push((
+					"Capacity",
+					Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{} sats", cap_fmt)); }),
+				));
+			}
+
+			if let Some(update) = &one_to_two {
+				let enabled = update.enabled;
+				let cltv = update.cltv_expiry_delta;
+				let min = update.htlc_minimum_msat;
+				let max = update.htlc_maximum_msat;
+				rows.push(("1->2 Enabled", Box::new(move |ui: &mut egui::Ui| { ui.label(if enabled { "Yes" } else { "No" }); })));
+				rows.push(("1->2 CLTV Delta", Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{}", cltv)); })));
+				rows.push(("1->2 HTLC Min", Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{} msat", min)); })));
+				rows.push(("1->2 HTLC Max", Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{} msat", max)); })));
+			}
+
+			if let Some(update) = &two_to_one {
+				let enabled = update.enabled;
+				let cltv = update.cltv_expiry_delta;
+				let min = update.htlc_minimum_msat;
+				let max = update.htlc_maximum_msat;
+				rows.push(("2->1 Enabled", Box::new(move |ui: &mut egui::Ui| { ui.label(if enabled { "Yes" } else { "No" }); })));
+				rows.push(("2->1 CLTV Delta", Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{}", cltv)); })));
+				rows.push(("2->1 HTLC Min", Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{} msat", min)); })));
+				rows.push(("2->1 HTLC Max", Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{} msat", max)); })));
+			}
+
+			if !rows.is_empty() {
+				kv_grid_custom(ui, "graph_channel_detail", rows);
+			}
+		}
+	}
 }
 
 fn render_nodes_section(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Graph Nodes");
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.graph_list_nodes.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Loading...");
+		} else if ui.button("List Nodes").clicked() {
+			app.fetch_graph_nodes();
+		}
+	});
+
+	if let Some(resp) = &app.state.graph_nodes {
 		ui.add_space(5.0);
+		ui.label(format!("{} nodes in network graph", resp.node_ids.len()));
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.graph_list_nodes.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Loading...");
-			} else if ui.button("List Nodes").clicked() {
-				app.fetch_graph_nodes();
-			}
-		});
-
-		if let Some(resp) = &app.state.graph_nodes {
+		if !resp.node_ids.is_empty() {
 			ui.add_space(5.0);
-			ui.label(format!("{} nodes in network graph", resp.node_ids.len()));
 
-			if !resp.node_ids.is_empty() {
-				ui.add_space(5.0);
+			// Filter box for node list (temp memory, no AppState field)
+			let filter_id = ui.id().with("node_filter");
+			let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
+			ui.horizontal(|ui| {
+				ui.label("Filter:");
+				ui.text_edit_singleline(&mut filter);
+			});
+			ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
 
-				// Filter box for node list (temp memory, no AppState field)
-				let filter_id = ui.id().with("node_filter");
-				let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
-				ui.horizontal(|ui| {
-					ui.label("Filter:");
-					ui.text_edit_singleline(&mut filter);
-				});
-				ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
+			let max_display = 100.min(resp.node_ids.len());
+			// Apply filter to the already-capped slice
+			let visible: Vec<&String> = resp.node_ids
+				.iter()
+				.take(max_display)
+				.filter(|id| filter.is_empty() || id.contains(&filter))
+				.collect();
 
-				let max_display = 100.min(resp.node_ids.len());
-				// Apply filter to the already-capped slice
-				let visible: Vec<&String> = resp.node_ids
-					.iter()
-					.take(max_display)
-					.filter(|id| filter.is_empty() || id.contains(&filter))
-					.collect();
-
-				egui::Grid::new("graph_nodes_list").striped(true).show(ui, |ui| {
-					ui.label(egui::RichText::new("Node ID").strong());
-					ui.end_row();
-
+			TableBuilder::new(ui)
+				.striped(true)
+				.resizable(false)
+				.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+				.auto_shrink([false, true])
+				.column(Column::remainder().at_least(64.0).clip(true))
+				.header(22.0, |mut header| {
+					header.col(|ui| { ui.strong("Node ID"); });
+				})
+				.body(|mut body| {
 					for node_id in &visible {
 						let node_id_str = node_id.to_string();
-						widgets::id_with_copy(ui, &node_id_str, &mut app.state.status_message);
-						ui.end_row();
+						body.row(24.0, |mut row| {
+							row.col(|ui| { widgets::id_with_copy(ui, &node_id_str, &mut app.state.status_message); });
+						});
 					}
 				});
 
-				if resp.node_ids.len() > max_display {
-					ui.label(format!("... and {} more", resp.node_ids.len() - max_display));
-				}
+			if resp.node_ids.len() > max_display {
+				ui.label(format!("... and {} more", resp.node_ids.len() - max_display));
 			}
 		}
+	}
 
-		ui.add_space(10.0);
-		ui.separator();
-		ui.heading("Lookup Node");
-		ui.add_space(5.0);
+	ui.add_space(10.0);
+	ui.separator();
 
-		let form = &mut app.state.forms.graph_get_node;
-		ui.horizontal(|ui| {
-			ui.label("Node ID:");
-			ui.text_edit_singleline(&mut form.node_id);
-		});
+	card(ui, "Lookup Node", |ui| render_node_lookup(ui, app));
+}
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.graph_get_node.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Loading...");
-			} else if ui.button("Lookup").clicked() {
-				app.fetch_graph_node();
-			}
-		});
+fn render_node_lookup(ui: &mut egui::Ui, app: &mut LspServerApp) {
+	let form = &mut app.state.forms.graph_get_node;
+	ui.horizontal(|ui| {
+		ui.label("Node ID:");
+		ui.text_edit_singleline(&mut form.node_id);
+	});
 
-		if let Some(resp) = &app.state.graph_node_detail {
-			if let Some(node) = &resp.node {
-				ui.add_space(5.0);
-				egui::Grid::new("graph_node_detail").num_columns(2).spacing([10.0, 5.0]).show(
-					ui,
-					|ui| {
-						ui.label("Channels:");
-						ui.label(format!("{}", node.channels.len()));
-						ui.end_row();
-
-						if let Some(ann) = &node.announcement_info {
-							ui.label("Alias:");
-							ui.label(&ann.alias);
-							ui.end_row();
-
-							ui.label("Color:");
-							ui.label(format!("#{}", ann.rgb));
-							ui.end_row();
-
-							ui.label("Last Update:");
-							let ts = ann.last_update;
-							ui.label(format!("{}", ts))
-								.on_hover_text(format!("unix: {}", ts));
-							ui.end_row();
-
-							if !ann.addresses.is_empty() {
-								ui.label("Addresses:");
-								ui.vertical(|ui| {
-									for addr in &ann.addresses {
-										ui.label(addr);
-									}
-								});
-								ui.end_row();
-							}
-						}
-					},
-				);
-			}
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.graph_get_node.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Loading...");
+		} else if ui.button("Lookup").clicked() {
+			app.fetch_graph_node();
 		}
 	});
+
+	if let Some(resp) = &app.state.graph_node_detail {
+		if let Some(node) = &resp.node {
+			ui.add_space(5.0);
+			let channel_count = node.channels.len();
+
+			let mut rows: crate::ui::layout::KvRows = vec![(
+				"Channels",
+				Box::new(move |ui: &mut egui::Ui| { ui.label(format!("{}", channel_count)); }),
+			)];
+
+			if let Some(ann) = &node.announcement_info {
+				let alias = ann.alias.clone();
+				rows.push(("Alias", Box::new(move |ui: &mut egui::Ui| { ui.label(alias); })));
+
+				let color = format!("#{}", ann.rgb);
+				rows.push(("Color", Box::new(move |ui: &mut egui::Ui| { ui.label(color); })));
+
+				let ts = ann.last_update;
+				rows.push((
+					"Last Update",
+					Box::new(move |ui: &mut egui::Ui| {
+						ui.label(format!("{}", ts)).on_hover_text(format!("unix: {}", ts));
+					}),
+				));
+
+				if !ann.addresses.is_empty() {
+					let addresses = ann.addresses.clone();
+					rows.push((
+						"Addresses",
+						Box::new(move |ui: &mut egui::Ui| {
+							ui.vertical(|ui| {
+								for addr in &addresses {
+									ui.label(addr);
+								}
+							});
+						}),
+					));
+				}
+			}
+
+			kv_grid_custom(ui, "graph_node_detail", rows);
+		}
+	}
 }

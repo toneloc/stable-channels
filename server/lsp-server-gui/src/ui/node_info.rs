@@ -4,6 +4,7 @@ use web_sys::js_sys;
 
 use crate::app::LspServerApp;
 use crate::config::ChainSourceConfig;
+use crate::ui::layout::{card, kv_grid_custom, page, page_scrolled};
 use crate::ui::widgets;
 
 // Snapshot of node_info fields extracted before any &mut app borrow.
@@ -22,9 +23,10 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.heading("Node Information");
 	ui.add_space(10.0);
 
-	// Show chain source config if loaded
-	render_chain_source_info(ui, app);
-	ui.add_space(10.0);
+	// Chain source is local config — visible even while disconnected (as before the redesign).
+	page(ui, |ui| {
+		card(ui, "Chain Source", |ui| render_chain_source_body(ui, app));
+	});
 
 	if app.render_disconnected_gate(ui) {
 		return;
@@ -43,68 +45,91 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 		announcement_ts: info.latest_node_announcement_broadcast_timestamp,
 	});
 
-	ui.group(|ui| {
-		ui.horizontal(|ui| {
-			ui.heading("Node Details");
-			widgets::status_pill(ui, "Online", egui::Color32::GREEN);
-			if app.state.tasks.node_info.is_some() {
-				ui.spinner();
-			} else if ui.button("Refresh").clicked() {
-				app.fetch_node_info();
-			}
-		});
-		ui.add_space(5.0);
+	page_scrolled(ui, |ui| {
+		card(ui, "Node Details", |ui| render_node_details_body(ui, app, &row));
+	});
+}
 
-		if let Some(r) = row {
-			egui::Grid::new("node_info_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-				ui.label("Node ID:");
-				widgets::id_with_copy(ui, &r.node_id, &mut app.state.status_message);
-				ui.end_row();
-
-				if let (Some(hash), Some(height)) = (r.best_block_hash, r.best_block_height) {
-					ui.label("Best Block:");
-					ui.monospace(format!(
-						"{} (height: {})",
-						crate::ui::truncate_id(&hash, 8, 8),
-						height
-					));
-					ui.end_row();
-				}
-
-				if let Some(ts) = r.ln_sync_ts {
-					ui.label("Lightning Wallet Sync:");
-					ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
-					ui.end_row();
-				}
-
-				if let Some(ts) = r.onchain_sync_ts {
-					ui.label("On-chain Wallet Sync:");
-					ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
-					ui.end_row();
-				}
-
-				if let Some(ts) = r.fee_rate_ts {
-					ui.label("Fee Rate Cache Update:");
-					ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
-					ui.end_row();
-				}
-
-				if let Some(ts) = r.rgs_ts {
-					ui.label("RGS Snapshot:");
-					ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
-					ui.end_row();
-				}
-
-				if let Some(ts) = r.announcement_ts {
-					ui.label("Node Announcement:");
-					ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
-					ui.end_row();
-				}
-			});
-		} else {
-			ui.label("No node info available. Click Refresh to fetch.");
+fn render_node_details_body(ui: &mut Ui, app: &mut LspServerApp, row: &Option<NodeInfoRow>) {
+	ui.horizontal(|ui| {
+		widgets::status_pill(ui, "Online", egui::Color32::GREEN);
+		if app.state.tasks.node_info.is_some() {
+			ui.spinner();
+		} else if ui.button("Refresh").clicked() {
+			app.fetch_node_info();
 		}
 	});
+	ui.add_space(5.0);
+
+	let Some(r) = row else {
+		ui.label("No node info available. Click Refresh to fetch.");
+		return;
+	};
+
+	let mut rows: crate::ui::layout::KvRows = Vec::new();
+
+	rows.push((
+		"Node ID",
+		Box::new(|ui: &mut Ui| {
+			widgets::id_with_copy(ui, &r.node_id, &mut app.state.status_message);
+		}),
+	));
+
+	if let (Some(hash), Some(height)) = (&r.best_block_hash, r.best_block_height) {
+		rows.push((
+			"Best Block",
+			Box::new(move |ui: &mut Ui| {
+				ui.monospace(format!("{} (height: {})", crate::ui::truncate_id(hash, 8, 8), height));
+			}),
+		));
+	}
+
+	if let Some(ts) = r.ln_sync_ts {
+		rows.push((
+			"Lightning Wallet Sync",
+			Box::new(move |ui: &mut Ui| {
+				ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
+			}),
+		));
+	}
+
+	if let Some(ts) = r.onchain_sync_ts {
+		rows.push((
+			"On-chain Wallet Sync",
+			Box::new(move |ui: &mut Ui| {
+				ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
+			}),
+		));
+	}
+
+	if let Some(ts) = r.fee_rate_ts {
+		rows.push((
+			"Fee Rate Cache Update",
+			Box::new(move |ui: &mut Ui| {
+				ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
+			}),
+		));
+	}
+
+	if let Some(ts) = r.rgs_ts {
+		rows.push((
+			"RGS Snapshot",
+			Box::new(move |ui: &mut Ui| {
+				ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
+			}),
+		));
+	}
+
+	if let Some(ts) = r.announcement_ts {
+		rows.push((
+			"Node Announcement",
+			Box::new(move |ui: &mut Ui| {
+				ui.label(format_timestamp(ts)).on_hover_text(format!("unix: {}", ts));
+			}),
+		));
+	}
+
+	kv_grid_custom(ui, "node_details_grid", rows);
 }
 
 fn format_timestamp(ts: u64) -> String {
@@ -136,86 +161,112 @@ fn format_timestamp(ts: u64) -> String {
 	}
 }
 
-fn render_chain_source_info(ui: &mut Ui, app: &LspServerApp) {
+fn render_chain_source_body(ui: &mut Ui, app: &LspServerApp) {
 	// Only show if we have chain source info from config
 	if matches!(app.state.chain_source, ChainSourceConfig::None) && app.state.network.is_empty() {
+		ui.label("No chain source configured.");
 		return;
 	}
 
-	ui.group(|ui| {
-		ui.heading("Chain Source Configuration");
-		ui.add_space(5.0);
+	let mut rows: crate::ui::layout::KvRows = Vec::new();
 
-		egui::Grid::new("chain_source_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-			if !app.state.network.is_empty() {
-				ui.label("Network:");
-				ui.monospace(&app.state.network);
-				ui.end_row();
-			}
+	if !app.state.network.is_empty() {
+		let network = app.state.network.clone();
+		rows.push(("Network", Box::new(move |ui: &mut Ui| { ui.monospace(&network); })));
+	}
 
-			match &app.state.chain_source {
-				ChainSourceConfig::None => {},
-				ChainSourceConfig::Bitcoind { rpc_address, rpc_user, rpc_password } => {
-					ui.label("Chain Source:");
+	match &app.state.chain_source {
+		ChainSourceConfig::None => {},
+		ChainSourceConfig::Bitcoind { rpc_address, rpc_user, rpc_password } => {
+			rows.push((
+				"Chain Source",
+				Box::new(|ui: &mut Ui| {
 					ui.colored_label(egui::Color32::from_rgb(255, 165, 0), "Bitcoin Core RPC");
-					ui.end_row();
+				}),
+			));
 
-					ui.label("RPC Address:");
+			let addr = rpc_address.clone();
+			rows.push((
+				"RPC Address",
+				Box::new(move |ui: &mut Ui| {
 					ui.horizontal(|ui| {
-						ui.monospace(rpc_address);
+						ui.monospace(&addr);
 						if ui.small_button("Copy").clicked() {
-							ui.output_mut(|o| o.copied_text = rpc_address.clone());
+							ui.output_mut(|o| o.copied_text = addr.clone());
 						}
 					});
-					ui.end_row();
+				}),
+			));
 
-					ui.label("RPC User:");
+			let user = rpc_user.clone();
+			rows.push((
+				"RPC User",
+				Box::new(move |ui: &mut Ui| {
 					ui.horizontal(|ui| {
-						ui.monospace(rpc_user);
+						ui.monospace(&user);
 						if ui.small_button("Copy").clicked() {
-							ui.output_mut(|o| o.copied_text = rpc_user.clone());
+							ui.output_mut(|o| o.copied_text = user.clone());
 						}
 					});
-					ui.end_row();
+				}),
+			));
 
-					ui.label("RPC Password:");
+			let password = rpc_password.clone();
+			rows.push((
+				"RPC Password",
+				Box::new(move |ui: &mut Ui| {
 					ui.horizontal(|ui| {
 						ui.monospace("********");
 						if ui.small_button("Copy").clicked() {
-							ui.output_mut(|o| o.copied_text = rpc_password.clone());
+							ui.output_mut(|o| o.copied_text = password.clone());
 						}
 					});
-					ui.end_row();
-				},
-				ChainSourceConfig::Electrum { server_url } => {
-					ui.label("Chain Source:");
+				}),
+			));
+		},
+		ChainSourceConfig::Electrum { server_url } => {
+			rows.push((
+				"Chain Source",
+				Box::new(|ui: &mut Ui| {
 					ui.colored_label(egui::Color32::from_rgb(100, 149, 237), "Electrum");
-					ui.end_row();
+				}),
+			));
 
-					ui.label("Server URL:");
+			let url = server_url.clone();
+			rows.push((
+				"Server URL",
+				Box::new(move |ui: &mut Ui| {
 					ui.horizontal(|ui| {
-						ui.monospace(server_url);
+						ui.monospace(&url);
 						if ui.small_button("Copy").clicked() {
-							ui.output_mut(|o| o.copied_text = server_url.clone());
+							ui.output_mut(|o| o.copied_text = url.clone());
 						}
 					});
-					ui.end_row();
-				},
-				ChainSourceConfig::Esplora { server_url } => {
-					ui.label("Chain Source:");
+				}),
+			));
+		},
+		ChainSourceConfig::Esplora { server_url } => {
+			rows.push((
+				"Chain Source",
+				Box::new(|ui: &mut Ui| {
 					ui.colored_label(egui::Color32::from_rgb(50, 205, 50), "Esplora");
-					ui.end_row();
+				}),
+			));
 
-					ui.label("Server URL:");
+			let url = server_url.clone();
+			rows.push((
+				"Server URL",
+				Box::new(move |ui: &mut Ui| {
 					ui.horizontal(|ui| {
-						ui.monospace(server_url);
+						ui.monospace(&url);
 						if ui.small_button("Copy").clicked() {
-							ui.output_mut(|o| o.copied_text = server_url.clone());
+							ui.output_mut(|o| o.copied_text = url.clone());
 						}
 					});
-					ui.end_row();
-				},
-			}
-		});
-	});
+				}),
+			));
+		},
+	}
+
+	kv_grid_custom(ui, "chain_source_grid", rows);
 }

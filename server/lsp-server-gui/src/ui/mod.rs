@@ -5,6 +5,7 @@ pub mod channels;
 pub mod connection;
 pub mod forwarded_payments;
 pub mod ldk_log;
+pub mod layout;
 pub mod log_view;
 pub mod logs;
 pub mod lightning;

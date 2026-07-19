@@ -457,6 +457,8 @@ pub struct AppState {
 
 	// Navigation
 	pub active_tab: ActiveTab,
+	pub last_rendered_tab: Option<ActiveTab>,
+	pub settle_until: f64,
 
 	// Cached API responses
 	pub node_info: Option<GetNodeInfoResponse>,
@@ -562,6 +564,8 @@ impl Default for AppState {
 			chain_source: ChainSourceConfig::default(),
 
 			active_tab: ActiveTab::NodeInfo,
+			last_rendered_tab: None,
+			settle_until: 0.0,
 
 			node_info: None,
 			balances: None,
