@@ -189,7 +189,6 @@ class DatabaseService {
         }
     }
 
-
     // MARK: - Channel Operations
 
     func saveChannel(
@@ -624,7 +623,7 @@ class DatabaseService {
     func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
         let confs = min(
             max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0),
-            3
+            ConfirmationPolicy.requiredConfirmations
         )
         try execute(
             "UPDATE payments SET tx_block_height = ?, confirmations = ? WHERE id = ?",
