@@ -134,6 +134,26 @@ then "Failed to build LDK Node: Failed to read from store.", nothing between.
 5. Start stable-channels-lsp; confirm gRPC connect + REST up + price medians.
 6. Expect: any client that was mid-JIT-onboard retries its request.
 
+MITIGATION WITHOUT UPSTREAM — SELF-HEALING GUARD (added 2026-07-19)
+-------------------------------------------------------------------
+umbrel/docker/ldk-server-guard.sh wraps the ldk-server process: on 3
+consecutive fast exits bearing the bare "Failed to read from store."
+signature (only the LSPS2 reload fails without a companion detail line), it
+backs up ldk_node_data.sqlite and deletes the lightning_liquidity_state
+namespace, then lets the next start proceed. Healthy restarts lose nothing.
+Deployed in both Docker images (e2e + Umbrel package).
+
+Prod (systemd on the LSP box) — install during the controlled restart:
+  1. scp umbrel/docker/ldk-server-guard.sh to /home/ubuntu/bidaemon/
+  2. In the ldk-server unit, replace ExecStart with:
+       ExecStart=/home/ubuntu/bidaemon/ldk-server-guard.sh \
+         /home/ubuntu/bidaemon/ldk-server-config.toml \
+         /home/ubuntu/bidaemon/bidaemon-ldk-data
+     (network dir auto-derived from the config; ensure sqlite3 is installed)
+  3. The guard loops internally — set the unit's Restart=no so systemd's
+     restart counter doesn't fight the wrapper's.
+  4. daemon-reload + restart per the runbook below, runbook staged.
+
 PROACTIVE OPTIONS FOR PROD (pick one)
 -------------------------------------
 a) Scheduled controlled restart during a quiet window WITH the runbook staged,

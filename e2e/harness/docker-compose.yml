@@ -78,7 +78,8 @@ services:
       dockerfile: docker/Dockerfile.ldk-server
     depends_on: [block-explorer]
     restart: unless-stopped   # retries until electrs serves (post chain-init)
-    command: ["/usr/local/bin/ldk-server", "/etc/ldk-server/config.toml"]
+    # Guard wrapper self-heals the LSPS2 persisted-state restart landmine.
+    command: ["/usr/local/bin/ldk-server-guard.sh", "/etc/ldk-server/config.toml", "/data/ldk-server"]
     ports:
       - "127.0.0.1:9735:9735"     # lightning p2p — the wallets + harness dial this
       - "127.0.0.1:3536:3536"     # gRPC (sc-lsp uses the docker network; host port for debugging)
