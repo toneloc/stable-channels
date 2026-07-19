@@ -220,3 +220,7 @@ sc-config.toml
 
 # Tier-1 Umbrel sim runtime state (contains node keys) — never commit
 umbrel/test/.sim-app-data/
+
+# Local umbrelOS test state (stateful — NOT in tmp) and generated store repo
+umbrel/test/.umbrelos-data/
+umbrel/test/store-server/store-repo/
