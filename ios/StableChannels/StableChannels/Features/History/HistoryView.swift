@@ -200,8 +200,19 @@ struct PaymentRowView: View {
         }
     }
 
-    private var statusLabel: String { payment.status.capitalized }
+    private var statusLabel: String {
+        if payment.shouldShowConfirmationProgress,
+           !payment.confirmationStatusLabel.isEmpty {
+            return payment.confirmationStatusLabel
+        }
+        return payment.status.capitalized
+    }
+
     private var statusColor: Color {
+        if payment.shouldShowConfirmationProgress,
+           !payment.confirmationStatusLabel.isEmpty {
+            return payment.confirmationStatusLabel == "Confirmed" ? .green : .orange
+        }
         switch payment.status {
         case "completed": return .green
         case "pending": return .orange
