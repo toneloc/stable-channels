@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import os.log
 
 @Observable
 @MainActor
@@ -39,6 +40,7 @@ final class BlockHeightService {
             currentHeight = height
             onHeightUpdated?(height)
         } catch {
+            os_log("Block height refresh failed: %{public}@", log: .default, type: .error, error.localizedDescription)
         }
     }
 }

@@ -610,11 +610,14 @@ class DatabaseService {
         AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
         AND status != 'failed'
         AND tx_block_height IS NOT NULL
-        AND tx_block_height + (3 - 1) > ?
+        AND tx_block_height + ? > ?
         ORDER BY created_at DESC
         LIMIT 50
         """
-        let rows = try query(sql, params: [.integer(Int64(currentBlockHeight))])
+        let rows = try query(
+            sql,
+            params: [.integer(Int64(ConfirmationPolicy.requiredConfirmations - 1)), .integer(Int64(currentBlockHeight))]
+        )
         return rows.compactMap { row in
             guard row.count >= 15 else { return nil }
             return paymentRecord(from: row)
