@@ -71,6 +71,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val sc by appState.stableChannel.collectAsState()
     val nativeSatsCached by appState.nativeSats.collectAsState()
     val lastRxTxid by appState.lastReceiveTxid.collectAsState()
+    val lastCloseTxid by appState.lastCloseTxid.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
@@ -390,7 +391,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             } else {
                                 "Deposit confirming..."
                             }
-                            PendingRow(text, if (pendingCloseId != null) null else lastRxTxid, context)
+                            PendingRow(text, if (pendingCloseId != null) lastCloseTxid else lastRxTxid, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,

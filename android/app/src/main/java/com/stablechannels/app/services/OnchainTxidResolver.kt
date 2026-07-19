@@ -35,17 +35,17 @@ object OnchainTxidResolver {
                 for (url in endpoints) {
                     try {
                         val request = Request.Builder().url(url).build()
-                        val response = httpClient.newCall(request).execute()
-                        
-                        if (response.isSuccessful) {
-                            val bodyStr = response.body?.string()
-                            if (!bodyStr.isNullOrBlank()) {
-                                val jsonArray = JSONArray(bodyStr)
-                                if (jsonArray.length() > 0) {
-                                    val firstTx = jsonArray.getJSONObject(0)
-                                    val txid = firstTx.optString("txid")
-                                    if (txid.isNotBlank()) {
-                                        return@withContext txid
+                        httpClient.newCall(request).execute().use { response ->
+                            if (response.isSuccessful) {
+                                val bodyStr = response.body?.string()
+                                if (!bodyStr.isNullOrBlank()) {
+                                    val jsonArray = JSONArray(bodyStr)
+                                    if (jsonArray.length() > 0) {
+                                        val firstTx = jsonArray.getJSONObject(0)
+                                        val txid = firstTx.optString("txid")
+                                        if (txid.isNotBlank()) {
+                                            return@withContext txid
+                                        }
                                     }
                                 }
                             }

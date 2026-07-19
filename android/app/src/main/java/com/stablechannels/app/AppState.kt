@@ -85,6 +85,22 @@ class AppState(private val context: Context) : ViewModel() {
     private val _lastReceiveTxid = MutableStateFlow<String?>(null)
     val lastReceiveTxid: StateFlow<String?> get() = _lastReceiveTxid
 
+    private val _lastCloseTxid = MutableStateFlow<String?>(null)
+    val lastCloseTxid: StateFlow<String?> get() = _lastCloseTxid
+
+    fun setLastCloseTxid(txid: String?) {
+        _lastCloseTxid.value = txid
+        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        if (txid != null) {
+            editor.putString("last_close_txid", txid)
+            editor.putLong("last_close_txid_at", System.currentTimeMillis())
+        } else {
+            editor.remove("last_close_txid")
+            editor.remove("last_close_txid_at")
+        }
+        editor.apply()
+    }
+
 
     private val _spendableOnchainSats = MutableStateFlow(
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).getLong("cached_spendable_sats", 0L)
@@ -104,6 +120,16 @@ class AppState(private val context: Context) : ViewModel() {
                 _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
         _onchainReceiveAddress.value = prefs.getString("onchain_receive_address", null)
         _lastReceiveTxid.value = prefs.getString("last_receive_txid", null)
+
+        val closeAt = prefs.getLong("last_close_txid_at", 0L)
+        if (System.currentTimeMillis() - closeAt < 7 * 86400 * 1000L) {
+            _lastCloseTxid.value = prefs.getString("last_close_txid", null)
+        } else {
+            prefs.edit()
+                .remove("last_close_txid")
+                .remove("last_close_txid_at")
+                .apply()
+        }
 
 
         // Restore cached channel state so UI shows correct slider position immediately
@@ -251,6 +277,12 @@ class AppState(private val context: Context) : ViewModel() {
                     if (pendingCloseId != null) {
                         pendingClosePaymentId = pendingCloseId
                         isChannelClosing = true
+                        if (_lastCloseTxid.value == null) {
+                            val dbTxid = databaseService?.getPaymentTxid(pendingCloseId)
+                            if (!dbTxid.isNullOrEmpty()) {
+                                setLastCloseTxid(dbTxid)
+                            }
+                        }
                     }
                     detectOnchainDeposit()
                     
@@ -966,6 +998,7 @@ class AppState(private val context: Context) : ViewModel() {
                     chainURLs = listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL),
                     onResolved = { _, txid ->
                         Log.d("AppState", "Close TX resolved: $txid")
+                        setLastCloseTxid(txid)
                     }
                 )
                 viewModelScope.launch(Dispatchers.IO) {
@@ -1247,12 +1280,15 @@ class AppState(private val context: Context) : ViewModel() {
             // Attempt to resolve txid if we have an address but no txid yet (handles app restarts)
             val address = _onchainReceiveAddress.value
             if (address != null && _lastReceiveTxid.value == null) {
-                val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
-                val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
-                if (txid != null) {
-                    _lastReceiveTxid.value = txid
-                    context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-                        .putString("last_receive_txid", txid).apply()
+                // Run txid resolution in the background so it doesn't block the polling loop
+                launch {
+                    val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
+                    val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
+                    if (txid != null) {
+                        _lastReceiveTxid.value = txid
+                        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                            .putString("last_receive_txid", txid).apply()
+                    }
                 }
             }
 
@@ -1433,10 +1469,11 @@ class AppState(private val context: Context) : ViewModel() {
         _spendableOnchainSats.value = spendable
 
 
-        // Clear closing flag once lightning balance fully resolves
+        // Clear closing flag once lightning balance fully resolves, or if a new channel is opened
         // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
         // handle it when the on-chain funds arrive
-        if (isChannelClosing && lightning == 0L) {
+        val isOpeningChannel = _stableChannel.value.userChannelId.isNotEmpty() && !hasReady
+        if (isChannelClosing && (lightning == 0L || hasReady || isOpeningChannel)) {
             isChannelClosing = false
         }
 

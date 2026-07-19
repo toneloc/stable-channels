@@ -508,6 +508,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
+    fun getPaymentTxid(paymentId: String): String? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT txid FROM payments WHERE payment_id = ?",
+            arrayOf(paymentId)
+        )
+        return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
+    }
+
     fun setPendingSpliceTxid(txid: String) {
         writableDatabase.execSQL(
             "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'splice_in' AND status IN ('pending','failed') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)",
