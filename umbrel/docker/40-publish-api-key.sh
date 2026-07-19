@@ -9,6 +9,8 @@
     until [ -s "$key_file" ]; do sleep 5; done
     hex="$(od -An -tx1 "$key_file" | tr -d ' \n')"
     mkdir -p /usr/share/nginx/html/setup
+    # Bare key for the GUI's zero-input auto-connect (fetched same-origin).
+    printf '%s\n' "$hex" > /usr/share/nginx/html/setup/key.txt
     cat > /usr/share/nginx/html/setup/index.html <<EOF
 <!doctype html><meta charset="utf-8"><title>Stable Channels LSP — Setup</title>
 <body style="font-family:system-ui;max-width:40em;margin:4em auto">

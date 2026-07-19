@@ -58,6 +58,12 @@ pub struct LspServerApp {
 	pub state: AppState,
 	#[cfg(not(target_arch = "wasm32"))]
 	pub rt: Runtime,
+	/// Filled asynchronously from `/setup/key.txt` (same origin, published by
+	/// the serving container) so proxied deployments connect with zero input.
+	#[cfg(target_arch = "wasm32")]
+	auto_key: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+	#[cfg(target_arch = "wasm32")]
+	auto_key_applied: bool,
 }
 
 impl LspServerApp {
@@ -93,10 +99,43 @@ impl LspServerApp {
 			state.active_tab = ActiveTab::Settings;
 		}
 
+		#[cfg(target_arch = "wasm32")]
+		let auto_key = {
+			use wasm_bindgen::JsCast;
+			let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+			let filled = slot.clone();
+			let ctx = cc.egui_ctx.clone();
+			wasm_bindgen_futures::spawn_local(async move {
+				let Some(win) = web_sys::window() else { return };
+				let Ok(resp) =
+					wasm_bindgen_futures::JsFuture::from(win.fetch_with_str("/setup/key.txt")).await
+				else {
+					return;
+				};
+				let Ok(resp) = resp.dyn_into::<web_sys::Response>() else { return };
+				if !resp.ok() {
+					return;
+				}
+				let Ok(text) = resp.text() else { return };
+				let Ok(text) = wasm_bindgen_futures::JsFuture::from(text).await else { return };
+				let Some(text) = text.as_string() else { return };
+				let key = text.trim().to_string();
+				if key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
+					*filled.borrow_mut() = Some(key);
+					ctx.request_repaint();
+				}
+			});
+			slot
+		};
+
 		Self {
 			state,
 			#[cfg(not(target_arch = "wasm32"))]
 			rt: Runtime::new().expect("Failed to create tokio runtime"),
+			#[cfg(target_arch = "wasm32")]
+			auto_key,
+			#[cfg(target_arch = "wasm32")]
+			auto_key_applied: false,
 		}
 	}
 
@@ -1336,6 +1375,24 @@ impl App for LspServerApp {
 		if self.state.auto_connect_pending {
 			self.state.auto_connect_pending = false;
 			self.connect();
+		}
+
+		// Web: the serving container publishes the API key at /setup/key.txt
+		// (same origin, behind the deployment's auth) — connect with zero input.
+		#[cfg(target_arch = "wasm32")]
+		if !self.auto_key_applied {
+			let fetched = self.auto_key.borrow_mut().take();
+			if let Some(key) = fetched {
+				self.auto_key_applied = true;
+				let idle = !matches!(
+					self.state.connection_status,
+					crate::state::ConnectionStatus::Connected
+				);
+				if idle && self.state.api_key.trim().is_empty() {
+					self.state.api_key = key;
+					self.connect();
+				}
+			}
 		}
 
 		if self.state.client.is_some() && self.state.tasks.get_price.is_none() {
