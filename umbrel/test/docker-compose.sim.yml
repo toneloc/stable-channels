@@ -1,0 +1,49 @@
+# Tier-1 Umbrel simulation (see umbrel/README.md): runs the production images
+# with Umbrel-style injected container names against the e2e regtest chain.
+# No umbrelOS involved — app_proxy is replaced by a direct host port.
+#
+#   ./run-sim.sh   (from umbrel/test/; e2e backend must be up: cd e2e && make up)
+#
+# What this exercises: hooks/pre-start rendering, the prod images, the
+# container-name gRPC + TLS-SAN wiring, /setup, and the GUI's /api/ proxy.
+
+name: umbrel-sim
+
+services:
+  ldk-server:
+    image: sc-ldk-server-umbrel-test
+    container_name: stable-channels-lsp_ldk-server_1
+    restart: on-failure
+    volumes:
+      - ${SIM_APP_DATA_DIR:?run via run-sim.sh}/data/config:/etc/ldk-server:ro
+      - ${SIM_APP_DATA_DIR}/data/ldk-server:/data/ldk-server
+    # No host ports: 9735 is taken by the e2e ldk-server; peers in this sim
+    # (none) would connect over the docker network.
+
+  sc-lsp:
+    image: sc-lsp-umbrel-test
+    container_name: stable-channels-lsp_sc-lsp_1
+    restart: on-failure
+    depends_on: [ldk-server]
+    volumes:
+      - ${SIM_APP_DATA_DIR}/data/config:/etc/sc-lsp:ro
+      - ${SIM_APP_DATA_DIR}/data/sc-lsp:/data/stable-channels-lsp
+      - ${SIM_APP_DATA_DIR}/data/ldk-server:/data/ldk-server:ro
+
+  gui:
+    image: sc-lsp-gui-umbrel-test
+    container_name: stable-channels-lsp_gui_1
+    restart: on-failure
+    depends_on: [sc-lsp]
+    environment:
+      SC_LSP_UPSTREAM: https://stable-channels-lsp_sc-lsp_1:3002
+      SC_NETWORK: regtest
+    volumes:
+      - ${SIM_APP_DATA_DIR}/data/sc-lsp:/run/sc-lsp:ro
+    ports:
+      - "127.0.0.1:3004:80"   # in place of app_proxy (e2e's own GUI is on 3003)
+
+networks:
+  default:
+    name: harness_default     # join the e2e regtest network (bitcoin-core lives there)
+    external: true

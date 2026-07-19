@@ -217,3 +217,6 @@ server/lsp-server-gui/dist/
 # SC daemon runtime data (when run from repo root)
 server/stable-channels-lsp/data/
 sc-config.toml
+
+# Tier-1 Umbrel sim runtime state (contains node keys) — never commit
+umbrel/test/.sim-app-data/

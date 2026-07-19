@@ -84,4 +84,8 @@ cert_path    = "/data/ldk-server/tls.crt"
 api_key_path = "/data/ldk-server/${NETWORK}/api_key"
 EOF
 
-chown -R 1000:1000 "${APP_DATA_DIR}/data"
+# Umbrel runs hooks as root; the tier-1 Mac sim (umbrel/test/) does not, and
+# Docker Desktop handles bind-mount ownership itself.
+if [ "$(id -u)" = "0" ]; then
+    chown -R 1000:1000 "${APP_DATA_DIR}/data"
+fi

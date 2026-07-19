@@ -5,6 +5,11 @@
 server {
     listen 80;
 
+    # Relative redirects: nginx only knows its internal port 80, so absolute
+    # redirects (e.g. /setup -> /setup/) would drop the host-facing port
+    # (3004 in the sim, the app_proxy port on Umbrel).
+    absolute_redirect off;
+
     root /usr/share/nginx/html;
     index index.html;
 
