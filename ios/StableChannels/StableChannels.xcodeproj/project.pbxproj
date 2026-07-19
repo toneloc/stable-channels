@@ -23,6 +23,9 @@
 		3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3940DC5406ABC63AA090441A /* DatabaseService.swift */; };
 		491D2E883008F96B0009FADF /* PaymentDetailCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */; };
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
+		492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */; };
+		492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */; };
+		492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AB300CC81D003EC383 /* EsploraError.swift */; };
 		496A44432FCD4F75005AF12F /* QRInputToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44422FCD4F75005AF12F /* QRInputToolbar.swift */; };
 		496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */; };
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
@@ -53,8 +56,6 @@
 		499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */; };
 		499F1E503009F02300936944 /* BlockHeightProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4A3009F02300936944 /* BlockHeightProvider.swift */; };
 		499F1E513009F02300936944 /* BlockHeightService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4B3009F02300936944 /* BlockHeightService.swift */; };
-		499F1E523009F02300936944 /* EsploraTxConfirmationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4E3009F02300936944 /* EsploraTxConfirmationClient.swift */; };
-		499F1E533009F02300936944 /* EsploraBlockHeightClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4D3009F02300936944 /* EsploraBlockHeightClient.swift */; };
 		499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */; };
 		499F1E553009F02300936944 /* ConfirmationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4C3009F02300936944 /* ConfirmationService.swift */; };
 		499F1E573009F03E00936944 /* PaymentProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E563009F03E00936944 /* PaymentProgress.swift */; };
@@ -161,6 +162,9 @@
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailCoordinator.swift; sourceTree = "<group>"; };
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
+		492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightResolver.swift; sourceTree = "<group>"; };
+		492B54AB300CC81D003EC383 /* EsploraError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraError.swift; sourceTree = "<group>"; };
+		492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationResolver.swift; sourceTree = "<group>"; };
 		496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractor.swift; sourceTree = "<group>"; };
 		496A44422FCD4F75005AF12F /* QRInputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRInputToolbar.swift; sourceTree = "<group>"; };
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
@@ -192,8 +196,6 @@
 		499F1E4A3009F02300936944 /* BlockHeightProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightProvider.swift; sourceTree = "<group>"; };
 		499F1E4B3009F02300936944 /* BlockHeightService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightService.swift; sourceTree = "<group>"; };
 		499F1E4C3009F02300936944 /* ConfirmationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmationService.swift; sourceTree = "<group>"; };
-		499F1E4D3009F02300936944 /* EsploraBlockHeightClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraBlockHeightClient.swift; sourceTree = "<group>"; };
-		499F1E4E3009F02300936944 /* EsploraTxConfirmationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraTxConfirmationClient.swift; sourceTree = "<group>"; };
 		499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationProvider.swift; sourceTree = "<group>"; };
 		499F1E563009F03E00936944 /* PaymentProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentProgress.swift; sourceTree = "<group>"; };
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
@@ -423,6 +425,7 @@
 				49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				499F1E4A3009F02300936944 /* BlockHeightProvider.swift */,
+				492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */,
 				499F1E4B3009F02300936944 /* BlockHeightService.swift */,
 				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */,
@@ -430,8 +433,7 @@
 				CB7BB840EC5C451056C5C21D /* CryptoService.swift */,
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
 				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
-				499F1E4D3009F02300936944 /* EsploraBlockHeightClient.swift */,
-				499F1E4E3009F02300936944 /* EsploraTxConfirmationClient.swift */,
+				492B54AB300CC81D003EC383 /* EsploraError.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
@@ -444,6 +446,7 @@
 				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
 				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
 				499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */,
+				492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
 			);
@@ -713,9 +716,10 @@
 				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
 				499F1E503009F02300936944 /* BlockHeightProvider.swift in Sources */,
+				492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */,
+				492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */,
+				492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */,
 				499F1E513009F02300936944 /* BlockHeightService.swift in Sources */,
-				499F1E523009F02300936944 /* EsploraTxConfirmationClient.swift in Sources */,
-				499F1E533009F02300936944 /* EsploraBlockHeightClient.swift in Sources */,
 				499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */,
 				499F1E553009F02300936944 /* ConfirmationService.swift in Sources */,
 				49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */,

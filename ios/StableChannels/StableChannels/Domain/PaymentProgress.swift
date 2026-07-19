@@ -2,32 +2,31 @@ import Foundation
 
 enum ConfirmationPolicy {
     static let requiredConfirmations = 3
+    // Bitcoin mainnet = 3, Liquid = 2 — bump when adding network-specific policies
 }
 
 struct ConfirmationProgress: Equatable {
-    let raw: Int // actual confirmations (may exceed requiredConfirmations)
-    let display: Int // capped at requiredConfirmations for UI
+    let raw: Int
+    let display: Int
 
     var label: String { "\(display)/\(ConfirmationPolicy.requiredConfirmations) done" }
-    var isComplete: Bool { display >= ConfirmationPolicy.requiredConfirmations }
+    var isComplete: Bool { display == ConfirmationPolicy.requiredConfirmations }
 }
 
 struct ConfirmationCalculator {
     func progress(for txBlockHeight: UInt32, currentBlockHeight: UInt32) -> ConfirmationProgress {
         let confs = Int(currentBlockHeight) - Int(txBlockHeight) + 1
-        let clamped = min(max(confs, 0), ConfirmationPolicy.requiredConfirmations)
-        return ConfirmationProgress(raw: confs, display: clamped)
+        let raw = max(confs, 0)
+        let display = min(raw, ConfirmationPolicy.requiredConfirmations)
+        return ConfirmationProgress(raw: raw, display: display)
     }
 }
 
+private let onchainPaymentTypes: Set<String> = ["onchain", "splice_in", "splice_out", "channel_close"]
+
 extension PaymentRecord {
     var shouldShowConfirmationProgress: Bool {
-        switch paymentType {
-        case "onchain", "splice_in", "splice_out", "channel_close":
-            return true
-        default:
-            return false
-        }
+        onchainPaymentTypes.contains(paymentType)
     }
 
     var isOnchainConfirmed: Bool {

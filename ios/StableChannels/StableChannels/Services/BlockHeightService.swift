@@ -19,8 +19,11 @@ final class BlockHeightService {
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
+                let start = Date()
                 await self?.refresh()
-                try? await Task.sleep(nanoseconds: UInt64(self?.pollInterval ?? 30) * 1_000_000_000)
+                let elapsed = Date().timeIntervalSince(start)
+                let delay = max(0, (self?.pollInterval ?? 30) - elapsed)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
     }
@@ -36,7 +39,6 @@ final class BlockHeightService {
             currentHeight = height
             onHeightUpdated?(height)
         } catch {
-            // Keep last known height
         }
     }
 }

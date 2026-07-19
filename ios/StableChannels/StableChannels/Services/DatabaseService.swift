@@ -609,7 +609,8 @@ class DatabaseService {
         AND txid != ''
         AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
         AND status != 'failed'
-        AND (tx_block_height IS NULL OR tx_block_height < ?)
+        AND tx_block_height IS NOT NULL
+        AND tx_block_height + (3 - 1) > ?
         ORDER BY created_at DESC
         LIMIT 50
         """
