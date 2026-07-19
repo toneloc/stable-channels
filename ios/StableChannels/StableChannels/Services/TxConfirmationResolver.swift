@@ -34,27 +34,15 @@ struct TxConfirmationResolver: TxConfirmationProvider {
     }
 
     func blockHeight(for txid: String) async throws -> UInt32? {
-        try await withCheckedThrowingContinuation { cont in
-            Task {
-                var resolved = false
-                await client.run(
-                    endpointBuilder: { base in
-                        ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"]
-                    },
-                    resultParser: { (data: Data) -> UInt32? in
-                        let status = try JSONDecoder().decode(TxStatusResponse.self, from: data)
-                        guard status.confirmed, let height = status.blockHeight, height > 0 else { return nil }
-                        return UInt32(height)
-                    },
-                    onResolved: { (height: UInt32) in
-                        resolved = true
-                        cont.resume(returning: height)
-                    }
-                )
-                if !resolved {
-                    cont.resume(returning: nil)
-                }
+        return await client.fetch(
+            endpointBuilder: { base in
+                ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"]
+            },
+            resultParser: { (data: Data) -> UInt32? in
+                let status = try JSONDecoder().decode(TxStatusResponse.self, from: data)
+                guard status.confirmed, let height = status.blockHeight, height > 0 else { return nil }
+                return UInt32(height)
             }
-        }
+        )
     }
 }

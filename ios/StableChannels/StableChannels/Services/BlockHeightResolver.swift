@@ -24,28 +24,20 @@ struct BlockHeightResolver: BlockHeightProvider {
     }
 
     func currentHeight() async throws -> UInt32 {
-        try await withCheckedThrowingContinuation { cont in
-            Task {
-                var resolved = false
-                await client.run(
-                    endpointBuilder: { base in
-                        ["\(ResilientEsploraClient.trimSlash(base))/blocks/tip/height"]
-                    },
-                    resultParser: { (data: Data) -> UInt32? in
-                        guard let str = String(data: data, encoding: .utf8)?
-                            .trimmingCharacters(in: .whitespacesAndNewlines),
-                            let h = UInt32(str) else { return nil }
-                        return h
-                    },
-                    onResolved: { (height: UInt32) in
-                        resolved = true
-                        cont.resume(returning: height)
-                    }
-                )
-                if !resolved {
-                    cont.resume(throwing: EsploraError.invalidResponse)
-                }
+        if let height = await client.fetch(
+            endpointBuilder: { base in
+                ["\(ResilientEsploraClient.trimSlash(base))/blocks/tip/height"]
+            },
+            resultParser: { (data: Data) -> UInt32? in
+                guard let str = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                    let h = UInt32(str) else { return nil }
+                return h
             }
+        ) {
+            return height
+        } else {
+            throw EsploraError.invalidResponse
         }
     }
 }

@@ -72,15 +72,37 @@ struct ResilientEsploraClient {
     ///   The exhaustion path is the only branch that fires the callback,
     ///   so callers can use `onExhausted` as a definitive "we tried and
     ///   gave up" signal.
+    /// Poll-style API: calls onResolved once on success, or
+    /// onExhausted after all retries/cancellation. Primary use case
+    /// is open-ended polling (txid/address resolution).
     func run<T: Sendable>(
         endpointBuilder: @escaping EndpointBuilder,
         resultParser: @escaping ResultParser<T>,
         onResolved: @escaping @Sendable (T) async -> Void
+
     ) async {
+        if let hit = await fetch(endpointBuilder: endpointBuilder, resultParser: resultParser) {
+            await onResolved(hit)
+        } else {
+            Self.log("ESPLORA_EXHAUSTED", [
+                "chainURLs": "\(config.chainURLs)",
+                "attempts": "\(config.maxAttempts)"
+            ])
+            await config.onExhausted?()
+        }
+    }
+
+    /// Single-shot request/response API: returns the first parsed hit or
+    /// nil on exhaustion/cancellation. Prefer this over run() for
+    /// one-off lookups like /blocks/tip/height or /tx/{txid}/status.
+    func fetch<T: Sendable>(
+        endpointBuilder: @escaping EndpointBuilder,
+        resultParser: @escaping ResultParser<T>
+    ) async -> T? {
         let start = Date()
         for attempt in 0..<config.maxAttempts {
             if Task.isCancelled {
-                return
+                return nil
             }
             if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds {
                 break
@@ -90,7 +112,6 @@ struct ResilientEsploraClient {
                     min(attempt - 1, config.backoffSeconds.count - 1)
                 ]
                 let sleepNs = Self.jitteredBackoff(base: base) * 1_000_000_000
-                // Skip the sleep if it would blow the wall-clock budget.
                 if Date().timeIntervalSince(start) + (Double(sleepNs) / 1_000_000_000)
                     >= config.wallClockBudgetSeconds {
                     break
@@ -98,10 +119,10 @@ struct ResilientEsploraClient {
                 do {
                     try await Task.sleep(nanoseconds: sleepNs)
                 } catch {
-                    return
+                    return nil
                 }
                 if Task.isCancelled {
-                    return
+                    return nil
                 }
                 if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds {
                     break
@@ -109,12 +130,12 @@ struct ResilientEsploraClient {
             }
             for base in config.chainURLs {
                 if Task.isCancelled {
-                    return
+                    return nil
                 }
                 let paths = endpointBuilder(base)
                 for path in paths {
                     if Task.isCancelled {
-                        return
+                        return nil
                     }
                     guard let data = await fetchJSON(path: path) else { continue }
                     do {
@@ -123,8 +144,7 @@ struct ResilientEsploraClient {
                                 "path": path,
                                 "attempt": "\(attempt)"
                             ])
-                            await onResolved(hit)
-                            return
+                            return hit
                         }
                     } catch {
                         continue
@@ -132,13 +152,7 @@ struct ResilientEsploraClient {
                 }
             }
         }
-        // Fell through without a hit AND without cancellation: true exhaustion.
-        // Cancellation paths above already returned without reaching this point.
-        Self.log("ESPLORA_EXHAUSTED", [
-            "chainURLs": "\(config.chainURLs)",
-            "attempts": "\(config.maxAttempts)"
-        ])
-        await config.onExhausted?()
+        return nil
     }
 
     /// GET `path`. Returns the body on 200, nil on non-200, network
