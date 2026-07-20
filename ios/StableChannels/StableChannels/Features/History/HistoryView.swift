@@ -178,7 +178,7 @@ struct PaymentRowView: View {
                     Text(payment.amountSats.satsFormatted)
                         .fontWeight(.medium)
                 }
-                Text(payment.status.capitalized)
+                Text(statusLabel)
                     .font(.caption)
                     .foregroundStyle(statusColor)
             }
@@ -199,7 +199,27 @@ struct PaymentRowView: View {
         }
     }
 
+    private var statusLabel: String {
+        if payment.shouldShowConfirmationProgress {
+            let confs = Int(payment.confirmations)
+            if confs >= ConfirmationPolicy.requiredConfirmations {
+                return String(localized: "status_confirmed", defaultValue: "Confirmed")
+            } else if confs > 0 {
+                return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
+            }
+        }
+        return payment.status.capitalized
+    }
+
     private var statusColor: Color {
+        if payment.shouldShowConfirmationProgress {
+            let confs = Int(payment.confirmations)
+            if confs >= ConfirmationPolicy.requiredConfirmations {
+                return .green
+            } else if confs > 0 {
+                return .blue
+            }
+        }
         switch payment.status {
         case "completed": return .green
         case "pending": return .orange
