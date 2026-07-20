@@ -13,8 +13,13 @@ cp umbrel-app-store.yml.tmp "$REPO/umbrel-app-store.yml"
 cp -R ../../stable-channels-lsp "$REPO/stable-channels-lsp"
 
 # Local-test deltas vs the canonical package:
+#  - images from the local registry instead of GHCR
+#  - Lightning P2P on 19735: the e2e stack's ldk-server holds 127.0.0.1:9735
+#    on the same Mac, and a bind conflict leaves the app's ldk-server without
+#    ANY network attachment (crash-loops with "Network is unreachable").
 sed -i '' \
     -e 's|image: ghcr.io/toneloc/\(sc-[a-z-]*\):[a-z0-9]*|image: localhost:5001/\1:local|' \
+    -e 's|"9735:9735"|"19735:9735"|' \
     "$REPO/stable-channels-lsp/docker-compose.yml"
 sed -i '' 's|^gallery: \[\]|gallery: []\nicon: http://localhost:8929/icon.png|' \
     "$REPO/stable-channels-lsp/umbrel-app.yml"
