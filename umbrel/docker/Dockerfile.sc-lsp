@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Production stable-channels-lsp image for the Umbrel package.
 # Build context = repo root. Unlike the e2e image (e2e/harness/docker/
 # Dockerfile.sc-lsp), this build does NOT enable the `e2e` feature — the
@@ -6,10 +7,14 @@ FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler perl make && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p stable-channels-lsp
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p stable-channels-lsp \
+    && cp /src/target/release/stable-channels-lsp /tmp/stable-channels-lsp
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/stable-channels-lsp /usr/local/bin/stable-channels-lsp
+COPY --from=build /tmp/stable-channels-lsp /usr/local/bin/stable-channels-lsp
 EXPOSE 3002
 CMD ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/sc-lsp.toml"]

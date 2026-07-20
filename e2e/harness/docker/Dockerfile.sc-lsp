@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Builds stable-channels-lsp from THIS repo (context = repo root).
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler perl make && rm -rf /var/lib/apt/lists/*
@@ -5,9 +6,13 @@ WORKDIR /src
 COPY . .
 # GUI deps are feature-gated (PR #176); -p builds the daemon lean. The harness
 # opts into E2E-only mock price-feed hooks explicitly.
-RUN cargo build --release -p stable-channels-lsp --features e2e
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p stable-channels-lsp --features e2e \
+    && cp /src/target/release/stable-channels-lsp /tmp/stable-channels-lsp
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/stable-channels-lsp /usr/local/bin/stable-channels-lsp
+COPY --from=build /tmp/stable-channels-lsp /usr/local/bin/stable-channels-lsp
 EXPOSE 3002

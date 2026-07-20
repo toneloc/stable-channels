@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Production ldk-server image for the Umbrel package.
 # Builds upstream ldk-server at the exact rev the production bidaemon runs.
 FROM rust:1-bookworm AS build
@@ -8,12 +9,16 @@ RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
 # experimental-lsps2-support: without it the [liquidity.lsps2_service] config
 # is dead code and JIT-channel requests are rejected ("without LSPS2 service
 # handler configured").
-RUN cargo build --release -p ldk-server --features experimental-lsps2-support
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p ldk-server --features experimental-lsps2-support \
+    && cp /src/target/release/ldk-server /tmp/ldk-server
 
 FROM debian:bookworm-slim
 # sqlite3: used by ldk-server-guard.sh to quarantine bad LSPS2 state.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates sqlite3 && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/ldk-server /usr/local/bin/ldk-server
+COPY --from=build /tmp/ldk-server /usr/local/bin/ldk-server
 COPY umbrel/docker/ldk-server-guard.sh /usr/local/bin/ldk-server-guard.sh
 RUN chmod +x /usr/local/bin/ldk-server-guard.sh
 EXPOSE 9735 3536

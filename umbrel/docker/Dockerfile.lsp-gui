@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Production lsp-server-gui (web/wasm) image for the Umbrel package.
 # Build context = repo root. Serves the wasm bundle and reverse-proxies
 # /api/ to the sc-lsp daemon (the wasm client issues origin-relative
@@ -8,12 +9,18 @@
 # container names.
 FROM rust:1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/* \
- && rustup target add wasm32-unknown-unknown \
- && cargo install --locked trunk --version ^0.21
+ && rustup target add wasm32-unknown-unknown
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install --locked trunk --version ^0.21
 WORKDIR /src
 COPY . .
 WORKDIR /src/server/lsp-server-gui
-RUN trunk build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/root/.cache/trunk \
+    trunk build --release
 
 FROM nginx:alpine
 COPY --from=build /src/server/lsp-server-gui/dist /usr/share/nginx/html
