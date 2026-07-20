@@ -45,10 +45,12 @@ log inside its Docker volume is trimmed after 50 MiB
 run `make clean` first; use `docker system prune -a --volumes` only when you
 are ready to delete unused Docker images, containers, and volumes.
 
-Docker Rust builds default to low-memory settings for 8 GB Macs:
-`COMPOSE_PARALLEL_LIMIT=1`, `SC_DOCKER_CARGO_JOBS=1`, and
-`SC_DOCKER_CODEGEN_UNITS=1`. On a larger machine, raise the Cargo knob for
-speed, for example `SC_DOCKER_CARGO_JOBS=4 SC_DOCKER_CODEGEN_UNITS=4 make rebuild`.
+Docker Rust builds auto-tune from Docker's reported RAM while preserving manual
+overrides. 8-10 GiB stays at `COMPOSE_PARALLEL_LIMIT=1`,
+`SC_DOCKER_CARGO_JOBS=1`, and `SC_DOCKER_CODEGEN_UNITS=1`; 12+ GiB raises Cargo
+to 2 jobs / 2 codegen units, 24+ GiB allows 2 compose builds / 4 Cargo jobs,
+and 48+ GiB allows 3 compose builds / 6 Cargo jobs / 8 codegen units. Set any
+of those env vars yourself to override the auto choice.
 
 > **Why not `docker compose up ios`?** Device tests can't run inside Docker — a
 > simulator needs macOS+Xcode and the emulator needs the host. Docker hosts only

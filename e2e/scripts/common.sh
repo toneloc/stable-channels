@@ -168,6 +168,91 @@ sc_guard_path_size() {
     die "$label is $(sc_human_bytes "$size") (max ${max_gib} GiB). Remove it before retrying."
 }
 
+sc_positive_int() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+sc_command_with_timeout() {
+    local seconds="${1:?timeout seconds required}"
+    shift
+    if command -v perl >/dev/null 2>&1; then
+        perl -e 'my $seconds = shift @ARGV; alarm $seconds; exec @ARGV' "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
+sc_docker_or_host_mem_bytes() {
+    local bytes
+
+    if command -v docker >/dev/null 2>&1; then
+        bytes="$(sc_command_with_timeout 5 docker info --format '{{.MemTotal}}' 2>/dev/null || true)"
+        if sc_positive_int "$bytes" && [ "$bytes" -gt 0 ]; then
+            printf 'docker:%s\n' "$bytes"
+            return 0
+        fi
+    fi
+
+    if command -v sysctl >/dev/null 2>&1; then
+        bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+        if sc_positive_int "$bytes" && [ "$bytes" -gt 0 ]; then
+            printf 'host:%s\n' "$bytes"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+sc_autotune_docker_build_limits() {
+    local compose_was_set="${COMPOSE_PARALLEL_LIMIT+x}"
+    local jobs_was_set="${SC_DOCKER_CARGO_JOBS+x}"
+    local codegen_was_set="${SC_DOCKER_CODEGEN_UNITS+x}"
+    local compose=1 jobs=1 codegen=1 source="unknown" bytes="" gib=0
+    local detected
+
+    detected="$(sc_docker_or_host_mem_bytes || true)"
+    if [ -n "$detected" ]; then
+        source="${detected%%:*}"
+        bytes="${detected#*:}"
+        gib="$((bytes / 1024 / 1024 / 1024))"
+
+        if [ "$source" = "docker" ]; then
+            if [ "$gib" -ge 48 ]; then
+                compose=3; jobs=6; codegen=8
+            elif [ "$gib" -ge 24 ]; then
+                compose=2; jobs=4; codegen=4
+            elif [ "$gib" -ge 12 ]; then
+                compose=1; jobs=2; codegen=2
+            fi
+        else
+            # Host RAM is only a fallback; Docker Desktop may still be capped.
+            if [ "$gib" -ge 48 ]; then
+                compose=1; jobs=3; codegen=3
+            elif [ "$gib" -ge 24 ]; then
+                compose=1; jobs=2; codegen=2
+            fi
+        fi
+    fi
+
+    [ -n "${COMPOSE_PARALLEL_LIMIT:-}" ] || export COMPOSE_PARALLEL_LIMIT="$compose"
+    [ -n "${SC_DOCKER_CARGO_JOBS:-}" ] || export SC_DOCKER_CARGO_JOBS="$jobs"
+    [ -n "${SC_DOCKER_CODEGEN_UNITS:-}" ] || export SC_DOCKER_CODEGEN_UNITS="$codegen"
+
+    local detail="memory unknown; safe defaults"
+    if [ -n "$bytes" ]; then
+        detail="$(sc_human_bytes "$bytes") $source RAM"
+    fi
+    local override_note=""
+    if [ -n "$compose_was_set" ] || [ -n "$jobs_was_set" ] || [ -n "$codegen_was_set" ]; then
+        override_note="; manual overrides honored"
+    fi
+    info "docker build limits: compose parallel=$COMPOSE_PARALLEL_LIMIT, cargo jobs=$SC_DOCKER_CARGO_JOBS, codegen units=$SC_DOCKER_CODEGEN_UNITS ($detail$override_note)"
+}
+
 extract_first_sim_udid() {
     sed -nE 's/.*\(([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\).*/\1/p' \
         | head -n 1
