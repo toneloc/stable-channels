@@ -84,6 +84,8 @@ struct ResilientEsploraClient {
         if let hit = await fetch(endpointBuilder: endpointBuilder, resultParser: resultParser) {
             await onResolved(hit)
         } else {
+            // Fell through without a hit AND without cancellation: true exhaustion.
+            // Cancellation paths above already returned without reaching this point.
             Self.log("ESPLORA_EXHAUSTED", [
                 "chainURLs": "\(config.chainURLs)",
                 "attempts": "\(config.maxAttempts)"
@@ -112,6 +114,7 @@ struct ResilientEsploraClient {
                     min(attempt - 1, config.backoffSeconds.count - 1)
                 ]
                 let sleepNs = Self.jitteredBackoff(base: base) * 1_000_000_000
+                // Skip the sleep if it would blow the wall-clock budget.
                 if Date().timeIntervalSince(start) + (Double(sleepNs) / 1_000_000_000)
                     >= config.wallClockBudgetSeconds {
                     break

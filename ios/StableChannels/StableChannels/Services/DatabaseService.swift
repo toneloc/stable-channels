@@ -600,7 +600,7 @@ class DatabaseService {
         return paymentRecord(from: row)
     }
 
-    func paymentsNeedingConfirmation(currentBlockHeight: UInt32) throws -> [PaymentRecord] {
+    func paymentsNeedingConfirmation(currentBlockHeight _: UInt32) throws -> [PaymentRecord] {
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
@@ -609,13 +609,13 @@ class DatabaseService {
         AND txid != ''
         AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
         AND status != 'failed'
-        AND (tx_block_height IS NULL OR tx_block_height + ? > ?)
+        AND (confirmations IS NULL OR confirmations < 6)
         ORDER BY created_at DESC
         LIMIT 50
         """
         let rows = try query(
             sql,
-            params: [.integer(Int64(ConfirmationPolicy.requiredConfirmations - 1)), .integer(Int64(currentBlockHeight))]
+            params: []
         )
         return rows.compactMap { row in
             guard row.count >= 15 else { return nil }
@@ -637,8 +637,13 @@ class DatabaseService {
     func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
         let confs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
         try execute(
-            "UPDATE payments SET confirmations = ?, tx_block_height = COALESCE(tx_block_height, ?) WHERE id = ?",
-            params: [.integer(Int64(confs)), .integer(Int64(txBlockHeight)), .integer(paymentId)]
+            "UPDATE payments SET confirmations = ?, tx_block_height = COALESCE(tx_block_height, ?), status = CASE WHEN ? >= 6 THEN 'completed' ELSE status END WHERE id = ?",
+            params: [
+                .integer(Int64(confs)),
+                .integer(Int64(txBlockHeight)),
+                .integer(Int64(confs)),
+                .integer(paymentId)
+            ]
         )
     }
 

@@ -61,10 +61,7 @@ struct PaymentDetailView: View {
                         ? String(localized: "payment_received", defaultValue: "Received")
                         : String(localized: "payment_sent", defaultValue: "Sent"))
                 row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
-                row(
-                    String(localized: "label_amount", defaultValue: "Amount"),
-                    "\(payment.amountSats.btcSpacedFormatted) BTC"
-                )
+                row(String(localized: "label_amount", defaultValue: "Amount"), "\(payment.amountSats) sats")
                 if let usd = displayUSD {
                     row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
                 }
@@ -102,12 +99,10 @@ struct PaymentDetailView: View {
                     row(String(localized: "label_address", defaultValue: "Address"), address)
                 }
                 if payment.confirmations > 0 {
-                    if !payment.confirmationStatusLabel.isEmpty {
-                        row(
-                            String(localized: "label_confirmations", defaultValue: "Confirmations"),
-                            payment.confirmationStatusLabel
-                        )
-                    }
+                    row(
+                        String(localized: "label_confirmations", defaultValue: "Confirmations"),
+                        "\(payment.confirmations)"
+                    )
                 }
             }
         }
@@ -121,19 +116,6 @@ struct PaymentDetailView: View {
             Spacer()
             Text(value)
                 .textSelection(.enabled)
-        }
-    }
-
-    private var paymentTypeLabel: String {
-        switch payment?.paymentType {
-        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
-        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
-        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
-        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
-        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
-        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
-        default: return payment?.paymentType ?? ""
         }
     }
 
@@ -154,4 +136,22 @@ struct PaymentDetailView: View {
         default: return false
         }
     }
+
+    private var paymentTypeLabel: String {
+        switch payment?.paymentType {
+        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
+        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
+        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
+        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
+        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
+        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
+        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
+        default: return payment?.paymentType ?? ""
+        }
+    }
+}
+
+#Preview {
+    PaymentDetailView(paymentId: 0, displayPrice: 0)
+        .environment(AppState())
 }

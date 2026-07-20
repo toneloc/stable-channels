@@ -130,7 +130,7 @@ struct TradeRowView: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(String(format: "$%.2f", trade.amountUSD))
                     .fontWeight(.medium)
-                Text(statusLabel)
+                Text(trade.status.capitalized)
                     .font(.caption)
                     .foregroundStyle(statusColor)
             }
@@ -138,7 +138,6 @@ struct TradeRowView: View {
         .padding(.vertical, 4)
     }
 
-    private var statusLabel: String { trade.status.capitalized }
     private var statusColor: Color {
         switch trade.status {
         case "completed": return .green
@@ -179,7 +178,7 @@ struct PaymentRowView: View {
                     Text(payment.amountSats.satsFormatted)
                         .fontWeight(.medium)
                 }
-                Text(statusLabel)
+                Text(payment.status.capitalized)
                     .font(.caption)
                     .foregroundStyle(statusColor)
             }
@@ -200,36 +199,13 @@ struct PaymentRowView: View {
         }
     }
 
-    private var statusLabel: String {
-        if payment.shouldShowConfirmationProgress,
-           !payment.confirmationStatusLabel.isEmpty {
-            return payment.confirmationStatusLabel
-        }
-        return payment.status.capitalized
-    }
-
     private var statusColor: Color {
-        if payment.shouldShowConfirmationProgress,
-           !payment.confirmationStatusLabel.isEmpty {
-            return payment.confirmationStatusLabel == "Confirmed" ? .green : .orange
-        }
         switch payment.status {
         case "completed": return .green
         case "pending": return .orange
         case "failed": return .red
         default: return .secondary
         }
-    }
-}
-
-extension PaymentRecord {
-    var confirmationStatusLabel: String {
-        guard shouldShowConfirmationProgress,
-              let blockHeight = txBlockHeight, blockHeight > 0 else { return "" }
-        if confirmations >= ConfirmationPolicy.requiredConfirmations {
-            return "Confirmed"
-        }
-        return "\(confirmations)/\(ConfirmationPolicy.requiredConfirmations) confirmations"
     }
 }
 
@@ -252,4 +228,10 @@ private extension PaymentRecord {
         guard price > 0 else { return nil }
         return Double(amountSats) / Double(Constants.satsInBTC) * price
     }
+}
+
+#Preview {
+    HistoryView()
+        .environment(AppState())
+        .environment(PaymentDetailCoordinator())
 }
