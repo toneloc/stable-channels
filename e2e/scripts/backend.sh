@@ -9,6 +9,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 step "Backend (docker regtest stack)"
 cd "$HARNESS_DIR"
+sc_require_free_space "$REPO_DIR" "${SC_E2E_MIN_FREE_GIB:-25}" "e2e backend"
+sc_warn_docker_raw_size "${SC_DOCKER_RAW_WARN_GIB:-150}"
 
 # Optional LSP operator GUI (web build of server/lsp-server-gui) at
 # http://127.0.0.1:3003. Set E2E_LSP_GUI=1/0 to skip the prompt; non-interactive

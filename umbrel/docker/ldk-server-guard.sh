@@ -28,9 +28,43 @@ DB="${STORAGE}/${NETWORK}/ldk_node_data.sqlite"
 LOG="${STORAGE}/${NETWORK}/ldk-server.log"
 SIGNATURE="Failed to build LDK Node: Failed to read from store."
 THRESHOLD=3
+MAX_LOG_BYTES="${SC_LDK_LOG_MAX_BYTES:-52428800}"
+KEEP_LOG_BYTES="${SC_LDK_LOG_KEEP_BYTES:-1048576}"
+CHECK_LOG_SECONDS="${SC_LDK_LOG_CHECK_SECONDS:-300}"
+
+case "$MAX_LOG_BYTES" in ''|*[!0-9]*) MAX_LOG_BYTES=52428800 ;; esac
+case "$KEEP_LOG_BYTES" in ''|*[!0-9]*) KEEP_LOG_BYTES=1048576 ;; esac
+case "$CHECK_LOG_SECONDS" in ''|*[!0-9]*) CHECK_LOG_SECONDS=300 ;; esac
+[ "$KEEP_LOG_BYTES" -le "$MAX_LOG_BYTES" ] || KEEP_LOG_BYTES="$MAX_LOG_BYTES"
+
+trim_log_if_needed() {
+    [ -f "$LOG" ] || return 0
+    size="$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')"
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -le "$MAX_LOG_BYTES" ] && return 0
+
+    tmp="${LOG}.trim.$$"
+    if tail -c "$KEEP_LOG_BYTES" "$LOG" > "$tmp" 2>/dev/null; then
+        cat "$tmp" > "$LOG"
+        rm -f "$tmp"
+        echo "[guard] trimmed $LOG from $size bytes to the last $KEEP_LOG_BYTES bytes" >&2
+    else
+        rm -f "$tmp"
+        : > "$LOG"
+        echo "[guard] truncated $LOG after it exceeded $MAX_LOG_BYTES bytes" >&2
+    fi
+}
+
+while :; do
+    trim_log_if_needed
+    sleep "$CHECK_LOG_SECONDS"
+done &
+log_trimmer_pid=$!
+trap 'kill "$log_trimmer_pid" 2>/dev/null || true' EXIT
 
 consecutive=0
 while :; do
+    trim_log_if_needed
     start_epoch="$(date +%s)"
     /usr/local/bin/ldk-server "$CONFIG"
     rc=$?

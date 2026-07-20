@@ -56,6 +56,118 @@ die()  { printf '%serror:%s %s\n' "$C_RED$C_BOLD" "$C_RESET" "$*" >&2; exit 1; }
 
 # --- helpers ----------------------------------------------------------------
 
+sc_bytes_from_gib() {
+    local gib="${1:?GiB value required}"
+    case "$gib" in
+        ''|*[!0-9]*) die "invalid GiB value: $gib" ;;
+    esac
+    printf '%s\n' "$((gib * 1024 * 1024 * 1024))"
+}
+
+sc_human_bytes() {
+    awk -v bytes="${1:-0}" 'BEGIN {
+        split("B KiB MiB GiB TiB", unit)
+        i = 1
+        while (bytes >= 1024 && i < 5) {
+            bytes /= 1024
+            i++
+        }
+        printf "%.1f %s", bytes, unit[i]
+    }'
+}
+
+sc_existing_df_path() {
+    local path="${1:?path required}"
+    while [ ! -e "$path" ]; do
+        local parent
+        parent="$(dirname "$path")"
+        if [ "$parent" = "$path" ]; then
+            path="/"
+            break
+        fi
+        path="$parent"
+    done
+    printf '%s\n' "$path"
+}
+
+sc_available_bytes() {
+    local path
+    path="$(sc_existing_df_path "${1:?path required}")"
+    df -Pk "$path" | awk 'NR == 2 { printf "%.0f\n", $4 * 1024 }'
+}
+
+sc_path_bytes() {
+    local path="${1:?path required}"
+    if [ ! -e "$path" ]; then
+        printf '0\n'
+        return 0
+    fi
+    du -sk "$path" 2>/dev/null | awk 'NR == 1 { printf "%.0f\n", $1 * 1024 }'
+}
+
+sc_require_free_space() {
+    local path="${1:-$REPO_DIR}"
+    local min_gib="${2:-${SC_MIN_FREE_GIB:-25}}"
+    local label="${3:-operation}"
+    local available required
+
+    required="$(sc_bytes_from_gib "$min_gib")"
+    available="$(sc_available_bytes "$path")"
+    [ -n "$available" ] || die "could not determine free space near $path"
+    if [ "$available" -lt "$required" ]; then
+        die "$label needs at least ${min_gib} GiB free near $path; only $(sc_human_bytes "$available") is free. Run cleanup before retrying."
+    fi
+
+    info "$label disk preflight: $(sc_human_bytes "$available") free (min ${min_gib} GiB)"
+}
+
+sc_warn_docker_raw_size() {
+    local warn_gib="${1:-${SC_DOCKER_RAW_WARN_GIB:-150}}"
+    [ "${SC_SKIP_DOCKER_RAW_WARN:-0}" = "1" ] && return 0
+
+    local raw="$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+    [ -f "$raw" ] || return 0
+
+    local actual warn_bytes
+    actual="$(sc_path_bytes "$raw")"
+    [ -n "$actual" ] || return 0
+    warn_bytes="$(sc_bytes_from_gib "$warn_gib")"
+    if [ "$actual" -ge "$warn_bytes" ]; then
+        info "Docker.raw is $(sc_human_bytes "$actual") (warn threshold ${warn_gib} GiB)"
+        info "Docker Desktop may keep freed space until you prune/compact it; use 'docker system prune -a --volumes' only when you are ready to delete unused Docker state."
+    fi
+}
+
+sc_guard_path_size() {
+    local path="${1:?path required}"
+    local max_gib="${2:?max GiB required}"
+    local label="${3:-$path}"
+    local reset_env="${4:-}"
+
+    [ -e "$path" ] || return 0
+
+    local size max_bytes
+    size="$(sc_path_bytes "$path")"
+    [ -n "$size" ] || die "could not determine size for $path"
+    max_bytes="$(sc_bytes_from_gib "$max_gib")"
+    if [ "$size" -le "$max_bytes" ]; then
+        info "$label size: $(sc_human_bytes "$size") (max ${max_gib} GiB)"
+        return 0
+    fi
+
+    if [ -n "$reset_env" ]; then
+        local reset_value="${!reset_env:-0}"
+        if [ "$reset_value" = "1" ]; then
+            info "$label is $(sc_human_bytes "$size") (max ${max_gib} GiB); removing because $reset_env=1"
+            rm -rf "$path"
+            return 0
+        fi
+        die "$label is $(sc_human_bytes "$size") (max ${max_gib} GiB). Re-run with $reset_env=1 to wipe it, or remove $path manually."
+    fi
+
+    die "$label is $(sc_human_bytes "$size") (max ${max_gib} GiB). Remove it before retrying."
+}
+
 extract_first_sim_udid() {
     sed -nE 's/.*\(([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\).*/\1/p' \
         | head -n 1

@@ -9,10 +9,17 @@
 
 name: umbrel-sim
 
+x-log-rotation: &log-rotation
+  driver: json-file
+  options:
+    max-size: "${SC_DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${SC_DOCKER_LOG_MAX_FILE:-3}"
+
 services:
   ldk-server:
     image: sc-ldk-server-umbrel-test
     container_name: stable-channels-lsp_ldk-server_1
+    logging: *log-rotation
     restart: on-failure
     volumes:
       - ${SIM_APP_DATA_DIR:?run via run-sim.sh}/data/config:/etc/ldk-server:ro
@@ -23,6 +30,7 @@ services:
   sc-lsp:
     image: sc-lsp-umbrel-test
     container_name: stable-channels-lsp_sc-lsp_1
+    logging: *log-rotation
     restart: on-failure
     depends_on: [ldk-server]
     volumes:
@@ -33,6 +41,7 @@ services:
   gui:
     image: sc-lsp-gui-umbrel-test
     container_name: stable-channels-lsp_gui_1
+    logging: *log-rotation
     restart: on-failure
     depends_on: [sc-lsp]
     environment:

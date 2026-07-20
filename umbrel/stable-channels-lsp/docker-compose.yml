@@ -9,6 +9,12 @@
 # <app-id>_<service>_1; those names are baked into the rendered configs
 # (gRPC target + TLS SAN) and SC_LSP_UPSTREAM below.
 
+x-log-rotation: &log-rotation
+  driver: json-file
+  options:
+    max-size: "${SC_DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${SC_DOCKER_LOG_MAX_FILE:-3}"
+
 services:
   app_proxy:
     environment:
@@ -17,6 +23,7 @@ services:
 
   ldk-server:
     image: ghcr.io/toneloc/sc-ldk-server:5d5e011
+    logging: *log-rotation
     restart: on-failure
     user: "1000:1000"
     volumes:
@@ -29,6 +36,7 @@ services:
 
   sc-lsp:
     image: ghcr.io/toneloc/sc-lsp:5d5e011
+    logging: *log-rotation
     restart: on-failure
     user: "1000:1000"
     depends_on: [ldk-server]
@@ -40,6 +48,7 @@ services:
 
   gui:
     image: ghcr.io/toneloc/sc-lsp-gui:8598bcf
+    logging: *log-rotation
     restart: on-failure
     depends_on: [sc-lsp]
     environment:

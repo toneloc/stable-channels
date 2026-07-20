@@ -36,6 +36,15 @@ make help        # list targets
 make ios FLOWS="01_onboard_lightning 02_btc_to_usd 03_usd_stability"
 ```
 
+The backend refuses to start if the host filesystem has less than 25 GiB free;
+override with `SC_E2E_MIN_FREE_GIB=<n>` only for short local experiments.
+Container stdout logs are capped at 10 MiB x 3 files by default
+(`SC_DOCKER_LOG_MAX_SIZE`, `SC_DOCKER_LOG_MAX_FILE`), and the ldk-server file
+log inside its Docker volume is trimmed after 50 MiB
+(`SC_LDK_LOG_MAX_BYTES`). If Docker Desktop's `Docker.raw` is already large,
+run `make clean` first; use `docker system prune -a --volumes` only when you
+are ready to delete unused Docker images, containers, and volumes.
+
 > **Why not `docker compose up ios`?** Device tests can't run inside Docker — a
 > simulator needs macOS+Xcode and the emulator needs the host. Docker hosts only
 > the backend (bitcoin-core, block-explorer, ldk-server, sc-lsp, ldk-node); Maestro drives

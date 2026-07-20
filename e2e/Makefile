@@ -62,10 +62,10 @@ rebuild: ## force-rebuild backend images, then start (after LSP/harness source c
 	@REBUILD=1 $(S)/backend.sh 2>&1 | tee $(LOG)
 
 down: ## stop the docker backend (keeps volumes)
-	@cd harness && docker compose --profile gui down
+	@cd harness && docker compose --profile gui down --remove-orphans
 
 clean: ## stop the backend AND wipe volumes (fresh chain/channel next time)
-	@cd harness && docker compose --profile gui down -v
+	@cd harness && docker compose --profile gui down -v --remove-orphans
 
 logs: ## follow the backend logs
 	@cd harness && docker compose --profile gui logs -f

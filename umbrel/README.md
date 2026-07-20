@@ -67,6 +67,15 @@ Verify at every tier: pre-start rendered configs in
 `${APP_DATA_DIR}/data/config`; ldk-server logs its node id; `/setup` shows
 the key; dashboard connects; 9735 reachable from off-box.
 
+Local sim storage guardrails: `umbrel/test/run-sim.sh` refuses to start with
+less than 25 GiB free, stops if `.sim-app-data` exceeds 12 GiB, and stops if
+old `.umbrelos-data` exceeds 20 GiB. Use `SC_UMBREL_SIM_MIN_FREE_GIB`,
+`SC_UMBREL_SIM_MAX_GIB`, or `SC_UMBREL_OS_DATA_MAX_GIB` to tune those. To wipe
+local sim state deliberately, run `cd umbrel/test && ./run-sim.sh clean`, or
+set `SC_UMBREL_SIM_RESET=1` / `SC_UMBREL_OS_RESET=1` on the next run.
+Container stdout logs are capped at 10 MiB x 3 files, and the ldk-server file
+log is trimmed after 50 MiB.
+
 ## Known blockers / caveats before real users
 
 - **LSPS2 restart landmine (UPSTREAM, MUST FIX FIRST):** persisted LSPS2
