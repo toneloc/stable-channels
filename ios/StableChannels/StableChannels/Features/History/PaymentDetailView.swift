@@ -104,7 +104,6 @@ struct PaymentDetailView: View {
                 }
             }
         }
-        .listStyle(.plain)
     }
 
     private func row(_ label: String, _ value: String) -> some View {
