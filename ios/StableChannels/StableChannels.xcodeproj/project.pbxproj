@@ -27,6 +27,7 @@
 		492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */; };
 		492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AB300CC81D003EC383 /* EsploraError.swift */; };
 		492B54B1300CE85C003EC383 /* ConfirmationPollingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */; };
+		492B54C1300CE85C003EC383 /* MempoolWebSocketService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */; };
 		496A44432FCD4F75005AF12F /* QRInputToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44422FCD4F75005AF12F /* QRInputToolbar.swift */; };
 		496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */; };
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
@@ -167,6 +168,7 @@
 		492B54AB300CC81D003EC383 /* EsploraError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraError.swift; sourceTree = "<group>"; };
 		492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationResolver.swift; sourceTree = "<group>"; };
 		492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmationPollingService.swift; sourceTree = "<group>"; };
+		492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketService.swift; sourceTree = "<group>"; };
 		496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractor.swift; sourceTree = "<group>"; };
 		496A44422FCD4F75005AF12F /* QRInputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRInputToolbar.swift; sourceTree = "<group>"; };
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
@@ -439,6 +441,7 @@
 				492B54AB300CC81D003EC383 /* EsploraError.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
+				492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
@@ -752,6 +755,7 @@
 				49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */,
 				6B789335CAF664AC4DA75B1A /* PaymentDetailView.swift in Sources */,
 				492B54B1300CE85C003EC383 /* ConfirmationPollingService.swift in Sources */,
+				492B54C1300CE85C003EC383 /* MempoolWebSocketService.swift in Sources */,
 				8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */,
 				4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */,
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
