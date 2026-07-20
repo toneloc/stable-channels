@@ -52,6 +52,7 @@ fun BalanceBar(
     nativeSats: Long,
     totalSats: Long,
     btcPrice: Double,
+    showBtcFormat: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
     onTradeRequest: ((TradeDirection, Double) -> Unit)? = null
@@ -265,13 +266,14 @@ fun BalanceBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             // Left: USD label + amount
+            val stableSats = if (btcPrice > 0) (stableUSD / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Icon(Icons.Default.Shield, contentDescription = null, tint = stableColor, modifier = Modifier.size(12.dp))
                     Text("USD", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = stableColor)
                 }
                 Text(
-                    stableUSD.usdFormatted(),
+                    if (showBtcFormat) stableSats.btcSpacedFormatted() else stableUSD.usdFormatted(),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (btcPrice > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -284,7 +286,8 @@ fun BalanceBar(
                     Icon(Icons.Default.CurrencyBitcoin, contentDescription = null, tint = nativeColor, modifier = Modifier.size(12.dp))
                 }
                 Text(
-                    if (btcPrice > 0) nativeUSD.usdFormatted() else "...",
+                    if (showBtcFormat) nativeSats.btcSpacedFormatted()
+                    else if (btcPrice > 0) nativeUSD.usdFormatted() else "...",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (btcPrice > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -281,6 +281,26 @@ class AppState(private val context: Context) : ViewModel() {
                             val dbTxid = databaseService?.getPaymentTxid(pendingCloseId)
                             if (!dbTxid.isNullOrEmpty()) {
                                 setLastCloseTxid(dbTxid)
+                            } else {
+                                // Resume background resolver if it hasn't found the TX yet
+                                val closeFundingTxid = fundingTxid
+                                if (closeFundingTxid != null && databaseService != null) {
+                                    val resolver = CloseTxidResolver(
+                                        chainURLs = listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL),
+                                        onResolved = { _, txid ->
+                                            Log.d("AppState", "Close TX resolved on restart: $txid")
+                                            setLastCloseTxid(txid)
+                                        }
+                                    )
+                                    viewModelScope.launch(Dispatchers.IO) {
+                                        resolver.resolve(
+                                            paymentId = pendingCloseId,
+                                            fundingTxid = closeFundingTxid,
+                                            vout = 0,
+                                            databaseService = databaseService!!
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -992,8 +1012,14 @@ class AppState(private val context: Context) : ViewModel() {
             )
 
             // Start background resolver to find the close TX
+            // Fall back to the prefs-persisted value in case in-memory fundingTxid raced to null
             val closeFundingTxid = fundingTxid
+                ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                    .getString("closing_funding_txid", null)
             if (closeFundingTxid != null && databaseService != null) {
+                // Clear the pref now that we've consumed it
+                context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                    .edit().remove("closing_funding_txid").apply()
                 val resolver = CloseTxidResolver(
                     chainURLs = listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL),
                     onResolved = { _, txid ->
@@ -1462,6 +1488,19 @@ class AppState(private val context: Context) : ViewModel() {
         val lightning = balances.totalLightningBalanceSats.toLong()
         val onchain = balances.totalOnchainBalanceSats.toLong()
         val hasReady = nodeService.channels.any { it.isChannelReady }
+
+        // Sync fundingTxid directly from the LDK node's channel details
+        // to gracefully handle out-of-band splices (e.g. LSP-initiated)
+        val channel = nodeService.channels.firstOrNull()
+        if (channel != null) {
+            val txo = channel.fundingTxo
+            if (txo != null) {
+                val currentTxid = txo.txid
+                if (currentTxid != null && currentTxid != fundingTxid) {
+                    fundingTxid = currentTxid
+                }
+            }
+        }
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady

@@ -171,7 +171,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        if (amountUSD <= 0 || amountUSD > maxSellUSD) {
+                        if (amountUSD <= 0 || amountUSD > maxSellUSD + 0.01) {
                             error = "Enter an amount between $0 and ${maxSellUSD.usdFormatted()}"
                         } else {
                             error = null

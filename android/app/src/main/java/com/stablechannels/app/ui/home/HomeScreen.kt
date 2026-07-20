@@ -280,6 +280,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     nativeSats = nativeSatsCached,
                     totalSats = lightningSats,
                     btcPrice = btcPrice,
+                    showBtcFormat = showBTC,
                     modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
                     onTradeRequest = if (hasReadyChannel) { direction, amountUSD ->
@@ -342,23 +343,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         } else if (isChannelClosing) {
                             // 2. Channel closing
                             Spacer(Modifier.height(8.dp))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(
-                                    Icons.Default.Warning,
-                                    contentDescription = "Closing",
-                                    tint = Color(0xFFF59E0B),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    "Channel closing — funds will arrive onchain",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            PendingRow("Channel closing\u2026", lastCloseTxid, context)
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             Spacer(Modifier.height(8.dp))
@@ -379,19 +364,25 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     },
                                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
                                 ) {
-                                    Text("Swap", fontSize = 13.sp)
+                                    Text("Move", fontSize = 13.sp)
                                 }
                             }
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(8.dp))
                             val pendingCloseId = appState.pendingClosePaymentId
-                            val text = if (pendingCloseId != null) {
-                                "Channel closed - pending confirmation"
-                            } else {
-                                "Deposit confirming..."
+                            // Prefer close txid if known — pendingClosePaymentId may already be
+                            // cleared by detectOnchainDeposit even while funds are still unconfirmed
+                            val effectiveTxid = lastCloseTxid ?: lastRxTxid
+                            val isClosePending = pendingCloseId != null || lastCloseTxid != null
+                            // Use short text when txid is known (button fits on same row, matches iOS)
+                            // Use longer text when no txid yet (shown as two-line subtitle)
+                            val text = when {
+                                isClosePending && effectiveTxid != null -> "Channel closing\u2026"
+                                isClosePending -> "Channel closed"
+                                else -> "Deposit confirming..."
                             }
-                            PendingRow(text, if (pendingCloseId != null) lastCloseTxid else lastRxTxid, context)
+                            PendingRow(text, effectiveTxid, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,
@@ -688,23 +679,36 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
 
 @Composable
 private fun PendingRow(text: String, txid: String?, context: android.content.Context) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text("\u231B", fontSize = 14.sp)
-        Spacer(Modifier.width(6.dp))
-        Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.weight(1f))
-        txid?.let {
+    if (txid != null) {
+        // Has txid — short text + button in one row (matches iOS layout)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("\u231B", fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
             TextButton(
                 onClick = {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${it.substringBefore(":")}"))
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}"))
                     context.startActivity(intent)
                 },
-                contentPadding = PaddingValues(0.dp)
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
             ) {
                 Text("View on explorer", fontSize = 12.sp)
+            }
+        }
+    } else {
+        // No txid yet — show text with "pending confirmation" below
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("\u231B", fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            Column {
+                Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("pending confirmation", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
             }
         }
     }
