@@ -29,6 +29,7 @@ struct FundWalletView: View {
                                 address = addr
                                 bitcoinURI = QRCodeUtility.generateBitcoinURI(from: addr)
                                 appState.transactionLinkService.onchainReceiveAddress = addr
+                                appState.mempoolWebSocketService.trackAddress(addr)
                             } catch {
                                 loadError = error
                             }

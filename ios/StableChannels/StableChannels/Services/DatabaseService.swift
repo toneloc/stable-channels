@@ -365,11 +365,11 @@ class DatabaseService {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Bool {
-        // Dedup: skip if a payment with this payment_id already exists
+        // Dedup: skip if a payment with this payment_id OR txid already exists
         if let pid = paymentId, !pid.isEmpty {
             let existing = try query(
-                "SELECT id FROM payments WHERE payment_id = ?",
-                params: [.text(pid)]
+                "SELECT id FROM payments WHERE payment_id = ? OR (txid IS NOT NULL AND txid = ?)",
+                params: [.text(pid), txid.map { .text($0) } ?? .text(pid)]
             )
             if !existing.isEmpty {
                 return false
