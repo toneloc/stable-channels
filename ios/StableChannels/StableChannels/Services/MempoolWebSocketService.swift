@@ -10,9 +10,11 @@ final class MempoolWebSocketService {
     private let wsEndpointURL: URL
     private let logger = Logger(subsystem: "com.stablechannels", category: "websocket")
 
+    private var urlSession: URLSession?
     private var webSocketTask: URLSessionWebSocketTask?
     private var trackedAddresses: Set<String> = []
     private var trackedTxids: Set<String> = []
+    private var pendingOutboundMessages: [String] = []
     private var isManualDisconnect: Bool = false
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
@@ -30,7 +32,12 @@ final class MempoolWebSocketService {
         guard !isConnected else { return }
         isManualDisconnect = false
 
-        let session = URLSession(configuration: .default)
+        // Invalidate old session to prevent resource leaks
+        urlSession?.invalidateAndCancel()
+        let config = URLSessionConfiguration.default
+        let session = URLSession(configuration: config)
+        self.urlSession = session
+
         webSocketTask = session.webSocketTask(with: wsEndpointURL)
         webSocketTask?.resume()
         isConnected = true
@@ -48,15 +55,20 @@ final class MempoolWebSocketService {
         // Subscribe to real-time block header updates
         trackBlocks()
 
+        // Flush any pending outbound messages buffered while disconnected
+        flushPendingMessages()
+
         // Start async listening loop
         receiveMessages()
     }
 
-    /// Disconnects the WebSocket gracefully.
+    /// Disconnects the WebSocket gracefully and invalidates the session.
     func disconnect() {
         isManualDisconnect = true
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
         isConnected = false
         logger.info("Mempool WebSocket disconnected")
     }
@@ -72,9 +84,14 @@ final class MempoolWebSocketService {
         }
     }
 
-    /// Unsubscribes from tracking a specific Bitcoin address.
+    /// Unsubscribes from tracking a specific Bitcoin address on client and server.
     func untrackAddress(_ address: String) {
         trackedAddresses.remove(address)
+        if isConnected {
+            send("""
+            { "untrack-address": "\(address)" }
+            """)
+        }
     }
 
     /// Subscribes to real-time transaction outspend events for a funding txid.
@@ -88,14 +105,18 @@ final class MempoolWebSocketService {
         }
     }
 
-    /// Unsubscribes from tracking a transaction txid.
+    /// Unsubscribes from tracking a transaction txid on client and server.
     func untrackTx(_ txid: String) {
         trackedTxids.remove(txid)
+        if isConnected {
+            send("""
+            { "untrack-tx": "\(txid)" }
+            """)
+        }
     }
 
     /// Subscribes to real-time block header announcements.
     func trackBlocks() {
-        guard isConnected else { return }
         let payload = """
         { "action": "want", "data": ["blocks"] }
         """
@@ -117,12 +138,24 @@ final class MempoolWebSocketService {
     }
 
     private func send(_ text: String) {
-        webSocketTask?.send(.string(text)) { [weak self] error in
+        guard isConnected, let webSocketTask else {
+            pendingOutboundMessages.append(text)
+            return
+        }
+        webSocketTask.send(.string(text)) { [weak self] error in
             if let error {
                 Task { @MainActor [weak self] in
                     self?.logger.error("WebSocket send error: \(error.localizedDescription)")
                 }
             }
+        }
+    }
+
+    private func flushPendingMessages() {
+        let messages = pendingOutboundMessages
+        pendingOutboundMessages.removeAll()
+        for msg in messages {
+            send(msg)
         }
     }
 
@@ -170,11 +203,11 @@ final class MempoolWebSocketService {
            let firstTx = addressTxs.first,
            let txid = firstTx["txid"] as? String,
            ResilientEsploraClient.isValidTxid(txid) {
-            // Find which tracked address this matches
-            for address in trackedAddresses {
-                onTransactionDetected?(address, txid)
+            let targetKey = findMatchingTarget(json: json, firstTx: firstTx)
+            if let targetKey {
+                onTransactionDetected?(targetKey, txid)
+                logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
             }
-            logger.info("Real-time transaction detected via WebSocket: \(txid)")
         }
 
         // 2. Check for block header payload
@@ -184,5 +217,42 @@ final class MempoolWebSocketService {
             onBlockHeader?(height)
             logger.info("Real-time block header received via WebSocket: \(height)")
         }
+    }
+
+    private func findMatchingTarget(json: [String: Any], firstTx: [String: Any]) -> String? {
+        // Direct address in response JSON
+        if let respAddr = json["address"] as? String, trackedAddresses.contains(respAddr) {
+            return respAddr
+        }
+        // Match output scriptpubkey_address
+        if let vouts = firstTx["vout"] as? [[String: Any]] {
+            for vout in vouts {
+                if let addr = vout["scriptpubkey_address"] as? String, trackedAddresses.contains(addr) {
+                    return addr
+                }
+            }
+        }
+        // Match input prevout scriptpubkey_address
+        if let vins = firstTx["vin"] as? [[String: Any]] {
+            for vin in vins {
+                if let prevout = vin["prevout"] as? [String: Any],
+                   let addr = prevout["scriptpubkey_address"] as? String,
+                   trackedAddresses.contains(addr) {
+                    return addr
+                }
+                if let inputTxid = vin["txid"] as? String, trackedTxids.contains(inputTxid) {
+                    return inputTxid
+                }
+            }
+        }
+        // Match tracked txids directly
+        if let respTxid = json["txid"] as? String, trackedTxids.contains(respTxid) {
+            return respTxid
+        }
+        // Default to first tracked address if single subscription
+        if trackedAddresses.count == 1 {
+            return trackedAddresses.first
+        }
+        return nil
     }
 }
