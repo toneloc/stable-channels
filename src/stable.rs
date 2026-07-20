@@ -3,7 +3,7 @@ use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
     STABILITY_THRESHOLD_USD,
 };
-use crate::price_feeds::get_cached_price;
+use crate::price_feeds::{get_cached_price, get_cached_price_no_fetch};
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
 use serde_json::json;
@@ -204,12 +204,10 @@ pub fn update_balances<'update_balance_lifetime>(
     node: &Node,
     sc: &'update_balance_lifetime mut StableChannel,
 ) -> (bool, &'update_balance_lifetime mut StableChannel) {
-    let cached = get_cached_price();
+    // Cache-only so no caller (incl. the UI thread) blocks on the network; the background loop owns refreshes.
+    let cached = get_cached_price_no_fetch();
     if cached > 0.0 {
         sc.latest_price = cached;
-    } else if sc.latest_price == 0.0 {
-        let agent = Agent::new();
-        sc.latest_price = get_current_price(&agent);
     }
 
     // --- Update On-chain ---
@@ -311,7 +309,7 @@ pub fn check_stability(
     let current_price = if price > 0.0 {
         price
     } else {
-        let cached_price = get_cached_price();
+        let cached_price = get_cached_price_no_fetch();
         if cached_price > 0.0 {
             cached_price
         } else {

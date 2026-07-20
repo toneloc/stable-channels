@@ -203,6 +203,13 @@ impl Database {
             [],
         );
 
+        // Migration: per-splice marker so ChannelReady's reconcile_outgoing skips a splice
+        // already reconciled by the SpliceNegotiated esplora deduction (prevents a double deduction).
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN stable_reconciled INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+
         // Create index for faster payment queries
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_payments_created
@@ -996,6 +1003,30 @@ impl Database {
             [],
         )?;
         Ok(rows)
+    }
+
+    /// Mark a splice (by funding txid) as already stable-reconciled by the SpliceNegotiated
+    /// esplora deduction, so ChannelReady's reconcile_outgoing won't double-count it.
+    pub fn mark_splice_stable_reconciled(&self, txid: &str) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE payments SET stable_reconciled = 1
+             WHERE payment_type IN ('splice_in','splice_out') AND txid = ?1",
+            params![txid],
+        )?;
+        Ok(rows)
+    }
+
+    /// Whether the splice with this funding txid was already stable-reconciled.
+    pub fn is_splice_stable_reconciled(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM payments
+             WHERE payment_type IN ('splice_in','splice_out') AND txid = ?1 AND stable_reconciled = 1",
+            params![txid],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// Update confirmations and status for a payment by txid

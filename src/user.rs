@@ -206,6 +206,14 @@ impl Toast {
     }
 }
 
+/// A splice-out deduction awaiting its off-thread esplora funding-output lookup.
+struct PendingSpliceDeduction {
+    old_value_sats: u64,
+    txid: String,
+    vout: u32,
+    rx: std::sync::mpsc::Receiver<Option<u64>>,
+}
+
 pub struct UserApp {
     pub node: Arc<Node>,
     pub status_message: String,
@@ -314,6 +322,10 @@ pub struct UserApp {
 
     // Non-blocking daily price update
     daily_prices_receiver: Option<std::sync::mpsc::Receiver<bool>>,
+    // Startup historical/intraday Kraken backfill — off-thread so it never blocks the first frame.
+    historical_backfill_receiver: Option<std::sync::mpsc::Receiver<bool>>,
+    // In-flight splice-out esplora lookup; the deduction is applied when it lands.
+    pending_splice_deduction: Option<PendingSpliceDeduction>,
 
     // Bar chart display toggle: false = default (Stable=USD, BTC=BTC), true = swapped
     bar_chart_show_btc: bool,
@@ -644,6 +656,8 @@ impl UserApp {
             pending_trade_payments: HashMap::new(),
             pending_payments: HashMap::new(),
             daily_prices_receiver: None,
+            historical_backfill_receiver: None,
+            pending_splice_deduction: None,
             bar_chart_show_btc: false,
             bar_chart_anim: 0.0,
             bar_slider_drag_offset: 0.0,
@@ -663,13 +677,12 @@ impl UserApp {
             trade_success: None,
         };
 
-        // Seed historical price data if needed
-        app.seed_historical_prices();
+        // Backfill historical + intraday prices from Kraken on a background thread so a
+        // slow/hung feed can't block startup before the first frame.
+        app.start_historical_backfill();
 
-        // Backfill intraday data from Kraken for the 1D chart
-        app.backfill_intraday_prices();
-
-        // Load initial chart data
+        // Load whatever is already in the DB immediately (non-blocking); the chart
+        // refreshes when the backfill thread completes.
         app.load_chart_data();
 
         {
@@ -742,6 +755,8 @@ impl UserApp {
 
                 // Only proceed if we have a valid price
                 if price > 0.0 {
+                    // Publish so the UI thread's non-blocking get_cached_price_no_fetch reads stay fresh.
+                    stable_channels::price_feeds::set_cached_price(price);
                     let mut payment_sent = false;
 
                     // Brief lock to update values
@@ -2207,6 +2222,13 @@ impl UserApp {
                             .complete_latest_splice(Some(txid_str.as_str()))
                             .map(|rows| rows > 0)
                             .unwrap_or(false);
+                    // If SpliceNegotiated's esplora deduction already reconciled this splice,
+                    // ChannelReady must not reconcile again (persisted, so it survives a restart).
+                    let splice_already_reconciled = txid_str != "unknown"
+                        && self
+                            .db
+                            .is_splice_stable_reconciled(&txid_str)
+                            .unwrap_or(false);
                     let is_splice;
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
@@ -2237,16 +2259,28 @@ impl UserApp {
                         // After splice confirms, reconcile: if splice-out exceeded
                         // native BTC, the overflow eats into the stable position.
                         if is_splice {
-                            let price = sc.latest_price;
-                            if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
+                            if splice_already_reconciled {
+                                // SpliceNegotiated already deducted this splice-out precisely
+                                // (esplora); skip reconcile_outgoing so the pre-existing under-peg
+                                // gap isn't deducted a second time.
                                 audit_event(
-                                    "SPLICE_OUT_STABLE_DEDUCTED",
-                                    json!({
-                                        "usd_deducted": usd_deducted,
-                                        "new_expected_usd": sc.expected_usd.0,
-                                        "btc_price": price,
-                                    }),
+                                    "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                                    json!({ "txid": txid_str.clone() }),
                                 );
+                            } else {
+                                let price = sc.latest_price;
+                                if let Some(usd_deducted) =
+                                    stable::reconcile_outgoing(&mut sc, price)
+                                {
+                                    audit_event(
+                                        "SPLICE_OUT_STABLE_DEDUCTED",
+                                        json!({
+                                            "usd_deducted": usd_deducted,
+                                            "new_expected_usd": sc.expected_usd.0,
+                                            "btc_price": price,
+                                        }),
+                                    );
+                                }
                             }
                             // Splice complete: clear the auto-splice flag (bg-thread
                             // clear only handles splice-in via balance drop;
@@ -2850,52 +2884,20 @@ impl UserApp {
                         .map(|c| c.channel_value_sats);
 
                     if let Some(old_value) = old_channel_value_sats {
-                        match Self::lookup_funding_output_sats_esplora(&txid_str, vout) {
-                            Some(new_value) => {
-                                audit_event(
-                                    "SPLICE_PENDING_LOOKUP",
-                                    json!({
-                                        "old_channel_sats": old_value,
-                                        "new_channel_sats": new_value,
-                                        "delta_sats": (new_value as i64) - (old_value as i64),
-                                    }),
-                                );
-
-                                if new_value < old_value {
-                                    let splice_out_sats = old_value - new_value;
-                                    let mut sc = self.stable_channel.lock().unwrap();
-                                    let price = sc.latest_price;
-                                    if let Some(usd_deducted) =
-                                        stable::deduct_outgoing(&mut sc, splice_out_sats, price)
-                                    {
-                                        audit_event(
-                                            "SPLICE_OUT_STABLE_DEDUCTED",
-                                            json!({
-                                                "splice_out_sats": splice_out_sats,
-                                                "usd_deducted": usd_deducted,
-                                                "new_expected_usd": sc.expected_usd.0,
-                                                "btc_price": price,
-                                            }),
-                                        );
-                                    }
-                                    drop(sc);
-                                    self.save_channel_settings();
-                                }
-                            }
-                            None => {
-                                println!(
-                                    "[SplicePending] Could not look up funding output {}:{}",
-                                    txid_str, vout
-                                );
-                                audit_event(
-                                    "SPLICE_PENDING_LOOKUP_FAILED",
-                                    json!({
-                                        "txid": txid_str,
-                                        "vout": vout,
-                                    }),
-                                );
-                            }
-                        }
+                        // Run the esplora lookup off the UI thread; the deduction is applied in
+                        // poll_pending_splice_deduction() when the result lands (never blocks).
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let txid_for_lookup = txid_str.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx
+                                .send(Self::lookup_funding_output_sats_esplora(&txid_for_lookup, vout));
+                        });
+                        self.pending_splice_deduction = Some(PendingSpliceDeduction {
+                            old_value_sats: old_value,
+                            txid: txid_str.clone(),
+                            vout,
+                            rx,
+                        });
                     }
 
                     self.status_message = format!("Splice pending - tx: {}", new_funding_txo.txid);
@@ -2941,6 +2943,68 @@ impl UserApp {
                 // LDK returns the same queue-front event until it is acknowledged.
                 // Exit this processing pass so a transient DB failure cannot spin forever.
                 break;
+            }
+        }
+    }
+
+    /// Apply a deferred splice-out deduction once its background esplora lookup lands.
+    /// Non-blocking: returns immediately while the lookup is still in flight.
+    fn poll_pending_splice_deduction(&mut self) {
+        let recv = match self.pending_splice_deduction.as_ref() {
+            Some(p) => p.rx.try_recv(),
+            None => return,
+        };
+        let new_value_opt = match recv {
+            Ok(v) => v,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return, // still looking up
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None, // lookup thread died
+        };
+        let pending = self.pending_splice_deduction.take().unwrap();
+        match new_value_opt {
+            Some(new_value) => {
+                audit_event(
+                    "SPLICE_PENDING_LOOKUP",
+                    json!({
+                        "old_channel_sats": pending.old_value_sats,
+                        "new_channel_sats": new_value,
+                        "delta_sats": (new_value as i64) - (pending.old_value_sats as i64),
+                    }),
+                );
+                if new_value < pending.old_value_sats {
+                    let splice_out_sats = pending.old_value_sats - new_value;
+                    let mut sc = self.stable_channel.lock().unwrap();
+                    let price = sc.latest_price;
+                    if let Some(usd_deducted) =
+                        stable::deduct_outgoing(&mut sc, splice_out_sats, price)
+                    {
+                        audit_event(
+                            "SPLICE_OUT_STABLE_DEDUCTED",
+                            json!({
+                                "splice_out_sats": splice_out_sats,
+                                "usd_deducted": usd_deducted,
+                                "new_expected_usd": sc.expected_usd.0,
+                                "btc_price": price,
+                            }),
+                        );
+                    }
+                    drop(sc);
+                    self.save_channel_settings();
+                }
+                // This splice was reconciled here authoritatively; block a second deduction at ChannelReady.
+                let _ = self.db.mark_splice_stable_reconciled(&pending.txid);
+            }
+            None => {
+                println!(
+                    "[SplicePending] Could not look up funding output {}:{}",
+                    pending.txid, pending.vout
+                );
+                audit_event(
+                    "SPLICE_PENDING_LOOKUP_FAILED",
+                    json!({
+                        "txid": pending.txid,
+                        "vout": pending.vout,
+                    }),
+                );
             }
         }
     }
@@ -3267,141 +3331,70 @@ impl UserApp {
     }
 
     /// Seed historical price data into the database if not already present
-    fn seed_historical_prices(&mut self) {
-        // Check if we already have historical data going back to 2013
-        let needs_seed = match self.db.get_oldest_daily_price_date() {
-            Ok(Some(oldest)) => {
-                // Re-seed if oldest data is not from 2013
-                !oldest.starts_with("2013")
-            }
-            Ok(None) => true, // No data at all
-            Err(_) => true,   // Error, try to seed
-        };
-
-        if !needs_seed {
-            if let Ok(count) = self.db.get_daily_price_count() {
-                println!(
-                    "[Chart] Historical prices already seeded ({} records back to 2013)",
-                    count
-                );
-            }
-            // Still check if we need to fetch recent Kraken data
-            self.maybe_fetch_recent_data();
+    /// Kick off the 2013-present seed + recent Kraken daily/intraday backfill on a
+    /// background thread, so a slow/hung feed can never block startup or the UI thread.
+    /// The chart refreshes when it completes (polled in `update`).
+    fn start_historical_backfill(&mut self) {
+        if self.historical_backfill_receiver.is_some() {
             return;
         }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.historical_backfill_receiver = Some(rx);
+        let db = self.db.clone();
 
-        println!("[Chart] Seeding historical price data (2013-present)...");
-        let seed_data = get_seed_prices();
-        let data: Vec<(String, f64, f64, f64, f64, Option<f64>)> = seed_data
-            .into_iter()
-            .map(|(date, o, h, l, c, v)| (date.to_string(), o, h, l, c, v))
-            .collect();
+        std::thread::spawn(move || {
+            let agent = stable_channels::price_feeds::bounded_agent();
 
-        match self.db.bulk_insert_daily_prices(&data) {
-            Ok(count) => println!("[Chart] Seeded {} historical price records", count),
-            Err(e) => eprintln!("[Chart] Failed to seed historical prices: {}", e),
-        }
-
-        // Immediately fetch recent Kraken data to fill in gaps
-        self.fetch_kraken_daily_data();
-    }
-
-    /// Check if we need to fetch recent Kraken data and do so if needed
-    fn maybe_fetch_recent_data(&mut self) {
-        // Check if latest data is older than 3 days
-        let needs_update = match self.db.get_latest_daily_price_date() {
-            Ok(Some(latest)) => {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                if let (Ok(latest_date), Ok(today_date)) = (
-                    chrono::NaiveDate::parse_from_str(&latest, "%Y-%m-%d"),
-                    chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d"),
-                ) {
-                    let days_old = (today_date - latest_date).num_days();
-                    println!("[Chart] Latest data is {} days old ({})", days_old, latest);
-                    days_old > 3
-                } else {
-                    true
-                }
-            }
-            _ => true,
-        };
-
-        if needs_update {
-            println!("[Chart] Data is stale, fetching from Kraken...");
-            self.fetch_kraken_daily_data();
-        }
-    }
-
-    /// Fetch daily OHLC data from Kraken API (up to 720 days)
-    fn fetch_kraken_daily_data(&mut self) {
-        println!("[Chart] Fetching Kraken OHLC data...");
-        let agent = stable_channels::price_feeds::bounded_agent();
-
-        // Fetch without 'since' to get the most recent 720 days
-        match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
-            Ok(prices) => {
-                let count = prices.len();
-                for (date, open, high, low, close, volume) in prices {
-                    let _ = self.db.record_daily_price(
-                        &date,
-                        open,
-                        high,
-                        low,
-                        close,
-                        volume,
-                        Some("kraken"),
-                    );
-                }
-                println!("[Chart] Fetched {} daily prices from Kraken", count);
-            }
-            Err(e) => {
-                eprintln!("[Chart] Failed to fetch Kraken OHLC data: {}", e);
-            }
-        }
-    }
-
-    /// Backfill intraday price data from Kraken (15-min candles) if we have gaps
-    fn backfill_intraday_prices(&self) {
-        // Check how many points we have in the last 24 hours
-        let existing = self.db.get_price_history(24).unwrap_or_default();
-        if existing.len() >= 80 {
-            println!(
-                "[Chart] Intraday data sufficient ({} points), skipping backfill",
-                existing.len()
-            );
-            return;
-        }
-
-        println!(
-            "[Chart] Backfilling intraday prices from Kraken (have {} points)...",
-            existing.len()
-        );
-        let agent = stable_channels::price_feeds::bounded_agent();
-        match stable_channels::price_feeds::fetch_kraken_intraday(&agent) {
-            Ok(prices) => {
-                // Build a set of existing timestamps (rounded to nearest minute) to avoid dupes
-                let existing_ts: std::collections::HashSet<i64> = existing
-                    .iter()
-                    .map(|p| p.timestamp / 60 * 60) // round to minute
+            // Seed the full 2013-present daily history once (local insert) if missing.
+            let needs_seed = match db.get_oldest_daily_price_date() {
+                Ok(Some(oldest)) => !oldest.starts_with("2013"),
+                _ => true,
+            };
+            if needs_seed {
+                let data: Vec<(String, f64, f64, f64, f64, Option<f64>)> = get_seed_prices()
+                    .into_iter()
+                    .map(|(date, o, h, l, c, v)| (date.to_string(), o, h, l, c, v))
                     .collect();
-
-                let mut inserted = 0;
-                for (ts, price) in &prices {
-                    let rounded = ts / 60 * 60;
-                    if !existing_ts.contains(&rounded) {
-                        let _ = self.db.record_price_at(*price, *ts, Some("kraken"));
-                        inserted += 1;
-                    }
+                if let Err(e) = db.bulk_insert_daily_prices(&data) {
+                    eprintln!("[Chart] Failed to seed historical prices: {}", e);
                 }
-                println!(
-                    "[Chart] Backfilled {} intraday price points from Kraken",
-                    inserted
-                );
             }
-            Err(e) => {
-                eprintln!("[Chart] Failed to backfill intraday prices: {}", e);
+
+            // Refresh recent daily OHLC from Kraken when seeding or when data is stale.
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let daily_stale =
+                db.get_latest_daily_price_date().ok().flatten().as_deref() != Some(today.as_str());
+            if needs_seed || daily_stale {
+                match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
+                    Ok(prices) => {
+                        for (date, open, high, low, close, volume) in prices {
+                            let _ = db
+                                .record_daily_price(&date, open, high, low, close, volume, Some("kraken"));
+                        }
+                    }
+                    Err(e) => eprintln!("[Chart] Failed to fetch Kraken OHLC data: {}", e),
+                }
             }
-        }
+
+            // Backfill intraday (15-min) points for the 1D chart if sparse.
+            let existing = db.get_price_history(24).unwrap_or_default();
+            if existing.len() < 80 {
+                match stable_channels::price_feeds::fetch_kraken_intraday(&agent) {
+                    Ok(prices) => {
+                        let existing_ts: std::collections::HashSet<i64> =
+                            existing.iter().map(|p| p.timestamp / 60 * 60).collect();
+                        for (ts, price) in &prices {
+                            if !existing_ts.contains(&(ts / 60 * 60)) {
+                                let _ = db.record_price_at(*price, *ts, Some("kraken"));
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[Chart] Failed to backfill intraday prices: {}", e),
+                }
+            }
+
+            let _ = tx.send(true);
+        });
     }
 
     /// Load chart data based on current period selection
@@ -9104,6 +9097,23 @@ impl App for UserApp {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {} // Still fetching
             }
         }
+
+        // Poll background historical/intraday backfill; refresh the chart when it lands.
+        if let Some(ref rx) = self.historical_backfill_receiver {
+            match rx.try_recv() {
+                Ok(_) => {
+                    self.load_chart_data();
+                    self.historical_backfill_receiver = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.historical_backfill_receiver = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Apply a deferred splice-out deduction once its esplora lookup completes.
+        self.poll_pending_splice_deduction();
 
         self.show_onboarding = false;
 
