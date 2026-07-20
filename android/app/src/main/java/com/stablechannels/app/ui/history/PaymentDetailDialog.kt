@@ -15,6 +15,9 @@ import com.stablechannels.app.util.shortString
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
 import com.stablechannels.app.util.Constants
+import androidx.compose.ui.platform.LocalContext
+import android.content.Intent
+import android.net.Uri
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,6 +126,20 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0,
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         val displayTxid = if (txid.length > 16) txid.take(8) + "..." + txid.takeLast(8) else txid
                         CopyableDetailRow("TXID", displayTxid, txid)
+                        val context = LocalContext.current
+                        val onchainTypes = setOf("channel_close", "onchain", "splice_in", "splice_out")
+                        if (payment.paymentType in onchainTypes) {
+                            TextButton(
+                                onClick = {
+                                    val cleanTxid = txid.substringBefore(":")
+                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://mempool.space/tx/$cleanTxid"))
+                                    context.startActivity(intent)
+                                },
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text("View on explorer", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
                     }
                     
                     payment.address?.let { addr ->

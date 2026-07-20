@@ -22,7 +22,8 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun StatusCapsule(
     message: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
 ) {
     AnimatedVisibility(
         visible = message.isNotEmpty(),
@@ -39,7 +40,9 @@ fun StatusCapsule(
         Surface(
             shape = RoundedCornerShape(50),
             tonalElevation = 3.dp,
-            color = MaterialTheme.colorScheme.surface
+            color = MaterialTheme.colorScheme.surface,
+            onClick = { onClick?.invoke() },
+            modifier = if (onClick != null) Modifier else Modifier
         ) {
             Text(
                 text = message,

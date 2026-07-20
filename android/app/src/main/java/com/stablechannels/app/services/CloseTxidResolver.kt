@@ -73,18 +73,16 @@ class CloseTxidResolver(
             try {
                 val url = "${baseURL.trimEnd('/')}/tx/$fundingTxid/outspend/$vout"
                 val request = Request.Builder().url(url).build()
-                val response = client.newCall(request).execute()
-                val body = response.body?.string() ?: continue
-
-                if (!response.isSuccessful) continue
-
-                val json = JSONObject(body)
-                val spent = json.optBoolean("spent", false)
-
-                if (spent) {
-                    val txid = json.optString("txid", "")
-                    if (txid.isNotEmpty() && isValidTxid(txid)) {
-                        return txid
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = response.body?.string() ?: return@use
+                    val json = JSONObject(body)
+                    val spent = json.optBoolean("spent", false)
+                    if (spent) {
+                        val txid = json.optString("txid", "")
+                        if (txid.isNotEmpty() && isValidTxid(txid)) {
+                            return txid
+                        }
                     }
                 }
             } catch (e: Exception) {

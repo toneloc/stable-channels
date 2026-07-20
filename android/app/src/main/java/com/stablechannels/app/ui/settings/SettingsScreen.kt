@@ -334,6 +334,18 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 TextButton(onClick = {
                     showCloseConfirm = false
                     appState.isChannelClosing = true
+                    appState.setLastCloseTxid(null) // Clear any previous close txid from cache
+                    // Snapshot the true fundingTxid NOW, while the channel still exists
+                    val liveTxid = appState.nodeService.channels
+                        .firstOrNull { it.userChannelId == sc.userChannelId || it.isChannelReady }
+                        ?.fundingTxo?.txid
+                    if (liveTxid != null) {
+                        appState.fundingTxid = liveTxid
+                        // Also persist to prefs so handleChannelClosed can recover it
+                        // even if the in-memory value is cleared by a race
+                        context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                            .edit().putString("closing_funding_txid", liveTxid).apply()
+                    }
                     scope.launch(Dispatchers.IO) {
                         try {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)

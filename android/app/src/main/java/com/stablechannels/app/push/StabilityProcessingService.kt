@@ -20,6 +20,9 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.roundToLong
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 class StabilityProcessingService : Service() {
 
@@ -243,7 +246,11 @@ class StabilityProcessingService : Service() {
 
         while (System.currentTimeMillis() < deadline) {
             try {
-                val event = node.nextEvent()
+                val event = try {
+                    runBlocking { withTimeout(1000L) { node.nextEventAsync() } }
+                } catch (e: TimeoutCancellationException) {
+                    continue
+                }
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
@@ -408,7 +415,11 @@ class StabilityProcessingService : Service() {
 
         while (System.currentTimeMillis() < deadline) {
             try {
-                val event = node.nextEvent()
+                val event = try {
+                    runBlocking { withTimeout(1000L) { node.nextEventAsync() } }
+                } catch (e: TimeoutCancellationException) {
+                    continue
+                }
                 when (event) {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
