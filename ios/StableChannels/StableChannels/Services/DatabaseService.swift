@@ -601,6 +601,7 @@ class DatabaseService {
     }
 
     func paymentsNeedingConfirmation(currentBlockHeight _: UInt32) throws -> [PaymentRecord] {
+        let required = ConfirmationPolicy.requiredConfirmations
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
@@ -609,13 +610,13 @@ class DatabaseService {
         AND txid != ''
         AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
         AND status != 'failed'
-        AND (confirmations IS NULL OR confirmations < 6)
+        AND (confirmations IS NULL OR confirmations < ?)
         ORDER BY created_at DESC
         LIMIT 50
         """
         let rows = try query(
             sql,
-            params: []
+            params: [.integer(Int64(required))]
         )
         return rows.compactMap { row in
             guard row.count >= 15 else { return nil }
@@ -635,13 +636,16 @@ class DatabaseService {
     }
 
     func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
-        let confs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
+        let required = ConfirmationPolicy.requiredConfirmations
+        let rawConfs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
+        let confs = min(rawConfs, required)
         try execute(
-            "UPDATE payments SET confirmations = ?, tx_block_height = CASE WHEN confirmations IS NULL OR confirmations < 6 THEN ? ELSE tx_block_height END, status = CASE WHEN ? >= 6 THEN 'completed' ELSE status END WHERE id = ?",
+            "UPDATE payments SET confirmations = ?, tx_block_height = COALESCE(tx_block_height, ?), status = CASE WHEN ? >= ? THEN 'completed' ELSE status END WHERE id = ?",
             params: [
                 .integer(Int64(confs)),
                 .integer(Int64(txBlockHeight)),
                 .integer(Int64(confs)),
+                .integer(Int64(required)),
                 .integer(paymentId)
             ]
         )

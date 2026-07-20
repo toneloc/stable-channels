@@ -371,6 +371,8 @@ class AppState {
 
     private func dropDatabaseServices() {
         blockHeightService.stop()
+        blockHeightService.onHeightUpdated = nil
+        confirmationPollingService = nil
         nodeService.databaseService = nil
         nodeService.clearSavedMnemonic()
         tradeService = nil
