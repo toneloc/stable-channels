@@ -60,6 +60,9 @@ struct HistoryView: View {
             .onAppear {
                 loadHistory()
             }
+            .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
+                loadHistory()
+            }
             .refreshable {
                 appState.refreshBalances()
                 loadHistory()
@@ -204,9 +207,8 @@ struct PaymentRowView: View {
             let confs = Int(payment.confirmations)
             if confs >= ConfirmationPolicy.requiredConfirmations {
                 return String(localized: "status_confirmed", defaultValue: "Confirmed")
-            } else {
-                return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
             }
+            return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
         }
         return payment.status.capitalized
     }

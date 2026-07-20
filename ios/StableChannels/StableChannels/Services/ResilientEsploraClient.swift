@@ -83,9 +83,9 @@ struct ResilientEsploraClient {
     ) async {
         if let hit = await fetch(endpointBuilder: endpointBuilder, resultParser: resultParser) {
             await onResolved(hit)
-        } else {
-            // Fell through without a hit AND without cancellation: true exhaustion.
-            // Cancellation paths above already returned without reaching this point.
+        } else if !Task.isCancelled {
+            // Only fire onExhausted for genuine exhaustion, not cancellation.
+            // Cancellation is a silent return per the documented contract.
             Self.log("ESPLORA_EXHAUSTED", [
                 "chainURLs": "\(config.chainURLs)",
                 "attempts": "\(config.maxAttempts)"

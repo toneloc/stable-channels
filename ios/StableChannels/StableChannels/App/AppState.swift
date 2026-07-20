@@ -72,6 +72,9 @@ class AppState {
         provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
     )
     var confirmationPollingService: ConfirmationPollingService?
+    /// Incremented after each confirmation poll cycle completes a DB write.
+    /// Views observe this to reload payment data at the right time.
+    var confirmationUpdateEpoch: Int = 0
 
     // MARK: - State
 
@@ -205,6 +208,9 @@ class AppState {
             )
         }
         confirmationPollingService = pollingService
+        pollingService?.onUpdate = { [weak self] in
+            self?.confirmationUpdateEpoch += 1
+        }
         blockHeightService.onHeightUpdated = { [weak pollingService] _ in
             Task { @MainActor in
                 await pollingService?.pollOnce()

@@ -36,7 +36,7 @@ struct PaymentDetailView: View {
             .task {
                 await loadPayment()
             }
-            .onChange(of: appState.blockHeightService.currentHeight) { _, _ in
+            .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
                 Task { await loadPayment() }
             }
         }
@@ -121,9 +121,11 @@ struct PaymentDetailView: View {
             let confs = Int(payment.confirmations)
             if confs >= ConfirmationPolicy.requiredConfirmations {
                 return String(localized: "status_confirmed", defaultValue: "Confirmed")
-            } else if confs > 0 {
-                return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
             }
+            // Show confirmation count for all values 0..5 so the label
+            // never falls through to the stored status (which may be
+            // "Completed" before the poller has run).
+            return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
         }
         return payment.status.capitalized
     }
