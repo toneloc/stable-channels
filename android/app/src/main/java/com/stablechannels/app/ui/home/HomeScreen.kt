@@ -338,15 +338,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         }
                         if (isSweeping) {
                             // 1. Splice-in in progress
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             PendingRow("Swap pending...", appState.spliceTxid, context)
                         } else if (isChannelClosing) {
                             // 2. Channel closing
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             PendingRow("Channel closing\u2026", lastCloseTxid, context)
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
