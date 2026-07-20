@@ -69,6 +69,8 @@ final class ConfirmationPollingService {
         )
         switch outcome {
         case .confirmed(let progress, let blockHeight):
+            // Skip redundant writes — only update if confirmations actually changed
+            guard progress.raw != payment.confirmations else { return }
             do {
                 try databaseService.updateConfirmations(
                     paymentId: payment.id,
