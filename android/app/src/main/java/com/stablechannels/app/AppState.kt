@@ -1511,8 +1511,7 @@ class AppState(private val context: Context) : ViewModel() {
         // Clear closing flag once lightning balance fully resolves, or if a new channel is opened
         // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
         // handle it when the on-chain funds arrive
-        val isOpeningChannel = _stableChannel.value.userChannelId.isNotEmpty() && !hasReady
-        if (isChannelClosing && (lightning == 0L || hasReady || isOpeningChannel)) {
+        if (isChannelClosing && lightning == 0L) {
             isChannelClosing = false
         }
 
