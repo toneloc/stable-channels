@@ -14,6 +14,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -49,6 +52,7 @@ fun BalanceBar(
     nativeSats: Long,
     totalSats: Long,
     btcPrice: Double,
+    showBtcFormat: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
     onTradeRequest: ((TradeDirection, Double) -> Unit)? = null
@@ -59,8 +63,8 @@ fun BalanceBar(
 
     val stableFraction = (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat()
     val interactive = onTradeRequest != null
-    val barHeight = if (interactive) 20.dp else 12.dp
-    val thumbDiameter = 28.dp
+    val barHeight = if (interactive) 12.dp else 8.dp
+    val thumbDiameter = 22.dp
     val minTradeUSD = 1.0
 
     var barWidthPx by remember { mutableFloatStateOf(0f) }
@@ -224,20 +228,33 @@ fun BalanceBar(
 
                 // Percentage label while dragging
                 if (isDragging) {
-                    Box(
-                        modifier = Modifier
-                            .offset(x = thumbOffsetDp - 30.dp, y = (-34).dp)
-                            .background(
-                                MaterialTheme.colorScheme.surfaceVariant,
-                                RoundedCornerShape(12.dp)
-                            )
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    val barWidthDp = with(density) { barWidthPx.toDp() }
+                    val labelWidth = 105.dp
+                    val labelX = (thumbOffsetDp - (labelWidth / 2) + (thumbDiameter / 2))
+                        .coerceIn(0.dp, maxOf(0.dp, barWidthDp - labelWidth))
+
+                    val xPx = with(density) { labelX.roundToPx() }
+                    val yPx = with(density) { (-40).dp.roundToPx() }
+
+                    Popup(
+                        alignment = Alignment.TopStart,
+                        offset = IntOffset(xPx, yPx),
+                        properties = PopupProperties(clippingEnabled = false)
                     ) {
-                        Text(
-                            "$usdPct% USD  $btcPct% BTC",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant,
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .padding(horizontal = 8.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                "$usdPct% USD  $btcPct% BTC",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -249,13 +266,14 @@ fun BalanceBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             // Left: USD label + amount
+            val stableSats = if (btcPrice > 0) (stableUSD / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Icon(Icons.Default.Shield, contentDescription = null, tint = stableColor, modifier = Modifier.size(12.dp))
                     Text("USD", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = stableColor)
                 }
                 Text(
-                    stableUSD.usdFormatted(),
+                    if (showBtcFormat) stableSats.btcSpacedFormatted() else stableUSD.usdFormatted(),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (btcPrice > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -268,7 +286,8 @@ fun BalanceBar(
                     Icon(Icons.Default.CurrencyBitcoin, contentDescription = null, tint = nativeColor, modifier = Modifier.size(12.dp))
                 }
                 Text(
-                    if (btcPrice > 0) nativeUSD.usdFormatted() else "...",
+                    if (showBtcFormat) nativeSats.btcSpacedFormatted()
+                    else if (btcPrice > 0) nativeUSD.usdFormatted() else "...",
                     style = MaterialTheme.typography.labelSmall,
                     color = if (btcPrice > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )

@@ -45,6 +45,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.ui.history.OrderDetailBottomSheet
+import com.stablechannels.app.models.PaymentRecord
+import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
 import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.trade.BuyScreen
@@ -66,6 +70,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val sc by appState.stableChannel.collectAsState()
     val nativeSatsCached by appState.nativeSats.collectAsState()
+    val lastRxTxid by appState.lastReceiveTxid.collectAsState()
+    val lastCloseTxid by appState.lastCloseTxid.collectAsState()
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
@@ -75,6 +81,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
+    var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
+    var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
     var showReceive by remember { mutableStateOf(false) }
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
@@ -151,7 +159,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(scrollState)
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             // Title
@@ -263,7 +271,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
 
             // Balance bar
             if (lightningSats > 0) {
@@ -272,14 +280,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     nativeSats = nativeSatsCached,
                     totalSats = lightningSats,
                     btcPrice = btcPrice,
-                    modifier = Modifier.padding(horizontal = 24.dp),
+                    showBtcFormat = showBTC,
+                    modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
                     onTradeRequest = if (hasReadyChannel) { direction, amountUSD ->
                         prefillTradeAmount = amountUSD
                         if (direction == TradeDirection.BUY) showBuy = true else showSell = true
                     } else null
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(4.dp))
             }
 
             // Syncing indicator
@@ -314,7 +323,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Column(Modifier.padding(12.dp)) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -329,31 +338,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         }
                         if (isSweeping) {
                             // 1. Splice-in in progress
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             PendingRow("Swap pending...", appState.spliceTxid, context)
                         } else if (isChannelClosing) {
                             // 2. Channel closing
-                            Spacer(Modifier.height(8.dp))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(
-                                    Icons.Default.Warning,
-                                    contentDescription = "Closing",
-                                    tint = Color(0xFFF59E0B),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    "Channel closing — funds will arrive onchain",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            Spacer(Modifier.height(4.dp))
+                            PendingRow("Channel closing\u2026", lastCloseTxid, context)
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -371,19 +364,25 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     },
                                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
                                 ) {
-                                    Text("Swap", fontSize = 13.sp)
+                                    Text("Move", fontSize = 13.sp)
                                 }
                             }
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(8.dp))
                             val pendingCloseId = appState.pendingClosePaymentId
-                            val text = if (pendingCloseId != null) {
-                                "Channel closed - pending confirmation"
-                            } else {
-                                "Deposit confirming..."
+                            // Prefer close txid if known — pendingClosePaymentId may already be
+                            // cleared by detectOnchainDeposit even while funds are still unconfirmed
+                            val effectiveTxid = lastCloseTxid ?: lastRxTxid
+                            val isClosePending = pendingCloseId != null || lastCloseTxid != null
+                            // Use short text when txid is known (button fits on same row, matches iOS)
+                            // Use longer text when no txid yet (shown as two-line subtitle)
+                            val text = when {
+                                isClosePending && effectiveTxid != null -> "Channel closing\u2026"
+                                isClosePending -> "Channel closed"
+                                else -> "Deposit confirming..."
                             }
-                            PendingRow(text, appState.fundingTxid, context)
+                            PendingRow(text, effectiveTxid, context)
                             if (!hasReadyChannel) {
                                 Text("Receive over Lightning to create your Trading and Spending Account",
                                     style = MaterialTheme.typography.labelSmall,
@@ -391,14 +390,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                         } else {
                             // 4. No channel, confirmed deposit — just needs Lightning
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(4.dp))
                             Text("Receive over Lightning to create your Trading and Spending Account",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
-                Spacer(Modifier.height(12.dp))
             }
 
             // Price chart
@@ -408,7 +406,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     databaseService = appState.databaseService,
                     currentPrice = btcPrice
                 )
-                Spacer(Modifier.height(12.dp))
             }
 
             // Hint text when no channel
@@ -424,8 +421,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("Send", Icons.Default.ArrowCircleUp, Color(0xFF3B82F6), Modifier.weight(1f)) { showSend = true }
-                ActionButton("Receive", Icons.Default.ArrowCircleDown, Color(0xFF10B981), Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
+                val sendColor = if (isSystemInDarkTheme()) Color(0xFF0A84FF) else Color(0xFF007AFF)
+                val receiveColor = if (isSystemInDarkTheme()) Color(0xFF30D158) else Color(0xFF34C759)
+                ActionButton("Send", Icons.Default.ArrowCircleUp, sendColor, Modifier.weight(1f)) { showSend = true }
+                ActionButton("Receive", Icons.Default.ArrowCircleDown, receiveColor, Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -433,15 +432,39 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, Color(0xFFF59E0B), Modifier.weight(1f), rotation = 45f, enabled = hasReadyChannel) { showBuy = true }
-                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, Color(0xFF8B5CF6), Modifier.weight(1f), rotation = -45f, enabled = hasReadyChannel) { showSell = true }
+                val buyColor = if (isSystemInDarkTheme()) Color(0xFFFF9F0A) else Color(0xFFFF9500)
+                val sellColor = if (isSystemInDarkTheme()) Color(0xFFBF5AF2) else Color(0xFFAF52DE)
+                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, buyColor, Modifier.weight(1f), rotation = 45f, enabled = hasReadyChannel) { showBuy = true }
+                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, sellColor, Modifier.weight(1f), rotation = -45f, enabled = hasReadyChannel) { showSell = true }
             }
 
             // Status capsule
             if (statusMessage.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
                 StatusCapsule(
-                    message = statusMessage
+                    message = statusMessage,
+                    onClick = {
+                        val msg = statusMessage.lowercase()
+                        val isTrade = msg.contains("buy") || msg.contains("sell") || msg.contains("trade") || msg.contains("order")
+                        val isPayment = msg.contains("payment") || msg.contains("swap") || msg.contains("channel") || msg.contains("moving")
+                        
+                        if (isTrade || isPayment) {
+                            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                if (isTrade) {
+                                    val trades = appState.databaseService?.getRecentTrades(1)
+                                    if (!trades.isNullOrEmpty()) {
+                                        selectedTrade = trades.first()
+                                    }
+                                } else {
+                                    val payments = appState.databaseService?.getRecentPayments(1)
+                                    if (!payments.isNullOrEmpty()) {
+                                        selectedPayment = payments.first()
+                                    }
+                                }
+                            }
+                        } else {
+                            appState.setStatus("")
+                        }
+                    }
                 )
             }
             // Bottom padding for nav bar
@@ -602,6 +625,17 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             }
         }
     }
+
+    selectedTrade?.let { trade ->
+        OrderDetailBottomSheet(trade = trade, onDismiss = { selectedTrade = null })
+    }
+    selectedPayment?.let { payment ->
+        PaymentDetailBottomSheet(
+            payment = payment,
+            currentPrice = btcPrice,
+            onDismiss = { selectedPayment = null }
+        )
+    }
 }
 
 @Composable
@@ -645,23 +679,36 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
 
 @Composable
 private fun PendingRow(text: String, txid: String?, context: android.content.Context) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text("\u231B", fontSize = 14.sp)
-        Spacer(Modifier.width(6.dp))
-        Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.weight(1f))
-        txid?.let {
+    if (txid != null) {
+        // Has txid — short text + button in one row (matches iOS layout)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("\u231B", fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
             TextButton(
                 onClick = {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${it.substringBefore(":")}"))
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}"))
                     context.startActivity(intent)
                 },
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
             ) {
                 Text("View on explorer", fontSize = 12.sp)
+            }
+        }
+    } else {
+        // No txid yet — show text with "pending confirmation" below
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("\u231B", fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            Column {
+                Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("pending confirmation", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
             }
         }
     }

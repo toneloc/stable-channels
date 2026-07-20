@@ -128,7 +128,7 @@ fun PriceChart(
             containerColor = MaterialTheme.colorScheme.background
         )
     ) {
-        Column(Modifier.padding(16.dp)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             // Price header
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -184,8 +184,6 @@ fun PriceChart(
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
-
             // Period selector pills — scrollable
             Row(
                 modifier = Modifier
@@ -212,7 +210,7 @@ fun PriceChart(
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(4.dp))
 
             if (priceHistory.size >= 2) {
                 val prices = priceHistory.map { it.price }

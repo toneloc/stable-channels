@@ -34,6 +34,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
     LaunchedEffect(Unit) {
         try {
             address = appState.nodeService.newOnchainAddress()
+            appState.setOnchainReceiveAddress(address)
         } catch (_: Exception) {}
     }
 
