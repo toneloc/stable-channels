@@ -14,6 +14,7 @@ final class MempoolWebSocketService {
     private var trackedAddresses: Set<String> = []
     private var trackedTxids: Set<String> = []
     private var pendingOutboundMessages: [String] = []
+    private var processedTxids: Set<String> = []
     private var isManualDisconnect: Bool = false
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
@@ -65,6 +66,18 @@ final class MempoolWebSocketService {
     /// Disconnects the WebSocket gracefully and invalidates the session.
     func disconnect() {
         isManualDisconnect = true
+        if isConnected {
+            for address in trackedAddresses {
+                send("""
+                { "untrack-address": "\(address)" }
+                """)
+            }
+            for txid in trackedTxids {
+                send("""
+                { "untrack-tx": "\(txid)" }
+                """)
+            }
+        }
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         urlSession?.invalidateAndCancel()
@@ -197,10 +210,14 @@ final class MempoolWebSocketService {
                     self.logger.warning("WebSocket connection dropped: \(error.localizedDescription)")
                     self.isConnected = false
                     self.webSocketTask = nil
-                    // Auto-reconnect if not manually disconnected
+                    // Auto-reconnect off MainActor to avoid freezing UI
                     if !self.isManualDisconnect {
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                        self.connect()
+                        Task.detached { [weak self] in
+                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            await MainActor.run {
+                                self?.connect()
+                            }
+                        }
                     }
                 }
             }
@@ -217,6 +234,10 @@ final class MempoolWebSocketService {
            let firstTx = addressTxs.first,
            let txid = firstTx["txid"] as? String,
            ResilientEsploraClient.isValidTxid(txid) {
+            if processedTxids.contains(txid) { return }
+            processedTxids.insert(txid)
+            if processedTxids.count > 200 { processedTxids.removeFirst() }
+
             let targetKey = findMatchingTarget(json: json, firstTx: firstTx)
             if let targetKey {
                 var amountSats: Int64 = 0
