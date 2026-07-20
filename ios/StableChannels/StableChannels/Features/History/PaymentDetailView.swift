@@ -72,6 +72,14 @@ struct PaymentDetailView: View {
                     row(String(localized: "label_fee", defaultValue: "Fee"), "\(payment.feeMsat) msat")
                 }
                 row(String(localized: "label_status", defaultValue: "Status"), statusLabel(for: payment))
+                if payment.shouldShowConfirmationProgress {
+                    confirmationProgressRow(for: payment)
+                } else if payment.confirmations > 0 {
+                    row(
+                        String(localized: "label_confirmations", defaultValue: "Confirmations"),
+                        "\(payment.confirmations)"
+                    )
+                }
             }
 
             Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
@@ -93,14 +101,6 @@ struct PaymentDetailView: View {
                 }
                 if let address = payment.address {
                     row(String(localized: "label_address", defaultValue: "Address"), address)
-                }
-                if payment.shouldShowConfirmationProgress {
-                    confirmationProgressRow(for: payment)
-                } else if payment.confirmations > 0 {
-                    row(
-                        String(localized: "label_confirmations", defaultValue: "Confirmations"),
-                        "\(payment.confirmations)"
-                    )
                 }
             }
         }
