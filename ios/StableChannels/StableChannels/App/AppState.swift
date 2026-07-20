@@ -197,12 +197,18 @@ class AppState {
         }
 
         tradeService = TradeService(nodeService: nodeService)
-        confirmationPollingService = databaseService.map { db in
+        let pollingService = databaseService.map { db in
             ConfirmationPollingService(
                 databaseService: db,
                 blockHeightService: blockHeightService,
                 confirmationService: confirmationService
             )
+        }
+        confirmationPollingService = pollingService
+        blockHeightService.onHeightUpdated = { [weak pollingService] _ in
+            Task { @MainActor in
+                await pollingService?.pollOnce()
+            }
         }
 
         // Set audit log path
@@ -313,7 +319,7 @@ class AppState {
             updateStableBalances()
             startStabilityTimer()
             blockHeightService.start()
-            confirmationPollingService?.start()
+            Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
         } catch {
@@ -340,7 +346,6 @@ class AppState {
         spliceTxid = nil
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
-        confirmationPollingService?.stop()
         blockHeightService.stop()
         monitoredSpliceTxid = nil
         sweepOnchainStart = 0
@@ -365,7 +370,6 @@ class AppState {
     }
 
     private func dropDatabaseServices() {
-        confirmationPollingService?.stop()
         blockHeightService.stop()
         nodeService.databaseService = nil
         nodeService.clearSavedMnemonic()
@@ -544,7 +548,7 @@ class AppState {
                         .string(forKey: "funding_txid")
                     resumePendingSpliceConfirmation()
                     blockHeightService.start()
-                    confirmationPollingService?.start()
+                    Task { await confirmationPollingService?.pollOnce() }
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -578,7 +582,7 @@ class AppState {
                 await MainActor.run {
                     phase = .wallet
                     blockHeightService.start()
-                    confirmationPollingService?.start()
+                    Task { await confirmationPollingService?.pollOnce() }
                     refreshBalances()
                     updateStableBalances()
                 }
@@ -648,7 +652,6 @@ class AppState {
         heartbeatTimer = nil
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
-        confirmationPollingService?.stop()
         blockHeightService.stop()
         monitoredSpliceTxid = nil
         if let observer = eventObserver {
@@ -774,7 +777,7 @@ class AppState {
             )
             refreshBalances()
             blockHeightService.start()
-            confirmationPollingService?.start()
+            Task { await confirmationPollingService?.pollOnce() }
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()

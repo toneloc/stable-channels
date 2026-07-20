@@ -637,7 +637,7 @@ class DatabaseService {
     func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
         let confs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
         try execute(
-            "UPDATE payments SET confirmations = ?, tx_block_height = COALESCE(tx_block_height, ?), status = CASE WHEN ? >= 6 THEN 'completed' ELSE status END WHERE id = ?",
+            "UPDATE payments SET confirmations = ?, tx_block_height = CASE WHEN confirmations IS NULL OR confirmations < 6 THEN ? ELSE tx_block_height END, status = CASE WHEN ? >= 6 THEN 'completed' ELSE status END WHERE id = ?",
             params: [
                 .integer(Int64(confs)),
                 .integer(Int64(txBlockHeight)),

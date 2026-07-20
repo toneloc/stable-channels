@@ -6,10 +6,10 @@ final class ConfirmationPollingService {
     private let databaseService: DatabaseService
     private let blockHeightService: BlockHeightService
     private let confirmationService: ConfirmationService
-    private let pollInterval: TimeInterval
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
-    private var pollTask: Task<Void, Never>?
+    /// True while a poll cycle is in progress, prevents concurrent runs.
+    private var isPolling = false
 
     /// Fires after each poll cycle. Observers should re-load their
     /// payment list to reflect updated confirmation state.
@@ -18,31 +18,20 @@ final class ConfirmationPollingService {
     init(
         databaseService: DatabaseService,
         blockHeightService: BlockHeightService,
-        confirmationService: ConfirmationService,
-        pollInterval: TimeInterval = 30
+        confirmationService: ConfirmationService
     ) {
         self.databaseService = databaseService
         self.blockHeightService = blockHeightService
         self.confirmationService = confirmationService
-        self.pollInterval = pollInterval
     }
 
-    func start() {
-        guard pollTask == nil else { return }
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.pollOnce()
-                try? await Task.sleep(nanoseconds: UInt64((self?.pollInterval ?? 30) * 1_000_000_000))
-            }
-        }
-    }
-
-    func stop() {
-        pollTask?.cancel()
-        pollTask = nil
-    }
-
+    /// Called by BlockHeightService whenever the chain tip changes.
+    /// Also safe to call manually for an initial sync on app launch.
     func pollOnce() async {
+        guard !isPolling else { return }
+        isPolling = true
+        defer { isPolling = false }
+
         let currentHeight = blockHeightService.currentHeight
         guard currentHeight > 0 else { return }
 
