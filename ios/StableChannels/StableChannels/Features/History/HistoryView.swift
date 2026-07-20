@@ -204,7 +204,7 @@ struct PaymentRowView: View {
             let confs = Int(payment.confirmations)
             if confs >= ConfirmationPolicy.requiredConfirmations {
                 return String(localized: "status_confirmed", defaultValue: "Confirmed")
-            } else if confs > 0 {
+            } else {
                 return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
             }
         }
@@ -218,6 +218,8 @@ struct PaymentRowView: View {
                 return .green
             } else if confs > 0 {
                 return .blue
+            } else {
+                return .orange
             }
         }
         switch payment.status {
