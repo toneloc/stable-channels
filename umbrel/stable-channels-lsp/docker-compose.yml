@@ -39,7 +39,7 @@ services:
       - ${APP_DATA_DIR}/data/ldk-server:/data/ldk-server:ro
 
   gui:
-    image: ghcr.io/toneloc/sc-lsp-gui:5d5e011
+    image: ghcr.io/toneloc/sc-lsp-gui:8598bcf
     restart: on-failure
     depends_on: [sc-lsp]
     environment:
