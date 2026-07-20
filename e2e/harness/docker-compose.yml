@@ -85,6 +85,9 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.ldk-server
+      args:
+        CARGO_BUILD_JOBS: "${SC_DOCKER_CARGO_JOBS:-1}"
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "${SC_DOCKER_CODEGEN_UNITS:-1}"
     logging: *log-rotation
     depends_on: [block-explorer]
     restart: unless-stopped   # retries until electrs serves (post chain-init)
@@ -102,6 +105,9 @@ services:
     build:
       context: ../..            # repo root — builds server/stable-channels-lsp
       dockerfile: e2e/harness/docker/Dockerfile.sc-lsp
+      args:
+        CARGO_BUILD_JOBS: "${SC_DOCKER_CARGO_JOBS:-1}"
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "${SC_DOCKER_CODEGEN_UNITS:-1}"
     logging: *log-rotation
     depends_on: [ldk-server]
     restart: unless-stopped
@@ -128,6 +134,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        CARGO_BUILD_JOBS: "${SC_DOCKER_CARGO_JOBS:-1}"
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "${SC_DOCKER_CODEGEN_UNITS:-1}"
     logging: *log-rotation
     depends_on: [block-explorer, ldk-server]
     restart: unless-stopped
@@ -162,6 +171,9 @@ services:
     build:
       context: ../..            # repo root — builds server/lsp-server-gui (web)
       dockerfile: e2e/harness/docker/Dockerfile.lsp-gui
+      args:
+        CARGO_BUILD_JOBS: "${SC_DOCKER_CARGO_JOBS:-1}"
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "${SC_DOCKER_CODEGEN_UNITS:-1}"
     logging: *log-rotation
     depends_on: [sc-lsp]
     restart: unless-stopped

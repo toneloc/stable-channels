@@ -76,6 +76,11 @@ set `SC_UMBREL_SIM_RESET=1` / `SC_UMBREL_OS_RESET=1` on the next run.
 Container stdout logs are capped at 10 MiB x 3 files, and the ldk-server file
 log is trimmed after 50 MiB.
 
+The Dockerfiles also default to one Cargo job and one release codegen unit so
+local image builds survive 8 GB Macs. Larger machines can pass
+`--build-arg CARGO_BUILD_JOBS=4 --build-arg CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4`
+to trade memory for speed.
+
 ## Known blockers / caveats before real users
 
 - **LSPS2 restart landmine (UPSTREAM, MUST FIX FIRST):** persisted LSPS2

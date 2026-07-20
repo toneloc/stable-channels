@@ -4,13 +4,17 @@
 # Dockerfile.sc-lsp), this build does NOT enable the `e2e` feature — the
 # daemon prices from the real feeds.
 FROM rust:1-bookworm AS build
+ARG CARGO_BUILD_JOBS=1
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler perl make && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p stable-channels-lsp \
+    cargo build --release -j "$CARGO_BUILD_JOBS" -p stable-channels-lsp \
     && cp /src/target/release/stable-channels-lsp /tmp/stable-channels-lsp
 
 FROM debian:bookworm-slim

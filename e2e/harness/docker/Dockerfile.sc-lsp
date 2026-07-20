@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 # Builds stable-channels-lsp from THIS repo (context = repo root).
 FROM rust:1-bookworm AS build
+ARG CARGO_BUILD_JOBS=1
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler perl make && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
@@ -9,7 +13,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p stable-channels-lsp --features e2e \
+    cargo build --release -j "$CARGO_BUILD_JOBS" -p stable-channels-lsp --features e2e \
     && cp /src/target/release/stable-channels-lsp /tmp/stable-channels-lsp
 
 FROM debian:bookworm-slim

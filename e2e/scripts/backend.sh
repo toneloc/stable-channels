@@ -11,6 +11,11 @@ step "Backend (docker regtest stack)"
 cd "$HARNESS_DIR"
 sc_require_free_space "$REPO_DIR" "${SC_E2E_MIN_FREE_GIB:-25}" "e2e backend"
 sc_warn_docker_raw_size "${SC_DOCKER_RAW_WARN_GIB:-150}"
+export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+export COMPOSE_PARALLEL_LIMIT="${COMPOSE_PARALLEL_LIMIT:-1}"
+export SC_DOCKER_CARGO_JOBS="${SC_DOCKER_CARGO_JOBS:-1}"
+export SC_DOCKER_CODEGEN_UNITS="${SC_DOCKER_CODEGEN_UNITS:-1}"
+info "docker build limits: compose parallel=$COMPOSE_PARALLEL_LIMIT, cargo jobs=$SC_DOCKER_CARGO_JOBS, codegen units=$SC_DOCKER_CODEGEN_UNITS"
 
 # Optional LSP operator GUI (web build of server/lsp-server-gui) at
 # http://127.0.0.1:3003. Set E2E_LSP_GUI=1/0 to skip the prompt; non-interactive

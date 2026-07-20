@@ -2,6 +2,10 @@
 # Production ldk-server image for the Umbrel package.
 # Builds upstream ldk-server at the exact rev the production bidaemon runs.
 FROM rust:1-bookworm AS build
+ARG CARGO_BUILD_JOBS=1
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends git protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
@@ -12,7 +16,7 @@ RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p ldk-server --features experimental-lsps2-support \
+    cargo build --release -j "$CARGO_BUILD_JOBS" -p ldk-server --features experimental-lsps2-support \
     && cp /src/target/release/ldk-server /tmp/ldk-server
 
 FROM debian:bookworm-slim

@@ -1,13 +1,17 @@
 # syntax=docker/dockerfile:1.7
 # Builds the sc-e2e-harness binary (counterparty node + miner + price mock).
 FROM rust:1-bookworm AS build
+ARG CARGO_BUILD_JOBS=1
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release \
+    cargo build --release -j "$CARGO_BUILD_JOBS" \
     && cp /src/target/release/sc-e2e-harness /tmp/sc-e2e-harness
 
 FROM debian:bookworm-slim
