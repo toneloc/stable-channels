@@ -18,11 +18,6 @@ struct HistoryView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding()
-                .onChange(of: paymentCoordinator.selectedPayment) { _, newValue in
-                    if let payment = newValue {
-                        selectedSegment = payment.paymentType == "trade" ? 0 : 1
-                    }
-                }
 
                 // List
                 List {

@@ -1,61 +1,29 @@
 import SwiftUI
 
 struct PaymentDetailView: View {
-    let payment: PaymentRecord
+    let paymentId: Int64
     let displayPrice: Double
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+    @State private var payment: PaymentRecord?
+    @State private var loadError: Bool = false
 
     var body: some View {
         NavigationStack {
-            List {
-                Section(String(localized: "section_payment_details", defaultValue: "Payment Details")) {
-                    row(String(localized: "label_direction", defaultValue: "Direction"),
-                        payment.isIncoming
-                            ? String(localized: "payment_received", defaultValue: "Received")
-                            : String(localized: "payment_sent", defaultValue: "Sent"))
-                    row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
-                    row(
-                        String(localized: "label_amount", defaultValue: "Amount"),
-                        "\(payment.amountSats.btcSpacedFormatted) BTC"
+            Group {
+                if let payment {
+                    paymentList(payment)
+                } else if loadError {
+                    ContentUnavailableView(
+                        String(localized: "payment_detail_error_title", defaultValue: "Error"),
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(String(
+                            localized: "payment_detail_error_desc",
+                            defaultValue: "Could not load payment details."
+                        ))
                     )
-                    if let usd = displayUSD {
-                        row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
-                    }
-                    if let price = payment.btcPrice {
-                        row(String(localized: "label_btc_price", defaultValue: "BTC Price"), price.usdFormatted)
-                    }
-                    if payment.feeMsat > 0 {
-                        row(String(localized: "label_fee", defaultValue: "Fee"), "\(payment.feeMsat) msat")
-                    }
-                    row(String(localized: "label_status", defaultValue: "Status"), payment.status.capitalized)
-                }
-
-                Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
-                    row(String(localized: "label_date", defaultValue: "Date"), payment.date.formatted())
-                    if let paymentId = payment.paymentId {
-                        row(String(localized: "label_payment_id", defaultValue: "Payment ID"), paymentId)
-                    }
-                    if let txid = payment.txid {
-                        row(String(localized: "label_txid", defaultValue: "TXID"), txid)
-                        if let url = Constants.txExplorerLink(for: txid) {
-                            Link(destination: url) {
-                                HStack(spacing: 4) {
-                                    Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
-                                    Image(systemName: "arrow.up.right.square")
-                                }
-                                .font(.caption)
-                            }
-                        }
-                    }
-                    if let address = payment.address {
-                        row(String(localized: "label_address", defaultValue: "Address"), address)
-                    }
-                    if payment.confirmations > 0 {
-                        row(
-                            String(localized: "label_confirmations", defaultValue: "Confirmations"),
-                            "\(payment.confirmations)"
-                        )
-                    }
+                } else {
+                    ProgressView()
                 }
             }
             .navigationTitle(String(localized: "title_payment_detail", defaultValue: "Payment Detail"))
@@ -65,7 +33,85 @@ struct PaymentDetailView: View {
                     Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
                 }
             }
+            .task {
+                await loadPayment()
+                for await _ in Timer.publish(every: 30, on: .main, in: .common).autoconnect().values {
+                    await loadPayment()
+                }
+            }
         }
+    }
+
+    @MainActor
+    private func loadPayment() async {
+        guard let db = appState.databaseService else { return }
+        do {
+            payment = try db.getPayment(byId: paymentId)
+            loadError = false
+        } catch {
+            loadError = true
+        }
+    }
+
+    private func paymentList(_ payment: PaymentRecord) -> some View {
+        List {
+            Section(String(localized: "section_payment_details", defaultValue: "Payment Details")) {
+                row(String(localized: "label_direction", defaultValue: "Direction"),
+                    payment.isIncoming
+                        ? String(localized: "payment_received", defaultValue: "Received")
+                        : String(localized: "payment_sent", defaultValue: "Sent"))
+                row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
+                row(
+                    String(localized: "label_amount", defaultValue: "Amount"),
+                    "\(payment.amountSats.btcSpacedFormatted) BTC"
+                )
+                if let usd = displayUSD {
+                    row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
+                }
+                if let price = payment.btcPrice {
+                    row(String(localized: "label_btc_price", defaultValue: "BTC Price"), price.usdFormatted)
+                }
+                if payment.feeMsat > 0 {
+                    row(String(localized: "label_fee", defaultValue: "Fee"), "\(payment.feeMsat) msat")
+                }
+                if payment.isOnchainConfirmed && payment.confirmations >= ConfirmationPolicy.requiredConfirmations {
+                    row(String(localized: "label_status", defaultValue: "Status"), "Completed")
+                } else {
+                    row(String(localized: "label_status", defaultValue: "Status"), payment.status.capitalized)
+                }
+            }
+
+            Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
+                row(String(localized: "label_date", defaultValue: "Date"), payment.date.formatted())
+                if let pId = payment.paymentId {
+                    row(String(localized: "label_payment_id", defaultValue: "Payment ID"), pId)
+                }
+                if let txid = payment.txid {
+                    row(String(localized: "label_txid", defaultValue: "TXID"), txid)
+                    if let url = Constants.txExplorerLink(for: txid) {
+                        Link(destination: url) {
+                            HStack(spacing: 4) {
+                                Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                                Image(systemName: "arrow.up.right.square")
+                            }
+                            .font(.caption)
+                        }
+                    }
+                }
+                if let address = payment.address {
+                    row(String(localized: "label_address", defaultValue: "Address"), address)
+                }
+                if payment.confirmations > 0 {
+                    if !payment.confirmationStatusLabel.isEmpty {
+                        row(
+                            String(localized: "label_confirmations", defaultValue: "Confirmations"),
+                            payment.confirmationStatusLabel
+                        )
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
     }
 
     private func row(_ label: String, _ value: String) -> some View {
@@ -79,7 +125,7 @@ struct PaymentDetailView: View {
     }
 
     private var paymentTypeLabel: String {
-        switch payment.paymentType {
+        switch payment?.paymentType {
         case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
         case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
         case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
@@ -87,11 +133,12 @@ struct PaymentDetailView: View {
         case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
         case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
         case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
-        default: return payment.paymentType
+        default: return payment?.paymentType ?? ""
         }
     }
 
     private var displayUSD: Double? {
+        guard let payment else { return nil }
         if let amountUSD = payment.amountUSD {
             return amountUSD
         }
@@ -102,11 +149,9 @@ struct PaymentDetailView: View {
     }
 
     private var shouldPreferUSDDisplay: Bool {
-        switch payment.paymentType {
-        case "splice_in", "splice_out", "onchain", "channel_close":
-            return true
-        default:
-            return false
+        switch payment?.paymentType {
+        case "splice_in", "splice_out", "onchain", "channel_close": return true
+        default: return false
         }
     }
 }

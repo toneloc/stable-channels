@@ -609,8 +609,7 @@ class DatabaseService {
         AND txid != ''
         AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
         AND status != 'failed'
-        AND tx_block_height IS NOT NULL
-        AND tx_block_height + ? > ?
+        AND (tx_block_height IS NULL OR tx_block_height + ? > ?)
         ORDER BY created_at DESC
         LIMIT 50
         """
@@ -624,11 +623,19 @@ class DatabaseService {
         }
     }
 
+    func getPayment(byId id: Int64) throws -> PaymentRecord? {
+        let sql = """
+        SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+        counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
+        FROM payments WHERE id = ? LIMIT 1
+        """
+        let rows = try query(sql, params: [.integer(id)])
+        guard let row = rows.first, row.count >= 15 else { return nil }
+        return paymentRecord(from: row)
+    }
+
     func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
-        let confs = min(
-            max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0),
-            ConfirmationPolicy.requiredConfirmations
-        )
+        let confs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
         try execute(
             "UPDATE payments SET tx_block_height = ?, confirmations = ? WHERE id = ?",
             params: [.integer(Int64(txBlockHeight)), .integer(Int64(confs)), .integer(paymentId)]

@@ -1,8 +1,8 @@
 import Foundation
 
 enum ConfirmationPolicy {
-    static let requiredConfirmations = 3
-    // Bitcoin mainnet = 3, Liquid = 2 — bump when adding network-specific policies
+    static let requiredConfirmations = 6
+    // Bitcoin mainnet = 6, Liquid = 2 — bump when adding network-specific policies
 }
 
 struct ConfirmationProgress: Equatable {
