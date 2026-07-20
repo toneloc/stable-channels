@@ -3,7 +3,6 @@ import os.log
 
 /// Manages a native Swift `URLSessionWebSocketTask` connection to Mempool.space
 /// for real-time sub-second incoming payment alerts, txid resolution, and block tip updates.
-@Observable
 @MainActor
 final class MempoolWebSocketService {
     private(set) var isConnected: Bool = false
@@ -18,7 +17,7 @@ final class MempoolWebSocketService {
     private var isManualDisconnect: Bool = false
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
-    var onTransactionDetected: ((_ addressOrTxid: String, _ txid: String) -> Void)?
+    var onTransactionDetected: ((_ addressOrTxid: String, _ txid: String, _ amountSats: Int64) -> Void)?
 
     /// Fired when a new block header is mined.
     var onBlockHeader: ((_ height: UInt32) -> Void)?
@@ -42,7 +41,8 @@ final class MempoolWebSocketService {
         webSocketTask?.resume()
         isConnected = true
 
-        logger.info("Connected to Mempool WebSocket at \(self.wsEndpointURL.absoluteString)")
+        logger.info("[WebSocket] Connected to Mempool WebSocket at \(self.wsEndpointURL.absoluteString)")
+        AuditService.log("WEBSOCKET_CONNECTED", data: ["url": wsEndpointURL.absoluteString])
 
         // Re-subscribe to any previously tracked addresses and txids
         for address in trackedAddresses {
@@ -70,13 +70,16 @@ final class MempoolWebSocketService {
         urlSession?.invalidateAndCancel()
         urlSession = nil
         isConnected = false
-        logger.info("Mempool WebSocket disconnected")
+        logger.info("[WebSocket] Disconnected gracefully")
+        AuditService.log("WEBSOCKET_DISCONNECTED", data: [:])
     }
 
     /// Subscribes to real-time mempool transactions for a specific Bitcoin address.
     func trackAddress(_ address: String) {
         guard !address.isEmpty else { return }
         trackedAddresses.insert(address)
+        logger.info("[WebSocket] Registered address to watch: \(address)")
+        AuditService.log("WEBSOCKET_TRACK_ADDRESS", data: ["address": address])
         if isConnected {
             sendTrackAddress(address)
         } else {
@@ -87,6 +90,7 @@ final class MempoolWebSocketService {
     /// Unsubscribes from tracking a specific Bitcoin address on client and server.
     func untrackAddress(_ address: String) {
         trackedAddresses.remove(address)
+        logger.info("[WebSocket] Untracked address: \(address)")
         if isConnected {
             send("""
             { "untrack-address": "\(address)" }
@@ -98,6 +102,8 @@ final class MempoolWebSocketService {
     func trackTx(_ txid: String) {
         guard !txid.isEmpty else { return }
         trackedTxids.insert(txid)
+        logger.info("[WebSocket] Registered txid to watch: \(txid)")
+        AuditService.log("WEBSOCKET_TRACK_TX", data: ["txid": txid])
         if isConnected {
             sendTrackTx(txid)
         } else {
@@ -108,6 +114,7 @@ final class MempoolWebSocketService {
     /// Unsubscribes from tracking a transaction txid on client and server.
     func untrackTx(_ txid: String) {
         trackedTxids.remove(txid)
+        logger.info("[WebSocket] Untracked txid: \(txid)")
         if isConnected {
             send("""
             { "untrack-tx": "\(txid)" }
@@ -120,6 +127,7 @@ final class MempoolWebSocketService {
         let payload = """
         { "action": "want", "data": ["blocks"] }
         """
+        logger.info("[WebSocket] Requesting block tip stream")
         send(payload)
     }
 
@@ -139,13 +147,19 @@ final class MempoolWebSocketService {
 
     private func send(_ text: String) {
         guard isConnected, let webSocketTask else {
+            logger.debug("[WebSocket] Outbound message buffered while offline: \(text)")
             pendingOutboundMessages.append(text)
             return
         }
         webSocketTask.send(.string(text)) { [weak self] error in
             if let error {
                 Task { @MainActor [weak self] in
-                    self?.logger.error("WebSocket send error: \(error.localizedDescription)")
+                    self?.logger.error("[WebSocket] Send error: \(error.localizedDescription)")
+                    AuditService.log("WEBSOCKET_SEND_ERROR", data: ["error": error.localizedDescription])
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.logger.debug("[WebSocket] Frame sent: \(text)")
                 }
             }
         }
@@ -205,8 +219,21 @@ final class MempoolWebSocketService {
            ResilientEsploraClient.isValidTxid(txid) {
             let targetKey = findMatchingTarget(json: json, firstTx: firstTx)
             if let targetKey {
-                onTransactionDetected?(targetKey, txid)
+                var amountSats: Int64 = 0
+                if let vouts = firstTx["vout"] as? [[String: Any]] {
+                    for vout in vouts {
+                        if let addr = vout["scriptpubkey_address"] as? String, addr == targetKey,
+                           let val = vout["value"] as? NSNumber {
+                            amountSats += val.int64Value
+                        }
+                    }
+                }
                 logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
+                AuditService.log(
+                    "WEBSOCKET_MATCH_DETECTED",
+                    data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)"]
+                )
+                onTransactionDetected?(targetKey, txid, amountSats)
             }
         }
 
@@ -214,8 +241,9 @@ final class MempoolWebSocketService {
         if let block = json["block"] as? [String: Any],
            let heightNum = block["height"] as? NSNumber {
             let height = heightNum.uint32Value
-            onBlockHeader?(height)
             logger.info("Real-time block header received via WebSocket: \(height)")
+            AuditService.log("WEBSOCKET_BLOCK_TIP", data: ["height": "\(height)"])
+            onBlockHeader?(height)
         }
     }
 
@@ -248,10 +276,6 @@ final class MempoolWebSocketService {
         // Match tracked txids directly
         if let respTxid = json["txid"] as? String, trackedTxids.contains(respTxid) {
             return respTxid
-        }
-        // Default to first tracked address if single subscription
-        if trackedAddresses.count == 1 {
-            return trackedAddresses.first
         }
         return nil
     }

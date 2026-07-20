@@ -223,9 +223,13 @@ class AppState {
                 await self?.blockHeightService.refresh()
             }
         }
-        mempoolWebSocketService.onTransactionDetected = { [weak self] _, _ in
+        mempoolWebSocketService.onTransactionDetected = { [weak self] addressOrTxid, txid, amountSats in
             Task { @MainActor in
-                self?.detectOnchainDeposit()
+                self?.handleWebSocketTransactionDetected(
+                    addressOrTxid: addressOrTxid,
+                    txid: txid,
+                    amountSats: amountSats
+                )
             }
         }
 
@@ -338,6 +342,9 @@ class AppState {
             startStabilityTimer()
             blockHeightService.start()
             mempoolWebSocketService.connect()
+            if let addr = transactionLinkService.onchainReceiveAddress, !addr.isEmpty {
+                mempoolWebSocketService.trackAddress(addr)
+            }
             Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
@@ -2247,7 +2254,44 @@ class AppState {
                 "address_known": "\(transactionLinkService.onchainReceiveAddress != nil)"
             ])
         }
-        prevOnchainSats = currentOnchain
+    }
+
+    private func handleWebSocketTransactionDetected(addressOrTxid: String, txid: String, amountSats: Int64) {
+        guard let db = databaseService else { return }
+
+        // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
+        if amountSats >= 1000 {
+            let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+            let amountUSD: Double? = price > 0 ? Double(amountSats) / 100_000_000.0 * price : nil
+            let paymentId = "onchain_receive_\(txid)"
+
+            do {
+                let recorded = try db.recordPayment(
+                    paymentId: paymentId,
+                    paymentType: "onchain",
+                    direction: "received",
+                    amountMsat: UInt64(amountSats * 1000),
+                    amountUSD: amountUSD,
+                    btcPrice: price > 0 ? price : nil,
+                    counterparty: nil,
+                    status: "pending",
+                    txid: txid,
+                    address: addressOrTxid
+                )
+                if recorded {
+                    AuditService.log(
+                        "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                        data: ["txid": txid, "sats": "\(amountSats)"]
+                    )
+                    paymentFlash.toggle()
+                }
+            } catch {
+                AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
+            }
+        }
+
+        // 2. Also run detectOnchainDeposit fallback
+        detectOnchainDeposit()
     }
 
     // MARK: - Sweep to Channel
