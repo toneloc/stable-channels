@@ -15,6 +15,10 @@ final class ConfirmationService {
         guard let txid = payment.txid, !txid.isEmpty else {
             return .noTxid
         }
+        if let existingHeight = payment.txBlockHeight, existingHeight > 0 {
+            let progress = calculator.progress(for: existingHeight, currentBlockHeight: currentBlockHeight)
+            return .confirmed(progress: progress, blockHeight: existingHeight)
+        }
         do {
             guard let height = try await provider.blockHeight(for: txid) else {
                 return .pending
