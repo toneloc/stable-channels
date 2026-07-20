@@ -71,11 +71,7 @@ struct PaymentDetailView: View {
                 if payment.feeMsat > 0 {
                     row(String(localized: "label_fee", defaultValue: "Fee"), "\(payment.feeMsat) msat")
                 }
-                if payment.isOnchainConfirmed && payment.confirmations >= ConfirmationPolicy.requiredConfirmations {
-                    row(String(localized: "label_status", defaultValue: "Status"), "Completed")
-                } else {
-                    row(String(localized: "label_status", defaultValue: "Status"), payment.status.capitalized)
-                }
+                row(String(localized: "label_status", defaultValue: "Status"), statusLabel(for: payment))
             }
 
             Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
@@ -98,7 +94,9 @@ struct PaymentDetailView: View {
                 if let address = payment.address {
                     row(String(localized: "label_address", defaultValue: "Address"), address)
                 }
-                if payment.confirmations > 0 {
+                if payment.shouldShowConfirmationProgress {
+                    confirmationProgressRow(for: payment)
+                } else if payment.confirmations > 0 {
                     row(
                         String(localized: "label_confirmations", defaultValue: "Confirmations"),
                         "\(payment.confirmations)"
@@ -116,6 +114,45 @@ struct PaymentDetailView: View {
             Spacer()
             Text(value)
                 .textSelection(.enabled)
+        }
+    }
+
+    private func statusLabel(for payment: PaymentRecord) -> String {
+        if payment.shouldShowConfirmationProgress {
+            let confs = Int(payment.confirmations)
+            if confs >= ConfirmationPolicy.requiredConfirmations {
+                return String(localized: "status_confirmed", defaultValue: "Confirmed")
+            } else if confs > 0 {
+                return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
+            }
+        }
+        return payment.status.capitalized
+    }
+
+    @ViewBuilder
+    private func confirmationProgressRow(for payment: PaymentRecord) -> some View {
+        let confs = min(Int(payment.confirmations), ConfirmationPolicy.requiredConfirmations)
+        let required = ConfirmationPolicy.requiredConfirmations
+        HStack {
+            Text(String(localized: "label_confirmations", defaultValue: "Confirmations"))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if confs >= required {
+                Label(
+                    String(localized: "confirmations_complete", defaultValue: "Confirmed"),
+                    systemImage: "checkmark.circle.fill"
+                )
+                .foregroundStyle(.green)
+                .font(.subheadline)
+            } else {
+                HStack(spacing: 8) {
+                    Text("\(confs)/\(required)")
+                        .font(.subheadline)
+                    ProgressView(value: Double(confs), total: Double(required))
+                        .frame(width: 60)
+                        .tint(confs > 0 ? .blue : .orange)
+                }
+            }
         }
     }
 
