@@ -34,6 +34,17 @@ else
     docker compose up -d --remove-orphans
 fi
 
+# Stale-tip trap: after >24h idle, restarted bitcoind reports IBD=true (old
+# tip timestamp), electrs then refuses to serve HTTP, and the harness panics
+# on FeerateEstimationUpdateFailed. Mining one block clears the IBD flag.
+if ! curl -fsS -m 3 http://127.0.0.1:30000/blocks/tip/height >/dev/null 2>&1; then
+    info "esplora not serving — mining 1 block to clear bitcoind's stale-tip IBD flag …"
+    docker compose exec -T bitcoin-core sh -c '
+        bitcoin-cli -regtest -rpcuser=sc -rpcpassword=sc loadwallet miner 2>/dev/null
+        ADDR=$(bitcoin-cli -regtest -rpcuser=sc -rpcpassword=sc -rpcwallet=miner getnewaddress)
+        bitcoin-cli -regtest -rpcuser=sc -rpcpassword=sc generatetoaddress 1 "$ADDR"' >/dev/null 2>&1 || true
+fi
+
 info "waiting for harness API …"
 for _ in $(seq 1 60); do
     curl -fsS "$HARNESS_API/info" >/dev/null 2>&1 && break || sleep 2
