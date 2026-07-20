@@ -35,9 +35,9 @@ struct PaymentDetailView: View {
             }
             .task {
                 await loadPayment()
-                for await _ in Timer.publish(every: 30, on: .main, in: .common).autoconnect().values {
-                    await loadPayment()
-                }
+            }
+            .onChange(of: appState.blockHeightService.currentHeight) { _, _ in
+                Task { await loadPayment() }
             }
         }
     }

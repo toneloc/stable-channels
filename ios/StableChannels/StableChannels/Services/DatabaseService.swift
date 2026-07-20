@@ -600,7 +600,7 @@ class DatabaseService {
         return paymentRecord(from: row)
     }
 
-    func paymentsNeedingConfirmation(currentBlockHeight _: UInt32) throws -> [PaymentRecord] {
+    func paymentsNeedingConfirmation() throws -> [PaymentRecord] {
         let required = ConfirmationPolicy.requiredConfirmations
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,

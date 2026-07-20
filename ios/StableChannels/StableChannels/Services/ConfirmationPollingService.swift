@@ -37,7 +37,7 @@ final class ConfirmationPollingService {
 
         let pending: [PaymentRecord]
         do {
-            pending = try databaseService.paymentsNeedingConfirmation(currentBlockHeight: currentHeight)
+            pending = try databaseService.paymentsNeedingConfirmation()
         } catch {
             logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
             return
