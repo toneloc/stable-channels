@@ -18,6 +18,11 @@ struct HistoryView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding()
+                .onChange(of: paymentCoordinator.paymentId) { _, newValue in
+                    if newValue != nil {
+                        selectedSegment = 1
+                    }
+                }
 
                 // List
                 List {

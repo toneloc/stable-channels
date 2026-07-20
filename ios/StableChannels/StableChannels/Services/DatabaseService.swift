@@ -637,8 +637,8 @@ class DatabaseService {
     func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
         let confs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
         try execute(
-            "UPDATE payments SET tx_block_height = ?, confirmations = ? WHERE id = ?",
-            params: [.integer(Int64(txBlockHeight)), .integer(Int64(confs)), .integer(paymentId)]
+            "UPDATE payments SET confirmations = ?, tx_block_height = COALESCE(tx_block_height, ?) WHERE id = ?",
+            params: [.integer(Int64(confs)), .integer(Int64(txBlockHeight)), .integer(paymentId)]
         )
     }
 
