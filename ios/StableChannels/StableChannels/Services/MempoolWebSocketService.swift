@@ -14,7 +14,7 @@ final class MempoolWebSocketService {
     private var trackedAddresses: Set<String> = []
     private var trackedTxids: Set<String> = []
     private var pendingOutboundMessages: [String] = []
-    private var processedTxids: Set<String> = []
+    private var processedTxids: [String] = []
     private var isManualDisconnect: Bool = false
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
@@ -235,7 +235,7 @@ final class MempoolWebSocketService {
            let txid = firstTx["txid"] as? String,
            ResilientEsploraClient.isValidTxid(txid) {
             if processedTxids.contains(txid) { return }
-            processedTxids.insert(txid)
+            processedTxids.append(txid)
             if processedTxids.count > 200 { processedTxids.removeFirst() }
 
             let targetKey = findMatchingTarget(json: json, firstTx: firstTx)
