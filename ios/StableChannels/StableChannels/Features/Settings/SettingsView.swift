@@ -134,7 +134,7 @@ struct SettingsView: View {
                 }
 
                 // MARK: - Support
-                
+
                 Section {
                     NavigationLink(destination: DiagnosticsSettingsView()) {
                         rowLabel(
@@ -267,7 +267,7 @@ struct DiagnosticsSettingsView: View {
                 Text("Save app logs to a file for debugging and support.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    
+
                 let logUrls = AppLogger.shared.getExportLogs()
                 if !logUrls.isEmpty {
                     ShareLink(items: logUrls) {
@@ -321,7 +321,7 @@ struct DiagnosticsSettingsView: View {
             }
         }
     }
-    
+
     private func rowLabel(icon: String, color: Color, text: String) -> some View {
         HStack(spacing: 16) {
             ZStack {
@@ -341,7 +341,7 @@ struct DiagnosticsSettingsView: View {
 struct LogTextDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.plainText] }
     var text: String
-    
+
     init(text: String) { self.text = text }
     init(configuration: ReadConfiguration) throws {
         if let data = configuration.file.regularFileContents {
@@ -350,8 +350,8 @@ struct LogTextDocument: FileDocument {
             text = ""
         }
     }
-    
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+
+    func fileWrapper(configuration _: WriteConfiguration) throws -> FileWrapper {
         let data = Data(text.utf8)
         return FileWrapper(regularFileWithContents: data)
     }
