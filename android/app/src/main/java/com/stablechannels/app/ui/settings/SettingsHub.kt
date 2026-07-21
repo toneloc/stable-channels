@@ -9,6 +9,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.border
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -17,12 +18,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.navigation.NavController
 import com.stablechannels.app.AppState
 
 @Composable
 fun SettingsHub(appState: AppState, navController: NavController) {
     val onchainSats by appState.onchainBalanceSats.collectAsState()
+    val uriHandler = LocalUriHandler.current
 
     Column(
         modifier = Modifier
@@ -36,8 +39,11 @@ fun SettingsHub(appState: AppState, navController: NavController) {
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 16.dp)
+                .padding(top = 16.dp, bottom = 8.dp)
         )
+        
+        DisclaimerBanner()
+        
         Spacer(Modifier.height(8.dp))
 
         // Wallet section
@@ -108,23 +114,80 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 onClick = { navController.navigate(SettingsRoute.AppAccess.route) }
             )
 
-            // About section
-            SettingsSectionHeader(title = "About", color = Color(0xFF6B7280))
+            // Support section
+            SettingsSectionHeader(title = "Support", color = Color(0xFF10B981))
             SettingsNavLink(
                 icon = Icons.Default.MedicalServices,
-                iconBackground = Color(0xFF6B7280),
+                iconBackground = Color(0xFF10B981),
                 label = "Logs & Diagnostics",
                 onClick = { navController.navigate(SettingsRoute.Logs.route) }
             )
+
+            // About section
+            SettingsSectionHeader(title = "About", color = Color(0xFF6B7280))
             SettingsNavLink(
                 icon = Icons.Default.Info,
                 iconBackground = Color(0xFF6B7280),
                 label = "About",
                 onClick = { navController.navigate(SettingsRoute.About.route) }
             )
+            SettingsNavLink(
+                icon = Icons.Default.PrivacyTip,
+                iconBackground = Color(0xFF6B7280),
+                label = "Privacy Policy",
+                onClick = { uriHandler.openUri("https://stablechannels.com/privacy.html") }
+            )
 
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(100.dp))
         }
+}
+
+@Composable
+private fun DisclaimerBanner() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .background(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .border(
+                width = 1.dp,
+                color = Color(0xFF10B981),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(Color(0xFF10B981), shape = androidx.compose.foundation.shape.CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Security,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(14.dp))
+        Column {
+            Text(
+                text = "Your keys, your coins.",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
 }
 
 @Composable
