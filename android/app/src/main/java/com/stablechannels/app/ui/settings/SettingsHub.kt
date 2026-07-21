@@ -111,6 +111,12 @@ fun SettingsHub(appState: AppState, navController: NavController) {
             // About section
             SettingsSectionHeader(title = "About", color = Color(0xFF6B7280))
             SettingsNavLink(
+                icon = Icons.Default.MedicalServices,
+                iconBackground = Color(0xFF6B7280),
+                label = "Logs & Diagnostics",
+                onClick = { navController.navigate(SettingsRoute.Logs.route) }
+            )
+            SettingsNavLink(
                 icon = Icons.Default.Info,
                 iconBackground = Color(0xFF6B7280),
                 label = "About",

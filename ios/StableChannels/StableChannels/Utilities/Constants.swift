@@ -146,3 +146,163 @@ enum SeedConstants {
     static let animationDuration: TimeInterval = 0.3
     static let successDisplaySeconds: UInt64 = 1_500_000_000
 }
+
+enum LogLevel: Int, Comparable {
+    case debug = 0
+    case info = 1
+    case warn = 2
+    case error = 3
+
+    static func < (lhs: LogLevel, rhs: LogLevel) -> Bool {
+        return lhs.rawValue < rhs.rawValue
+    }
+    
+    var stringValue: String {
+        switch self {
+        case .debug: return "DEBUG"
+        case .info: return "INFO"
+        case .warn: return "WARN"
+        case .error: return "ERROR"
+        }
+    }
+}
+
+class AppLogger {
+    static let shared = AppLogger()
+    
+    private let logFileName = "app_debug.log"
+    private let oldLogFileName = "app_debug.old.log"
+    private let maxFileSize: UInt64 = 5 * 1024 * 1024 // 5MB
+    
+    private let dateFormatter: ISO8601DateFormatter
+    
+    // Naive regex to redact 12-24 word BIP39 seed phrases
+    private let seedRegex: NSRegularExpression?
+    
+    // Default to info for release, debug for debug builds
+    var minLevel: LogLevel = {
+        #if DEBUG
+        return .debug
+        #else
+        return .info
+        #endif
+    }()
+    
+    private let ioQueue = DispatchQueue(label: "com.stablechannels.app.logger")
+    
+    private init() {
+        self.dateFormatter = ISO8601DateFormatter()
+        self.dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        self.seedRegex = try? NSRegularExpression(pattern: "(?<=\\b|\\s)(?:[a-z]+\\s){11,23}[a-z]+(?=\\b|\\s)", options: [])
+    }
+    
+    private var logFileURL: URL? {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Constants.appGroupIdentifier) else {
+            return nil
+        }
+        return container.appendingPathComponent(logFileName)
+    }
+    
+    private var oldLogFileURL: URL? {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: Constants.appGroupIdentifier) else {
+            return nil
+        }
+        return container.appendingPathComponent(oldLogFileName)
+    }
+    
+    func d(tag: String, _ message: String) { self.log(level: .debug, tag: tag, message) }
+    func i(tag: String, _ message: String) { self.log(level: .info, tag: tag, message) }
+    func w(tag: String, _ message: String) { self.log(level: .warn, tag: tag, message) }
+    func e(tag: String, _ message: String) { self.log(level: .error, tag: tag, message) }
+    
+    private func log(level: LogLevel, tag: String, _ message: String) {
+        guard level >= minLevel else { return }
+        
+        var finalMessage = message
+        if let regex = seedRegex {
+            let range = NSRange(location: 0, length: finalMessage.utf16.count)
+            finalMessage = regex.stringByReplacingMatches(in: finalMessage, options: [], range: range, withTemplate: "[REDACTED_SEED]")
+        }
+        
+        let timestamp = dateFormatter.string(from: Date())
+        let logLine = "[\(timestamp)] [\(level.stringValue)] [\(tag)] \(finalMessage)\n"
+        
+        // Print to console
+        #if DEBUG
+        print(logLine, terminator: "")
+        #endif
+        
+        ioQueue.async { [weak self] in
+            self?.writeToFile(logLine)
+        }
+    }
+    
+    private func writeToFile(_ line: String) {
+        guard let fileURL = logFileURL, let data = line.data(using: .utf8) else { return }
+        
+        let fileManager = FileManager.default
+        
+        if fileManager.fileExists(atPath: fileURL.path) {
+            do {
+                let attrs = try fileManager.attributesOfItem(atPath: fileURL.path)
+                let fileSize = attrs[.size] as? UInt64 ?? 0
+                
+                if fileSize > maxFileSize {
+                    rotateLogs()
+                }
+            } catch {
+                // Ignore
+            }
+        }
+        
+        if !fileManager.fileExists(atPath: fileURL.path) {
+            try? data.write(to: fileURL)
+            return
+        }
+        
+        if let fileHandle = try? FileHandle(forWritingTo: fileURL) {
+            fileHandle.seekToEndOfFile()
+            fileHandle.write(data)
+            fileHandle.closeFile()
+        }
+    }
+    
+    private func rotateLogs() {
+        guard let fileURL = logFileURL, let oldFileURL = oldLogFileURL else { return }
+        let fileManager = FileManager.default
+        
+        if fileManager.fileExists(atPath: oldFileURL.path) {
+            try? fileManager.removeItem(at: oldFileURL)
+        }
+        
+        try? fileManager.moveItem(at: fileURL, to: oldFileURL)
+    }
+    
+    func getExportLogs() -> [URL] {
+        var urls: [URL] = []
+        let fileManager = FileManager.default
+        
+        if let fileURL = logFileURL, fileManager.fileExists(atPath: fileURL.path) {
+            urls.append(fileURL)
+        }
+        
+        if let oldFileURL = oldLogFileURL, fileManager.fileExists(atPath: oldFileURL.path) {
+            urls.append(oldFileURL)
+        }
+        
+        // Audit log
+        let auditURL = Constants.userDataDir.appendingPathComponent("audit_log.txt")
+        if fileManager.fileExists(atPath: auditURL.path) {
+            urls.append(auditURL)
+        }
+        
+        // LDK node log
+        let ldkLogURL = Constants.userDataDir.appendingPathComponent("ldk-node.log")
+        if fileManager.fileExists(atPath: ldkLogURL.path) {
+            urls.append(ldkLogURL)
+        }
+        
+        return urls
+    }
+>>>>>>> d635c6f (feat: Add Logs & Diagnostics UI to Android, iOS, and Desktop)
+}

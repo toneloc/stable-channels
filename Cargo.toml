@@ -12,6 +12,12 @@ exchange = []
 regtest = []
 
 [dependencies]
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+regex = "1.10"
+
 chrono = "0.4"
 ldk-node = { git = "https://github.com/lightningdevkit/ldk-node", rev = "47dad6d909af0fbb53e76d07740c04df5abdde3b" }
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "369a2cf9c8ef810deea0cd2b4cf6ed0691b78144", features = ["std"] }
@@ -90,4 +96,5 @@ members = [
 # macOS / Linux builds.
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1"
+
 
