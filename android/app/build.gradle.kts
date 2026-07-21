@@ -22,10 +22,28 @@ android {
         versionName = "0.9.1"
     }
 
+    // Play upload signing. Reads STABLECHANNELS_UPLOAD_* Gradle properties
+    // (kept out of the repo — set in ~/.gradle/gradle.properties, or via -P /
+    // ORG_GRADLE_PROJECT_* env vars). When absent, release builds are unsigned
+    // and Android Studio's "Generate Signed Bundle" dialog can sign instead.
+    val uploadStoreFile = findProperty("STABLECHANNELS_UPLOAD_STORE_FILE") as String?
+    if (uploadStoreFile != null) {
+        signingConfigs {
+            create("upload") {
+                storeFile = file(uploadStoreFile)
+                storePassword = findProperty("STABLECHANNELS_UPLOAD_STORE_PASSWORD") as String?
+                keyAlias = findProperty("STABLECHANNELS_UPLOAD_KEY_ALIAS") as String?
+                keyPassword = findProperty("STABLECHANNELS_UPLOAD_KEY_PASSWORD") as String?
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("upload")
         }
     }
 
