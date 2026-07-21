@@ -304,5 +304,4 @@ class AppLogger {
         
         return urls
     }
->>>>>>> d635c6f (feat: Add Logs & Diagnostics UI to Android, iOS, and Desktop)
 }
