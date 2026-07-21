@@ -26,6 +26,7 @@ sealed class SettingsRoute(val route: String) {
     object Node : SettingsRoute("settings_node")
     object PushConnectivity : SettingsRoute("settings_push_connectivity")
     object AppAccess : SettingsRoute("settings_app_access")
+    object Logs : SettingsRoute("settings_logs")
     object About : SettingsRoute("settings_about")
 }
 
@@ -92,6 +93,11 @@ fun SettingsNavHost(appState: AppState, onShowBottomBar: (Boolean) -> Unit, modi
         composable(SettingsRoute.AppAccess.route) {
             SettingsSubViewScaffold(title = "App Access", navController = navController) {
                 AppAccessView()
+            }
+        }
+        composable(SettingsRoute.Logs.route) {
+            SettingsSubViewScaffold(title = "Logs & Diagnostics", navController = navController) {
+                LogsView()
             }
         }
         composable(SettingsRoute.About.route) {

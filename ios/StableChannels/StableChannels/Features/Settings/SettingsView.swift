@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import UserNotifications
 
 struct SettingsView: View {
@@ -132,6 +133,22 @@ struct SettingsView: View {
                         .foregroundStyle(.indigo)
                 }
 
+                // MARK: - Support
+                
+                Section {
+                    NavigationLink(destination: DiagnosticsSettingsView()) {
+                        rowLabel(
+                            icon: "stethoscope",
+                            color: .green,
+                            text: "Logs & Diagnostics"
+                        )
+                    }
+                } header: {
+                    Text("Support")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                }
+
                 // MARK: - About
 
                 Section {
@@ -237,5 +254,105 @@ struct SettingsView: View {
             .font(.caption)
             .foregroundStyle(Color(uiColor: .label).opacity(0.7))
         }
+    }
+}
+
+struct DiagnosticsSettingsView: View {
+    @State private var isExporting = false
+    @State private var logDocument: LogTextDocument? = nil
+
+    var body: some View {
+        List {
+            Section {
+                Text("Save app logs to a file for debugging and support.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    
+                let logUrls = AppLogger.shared.getExportLogs()
+                if !logUrls.isEmpty {
+                    ShareLink(items: logUrls) {
+                        rowLabel(
+                            icon: "square.and.arrow.up",
+                            color: .green,
+                            text: "Share the logs"
+                        )
+                    }
+                    Button {
+                        var allLogs = ""
+                        for url in logUrls {
+                            if let content = try? String(contentsOf: url) {
+                                allLogs += "=== \(url.lastPathComponent) ===\n\(content)\n\n"
+                            }
+                        }
+                        logDocument = LogTextDocument(text: allLogs)
+                        isExporting = true
+                    } label: {
+                        rowLabel(
+                            icon: "arrow.down.doc",
+                            color: .green,
+                            text: "Download logs"
+                        )
+                    }
+                } else {
+                    Button {} label: {
+                        rowLabel(icon: "square.and.arrow.up", color: .gray, text: "Share the logs")
+                    }.disabled(true)
+                    Button {} label: {
+                        rowLabel(icon: "arrow.down.doc", color: .gray, text: "Download logs")
+                    }.disabled(true)
+                }
+            } header: {
+                Text("Logs")
+            }
+        }
+        .navigationTitle("Logs & Diagnostics")
+        .navigationBarTitleDisplayMode(.inline)
+        .fileExporter(
+            isPresented: $isExporting,
+            document: logDocument,
+            contentType: .plainText,
+            defaultFilename: "stable_channels_logs.txt"
+        ) { result in
+            switch result {
+            case .success(let url):
+                print("Saved to \(url)")
+            case .failure(let error):
+                print("Failed to save: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func rowLabel(icon: String, color: Color, text: String) -> some View {
+        HStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(color)
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon)
+                    .foregroundStyle(.white)
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            Text(text)
+                .foregroundStyle(.primary)
+        }
+    }
+}
+
+struct LogTextDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.plainText] }
+    var text: String
+    
+    init(text: String) { self.text = text }
+    init(configuration: ReadConfiguration) throws {
+        if let data = configuration.file.regularFileContents {
+            text = String(decoding: data, as: UTF8.self)
+        } else {
+            text = ""
+        }
+    }
+    
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        let data = Data(text.utf8)
+        return FileWrapper(regularFileWithContents: data)
     }
 }
