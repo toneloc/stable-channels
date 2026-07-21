@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::app::LspServerApp;
+use crate::ui::layout::{self, card, page_scrolled};
 use crate::ui::widgets;
 
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
@@ -11,135 +12,124 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		return;
 	}
 
-	render_sign_message(ui, app);
-	ui.add_space(20.0);
-	render_verify_signature(ui, app);
-	ui.add_space(20.0);
-	render_export_pathfinding_scores(ui, app);
+	page_scrolled(ui, |ui| {
+		// Cap the column so form fields don't stretch across the whole window.
+		ui.set_max_width(layout::FORM_WIDTH);
+		card(ui, "Sign Message", |ui| render_sign_body(ui, app));
+		ui.add_space(10.0);
+		card(ui, "Verify Signature", |ui| render_verify_body(ui, app));
+		ui.add_space(10.0);
+		card(ui, "Export Pathfinding Scores", |ui| render_export_body(ui, app));
+	});
 }
 
-fn render_sign_message(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Sign Message");
-		ui.add_space(5.0);
+fn render_sign_body(ui: &mut egui::Ui, app: &mut LspServerApp) {
+	let form = &mut app.state.forms.sign_message;
 
-		let form = &mut app.state.forms.sign_message;
+	ui.label("Message:");
+	ui.add(
+		egui::TextEdit::multiline(&mut form.message)
+			.desired_rows(3)
+			.desired_width(f32::INFINITY),
+	);
 
+	ui.add_space(10.0);
+
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.sign_message.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Signing...");
+		} else if ui.button("Sign").clicked() {
+			app.sign_message();
+		}
+	});
+
+	if let Some(signature) = &app.state.sign_result {
+		ui.add_space(10.0);
+		ui.separator();
+		ui.label("Signature:");
+		// Pre-extract to avoid borrow conflict between TextEdit and copy button
+		let sig_clone = signature.clone();
+		ui.add(
+			egui::TextEdit::multiline(&mut sig_clone.as_str())
+				.desired_rows(2)
+				.desired_width(f32::INFINITY)
+				.interactive(false),
+		);
+		if ui.button("Copy Signature").clicked() {
+			ui.output_mut(|o| o.copied_text = sig_clone.clone());
+			app.state.status_message = Some(crate::state::StatusMessage::success("Copied"));
+		}
+	}
+}
+
+fn render_export_body(ui: &mut egui::Ui, app: &mut LspServerApp) {
+	ui.label("Export the pathfinding scores used by the router.");
+
+	ui.add_space(10.0);
+
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.export_pathfinding_scores.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Exporting...");
+		} else if ui.button("Export Scores").clicked() {
+			app.export_pathfinding_scores();
+		}
+	});
+
+	if let Some(result) = &app.state.export_scores_result {
+		ui.add_space(10.0);
+		ui.separator();
+		let n = result.scores.len();
+		ui.horizontal(|ui| {
+			widgets::status_pill(ui, &format!("Exported {} bytes", n), egui::Color32::GREEN);
+		});
+	}
+}
+
+fn render_verify_body(ui: &mut egui::Ui, app: &mut LspServerApp) {
+	let form = &mut app.state.forms.verify_signature;
+
+	egui::Grid::new("verify_sig_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
 		ui.label("Message:");
 		ui.add(
 			egui::TextEdit::multiline(&mut form.message)
-				.desired_rows(3)
+				.desired_rows(2)
 				.desired_width(f32::INFINITY),
 		);
+		ui.end_row();
 
-		ui.add_space(10.0);
+		ui.label("Signature (zbase32):");
+		ui.text_edit_singleline(&mut form.signature);
+		ui.end_row();
 
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.sign_message.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Signing...");
-			} else if ui.button("Sign").clicked() {
-				app.sign_message();
-			}
-		});
+		ui.label("Public Key (hex):");
+		ui.text_edit_singleline(&mut form.public_key);
+		ui.end_row();
+	});
 
-		if let Some(signature) = &app.state.sign_result {
-			ui.add_space(10.0);
-			ui.separator();
-			ui.label("Signature:");
-			// Pre-extract to avoid borrow conflict between TextEdit and copy button
-			let sig_clone = signature.clone();
-			ui.add(
-				egui::TextEdit::multiline(&mut sig_clone.as_str())
-					.desired_rows(2)
-					.desired_width(f32::INFINITY)
-					.interactive(false),
-			);
-			if ui.button("Copy Signature").clicked() {
-				ui.output_mut(|o| o.copied_text = sig_clone.clone());
-				app.state.status_message = Some(crate::state::StatusMessage::success("Copied"));
-			}
+	ui.add_space(10.0);
+
+	ui.horizontal(|ui| {
+		let is_pending = app.state.tasks.verify_signature.is_some();
+		if is_pending {
+			ui.spinner();
+			ui.label("Verifying...");
+		} else if ui.button("Verify").clicked() {
+			app.verify_signature();
 		}
 	});
-}
 
-fn render_export_pathfinding_scores(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Export Pathfinding Scores");
+	if let Some(valid) = &app.state.verify_result {
 		ui.add_space(5.0);
-
-		ui.label("Export the pathfinding scores used by the router.");
-
-		ui.add_space(10.0);
-
 		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.export_pathfinding_scores.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Exporting...");
-			} else if ui.button("Export Scores").clicked() {
-				app.export_pathfinding_scores();
+			if *valid {
+				widgets::status_pill(ui, "VALID", egui::Color32::GREEN);
+			} else {
+				widgets::status_pill(ui, "INVALID", egui::Color32::RED);
 			}
 		});
-
-		if let Some(result) = &app.state.export_scores_result {
-			ui.add_space(10.0);
-			ui.separator();
-			let n = result.scores.len();
-			ui.horizontal(|ui| {
-				widgets::status_pill(ui, &format!("Exported {} bytes", n), egui::Color32::GREEN);
-			});
-		}
-	});
-}
-
-fn render_verify_signature(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.group(|ui| {
-		ui.heading("Verify Signature");
-		ui.add_space(5.0);
-
-		let form = &mut app.state.forms.verify_signature;
-
-		egui::Grid::new("verify_sig_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-			ui.label("Message:");
-			ui.add(
-				egui::TextEdit::multiline(&mut form.message)
-					.desired_rows(2)
-					.desired_width(f32::INFINITY),
-			);
-			ui.end_row();
-
-			ui.label("Signature (zbase32):");
-			ui.text_edit_singleline(&mut form.signature);
-			ui.end_row();
-
-			ui.label("Public Key (hex):");
-			ui.text_edit_singleline(&mut form.public_key);
-			ui.end_row();
-		});
-
-		ui.add_space(10.0);
-
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.verify_signature.is_some();
-			if is_pending {
-				ui.spinner();
-				ui.label("Verifying...");
-			} else if ui.button("Verify").clicked() {
-				app.verify_signature();
-			}
-		});
-
-		if let Some(valid) = &app.state.verify_result {
-			ui.add_space(5.0);
-			ui.horizontal(|ui| {
-				if *valid {
-					widgets::status_pill(ui, "VALID", egui::Color32::GREEN);
-				} else {
-					widgets::status_pill(ui, "INVALID", egui::Color32::RED);
-				}
-			});
-		}
-	});
+	}
 }

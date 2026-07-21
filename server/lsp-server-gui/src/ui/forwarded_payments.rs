@@ -1,6 +1,8 @@
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
 
 use crate::app::LspServerApp;
+use crate::ui::layout::page_scrolled;
 use crate::ui::widgets;
 
 // Per-row snapshot extracted from state.forwarded_payments so the state borrow
@@ -61,47 +63,49 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 					);
 				}
 			} else {
-				// Summary header: count + operator revenue (fee) + total forwarded
-				ui.horizontal(|ui| {
-					ui.label(format!("{} forwards", rows.len()));
-					ui.separator();
-					ui.label(
-						egui::RichText::new(format!(
-							"Revenue: {}",
-							app.fmt_msat(total_fee)
-						))
-						.strong()
-						.color(egui::Color32::from_rgb(0xF7, 0x93, 0x1A)),
-					);
-					ui.separator();
-					ui.label(format!("Forwarded: {}", app.fmt_msat(total_forwarded)));
-				});
-				ui.add_space(5.0);
+				page_scrolled(ui, |ui| {
+					// Summary header: count + operator revenue (fee) + total forwarded
+					ui.horizontal(|ui| {
+						ui.label(format!("{} forwards", rows.len()));
+						ui.separator();
+						ui.label(
+							egui::RichText::new(format!(
+								"Revenue: {}",
+								app.fmt_msat(total_fee)
+							))
+							.strong()
+							.color(egui::Color32::from_rgb(0xF7, 0x93, 0x1A)),
+						);
+						ui.separator();
+						ui.label(format!("Forwarded: {}", app.fmt_msat(total_forwarded)));
+					});
+					ui.add_space(5.0);
 
-				egui::ScrollArea::both().max_height(400.0).show(ui, |ui| {
-					egui::Grid::new("forwarded_payments_table")
+					TableBuilder::new(ui)
 						.striped(true)
-						.min_col_width(80.0)
-						.show(ui, |ui| {
-							ui.label(egui::RichText::new("Total Fee").strong());
-							ui.label(egui::RichText::new("Amount Forwarded").strong());
-							ui.end_row();
-
+						.resizable(false)
+						.auto_shrink([false, true])
+						.column(Column::remainder().clip(true))
+						.column(Column::remainder().clip(true))
+						.header(22.0, |mut h| {
+							h.col(|ui| { ui.strong("Total Fee"); });
+							h.col(|ui| { ui.strong("Amount Forwarded"); });
+						})
+						.body(|mut body| {
 							for row in &rows {
-								// Right-align both msat columns
-								ui.with_layout(
-									egui::Layout::right_to_left(egui::Align::Center),
-									|ui| {
-										ui.monospace(app.fmt_msat(row.fee_msat));
-									},
-								);
-								ui.with_layout(
-									egui::Layout::right_to_left(egui::Align::Center),
-									|ui| {
-										ui.monospace(app.fmt_msat(row.amount_msat));
-									},
-								);
-								ui.end_row();
+								body.row(24.0, |mut r| {
+									// Left-align both msat columns
+									r.col(|ui| {
+										ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+											ui.monospace(app.fmt_msat(row.fee_msat));
+										});
+									});
+									r.col(|ui| {
+										ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+											ui.monospace(app.fmt_msat(row.amount_msat));
+										});
+									});
+								});
 							}
 						});
 				});

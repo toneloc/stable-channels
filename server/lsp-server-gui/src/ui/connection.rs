@@ -52,9 +52,10 @@ pub fn render_settings(ui: &mut Ui, app: &mut LspServerApp) {
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut app.state.tls_cert_path);
                     if ui.button("Browse...").clicked() {
+                        // Default cert is tls.crt; include common cert extensions so the
+                        // real file isn't greyed out on macOS (NSOpenPanel disables non-matching files).
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("PEM files", &["pem"])
-                            .add_filter("All files", &["*"])
+                            .add_filter("Certificate", &["crt", "cert", "pem", "der"])
                             .pick_file()
                         {
                             app.state.tls_cert_path = path.display().to_string();

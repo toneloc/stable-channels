@@ -72,7 +72,7 @@ struct TradeRecord: Codable, Identifiable {
     }
 }
 
-struct PaymentRecord: Codable, Identifiable {
+struct PaymentRecord: Codable, Equatable, Identifiable {
     let id: Int64
     let paymentId: String?
     let paymentType: String

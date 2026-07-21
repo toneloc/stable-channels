@@ -1,9 +1,11 @@
-use egui::{Context, ScrollArea, Ui};
+use egui::{Context, Ui};
+use egui_extras::{Column, TableBuilder};
 use hex::DisplayHex;
 #[cfg(target_arch = "wasm32")]
 use web_sys::js_sys;
 
 use crate::app::LspServerApp;
+use crate::ui::layout::page_scrolled;
 use crate::ui::truncate_id;
 use crate::ui::widgets;
 
@@ -106,21 +108,15 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 
 			ui.horizontal(|ui| {
 				ui.label("Filter:");
-				ui.add(egui::TextEdit::singleline(&mut filter).hint_text("id or hash"));
+				ui.add(egui::TextEdit::singleline(&mut filter).hint_text("id or hash").desired_width(240.0));
 				egui::ComboBox::from_id_salt(status_id)
+					.width(160.0)
 					.selected_text(status_label(status_filter))
 					.show_ui(ui, |ui| {
 						ui.selectable_value(&mut status_filter, -1, "All statuses");
 						ui.selectable_value(&mut status_filter, 0, "Pending");
 						ui.selectable_value(&mut status_filter, 1, "Succeeded");
 						ui.selectable_value(&mut status_filter, 2, "Failed");
-					});
-				egui::ComboBox::from_id_salt(dir_id)
-					.selected_text(direction_label(dir_filter))
-					.show_ui(ui, |ui| {
-						ui.selectable_value(&mut dir_filter, -1, "All directions");
-						ui.selectable_value(&mut dir_filter, 0, "Inbound");
-						ui.selectable_value(&mut dir_filter, 1, "Outbound");
 					});
 			});
 
@@ -152,78 +148,135 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 				}
 			});
 
-			ui.label(format!("{}/{} payment(s)", view.len(), total));
-			ui.add_space(5.0);
+			page_scrolled(ui, |ui| {
+				ui.label(format!("{}/{} payment(s)", view.len(), total));
+				ui.add_space(5.0);
 
-			ScrollArea::both().max_height(500.0).show(ui, |ui| {
-				egui::Grid::new("payments_grid").striped(true).min_col_width(80.0).show(ui, |ui| {
-					// Header (Amount/Date are clickable sort toggles)
-					ui.strong("Payment ID");
-					ui.strong("Type");
-					if ui.button(sort_header("Amount", &sort, 0)).clicked() {
-						sort = (0, if sort.0 == 0 { !sort.1 } else { true });
-					}
-					ui.strong("Fee");
-					ui.strong("Direction");
-					ui.strong("Status");
-					if ui.button(sort_header("Timestamp", &sort, 1)).clicked() {
-						sort = (1, if sort.0 == 1 { !sort.1 } else { true });
-					}
-					ui.strong(""); // Details column
-					ui.end_row();
+				crate::ui::layout::h_scroll(ui, 1200.0, |ui| {
+					// Tighter gap between columns (default ~8.0); reserve it from the width so columns still fill exactly.
+						let gap = 3.0;
+						ui.spacing_mut().item_spacing.x = gap;
+						let cw = crate::ui::layout::weighted_widths(ui.available_width() - gap * 7.0, &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+					TableBuilder::new(ui)
+						.striped(true)
+						.resizable(false)
+						.vscroll(false)
+						.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+						.auto_shrink([false, true])
+						.column(Column::exact(cw[0]).clip(true)) // Payment ID
+						.column(Column::exact(cw[1]).clip(true)) // Type
+						.column(Column::exact(cw[2]).clip(true)) // Amount
+						.column(Column::exact(cw[3]).clip(true)) // Fee
+						.column(Column::exact(cw[4]).clip(true)) // Direction
+						.column(Column::exact(cw[5]).clip(true)) // Status
+						.column(Column::exact(cw[6]).clip(true)) // Timestamp
+						.column(Column::exact(cw[7]).clip(true)) // Details
+						.header(24.0, |mut h| {
+							h.col(|ui| { ui.strong("Payment ID"); });
+							h.col(|ui| { ui.strong("Type"); });
+							h.col(|ui| {
+								ui.vertical_centered(|ui| {
+									if ui.button(sort_header("Amount", &sort, 0)).clicked() {
+										sort = (0, if sort.0 == 0 { !sort.1 } else { true });
+									}
+								});
+							});
+							h.col(|ui| { ui.vertical_centered(|ui| { ui.strong("Fee"); }); });
+							h.col(|ui| {
+								ui.vertical_centered(|ui| {
+									let dir_hdr = match dir_filter { 0 => "Direction: In", 1 => "Direction: Out", _ => "Direction" };
+									if ui.button(dir_hdr).clicked() {
+										dir_filter = match dir_filter { -1 => 0, 0 => 1, _ => -1 };
+									}
+								});
+							});
+							h.col(|ui| { ui.vertical_centered(|ui| { ui.strong("Status"); }); });
+							h.col(|ui| {
+								ui.vertical_centered(|ui| {
+									if ui.button(sort_header("Timestamp", &sort, 1)).clicked() {
+										sort = (1, if sort.0 == 1 { !sort.1 } else { true });
+									}
+								});
+							});
+							h.col(|ui| { ui.vertical_centered(|ui| { ui.strong(""); }); });
+						})
+						.body(|mut body| {
+							for &i in &view {
+								let row = &rows[i];
+								body.row(26.0, |mut r| {
+									// Payment ID
+									r.col(|ui| {
+										ui.horizontal(|ui| {
+											ui.monospace(truncate_id(&row.id, 5, 4));
+											if ui.small_button("Copy").clicked() {
+												ui.output_mut(|o| o.copied_text = row.id.clone());
+											}
+										});
+									});
 
-					for &i in &view {
-						let row = &rows[i];
+									// Type — settlement keysends override the generic label
+									r.col(|ui| {
+										ui.label(payment_type_label_str(&row.type_label, row.settlement_kind));
+									});
 
-						// Payment ID
-						ui.horizontal(|ui| {
-							ui.monospace(truncate_id(&row.id, 5, 4));
-							if ui.small_button("Copy").clicked() {
-								ui.output_mut(|o| o.copied_text = row.id.clone());
+									// Amount (unit-aware, centered)
+									r.col(|ui| {
+										ui.vertical_centered(|ui| {
+											match row.amount_msat {
+												Some(amount) => ui.monospace(app.fmt_msat(amount)),
+												None => ui.monospace("-"),
+											}
+										});
+									});
+
+									// Fee (unit-aware, centered)
+									r.col(|ui| {
+										ui.vertical_centered(|ui| {
+											match row.fee_paid_msat {
+												Some(fee) => ui.monospace(app.fmt_msat(fee)),
+												None => ui.monospace("-"),
+											}
+										});
+									});
+
+									// Direction badge (0 = Inbound, 1 = Outbound), centered small pill
+									r.col(|ui| {
+										ui.vertical_centered(|ui| {
+											match row.direction {
+												0 => widgets::status_pill(ui, "⬇ In", egui::Color32::LIGHT_BLUE),
+												1 => widgets::status_pill(ui, "⬆ Out", egui::Color32::GOLD),
+												_ => widgets::status_pill(ui, "Unknown", egui::Color32::GRAY),
+											};
+										});
+									});
+
+									// Status pill (0 = Pending, 1 = Succeeded, 2 = Failed), centered
+									r.col(|ui| {
+										ui.vertical_centered(|ui| {
+											let (status_text, status_color) = status_style(row.status);
+											widgets::status_pill(ui, status_text, status_color);
+										});
+									});
+
+									// Timestamp (relative text, exact epoch on hover)
+									r.col(|ui| {
+										ui.vertical_centered(|ui| {
+											ui.label(format_timestamp(row.timestamp))
+												.on_hover_text(format!("unix: {}", row.timestamp));
+										});
+									});
+
+									// Details button - track click without modifying app state yet
+									r.col(|ui| {
+										ui.vertical_centered(|ui| {
+											if ui.small_button("Details").clicked() {
+												clicked_payment_id = Some(row.id.clone());
+											}
+										});
+									});
+								});
 							}
 						});
-
-						// Type — settlement keysends override the generic label
-						ui.label(payment_type_label_str(&row.type_label, row.settlement_kind));
-
-						// Amount (unit-aware, right-aligned)
-						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-							match row.amount_msat {
-								Some(amount) => ui.monospace(app.fmt_msat(amount)),
-								None => ui.monospace("-"),
-							}
-						});
-
-						// Fee (unit-aware, right-aligned)
-						ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-							match row.fee_paid_msat {
-								Some(fee) => ui.monospace(app.fmt_msat(fee)),
-								None => ui.monospace("-"),
-							}
-						});
-
-						// Direction badge (0 = Inbound, 1 = Outbound)
-						match row.direction {
-							0 => widgets::status_pill(ui, "⬇ In", egui::Color32::LIGHT_BLUE),
-							1 => widgets::status_pill(ui, "⬆ Out", egui::Color32::GOLD),
-							_ => widgets::status_pill(ui, "Unknown", egui::Color32::GRAY),
-						};
-
-						// Status pill (0 = Pending, 1 = Succeeded, 2 = Failed)
-						let (status_text, status_color) = status_style(row.status);
-						widgets::status_pill(ui, status_text, status_color);
-
-						// Timestamp (relative text, exact epoch on hover)
-						ui.label(format_timestamp(row.timestamp))
-							.on_hover_text(format!("unix: {}", row.timestamp));
-
-						// Details button - track click without modifying app state yet
-						if ui.small_button("Details").clicked() {
-							clicked_payment_id = Some(row.id.clone());
-						}
-
-						ui.end_row();
-					}
 				});
 			});
 
@@ -271,14 +324,6 @@ fn status_label(filter: i32) -> &'static str {
 		1 => "Succeeded",
 		2 => "Failed",
 		_ => "All statuses",
-	}
-}
-
-fn direction_label(filter: i32) -> &'static str {
-	match filter {
-		0 => "Inbound",
-		1 => "Outbound",
-		_ => "All directions",
 	}
 }
 
