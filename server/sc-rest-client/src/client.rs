@@ -6,7 +6,7 @@ use js_sys;
 
 use bitcoin_hashes::hmac::{Hmac, HmacEngine};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
-use ldk_server_client::ldk_server_grpc::api::{
+use ldk_server_grpc::api::{
 	Bolt11ClaimForHashRequest, Bolt11ClaimForHashResponse, Bolt11FailForHashRequest,
 	Bolt11FailForHashResponse, Bolt11ReceiveForHashRequest, Bolt11ReceiveForHashResponse,
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11ReceiveVariableAmountViaJitChannelRequest,
@@ -28,7 +28,7 @@ use ldk_server_client::ldk_server_grpc::api::{
 	SpontaneousSendResponse, UnifiedSendRequest, UnifiedSendResponse, UpdateChannelConfigRequest,
 	UpdateChannelConfigResponse, VerifySignatureRequest, VerifySignatureResponse,
 };
-use ldk_server_client::ldk_server_grpc::endpoints::{
+use ldk_server_grpc::endpoints::{
 	BOLT11_CLAIM_FOR_HASH_PATH, BOLT11_FAIL_FOR_HASH_PATH, BOLT11_RECEIVE_FOR_HASH_PATH,
 	BOLT11_RECEIVE_PATH, BOLT11_RECEIVE_VARIABLE_AMOUNT_VIA_JIT_CHANNEL_PATH,
 	BOLT11_RECEIVE_VIA_JIT_CHANNEL_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
@@ -40,7 +40,7 @@ use ldk_server_client::ldk_server_grpc::endpoints::{
 	SPLICE_OUT_PATH, SPONTANEOUS_SEND_PATH, UNIFIED_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH,
 	VERIFY_SIGNATURE_PATH,
 };
-use ldk_server_client::ldk_server_grpc::error::{ErrorCode, ErrorResponse};
+use ldk_server_grpc::error::{ErrorCode, ErrorResponse};
 use sc_protos::stable::{
 	EditStableChannelRequest, EditStableChannelResponse, GetPriceRequest, GetPriceResponse,
 	ListSettlementPaymentsRequest, ListSettlementPaymentsResponse, ListStableChannelsRequest,
@@ -117,7 +117,16 @@ impl LspRestClient {
 	/// Builds the full URL for an API endpoint.
 	fn build_url(&self, path: &str) -> String {
 		if self.use_relative_urls {
-			format!("/api/{path}")
+			// reqwest rejects relative URLs (unlike browser fetch), so resolve
+			// /api/<path> against the page's own origin — the origin's reverse
+			// proxy forwards it to the daemon.
+			#[cfg(target_arch = "wasm32")]
+			let origin = web_sys::window()
+				.and_then(|w| w.location().origin().ok())
+				.unwrap_or_default();
+			#[cfg(not(target_arch = "wasm32"))]
+			let origin = String::new();
+			format!("{origin}/api/{path}")
 		} else {
 			format!("https://{}/{path}", self.base_url)
 		}
