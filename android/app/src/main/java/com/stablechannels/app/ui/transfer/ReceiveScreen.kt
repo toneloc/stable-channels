@@ -68,7 +68,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Toolbar (Cancel button, centered title, top-right Onchain button)
+        // Toolbar (Done button, centered title, top-right Onchain button)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -88,7 +88,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 shape = RoundedCornerShape(20.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
             ) {
-                Text("Cancel", style = MaterialTheme.typography.bodyMedium)
+                Text("Done", style = MaterialTheme.typography.bodyMedium)
             }
             Text(
                 text = "Receive",
@@ -169,7 +169,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "First payment — a channel will be opened automatically via LSP",
+                        "Get your first payment to activate your account",
                         modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall
                     )

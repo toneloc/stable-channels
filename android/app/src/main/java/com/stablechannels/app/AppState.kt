@@ -517,7 +517,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
 
                     _stableChannel.value = sc
-                    _statusMessage.value = "Swap pending confirmation"
+                    _statusMessage.value = "Move pending confirmation"
                 } else {
                     _stableChannel.value = sc
                 }
@@ -762,7 +762,7 @@ class AppState(private val context: Context) : ViewModel() {
                 }
             }
             saveChannelToDB(preserveBacking = true)
-            val successMsg = if (displayVal != null) "Payment sent: $displayVal" else "Payment confirmed"
+            val successMsg = if (displayVal != null) "Payment sent: $displayVal" else "Payment sent"
             _statusMessage.value = successMsg
             _lastPaymentResult.value = successMsg
         }
@@ -878,7 +878,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
         refreshBalances()
         updateStableBalances()
-        _statusMessage.value = "Swap pending confirmation"
+        _statusMessage.value = "Move pending confirmation"
         startSpliceConfirmationMonitor(txid)
     }
 
@@ -888,7 +888,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
         isSweeping = true
         pendingSplice = PendingSplice("out", amountSats, address)
-        _statusMessage.value = "Swap pending..."
+        _statusMessage.value = "Move pending..."
     }
 
     fun cancelPendingSpliceStart() {
@@ -966,7 +966,7 @@ class AppState(private val context: Context) : ViewModel() {
         if (spliceTxid == txid) spliceTxid = null
         monitoredSpliceTxid = null
         spliceConfirmationJob = null
-        _statusMessage.value = "Swap confirmed"
+        _statusMessage.value = "Move confirmed"
 
         AuditService.log("SPLICE_CONFIRMED", mapOf(
             "txid" to txid,
@@ -1113,7 +1113,14 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             val paymentId = try {
-                nodeService.sendKeysend(amountMsat, sc.counterparty)
+                // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
+                // this as a settlement (operator GUI) and runs reconcile_incoming_stability
+                // immediately, matching every other sender. See issue #161.
+                nodeService.sendKeysendWithTLV(
+                    amountMsat,
+                    sc.counterparty,
+                    listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1)))
+                )
             } catch (e: Exception) {
                 // Send never happened — release the claim.
                 try { databaseService?.clearPendingSend() } catch (_: Exception) {}

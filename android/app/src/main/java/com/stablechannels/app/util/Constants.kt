@@ -27,6 +27,7 @@ object Constants {
         TestOverrides.pushRegisterUrl ?: "https://stablechannels.com/api/register-push"
     val LSP_CHANNEL_EXISTS_URL: String get() =
         TestOverrides.channelExistsUrl ?: "https://stablechannels.com/api/channel-exists"
+    const val PRIVACY_POLICY_URL = "https://stablechannels.com/privacy.html"
 
     val PRIMARY_CHAIN_URL: String get() =
         TestOverrides.primaryChainUrl ?: "https://blockstream.info/api"

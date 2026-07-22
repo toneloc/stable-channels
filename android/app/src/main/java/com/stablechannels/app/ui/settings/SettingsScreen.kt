@@ -196,7 +196,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 onClick = { showCloseConfirm = true },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-            ) { Text("Close Channel") }
+            ) { Text("Close channel") }
         }
 
         // On-chain
@@ -328,8 +328,8 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showCloseConfirm = false },
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
-            title = { Text("Close Channel?") },
-            text = { Text("This will close your Lightning channel and return funds onchain. Are you sure?") },
+            title = { Text("Close channel") },
+            text = { Text("This will cooperatively close the channel and return your funds to your onchain wallet after confirmation.") },
             confirmButton = {
                 TextButton(onClick = {
                     showCloseConfirm = false
@@ -351,7 +351,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
                         } catch (_: Exception) {}
                     }
-                }) { Text("Close", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Close channel", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
                 TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }

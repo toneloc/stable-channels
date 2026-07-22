@@ -365,7 +365,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
-                label = { Text("Lightning invoice or Onchain address") },
+                label = { Text("To") },
+                placeholder = { Text("Invoice or onchain address") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2
             )

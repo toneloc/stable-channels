@@ -5,9 +5,9 @@ import SwiftUI
 /// Owned by MainTabView so the sheet can be presented above the tab hierarchy.
 @Observable
 final class PaymentDetailCoordinator {
-    var selectedPayment: PaymentRecord?
+    var paymentId: Int64?
 
     func open(_ payment: PaymentRecord) {
-        selectedPayment = payment
+        paymentId = payment.id
     }
 }

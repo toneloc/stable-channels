@@ -18,9 +18,9 @@ struct HistoryView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding()
-                .onChange(of: paymentCoordinator.selectedPayment) { _, newValue in
-                    if let payment = newValue {
-                        selectedSegment = payment.paymentType == "trade" ? 0 : 1
+                .onChange(of: paymentCoordinator.paymentId) { _, newValue in
+                    if newValue != nil {
+                        selectedSegment = 1
                     }
                 }
 
@@ -58,6 +58,9 @@ struct HistoryView: View {
             .navigationTitle(String(localized: "title_history", defaultValue: "History"))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
+                loadHistory()
+            }
+            .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
                 loadHistory()
             }
             .refreshable {
@@ -130,7 +133,7 @@ struct TradeRowView: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(String(format: "$%.2f", trade.amountUSD))
                     .fontWeight(.medium)
-                Text(statusLabel)
+                Text(trade.status.capitalized)
                     .font(.caption)
                     .foregroundStyle(statusColor)
             }
@@ -138,7 +141,6 @@ struct TradeRowView: View {
         .padding(.vertical, 4)
     }
 
-    private var statusLabel: String { trade.status.capitalized }
     private var statusColor: Color {
         switch trade.status {
         case "completed": return .green
@@ -200,8 +202,28 @@ struct PaymentRowView: View {
         }
     }
 
-    private var statusLabel: String { payment.status.capitalized }
+    private var statusLabel: String {
+        if payment.shouldShowConfirmationProgress {
+            let confs = Int(payment.confirmations)
+            if confs >= ConfirmationPolicy.requiredConfirmations {
+                return String(localized: "status_confirmed", defaultValue: "Confirmed")
+            }
+            return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
+        }
+        return payment.status.capitalized
+    }
+
     private var statusColor: Color {
+        if payment.shouldShowConfirmationProgress {
+            let confs = Int(payment.confirmations)
+            if confs >= ConfirmationPolicy.requiredConfirmations {
+                return .green
+            } else if confs > 0 {
+                return .blue
+            } else {
+                return .orange
+            }
+        }
         switch payment.status {
         case "completed": return .green
         case "pending": return .orange
@@ -230,4 +252,10 @@ private extension PaymentRecord {
         guard price > 0 else { return nil }
         return Double(amountSats) / Double(Constants.satsInBTC) * price
     }
+}
+
+#Preview {
+    HistoryView()
+        .environment(AppState())
+        .environment(PaymentDetailCoordinator())
 }

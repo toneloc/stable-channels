@@ -77,7 +77,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
             }
             Text(
-                text = "USD → BTC",
+                text = if (step == TradeStep.CONFIRM) "Review USD -> BTC" else "USD → BTC",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.Center)
@@ -92,7 +92,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("How much USD to convert to BTC?", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
                         onClick = { amountText = String.format(Locale.US, "%.2f", maxBuyUSD) },
                         colors = ButtonDefaults.textButtonColors(
