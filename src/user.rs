@@ -11,7 +11,7 @@ use egui::{Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
 use image::{GrayImage, Luma};
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
-use qrcode::{Color, QrCode};
+use qrcode::QrCode;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs::File;
@@ -749,14 +749,13 @@ impl UserApp {
                     .timeout_connect(Duration::from_secs(5))
                     .timeout(Duration::from_secs(10))
                     .build();
-                let price = match stable_channels::price_feeds::get_latest_price(&price_agent)
-                {
-                    Ok(p) if p > 0.0 => p,
-                    _ => stable_channels::price_feeds::get_cached_price(),
-                };
+                let price = stable_channels::price_feeds::get_latest_price(&price_agent)
+                    .ok()
+                    .filter(|price| *price > 0.0);
 
-                // Only proceed if we have a valid price
-                if price > 0.0 {
+                // Automatic stability payments require a freshly validated consensus price.
+                // The last trusted cached price remains available to the UI during an outage.
+                if let Some(price) = price {
                     // Publish so the UI thread's non-blocking get_cached_price_no_fetch reads stay fresh.
                     stable_channels::price_feeds::set_cached_price(price);
                     let mut payment_sent = false;
@@ -944,50 +943,22 @@ impl UserApp {
                         "type": "variable_amount"
                     }),
                 );
-                let code = QrCode::new(&self.invoice_result).unwrap();
-                let bits = code.to_colors();
-                let width = code.width();
-                let scale = 4;
-                let border = scale * 2; // 2 modules of border
-                let img_size = (width * scale) as u32;
-                let bordered_size = img_size + (border * 2) as u32;
-
-                // Create image with border (white background)
-                let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255]));
-
-                // Draw QR code in the center
-                for y in 0..width {
-                    for x in 0..width {
-                        let color = if bits[y * width + x] == Color::Dark {
-                            0
-                        } else {
-                            255
-                        };
-                        for dy in 0..scale {
-                            for dx in 0..scale {
-                                imgbuf.put_pixel(
-                                    (x * scale + dx) as u32 + border as u32,
-                                    (y * scale + dy) as u32 + border as u32,
-                                    Luma([color]),
-                                );
-                            }
-                        }
-                    }
+                self.qr_texture = Self::generate_qr_texture(&self.invoice_result, ctx, "qr_code");
+                if self.qr_texture.is_some() {
+                    self.status_message =
+                        "Invoice generated. Pay it to create a JIT channel.".to_string();
+                } else {
+                    audit_event(
+                        "QR_GENERATION_FAILED",
+                        json!({
+                            "context": "jit_onboarding",
+                            "payload_len": self.invoice_result.len()
+                        }),
+                    );
+                    self.status_message =
+                        "Invoice generated, but its QR code could not be rendered.".to_string();
+                    self.show_toast("QR code unavailable", "!");
                 }
-                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
-                let mut rgba = Vec::with_capacity(w * h * 4);
-                for p in imgbuf.pixels() {
-                    let lum = p[0];
-                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
-                }
-                let tex = ctx.load_texture(
-                    "qr_code",
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                    TextureOptions::LINEAR,
-                );
-                self.qr_texture = Some(tex);
-                self.status_message =
-                    "Invoice generated. Pay it to create a JIT channel.".to_string();
                 self.waiting_for_payment = true;
             }
             Err(e) => {
@@ -1079,49 +1050,24 @@ impl UserApp {
                     }),
                 );
 
-                // Generate QR code
-                let code = QrCode::new(&self.lightning_receive_invoice).unwrap();
-                let bits = code.to_colors();
-                let width = code.width();
-                let scale = 4;
-                let border = scale * 2;
-                let img_size = (width * scale) as u32;
-                let bordered_size = img_size + (border * 2) as u32;
-
-                let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255]));
-
-                for y in 0..width {
-                    for x in 0..width {
-                        let color = if bits[y * width + x] == Color::Dark {
-                            0
-                        } else {
-                            255
-                        };
-                        for dy in 0..scale {
-                            for dx in 0..scale {
-                                imgbuf.put_pixel(
-                                    (x * scale + dx) as u32 + border as u32,
-                                    (y * scale + dy) as u32 + border as u32,
-                                    Luma([color]),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
-                let mut rgba = Vec::with_capacity(w * h * 4);
-                for p in imgbuf.pixels() {
-                    let lum = p[0];
-                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
-                }
-
-                let tex = ctx.load_texture(
+                self.lightning_receive_qr = Self::generate_qr_texture(
+                    &self.lightning_receive_invoice,
+                    ctx,
                     "lightning_receive_qr",
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                    TextureOptions::LINEAR,
                 );
-                self.lightning_receive_qr = Some(tex);
+                if self.lightning_receive_qr.is_some() {
+                    self.lightning_receive_error.clear();
+                } else {
+                    self.lightning_receive_error =
+                        "Invoice ready, but its QR code could not be rendered.".to_string();
+                    audit_event(
+                        "QR_GENERATION_FAILED",
+                        json!({
+                            "context": "lightning_receive",
+                            "payload_len": self.lightning_receive_invoice.len()
+                        }),
+                    );
+                }
                 self.show_lightning_receive = true;
             }
             Err(e) => {
@@ -1164,43 +1110,24 @@ impl UserApp {
         match result {
             Ok(invoice) => {
                 self.lightning_receive_invoice = invoice.to_string();
-                let code = QrCode::new(&self.lightning_receive_invoice).unwrap();
-                let bits = code.to_colors();
-                let width = code.width();
-                let scale = 4;
-                let border = scale * 2;
-                let bordered_size = (width * scale) as u32 + (border * 2) as u32;
-                let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255u8]));
-                for y in 0..width {
-                    for x in 0..width {
-                        let color = if bits[y * width + x] == Color::Dark {
-                            0
-                        } else {
-                            255
-                        };
-                        for dy in 0..scale {
-                            for dx in 0..scale {
-                                imgbuf.put_pixel(
-                                    (x * scale + dx) as u32 + border as u32,
-                                    (y * scale + dy) as u32 + border as u32,
-                                    Luma([color]),
-                                );
-                            }
-                        }
-                    }
-                }
-                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
-                let mut rgba = Vec::with_capacity(w * h * 4);
-                for p in imgbuf.pixels() {
-                    let lum = p[0];
-                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
-                }
-                let tex = ctx.load_texture(
+                self.lightning_receive_qr = Self::generate_qr_texture(
+                    &self.lightning_receive_invoice,
+                    ctx,
                     "lightning_receive_qr",
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                    TextureOptions::LINEAR,
                 );
-                self.lightning_receive_qr = Some(tex);
+                if self.lightning_receive_qr.is_some() {
+                    self.lightning_receive_error.clear();
+                } else {
+                    self.lightning_receive_error =
+                        "Invoice ready, but its QR code could not be rendered.".to_string();
+                    audit_event(
+                        "QR_GENERATION_FAILED",
+                        json!({
+                            "context": "jit_receive",
+                            "payload_len": self.lightning_receive_invoice.len()
+                        }),
+                    );
+                }
                 self.show_lightning_receive = true;
             }
             Err(e) => {
@@ -1250,20 +1177,7 @@ impl UserApp {
             return false;
         }
 
-        // Auto-fix double-paste
-        let input = {
-            let len = input.len();
-            if len > 60 && len.is_multiple_of(2) {
-                let (first, second) = input.split_at(len / 2);
-                if first == second {
-                    first.to_string()
-                } else {
-                    input
-                }
-            } else {
-                input
-            }
-        };
+        let input = collapse_double_paste(input);
 
         let lower = input.to_lowercase();
 
@@ -1284,32 +1198,27 @@ impl UserApp {
                             "No Lightning channel open. Fund your wallet first.".to_string();
                         return false;
                     }
-                    let result = if invoice.amount_milli_satoshis().is_none() {
-                        // Variable-amount invoice — use amount from input
-                        match self.send_amount.trim().parse::<f64>() {
-                            Ok(btc) if btc > 0.0 => {
-                                let msat = (btc * 100_000_000_000.0) as u64;
-                                self.node
-                                    .bolt11_payment()
-                                    .send_using_amount(&invoice, msat, None)
-                            }
-                            _ => {
+                    let invoice_amount_msat = invoice.amount_milli_satoshis();
+                    let amount_msat = if let Some(amount_msat) = invoice_amount_msat {
+                        amount_msat
+                    } else {
+                        match btc_amount_to_msat(&self.send_amount) {
+                            Some(amount_msat) => amount_msat,
+                            None => {
                                 self.send_error = "Enter an amount in BTC".to_string();
                                 return false;
                             }
                         }
-                    } else {
+                    };
+                    let result = if invoice_amount_msat.is_some() {
                         self.node.bolt11_payment().send(&invoice, None)
+                    } else {
+                        self.node
+                            .bolt11_payment()
+                            .send_using_amount(&invoice, amount_msat, None)
                     };
                     match result {
                         Ok(payment_id) => {
-                            // Determine amount_msat for the pending record
-                            let amount_msat = if let Some(amt) = invoice.amount_milli_satoshis() {
-                                amt
-                            } else {
-                                (self.send_amount.trim().parse::<f64>().unwrap_or(0.0)
-                                    * 100_000_000_000.0) as u64
-                            };
                             let (amount_usd, btc_price_opt) = {
                                 let sc = self.stable_channel.lock().unwrap();
                                 let price = sc.latest_price;
@@ -3508,9 +3417,16 @@ impl UserApp {
 
     /// Format a price with comma separators and 2 decimal places (e.g., 100000.50 -> "$100,000.50")
     fn format_price(price: f64) -> String {
-        let price_int = price as i64;
-        let decimal_part = ((price - price_int as f64) * 100.0).round() as i64;
-        let formatted = price_int
+        if !price.is_finite() {
+            return "$0.00".to_string();
+        }
+
+        let total_cents = (price * 100.0).round() as i64;
+        let sign = if total_cents < 0 { "-" } else { "" };
+        let absolute_cents = total_cents.unsigned_abs();
+        let dollars = absolute_cents / 100;
+        let cents = absolute_cents % 100;
+        let formatted = dollars
             .to_string()
             .as_bytes()
             .rchunks(3)
@@ -3518,7 +3434,7 @@ impl UserApp {
             .map(|chunk| std::str::from_utf8(chunk).unwrap())
             .collect::<Vec<_>>()
             .join(",");
-        format!("${}.{:02}", formatted, decimal_part.abs())
+        format!("{sign}${formatted}.{cents:02}")
     }
 
     fn format_chart_price(price: f64) -> String {
@@ -7820,6 +7736,13 @@ impl UserApp {
                         let img = egui::Image::from_texture(qr).max_size(egui::vec2(180.0, 180.0));
                         ui.add(img);
                     }
+                    if !self.lightning_receive_error.is_empty() {
+                        ui.label(
+                            RichText::new(&self.lightning_receive_error)
+                                .size(12.0)
+                                .color(theme::DANGER_HOVER),
+                        );
+                    }
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(
@@ -9722,10 +9645,36 @@ fn channel_balance_split(
     (stable_sats, native_sats, native_usd)
 }
 
+fn collapse_double_paste(input: String) -> String {
+    let len = input.len();
+    let midpoint = len / 2;
+    if len > 60 && len.is_multiple_of(2) && input.is_char_boundary(midpoint) {
+        let (first, second) = input.split_at(midpoint);
+        if first == second {
+            return first.to_string();
+        }
+    }
+    input
+}
+
+fn btc_amount_to_msat(input: &str) -> Option<u64> {
+    let btc = input.trim().parse::<f64>().ok()?;
+    if !btc.is_finite() || btc <= 0.0 || btc > 21_000_000.0 {
+        return None;
+    }
+
+    let amount_msat = (btc * SATS_IN_BTC as f64 * 1000.0).round();
+    if !amount_msat.is_finite() || amount_msat < 1.0 || amount_msat > u64::MAX as f64 {
+        return None;
+    }
+    Some(amount_msat as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_balance_split, floor_usd_cents, parse_trade_usd_cents, sats_for_usd_cents,
+        btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
+        parse_trade_usd_cents, sats_for_usd_cents, UserApp,
     };
 
     #[test]
@@ -9805,5 +9754,45 @@ mod tests {
         assert_eq!(stable, 57_444);
         assert_eq!(native, 0);
         assert_eq!(usd, 0.0);
+    }
+
+    #[test]
+    fn double_paste_is_collapsed() {
+        let invoice = "lnbc".repeat(20);
+        assert_eq!(
+            collapse_double_paste(format!("{invoice}{invoice}")),
+            invoice
+        );
+    }
+
+    #[test]
+    fn double_paste_check_handles_utf8_midpoint() {
+        let input = format!("{}\u{20ac}{}", "a".repeat(30), "a".repeat(31));
+        assert_eq!(input.len(), 64);
+        assert!(!input.is_char_boundary(input.len() / 2));
+        assert_eq!(collapse_double_paste(input.clone()), input);
+    }
+
+    #[test]
+    fn oversized_qr_payload_is_rejected_without_panicking() {
+        let ctx = eframe::egui::Context::default();
+        assert!(UserApp::generate_qr_texture(&"x".repeat(10_000), &ctx, "test_qr").is_none());
+    }
+
+    #[test]
+    fn variable_invoice_amount_uses_btc_units_once() {
+        assert_eq!(btc_amount_to_msat("0.0001"), Some(10_000_000));
+        assert_eq!(btc_amount_to_msat("1"), Some(100_000_000_000));
+        assert_eq!(btc_amount_to_msat("NaN"), None);
+        assert_eq!(btc_amount_to_msat("inf"), None);
+        assert_eq!(btc_amount_to_msat("0"), None);
+    }
+
+    #[test]
+    fn price_formatting_carries_rounded_cents() {
+        assert_eq!(UserApp::format_price(99.999), "$100.00");
+        assert_eq!(UserApp::format_price(1_234.5), "$1,234.50");
+        assert_eq!(UserApp::format_price(-0.005), "-$0.01");
+        assert_eq!(UserApp::format_price(f64::NAN), "$0.00");
     }
 }

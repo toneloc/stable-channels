@@ -8,6 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ureq::Agent;
 
+const MIN_PLAUSIBLE_BTC_USD_PRICE: f64 = 1_000.0;
+const MAX_PLAUSIBLE_BTC_USD_PRICE: f64 = 10_000_000.0;
+const MIN_AGREEING_PRICE_FEEDS: usize = 2;
+const MAX_FEED_DEVIATION_RATIO: f64 = 0.05;
+const MAX_MEDIAN_MOVE_RATIO: f64 = 0.10;
+
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
         price: 0.0,
@@ -90,6 +96,82 @@ pub fn bounded_agent() -> Agent {
         .build()
 }
 
+fn is_plausible_price(price: f64) -> bool {
+    price.is_finite()
+        && (MIN_PLAUSIBLE_BTC_USD_PRICE..=MAX_PLAUSIBLE_BTC_USD_PRICE).contains(&price)
+}
+
+fn parse_price_value(value: &Value) -> Option<f64> {
+    let price = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))?;
+    is_plausible_price(price).then_some(price)
+}
+
+fn calculate_median_price(prices: &[(String, f64)]) -> Option<f64> {
+    let mut price_values: Vec<f64> = prices
+        .iter()
+        .map(|(_, price)| *price)
+        .filter(|price| is_plausible_price(*price))
+        .collect();
+    price_values.sort_by(f64::total_cmp);
+
+    let midpoint = price_values.len() / 2;
+    let median = if price_values.len().is_multiple_of(2) {
+        let lower = *price_values.get(midpoint.checked_sub(1)?)?;
+        let upper = *price_values.get(midpoint)?;
+        lower + (upper - lower) / 2.0
+    } else {
+        *price_values.get(midpoint)?
+    };
+    is_plausible_price(median).then_some(median)
+}
+
+fn relative_deviation(value: f64, reference: f64) -> f64 {
+    if !is_plausible_price(value) || !is_plausible_price(reference) {
+        return f64::INFINITY;
+    }
+    (value - reference).abs() / reference
+}
+
+fn validate_price_consensus(
+    prices: &[(String, f64)],
+    last_trusted_price: Option<f64>,
+) -> Result<f64, String> {
+    let initial_median = calculate_median_price(prices)
+        .ok_or_else(|| "No plausible BTC/USD prices were returned".to_string())?;
+    let agreeing_prices: Vec<(String, f64)> = prices
+        .iter()
+        .filter(|(_, price)| {
+            is_plausible_price(*price)
+                && relative_deviation(*price, initial_median) <= MAX_FEED_DEVIATION_RATIO
+        })
+        .cloned()
+        .collect();
+
+    if agreeing_prices.len() < MIN_AGREEING_PRICE_FEEDS {
+        return Err(format!(
+            "Price consensus requires at least {MIN_AGREEING_PRICE_FEEDS} agreeing feeds; got {}",
+            agreeing_prices.len()
+        ));
+    }
+
+    let median = calculate_median_price(&agreeing_prices)
+        .ok_or_else(|| "Agreeing feeds did not produce a valid median".to_string())?;
+    if let Some(last_price) = last_trusted_price.filter(|price| is_plausible_price(*price)) {
+        let deviation = relative_deviation(median, last_price);
+        if deviation > MAX_MEDIAN_MOVE_RATIO {
+            return Err(format!(
+                "BTC/USD median moved {:.2}% from the last trusted price, above the {:.2}% limit",
+                deviation * 100.0,
+                MAX_MEDIAN_MOVE_RATIO * 100.0
+            ));
+        }
+    }
+
+    Ok(median)
+}
+
 pub fn fetch_prices(
     agent: &Agent,
     price_feeds: &[PriceFeed],
@@ -150,20 +232,11 @@ pub fn fetch_prices(
             }
         }
 
-        if let Some(price) = data.as_f64() {
+        if let Some(price) = parse_price_value(data) {
             prices.push((price_feed.name.clone(), price));
-        } else if let Some(price_str) = data.as_str() {
-            if let Ok(price) = price_str.parse::<f64>() {
-                prices.push((price_feed.name.clone(), price));
-            } else {
-                eprintln!(
-                    "Invalid price format for {}: {}",
-                    price_feed.name, price_str
-                );
-            }
         } else {
             eprintln!(
-                "Price data not found or invalid format for {}",
+                "Price data for {} is missing, malformed, or outside the plausibility band",
                 price_feed.name
             );
         }
@@ -184,13 +257,14 @@ pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
         println!("{:<25} ${:>1.2}", feed_name, price);
     }
 
-    let mut price_values: Vec<f64> = prices.iter().map(|(_, price)| *price).collect();
-    price_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_price = if price_values.len().is_multiple_of(2) {
-        (price_values[price_values.len() / 2 - 1] + price_values[price_values.len() / 2]) / 2.0
-    } else {
-        price_values[price_values.len() / 2]
-    };
+    let cached_price = get_cached_price_no_fetch();
+    let last_trusted_price = is_plausible_price(cached_price).then_some(cached_price);
+    let median_price = validate_price_consensus(&prices, last_trusted_price).map_err(
+        |message| -> Box<dyn Error> {
+            eprintln!("Rejected BTC/USD price update: {message}");
+            message.into()
+        },
+    )?;
 
     println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
     Ok(median_price)
@@ -353,6 +427,75 @@ mod tests {
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD");
         assert_eq!(url, "https://example.com/usd/USD");
+    }
+
+    #[test]
+    fn test_price_parser_rejects_non_finite_and_non_positive_values() {
+        for value in [
+            Value::String("NaN".to_string()),
+            Value::String("inf".to_string()),
+            Value::String("-inf".to_string()),
+            Value::String("0".to_string()),
+            Value::String("-1".to_string()),
+            Value::String("999.99".to_string()),
+            Value::String("10000000.01".to_string()),
+            Value::Null,
+        ] {
+            assert_eq!(parse_price_value(&value), None);
+        }
+
+        assert_eq!(
+            parse_price_value(&Value::String("50000.5".to_string())),
+            Some(50000.5)
+        );
+    }
+
+    #[test]
+    fn test_median_filters_invalid_prices_without_panicking() {
+        let prices = vec![
+            ("nan".to_string(), f64::NAN),
+            ("infinity".to_string(), f64::INFINITY),
+            ("zero".to_string(), 0.0),
+            ("negative".to_string(), -1.0),
+            ("low".to_string(), 40_000.0),
+            ("high".to_string(), 60_000.0),
+        ];
+        assert_eq!(calculate_median_price(&prices), Some(50_000.0));
+
+        let invalid = vec![("nan".to_string(), f64::NAN)];
+        assert_eq!(calculate_median_price(&invalid), None);
+    }
+
+    #[test]
+    fn test_price_consensus_requires_two_agreeing_feeds() {
+        let single = vec![("only".to_string(), 60_000.0)];
+        assert!(validate_price_consensus(&single, None).is_err());
+
+        let split = vec![
+            ("low".to_string(), 40_000.0),
+            ("high".to_string(), 80_000.0),
+        ];
+        assert!(validate_price_consensus(&split, None).is_err());
+    }
+
+    #[test]
+    fn test_price_consensus_ignores_outlier() {
+        let prices = vec![
+            ("a".to_string(), 65_900.0),
+            ("b".to_string(), 66_000.0),
+            ("outlier".to_string(), 1_000_000.0),
+        ];
+        assert_eq!(validate_price_consensus(&prices, None), Ok(65_950.0));
+    }
+
+    #[test]
+    fn test_price_consensus_rejects_large_move_from_last_trusted_price() {
+        let prices = vec![("a".to_string(), 65_900.0), ("b".to_string(), 66_000.0)];
+        assert!(validate_price_consensus(&prices, Some(50_000.0)).is_err());
+        assert_eq!(
+            validate_price_consensus(&prices, Some(65_000.0)),
+            Ok(65_950.0)
+        );
     }
 
     // Integration test (requires network)
