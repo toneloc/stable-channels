@@ -231,3 +231,10 @@ umbrel/test/.sim-app-data/
 # Local umbrelOS test state (stateful — NOT in tmp) and generated store repo
 umbrel/test/.umbrelos-data/
 umbrel/test/store-server/store-repo/
+
+# Runtime logs, scratch text dumps, and local certs — regenerated per run, never
+# commit. Broad by request: any *.txt / *.crt is ignored (use `git add -f` to
+# force-add a legit one). chart.html is a one-off scratch page, kept explicit.
+*.txt
+*.crt
+/chart.html
