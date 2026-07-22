@@ -161,6 +161,7 @@ pub struct PendingTrade {
 struct PendingTradePayment {
     new_expected_usd: f64,
     price: f64,
+    backing_sats: Option<u64>,
     trade_db_id: i64,
     action: String,
 }
@@ -1880,32 +1881,67 @@ impl UserApp {
 
     /// Send a trade message to the LSP with the new stabilized USD amount.
     /// The fee is sent as the keysend payment amount.
-    /// Returns the PaymentId on success so the caller can track it.
+    /// Returns the PaymentId and signed backing allocation on success so the caller can track it.
     fn send_trade(
         &mut self,
         new_expected_usd: f64,
         fee_usd: f64,
         trade_action: &str,
         trade_price: f64,
-    ) -> Option<PaymentId> {
-        // Grab channel identifiers and counterparty from StableChannel. The fee and the local
-        // settlement use the quote the user reviewed on the confirmation screen.
-        let (channel_id_str, user_channel_id_str, counterparty, old_expected_usd) = {
-            let sc = self.stable_channel.lock().unwrap();
+    ) -> Option<(PaymentId, u64)> {
+        // The fee is a direct keysend amount. Calculate its whole-sat channel impact before
+        // signing the allocation so both peers derive against the same post-settlement balance.
+        let fee_sats = if trade_price > 0.0 && fee_usd > 0.0 {
+            (fee_usd / trade_price * SATS_IN_BTC as f64) as u64
+        } else {
+            0
+        };
+        let fee_msats = fee_sats.saturating_mul(1000);
+        let amt_msat = fee_msats.max(1);
+
+        // Refresh from this wallet's LDK node, then sign one exact allocation at the quote the
+        // user reviewed. The LSP independently validates this against its LDK view and price.
+        let (
+            channel_id_str,
+            user_channel_id_str,
+            counterparty,
+            old_expected_usd,
+            post_fee_receiver_sats,
+            backing_sats,
+        ) = {
+            let mut sc = self.stable_channel.lock().unwrap();
+            stable::update_balances(&self.node, &mut sc);
+            let post_fee_receiver_sats = sc.stable_receiver_btc.sats.saturating_sub(fee_sats);
+            let backing_sats = stable::trade_backing_sats(
+                post_fee_receiver_sats,
+                new_expected_usd,
+                trade_price,
+            );
             (
                 sc.channel_id.to_string(),
                 format!("{}", sc.user_channel_id),
                 sc.counterparty,
                 sc.expected_usd.0,
+                post_fee_receiver_sats,
+                backing_sats,
             )
         };
 
-        // Build payload with channel_id (shared between both nodes) for LSP lookup
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // All allocation inputs are signed. A different price observed later cannot alter this
+        // already-reviewed trade.
         let payload = json!({
             "type": TRADE_MESSAGE_TYPE,
             "channel_id": channel_id_str,
             "user_channel_id": user_channel_id_str,
             "expected_usd": new_expected_usd,
+            "quote_price": trade_price,
+            "backing_sats": backing_sats,
+            "ts": ts,
         });
 
         // Serialize payload and sign it with the node's key
@@ -1926,16 +1962,6 @@ impl UserApp {
             type_num: STABLE_CHANNEL_TLV_TYPE,
             value: signed_str.as_bytes().to_vec(),
         };
-
-        // Calculate fee in msats (sent to LSP as keysend amount)
-        let fee_msats = if trade_price > 0.0 && fee_usd > 0.0 {
-            let fee_btc = fee_usd / trade_price;
-            let fee_sats = (fee_btc * 100_000_000.0) as u64;
-            fee_sats * 1000 // convert to msats
-        } else {
-            1 // minimum 1 msat if no fee
-        };
-        let amt_msat: u64 = fee_msats.max(1);
 
         match self.node.spontaneous_payment().send_with_custom_tlvs(
             amt_msat,
@@ -1959,12 +1985,15 @@ impl UserApp {
                         "new_expected_usd": new_expected_usd,
                         "fee_usd": fee_usd,
                         "fee_msats": amt_msat,
-                        "btc_price": trade_price,
+                        "quote_price": trade_price,
+                        "post_fee_receiver_sats": post_fee_receiver_sats,
+                        "backing_sats": backing_sats,
+                        "ts": ts,
                         "status": "pending",
                     }),
                 );
 
-                Some(payment_id)
+                Some((payment_id, backing_sats))
             }
             Err(e) => {
                 self.status_message = format!("Failed to send order: {}", e);
@@ -2145,8 +2174,10 @@ impl UserApp {
         action: &str,
         amount_usd: f64,
         amount_btc: f64,
+        btc_price: f64,
         fee_usd: f64,
         new_expected_usd: f64,
+        new_backing_sats: Option<u64>,
         payment_id: Option<&str>,
         status: &str,
     ) -> i64 {
@@ -2160,9 +2191,10 @@ impl UserApp {
             action,
             amount_usd,
             amount_btc,
-            self.btc_price,
+            btc_price,
             fee_usd,
             new_expected_usd,
+            new_backing_sats,
             payment_id,
             status,
         ) {
@@ -2419,11 +2451,25 @@ impl UserApp {
                             if let Some(expected_usd) =
                                 payload.get("expected_usd").and_then(|v| v.as_f64())
                             {
+                                if expected_usd < 0.0 || !expected_usd.is_finite() {
+                                    continue;
+                                }
+                                let backing_sats =
+                                    payload.get("backing_sats").and_then(|v| v.as_u64());
                                 let mut sc = self.stable_channel.lock().unwrap();
                                 stable::update_balances(&self.node, &mut sc);
                                 let price = sc.latest_price;
                                 let old_expected = sc.expected_usd.0;
-                                stable::apply_trade(&mut sc, expected_usd, price);
+                                let live_receiver_sats = sc.stable_receiver_btc.sats;
+                                if let Some(backing_sats) = backing_sats {
+                                    stable::apply_trade_allocation(
+                                        &mut sc,
+                                        expected_usd,
+                                        backing_sats,
+                                    );
+                                } else {
+                                    stable::apply_trade(&mut sc, expected_usd, price);
+                                }
                                 drop(sc);
                                 self.save_channel_settings();
 
@@ -2432,6 +2478,8 @@ impl UserApp {
                                     json!({
                                         "old_expected_usd": old_expected,
                                         "new_expected_usd": expected_usd,
+                                        "backing_sats": backing_sats,
+                                        "live_receiver_sats": live_receiver_sats,
                                         "btc_price": price,
                                         "payment_hash": &payment_hash_str,
                                     }),
@@ -2627,6 +2675,7 @@ impl UserApp {
                                 pending_trade = Some(PendingTradePayment {
                                     new_expected_usd: row.new_expected_usd,
                                     price: row.btc_price,
+                                    backing_sats: row.new_backing_sats,
                                     trade_db_id: row.id,
                                     action: row.action,
                                 });
@@ -2641,7 +2690,15 @@ impl UserApp {
                             // The trade fee has left the channel. Apply against the post-fee live
                             // balance so native_sats cannot retain the pre-settlement amount.
                             stable::update_balances(&self.node, &mut sc);
-                            stable::apply_trade(&mut sc, trade.new_expected_usd, trade.price);
+                            if let Some(backing_sats) = trade.backing_sats {
+                                stable::apply_trade_allocation(
+                                    &mut sc,
+                                    trade.new_expected_usd,
+                                    backing_sats,
+                                );
+                            } else {
+                                stable::apply_trade(&mut sc, trade.new_expected_usd, trade.price);
+                            }
                         }
                         self.save_channel_settings();
                         let _ = self.db.update_trade_status(trade.trade_db_id, "completed");
@@ -2652,6 +2709,7 @@ impl UserApp {
                                 "payment_hash": payment_hash_str,
                                 "action": trade.action,
                                 "new_expected_usd": trade.new_expected_usd,
+                                "backing_sats": trade.backing_sats,
                                 "fee_paid_msat": fee_paid_msat,
                             }),
                         );
@@ -2673,107 +2731,204 @@ impl UserApp {
                             sc.latest_price
                         };
 
-                        // Stability payments are already balanced by check_stability; only genuine
-                        // user sends reconcile against the stable position here.
-                        let needs_reconcile =
-                            !self.db.is_stability_payment(&payment_hash_str).unwrap_or(false);
+                        // LDK's PaymentId is the key persisted when a send starts. It equals the
+                        // payment hash for BOLT11/keysend today, but not for every payment kind.
+                        let event_id = payment_id
+                            .map(|pid| format!("{pid}"))
+                            .unwrap_or_else(|| payment_hash_str.clone());
 
-                        if needs_reconcile && price <= 0.0 {
-                            // No price yet — we can't size the peg overflow. Withhold the ack so LDK
-                            // re-delivers and we reconcile once the price feed returns; the background
-                            // loop keeps refreshing it, so redelivery makes progress. Nothing has been
-                            // deducted or removed from the pending map, so the retry is clean.
-                            ack = false;
-                            audit_event(
-                                "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
-                                json!({ "payment_hash": payment_hash_str }),
-                            );
-                        } else {
-                            let pending =
-                                payment_id.and_then(|pid| self.pending_payments.remove(&pid));
-                            let payment_sent_message = pending
-                                .as_ref()
-                                .map(|p| {
-                                    p.amount_usd
-                                        .map(|usd| {
-                                            format!("Payment sent: {}", Self::format_price(usd))
-                                        })
-                                        .unwrap_or_else(|| {
-                                            format!(
-                                                "Payment sent: {}",
-                                                Self::format_msats_as_btc(p.amount_msat)
-                                            )
-                                        })
-                                })
-                                .unwrap_or_else(|| "Payment sent".to_string());
+                        // A DB lookup error is not evidence that this is a user payment. Deferring
+                        // avoids incorrectly reconciling a stability payment during a DB outage.
+                        match self.db.is_stability_payment(&event_id) {
+                            Err(e) => {
+                                ack = false;
+                                audit_event(
+                                    "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "payment_id": event_id,
+                                        "error": e.to_string(),
+                                    }),
+                                );
+                                self.status_message =
+                                    "Payment confirmed but accounting could not be saved; retrying"
+                                        .to_string();
+                            }
+                            Ok(is_stability_payment) => {
+                                let needs_reconcile = !is_stability_payment;
 
-                            audit_event(
-                                "PAYMENT_SUCCESSFUL",
-                                json!({
-                                    "payment_hash": payment_hash_str,
-                                    "fee_paid_msat": fee_paid_msat,
-                                }),
-                            );
-
-                            if needs_reconcile {
-                                let mut sc = self.stable_channel.lock().unwrap();
-                                let old_expected = sc.expected_usd.0;
-                                if let Some(usd_deducted) =
-                                    stable::reconcile_outgoing(&mut sc, price)
-                                {
+                                if needs_reconcile && price <= 0.0 {
+                                    // No price yet — we can't size the peg overflow. Withhold the ack
+                                    // so LDK re-delivers after the background price refresh. No state
+                                    // was deducted or removed from the pending map, so retry is clean.
+                                    ack = false;
                                     audit_event(
-                                        "OUTGOING_STABLE_DEDUCTED",
+                                        "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
                                         json!({
                                             "payment_hash": payment_hash_str,
-                                            "usd_deducted": usd_deducted,
-                                            "old_expected_usd": old_expected,
-                                            "new_expected_usd": sc.expected_usd.0,
-                                            "btc_price": price,
+                                            "payment_id": event_id,
                                         }),
                                     );
-                                }
-                            }
+                                } else {
+                                    let pending = payment_id
+                                        .and_then(|pid| self.pending_payments.get(&pid).cloned());
+                                    let payment_sent_message = pending
+                                        .as_ref()
+                                        .map(|p| {
+                                            p.amount_usd
+                                                .map(|usd| {
+                                                    format!(
+                                                        "Payment sent: {}",
+                                                        Self::format_price(usd)
+                                                    )
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    format!(
+                                                        "Payment sent: {}",
+                                                        Self::format_msats_as_btc(p.amount_msat)
+                                                    )
+                                                })
+                                        })
+                                        .unwrap_or_else(|| "Payment sent".to_string());
 
-                            if let Some(p) = pending {
-                                // Update existing pending record to completed + fee
-                                let _ = self.db.update_payment_status(
-                                    p.payment_db_id,
-                                    "completed",
-                                    fee_paid_msat,
-                                );
-                            } else {
-                                // Try to confirm a pending stability payment by payment_hash
-                                let updated = self
-                                    .db
-                                    .update_payment_status_by_pid(
-                                        &payment_hash_str,
-                                        "completed",
-                                        fee_paid_msat,
-                                    )
-                                    .unwrap_or(0);
-                                if updated == 0
-                                    && !self.db.payment_exists(&payment_hash_str).unwrap_or(false)
-                                {
-                                    // Completely unknown payment — record as completed
-                                    let _ = self.db.record_payment(
-                                        Some(&payment_hash_str),
-                                        "lightning",
-                                        "sent",
-                                        0,
-                                        None,
-                                        if price > 0.0 { Some(price) } else { None },
-                                        None,
-                                        "completed",
-                                        None,
-                                        None,
+                                    audit_event(
+                                        "PAYMENT_SUCCESSFUL",
+                                        json!({
+                                            "payment_hash": payment_hash_str,
+                                            "payment_id": event_id,
+                                            "fee_paid_msat": fee_paid_msat,
+                                        }),
                                     );
+
+                                    if needs_reconcile {
+                                        // Hold the channel lock through the short SQLite transaction.
+                                        // On failure restore the pre-reconcile snapshot and leave the
+                                        // event unacked. A durable marker handles post-COMMIT replay.
+                                        let persisted = {
+                                            let mut sc = self.stable_channel.lock().unwrap();
+                                            let before_reconcile = sc.clone();
+                                            let old_expected_usd = sc.expected_usd.0;
+                                            let usd_deducted =
+                                                stable::reconcile_outgoing(&mut sc, price);
+
+                                            // Native-only sends do not change the peg, but their
+                                            // settled native allocation must still be persisted.
+                                            sc.native_sats = sc
+                                                .stable_receiver_btc
+                                                .sats
+                                                .saturating_sub(sc.backing_sats);
+                                            stable::recompute_native(&mut sc);
+
+                                            let result = self.db.persist_outgoing_reconciliation(
+                                                &event_id,
+                                                pending.as_ref().map(|p| p.payment_db_id),
+                                                fee_paid_msat,
+                                                &sc.channel_id.to_string(),
+                                                &format!("{}", sc.user_channel_id),
+                                                sc.expected_usd.0,
+                                                sc.backing_sats,
+                                                sc.native_sats,
+                                                sc.note.as_deref(),
+                                                if price > 0.0 { Some(price) } else { None },
+                                            );
+
+                                            match result {
+                                                Ok(true) => Ok((
+                                                    true,
+                                                    usd_deducted,
+                                                    old_expected_usd,
+                                                    sc.expected_usd.0,
+                                                )),
+                                                Ok(false) => {
+                                                    *sc = before_reconcile;
+                                                    Ok((
+                                                        false,
+                                                        None,
+                                                        old_expected_usd,
+                                                        old_expected_usd,
+                                                    ))
+                                                }
+                                                Err(e) => {
+                                                    *sc = before_reconcile;
+                                                    Err(e)
+                                                }
+                                            }
+                                        };
+
+                                        match persisted {
+                                            Ok((
+                                                applied,
+                                                usd_deducted,
+                                                old_expected_usd,
+                                                new_expected_usd,
+                                            )) => {
+                                                if let Some(pid) = payment_id {
+                                                    self.pending_payments.remove(&pid);
+                                                }
+                                                if let Some(usd_deducted) = usd_deducted {
+                                                    audit_event(
+                                                        "OUTGOING_STABLE_DEDUCTED",
+                                                        json!({
+                                                            "payment_hash": payment_hash_str,
+                                                            "payment_id": event_id,
+                                                            "usd_deducted": usd_deducted,
+                                                            "old_expected_usd": old_expected_usd,
+                                                            "new_expected_usd": new_expected_usd,
+                                                            "btc_price": price,
+                                                        }),
+                                                    );
+                                                }
+                                                audit_event(
+                                                    if applied {
+                                                        "OUTGOING_RECONCILE_COMMITTED"
+                                                    } else {
+                                                        "OUTGOING_RECONCILE_REPLAY"
+                                                    },
+                                                    json!({
+                                                        "payment_hash": payment_hash_str,
+                                                        "payment_id": event_id,
+                                                    }),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                ack = false;
+                                                audit_event(
+                                                    "OUTGOING_RECONCILE_PERSIST_FAILED",
+                                                    json!({
+                                                        "payment_hash": payment_hash_str,
+                                                        "payment_id": event_id,
+                                                        "error": e.to_string(),
+                                                    }),
+                                                );
+                                                self.status_message = "Payment confirmed but accounting could not be saved; retrying".to_string();
+                                            }
+                                        }
+                                    } else if let Some(p) = pending {
+                                        // Stability payments were accounted when sent. Only complete
+                                        // their history row here.
+                                        let _ = self.db.update_payment_status(
+                                            p.payment_db_id,
+                                            "completed",
+                                            fee_paid_msat,
+                                        );
+                                        if let Some(pid) = payment_id {
+                                            self.pending_payments.remove(&pid);
+                                        }
+                                    } else {
+                                        let _ = self.db.update_payment_status_by_pid(
+                                            &event_id,
+                                            "completed",
+                                            fee_paid_msat,
+                                        );
+                                    }
+
+                                    if ack {
+                                        self.update_balances();
+                                        self.status_message = payment_sent_message.clone();
+                                        self.show_toast(&payment_sent_message, "-");
+                                    }
                                 }
                             }
-
-                            self.save_channel_settings();
-                            self.update_balances();
-                            self.status_message = payment_sent_message.clone();
-                            self.show_toast(&payment_sent_message, "-");
                         }
                     }
                 }
@@ -8928,14 +9083,18 @@ impl UserApp {
         } else {
             0.0
         };
-        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "buy", btc_price) {
+        if let Some((payment_id, backing_sats)) =
+            self.send_trade(new_expected_usd, fee_usd, "buy", btc_price)
+        {
             let payment_id_str = format!("{payment_id}");
             let trade_db_id = self.record_trade(
                 "buy",
                 amount_usd,
                 btc_amount,
+                btc_price,
                 fee_usd,
                 new_expected_usd,
+                Some(backing_sats),
                 Some(&payment_id_str),
                 "pending",
             );
@@ -8944,6 +9103,7 @@ impl UserApp {
                 PendingTradePayment {
                     new_expected_usd,
                     price: btc_price,
+                    backing_sats: Some(backing_sats),
                     trade_db_id,
                     action: "buy".to_string(),
                 },
@@ -8988,14 +9148,18 @@ impl UserApp {
         let new_expected_usd = current_expected_usd + net_amount;
 
         let btc_amount = btc_sats as f64 / SATS_IN_BTC as f64;
-        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "sell", btc_price) {
+        if let Some((payment_id, backing_sats)) =
+            self.send_trade(new_expected_usd, fee_usd, "sell", btc_price)
+        {
             let payment_id_str = format!("{payment_id}");
             let trade_db_id = self.record_trade(
                 "sell",
                 amount_usd,
                 btc_amount,
+                btc_price,
                 fee_usd,
                 new_expected_usd,
+                Some(backing_sats),
                 Some(&payment_id_str),
                 "pending",
             );
@@ -9004,6 +9168,7 @@ impl UserApp {
                 PendingTradePayment {
                     new_expected_usd,
                     price: btc_price,
+                    backing_sats: Some(backing_sats),
                     trade_db_id,
                     action: "sell".to_string(),
                 },

@@ -191,6 +191,45 @@ pub fn normalize_backing_sats(
     }
 }
 
+/// Derive the stable backing allocation for a trade at the signed quote price.
+///
+/// The result is clamped to the receiver's post-settlement balance. Sub-cent native residue is
+/// absorbed into the stable side so a full BTC-to-USD trade has no floating native remainder.
+pub fn trade_backing_sats(
+    receiver_sats: u64,
+    new_expected_usd: f64,
+    quote_price: f64,
+) -> u64 {
+    if receiver_sats == 0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd <= 0.0
+        || !quote_price.is_finite()
+        || quote_price <= 0.0
+    {
+        return 0;
+    }
+
+    let derived_backing = (new_expected_usd / quote_price * SATS_IN_BTC as f64) as u64;
+    normalize_backing_sats(
+        receiver_sats,
+        derived_backing.min(receiver_sats),
+        new_expected_usd,
+        quote_price,
+    )
+}
+
+/// Apply a previously agreed trade allocation without repricing it.
+///
+/// `backing_sats` is part of the signed trade intent. A peer may validate that intent against its
+/// own price and live LDK balance first, but once accepted it must not derive a different allocation
+/// from a later price snapshot.
+pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, backing_sats: u64) {
+    sc.expected_usd = USD::from_f64(new_expected_usd);
+    sc.backing_sats = backing_sats;
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+    recompute_native(sc);
+}
+
 /// Apply a trade — set new expected_usd and recalculate backing_sats + native_sats.
 ///
 /// Used after buy/sell trades and when the LSP processes a trade message.
@@ -200,20 +239,12 @@ pub fn normalize_backing_sats(
 pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
     sc.expected_usd = USD::from_f64(new_expected_usd);
     if price > 0.0 {
-        let btc_amount = new_expected_usd / price;
-        let derived_backing = (btc_amount * 100_000_000.0) as u64;
         let receiver_sats = sc.stable_receiver_btc.sats;
-        let clamped_backing = if receiver_sats > 0 {
-            derived_backing.min(receiver_sats)
+        sc.backing_sats = if receiver_sats > 0 {
+            trade_backing_sats(receiver_sats, new_expected_usd, price)
         } else {
-            derived_backing
+            (new_expected_usd / price * SATS_IN_BTC as f64) as u64
         };
-        sc.backing_sats = normalize_backing_sats(
-            receiver_sats,
-            clamped_backing,
-            new_expected_usd,
-            price,
-        );
     }
     // native_sats is everything NOT backing the stable position
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
@@ -961,6 +992,32 @@ mod tests {
         apply_trade(&mut sc, 100.0, 100_000.0);
 
         assert_eq!(sc.backing_sats, 95_000);
+        assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn signed_trade_allocation_is_not_repriced_by_the_applying_peer() {
+        let receiver_sats = 50_000;
+        let quote_price = 100_000.0;
+        let backing_sats = trade_backing_sats(receiver_sats, 49.95, quote_price);
+        assert_eq!(backing_sats, 49_950);
+
+        let mut sc = test_sc(0.0, 100_500.0, receiver_sats);
+        apply_trade_allocation(&mut sc, 49.95, backing_sats);
+
+        assert_eq!(sc.expected_usd.0, 49.95);
+        assert_eq!(sc.backing_sats, 49_950);
+        assert_eq!(sc.native_sats, 50);
+    }
+
+    #[test]
+    fn signed_full_peg_allocation_absorbs_sub_cent_residue() {
+        let backing_sats = trade_backing_sats(57_444, 38.055025828575, 66_250.21);
+        assert_eq!(backing_sats, 57_444);
+
+        let mut sc = test_sc(0.0, 66_400.0, 57_444);
+        apply_trade_allocation(&mut sc, 38.055025828575, backing_sats);
+        assert_eq!(sc.backing_sats, 57_444);
         assert_eq!(sc.native_sats, 0);
     }
 
