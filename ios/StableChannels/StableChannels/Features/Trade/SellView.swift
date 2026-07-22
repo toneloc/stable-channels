@@ -117,7 +117,7 @@ struct SellView: View {
 
     private var confirmScreen: some View {
         VStack(spacing: 20) {
-            Text(String(localized: "title_confirm_sell", defaultValue: "Confirm Sell"))
+            Text(String(localized: "title_confirm_sell", defaultValue: "Review BTC -> USD"))
                 .font(.title2.bold())
             Text(String(localized: "subtitle_manage_exposure", defaultValue: "Manage your BTC exposure"))
                 .font(.subheadline)
@@ -162,7 +162,7 @@ struct SellView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                 } else {
-                    Text(String(localized: "title_sell_btc", defaultValue: "BTC → USD"))
+                    Text(String(localized: "button_confirm_order", defaultValue: "Confirm Order"))
                         .frame(maxWidth: .infinity)
                 }
             }

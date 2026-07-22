@@ -550,7 +550,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Close Channel"
+            "value" : "Close channel"
           }
         },
         "es" : {
@@ -621,7 +621,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Are you sure you want to close this channel?"
+            "value" : "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
           }
         },
         "es" : {
@@ -692,7 +692,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Close Channel?"
+            "value" : "Close channel"
           }
         },
         "es" : {
@@ -2247,7 +2247,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Close Channel"
+            "value" : "Close channel"
           }
         },
         "es" : {
@@ -8837,7 +8837,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Invoice Address"
+            "value" : "To"
           }
         },
         "es" : {
@@ -9121,7 +9121,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Receive over Lightning to create your Stable Wallet"
+            "value" : "Get your first payment to activate your account"
           }
         },
         "es" : {
@@ -10314,7 +10314,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Make your first payment to activate the channel"
+            "value" : "Get your first payment to activate your account"
           }
         },
         "es" : {
@@ -15355,7 +15355,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Onchain"
+            "value" : "Onchain Account"
           }
         },
         "es" : {
@@ -19410,7 +19410,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "lnbc1..."
+            "value" : "Invoice or onchain address"
           }
         },
         "es" : {
@@ -25684,7 +25684,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Confirm USD → BTC"
+            "value" : "Review USD -> BTC"
           }
         },
         "es" : {
@@ -25755,7 +25755,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Confirm BTC → USD"
+            "value" : "Review BTC -> USD"
           }
         },
         "es" : {

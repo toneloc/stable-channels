@@ -168,6 +168,8 @@ struct PendingTradePayment {
 #[derive(Clone, Debug)]
 struct PendingPayment {
     payment_db_id: i64,
+    amount_msat: u64,
+    amount_usd: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1193,8 +1195,20 @@ impl UserApp {
     pub fn pay_invoice(&mut self) -> bool {
         match Bolt11Invoice::from_str(&self.invoice_to_pay) {
             Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
-                Ok(payment_id) => {
-                    self.status_message = format!("Payment sent, ID: {}", payment_id);
+                Ok(_payment_id) => {
+                    let amount_text = invoice
+                        .amount_milli_satoshis()
+                        .map(|msat| {
+                            if self.btc_price > 0.0 {
+                                let usd =
+                                    msat as f64 / 1000.0 / SATS_IN_BTC as f64 * self.btc_price;
+                                format!("Payment sent: {}", Self::format_price(usd))
+                            } else {
+                                format!("Payment sent: {}", Self::format_msats_as_btc(msat))
+                            }
+                        })
+                        .unwrap_or_else(|| "Payment sent".to_string());
+                    self.status_message = amount_text;
                     self.invoice_to_pay.clear();
                     self.update_balances();
                     true
@@ -1276,7 +1290,8 @@ impl UserApp {
                             let amount_msat = if let Some(amt) = invoice.amount_milli_satoshis() {
                                 amt
                             } else {
-                                self.send_amount.trim().parse::<u64>().unwrap_or(0) * 1000
+                                (self.send_amount.trim().parse::<f64>().unwrap_or(0.0)
+                                    * 100_000_000_000.0) as u64
                             };
                             let (amount_usd, btc_price_opt) = {
                                 let sc = self.stable_channel.lock().unwrap();
@@ -1305,6 +1320,8 @@ impl UserApp {
                                     payment_id,
                                     PendingPayment {
                                         payment_db_id: db_id,
+                                        amount_msat,
+                                        amount_usd,
                                     },
                                 );
                             }
@@ -1379,6 +1396,8 @@ impl UserApp {
                                     payment_id,
                                     PendingPayment {
                                         payment_db_id: db_id,
+                                        amount_msat,
+                                        amount_usd,
                                     },
                                 );
                             }
@@ -2510,23 +2529,19 @@ impl UserApp {
                                                 "payment_hash": payment_hash_str
                                             }),
                                         );
-                                        self.status_message = format!(
-                                            "Received payment of {}",
-                                            Self::format_msats_as_btc(amount_msat)
-                                        );
+                                        let sats = amount_msat / 1000;
+                                        let received_msg = if let Some(usd) = amount_usd {
+                                            format!("Payment received: {}", Self::format_price(usd))
+                                        } else {
+                                            format!(
+                                                "Payment received: {}",
+                                                Self::format_sats_as_btc(sats)
+                                            )
+                                        };
+                                        self.status_message = received_msg.clone();
                                         self.show_onboarding = false;
                                         self.waiting_for_payment = false;
-                                        let sats = amount_msat / 1000;
-                                        let toast_msg = if let Some(usd) = amount_usd {
-                                            format!(
-                                                "Received {} (${:.2})",
-                                                Self::format_sats_as_btc(sats),
-                                                usd
-                                            )
-                                        } else {
-                                            format!("Received {}", Self::format_sats_as_btc(sats))
-                                        };
-                                        self.show_toast(&toast_msg, "+");
+                                        self.show_toast(&received_msg, "+");
                                     }
                                 }
                                 Err(e) => {
@@ -2586,6 +2601,19 @@ impl UserApp {
                     } else {
                         // Normal (non-trade) outgoing payment
                         let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
+                        let payment_sent_message = pending
+                            .as_ref()
+                            .map(|p| {
+                                p.amount_usd
+                                    .map(|usd| format!("Payment sent: {}", Self::format_price(usd)))
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "Payment sent: {}",
+                                            Self::format_msats_as_btc(p.amount_msat)
+                                        )
+                                    })
+                            })
+                            .unwrap_or_else(|| "Payment sent".to_string());
 
                         // Refresh channel balances from LDK
                         {
@@ -2662,8 +2690,8 @@ impl UserApp {
 
                         self.save_channel_settings();
                         self.update_balances();
-                        self.status_message = "Payment confirmed".to_string();
-                        self.show_toast("Payment confirmed", "-");
+                        self.status_message = payment_sent_message.clone();
+                        self.show_toast(&payment_sent_message, "-");
                     }
                 }
 
@@ -3806,12 +3834,12 @@ impl UserApp {
                     ui.add_space(8.0);
                 });
 
-                // Footer row: Cancel (left), Specify amount (right).
+                // Footer row: Done (left), Specify amount (right).
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
                     if ui
                         .link(
-                            egui::RichText::new("Cancel")
+                            egui::RichText::new("Done")
                                 .size(14.0)
                                 .color(Color32::DARK_GRAY),
                         )
@@ -3901,11 +3929,11 @@ impl UserApp {
 
                     ui.add_space(16.0);
 
-                    // Footer row: Cancel left, "Specify amount" right.
+                    // Footer row: Done left, "Specify amount" right.
                     ui.horizontal(|ui| {
                         if ui
                             .link(
-                                egui::RichText::new("Cancel")
+                                egui::RichText::new("Done")
                                     .size(13.0)
                                     .color(egui::Color32::DARK_GRAY),
                             )
@@ -4001,11 +4029,11 @@ impl UserApp {
 
                     ui.add_space(16.0);
 
-                    // Footer row: Cancel left, Back-to-variable right.
+                    // Footer row: Done left, Back-to-variable right.
                     ui.horizontal(|ui| {
                         if ui
                             .link(
-                                egui::RichText::new("Cancel")
+                                egui::RichText::new("Done")
                                     .size(13.0)
                                     .color(egui::Color32::DARK_GRAY),
                             )
@@ -4881,11 +4909,11 @@ impl UserApp {
                     .inner_margin(egui::Margin::same(10))
                     .corner_radius(theme::RADIUS_MD)
                     .show(ui, |ui| {
-                        // Header row: "On-chain" + amount (toggleable USD↔BTC).
+                        // Header row: "Onchain Account" + amount (toggleable USD↔BTC).
                         // Amount is total = confirmed + unconfirmed + pending sweep.
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("Onchain")
+                                RichText::new("Onchain Account")
                                     .size(11.0)
                                     .color(theme::MUTED)
                                     .strong(),
@@ -5041,7 +5069,7 @@ impl UserApp {
                                     theme::WARNING,
                                 );
                                 ui.label(
-                                    RichText::new("Swap pending...")
+                                    RichText::new("Move pending...")
                                         .size(11.0)
                                         .color(theme::MUTED),
                                 );
@@ -5076,16 +5104,11 @@ impl UserApp {
                                 );
                             });
                         } else if has_ready_channel && spendable_onchain_sats > 0 {
-                            // State 2: confirmed funds + channel ready — offer Swap.
+                            // State 2: confirmed funds + channel ready — offer Move.
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        RichText::new("Move to Trading")
-                                            .size(11.0)
-                                            .color(theme::MUTED),
-                                    );
-                                    ui.label(
-                                        RichText::new("and Spending Account")
+                                        RichText::new("Move to Lightning Account")
                                             .size(11.0)
                                             .color(theme::MUTED),
                                     );
@@ -5095,7 +5118,7 @@ impl UserApp {
                                     |ui| {
                                         // iOS-style: light blue capsule + blue text
                                         let swap_btn = egui::Button::new(
-                                            RichText::new("Swap")
+                                            RichText::new("Move")
                                                 .size(11.0)
                                                 .color(theme::IOS_BLUE)
                                                 .strong(),
@@ -5163,7 +5186,7 @@ impl UserApp {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new(
-                                        "Receive over Lightning to create your Stable Account",
+                                        "Get your first payment to activate your account",
                                     )
                                     .size(11.0)
                                     .color(theme::MUTED),
@@ -5173,11 +5196,9 @@ impl UserApp {
                             // State 4: confirmed funds but no channel — need a
                             // Lightning receive to open one.
                             ui.label(
-                                RichText::new(
-                                    "Receive over Lightning to create your Stable Account",
-                                )
-                                .size(11.0)
-                                .color(theme::MUTED),
+                                RichText::new("Get your first payment to activate your account")
+                                    .size(11.0)
+                                    .color(theme::MUTED),
                             );
                         }
                     });
@@ -5760,7 +5781,7 @@ impl UserApp {
             if !has_active_channel {
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("Receive over Lightning to open your account")
+                        RichText::new("Get your first payment to activate your account")
                             .size(12.0)
                             .color(theme::MUTED),
                     );
@@ -6311,14 +6332,13 @@ impl UserApp {
                         icon_badge(ui, "⚠", danger);
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
-                            ui.label(RichText::new("Close Wallet").size(13.5).strong().color(danger));
+                            ui.label(RichText::new("Close channel").size(13.5).strong().color(danger));
                             ui.add_space(2.0);
                             ui.label(RichText::new(
-                                "Closes your Lightning channel and sweeps all funds to an onchain address you control. \
-                                 Your trade and payment history will be preserved."
+                                "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
                             ).size(11.5).color(theme::MUTED));
                             ui.add_space(8.0);
-                            let close_btn = egui::Button::new(RichText::new("Close Wallet").size(13.0).color(danger).strong())
+                            let close_btn = egui::Button::new(RichText::new("Close channel").size(13.0).color(danger).strong())
                                 .fill(Color32::from_rgb(255, 241, 242))
                                 .stroke(egui::Stroke::new(1.0, Color32::from_rgb(252, 165, 165)))
                                 .corner_radius(theme::RADIUS_PILL);
@@ -7150,16 +7170,11 @@ impl UserApp {
     }
 
     fn show_send_tab(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            RichText::new("Paste an onchain address, bolt11 invoice, or bolt12 offer")
-                .size(12.0)
-                .italics()
-                .color(theme::MUTED),
-        );
+        ui.label(RichText::new("To").size(12.0).color(theme::MUTED));
         ui.add_space(10.0);
 
         let input_edit = egui::TextEdit::multiline(&mut self.send_input)
-            .hint_text("bc1..., lnbc..., or lno1...")
+            .hint_text("Invoice or onchain address")
             .font(egui::FontId::monospace(11.0))
             .desired_width(300.0)
             .desired_rows(3);
@@ -7445,7 +7460,7 @@ impl UserApp {
             .corner_radius(theme::RADIUS_MD)
             .min_size(egui::vec2(200.0, 38.0));
             if ui.add(send_btn).clicked() && self.send_unified() {
-                self.show_toast("Payment sent!", "OK");
+                self.show_toast("Payment pending...", "OK");
                 self.show_transfer_modal = false;
             }
         });
@@ -7522,12 +7537,10 @@ impl UserApp {
                 ui.vertical_centered(|ui| {
                     if !has_ready_channel {
                         ui.label(
-                            RichText::new(
-                                "First payment — a channel will be opened automatically via LSP",
-                            )
-                            .size(11.0)
-                            .color(theme::MUTED)
-                            .italics(),
+                            RichText::new("Get your first payment to activate your account")
+                                .size(11.0)
+                                .color(theme::MUTED)
+                                .italics(),
                         );
                         ui.add_space(6.0);
                     }
@@ -7851,7 +7864,7 @@ impl UserApp {
     fn show_buy_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
-            RichText::new("USD → BTC")
+            RichText::new("How much USD to convert to BTC?")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -8029,7 +8042,7 @@ impl UserApp {
 
         // Header
         ui.label(
-            RichText::new("Confirm Order")
+            RichText::new("Review USD -> BTC")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -8190,7 +8203,7 @@ impl UserApp {
     fn show_sell_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
-            RichText::new("BTC → USD")
+            RichText::new("How much BTC to convert to USD?")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -8374,7 +8387,7 @@ impl UserApp {
 
         // Header
         ui.label(
-            RichText::new("Confirm Order")
+            RichText::new("Review BTC -> USD")
                 .size(28.0)
                 .color(Color32::BLACK)
                 .strong(),
@@ -8553,15 +8566,13 @@ impl UserApp {
             self.fetch_fee_rate();
         }
 
-        egui::Window::new("Close Wallet")
+        egui::Window::new("Close channel")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .frame(egui::Frame::window(&ctx.style()).fill(Color32::WHITE).corner_radius(theme::RADIUS_LG))
                 .show(ctx, |ui| {
-                    ui.label(RichText::new("Are you sure you want to close your wallet?").size(13.0).color(Color32::BLACK));
-                    ui.add_space(5.0);
-                    ui.label(RichText::new("All funds will be sent to an onchain address you control. Your order and payment history will be preserved.").size(12.0).color(Color32::DARK_GRAY));
+                    ui.label(RichText::new("This will cooperatively close the channel and return your funds to your onchain wallet after confirmation.").size(12.0).color(Color32::DARK_GRAY));
                     ui.add_space(10.0);
 
                     // Show balance that will be received
@@ -8583,7 +8594,7 @@ impl UserApp {
 
                     ui.add_space(15.0);
                     ui.horizontal(|ui| {
-                        let yes_btn = egui::Button::new(RichText::new("Close Wallet").color(Color32::WHITE))
+                        let yes_btn = egui::Button::new(RichText::new("Close channel").color(Color32::WHITE))
                             .fill(theme::DANGER_HOVER)
                             .corner_radius(theme::RADIUS_SM);
                         if ui.add(yes_btn).clicked() {

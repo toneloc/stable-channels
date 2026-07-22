@@ -63,14 +63,6 @@ copyright = "Copyright (c) 2025 Stable Channels Developers"
 short_description = "Stable Channels Wallet"
 long_description = "A self-custodial bitcoin wallet with USD stability."
 
-[[bin]]
-name = "lsp_backend"
-path = "src/bin/lsp_backend.rs"
-
-[[bin]]
-name = "lsp_frontend"
-path = "src/bin/lsp_frontend.rs"
-
 [dev-dependencies]
 tempfile = "3"
 electrsd = { version = "0.36.1", features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }

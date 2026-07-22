@@ -593,6 +593,18 @@ class DatabaseService {
         return paymentRecord(from: row)
     }
 
+    func payment(paymentId: String) -> PaymentRecord? {
+        let sql = """
+        SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+        counterparty, status, created_at, fee_msat, txid, address, confirmations
+        FROM payments
+        WHERE payment_id = ?
+        ORDER BY id DESC LIMIT 1
+        """
+        guard let row = try? query(sql, params: [.text(paymentId)]).first else { return nil }
+        return paymentRecord(from: row)
+    }
+
     func getRecentPayments(limit: Int) throws -> [PaymentRecord] {
         let sql = """
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,

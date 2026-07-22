@@ -87,7 +87,7 @@ struct ChannelSettingsView: View {
 
                 Section {
                     Button(
-                        String(localized: "button_close_channel", defaultValue: "Close Channel"),
+                        String(localized: "button_close_channel", defaultValue: "Close channel"),
                         role: .destructive
                     ) {
                         showCloseChannelAlert = true
@@ -106,17 +106,17 @@ struct ChannelSettingsView: View {
         .navigationTitle(String(localized: "title_channel", defaultValue: "Channel"))
         .navigationBarTitleDisplayMode(.inline)
         .alert(
-            String(localized: "alert_close_channel_title", defaultValue: "Close Channel?"),
+            String(localized: "alert_close_channel_title", defaultValue: "Close channel"),
             isPresented: $showCloseChannelAlert
         ) {
             Button(String(localized: "alert_close_channel_cancel", defaultValue: "Cancel"), role: .cancel) { }
-            Button(String(localized: "alert_close_channel_confirm", defaultValue: "Close"), role: .destructive) {
+            Button(String(localized: "alert_close_channel_confirm", defaultValue: "Close channel"), role: .destructive) {
                 closeChannel()
             }
         } message: {
             Text(String(
                 localized: "alert_close_channel_message",
-                defaultValue: "This will cooperatively close the channel and sweep funds onchain."
+                defaultValue: "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
             ))
         }
     }

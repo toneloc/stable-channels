@@ -114,7 +114,7 @@ struct BuyView: View {
 
     private var confirmScreen: some View {
         VStack(spacing: 20) {
-            Text(String(localized: "title_confirm_buy", defaultValue: "Confirm Buy"))
+            Text(String(localized: "title_confirm_buy", defaultValue: "Review USD -> BTC"))
                 .font(.title2.bold())
             Text(String(localized: "subtitle_manage_exposure", defaultValue: "Manage your BTC exposure"))
                 .font(.subheadline)
@@ -159,7 +159,7 @@ struct BuyView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                 } else {
-                    Text(String(localized: "title_buy_btc", defaultValue: "USD → BTC"))
+                    Text(String(localized: "button_confirm_order", defaultValue: "Confirm Order"))
                         .frame(maxWidth: .infinity)
                 }
             }

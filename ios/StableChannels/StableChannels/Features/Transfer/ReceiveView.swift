@@ -109,7 +109,7 @@ struct ReceiveView: View {
             if !hasChannel {
                 Text(String(
                     localized: "info_first_payment",
-                    defaultValue: "First payment — a channel will be opened automatically via LSP"
+                    defaultValue: "Get your first payment to activate your account"
                 ))
                 .font(.caption)
                 .foregroundStyle(.orange)
