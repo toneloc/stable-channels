@@ -1113,7 +1113,14 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             val paymentId = try {
-                nodeService.sendKeysend(amountMsat, sc.counterparty)
+                // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
+                // this as a settlement (operator GUI) and runs reconcile_incoming_stability
+                // immediately, matching every other sender. See issue #161.
+                nodeService.sendKeysendWithTLV(
+                    amountMsat,
+                    sc.counterparty,
+                    listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1)))
+                )
             } catch (e: Exception) {
                 // Send never happened — release the claim.
                 try { databaseService?.clearPendingSend() } catch (_: Exception) {}
