@@ -1435,6 +1435,9 @@ class AppState(private val context: Context) : ViewModel() {
     /** Network from Constants.DEFAULT_NETWORK — "regtest" only via TestOverrides (E2E). */
     private fun ldkNetwork(): Network = Constants.LDK_NETWORK
 
+    /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
+    fun currentFeeRateSatVb(): Long? = fetchFeeRate()
+
     /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */
     private suspend fun resolveChainUrl(): String {
         return withContext(Dispatchers.IO) {

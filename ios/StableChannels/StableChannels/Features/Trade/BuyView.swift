@@ -31,13 +31,26 @@ struct BuyView: View {
         Double(amountStr) ?? 0
     }
 
+    private var feeUSD: Double {
+        amountUSD * Constants.stableChannelTradeFeeRate
+    }
+
+    private var netAmountUSD: Double {
+        amountUSD - feeUSD
+    }
+
+    private var feeLabel: String {
+        String(format: "Fee (%.0f%%)", Constants.stableChannelTradeFeeRate * 100)
+    }
+
     private var btcAmount: Double {
         guard appState.btcPrice > 0 else { return 0 }
         return amountUSD / appState.btcPrice
     }
 
     private var btcAmountFinal: Double {
-        btcAmount * 0.99
+        guard appState.btcPrice > 0 else { return 0 }
+        return netAmountUSD / appState.btcPrice
     }
 
     var body: some View {
@@ -126,8 +139,8 @@ struct BuyView: View {
                     String(format: "$%.2f", amountUSD)
                 )
                 confirmRow(
-                    String(localized: "label_fee_percent", defaultValue: "Fee (1%)"),
-                    String(format: "$%.2f", amountUSD * 0.01)
+                    feeLabel,
+                    String(format: "$%.2f", feeUSD)
                 )
                 confirmRow(
                     String(localized: "label_btc_price", defaultValue: "BTC Price"),
@@ -136,7 +149,7 @@ struct BuyView: View {
                 Divider()
                 confirmRow(
                     String(localized: "label_you_receive", defaultValue: "You receive"),
-                    String(format: "%.8f BTC", btcAmount * 0.99),
+                    String(format: "%.8f BTC", btcAmountFinal),
                     bold: true
                 )
             }
@@ -233,7 +246,6 @@ struct BuyView: View {
         errorMessage = nil
         appState.ensureLSPConnected()
         let sc = appState.stableChannel
-        let feeUSD = amountUSD * 0.01 // 1% fee
         let price = appState.btcPrice
         do {
             guard let result = try appState.tradeService?.executeBuy(

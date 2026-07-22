@@ -59,6 +59,13 @@ object Constants {
     const val STABILITY_PAYMENT_COOLDOWN_SECS: Long = 120
     const val MIN_DISPLAY_USD: Double = 2.0
     const val MAX_CHANNEL_USD: Double = 100.0
+    /** Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount. */
+    const val STABLE_CHANNEL_TRADE_FEE_RATE: Double = 0.01
+    const val LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT: Long = 1_000L
+    const val LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS: Long = 0L
+    const val ESTIMATED_ONCHAIN_SEND_VBYTES: Long = 140L
+    const val ESTIMATED_ONCHAIN_SEND_ALL_VBYTES: Long = 250L
+    const val ESTIMATED_CHANNEL_CLOSE_VBYTES: Long = 180L
     const val DEFAULT_CHANNEL_LIFETIME: Int = 2016
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000
