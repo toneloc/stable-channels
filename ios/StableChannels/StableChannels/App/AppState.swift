@@ -65,6 +65,16 @@ class AppState {
     let feeRateService = FeeRateService()
     var databaseService: DatabaseService?
     var tradeService: TradeService?
+    let blockHeightService = BlockHeightService(
+        provider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs)
+    )
+    let confirmationService = ConfirmationService(
+        provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
+    )
+    var confirmationPollingService: ConfirmationPollingService?
+    /// Incremented after each confirmation poll cycle completes a DB write.
+    /// Views observe this to reload payment data at the right time.
+    var confirmationUpdateEpoch: Int = 0
 
     // MARK: - State
 
@@ -190,6 +200,22 @@ class AppState {
         }
 
         tradeService = TradeService(nodeService: nodeService)
+        let pollingService = databaseService.map { db in
+            ConfirmationPollingService(
+                databaseService: db,
+                blockHeightService: blockHeightService,
+                confirmationService: confirmationService
+            )
+        }
+        confirmationPollingService = pollingService
+        pollingService?.onUpdate = { [weak self] in
+            self?.confirmationUpdateEpoch += 1
+        }
+        blockHeightService.onHeightUpdated = { [weak pollingService] _ in
+            Task { @MainActor in
+                await pollingService?.pollOnce()
+            }
+        }
 
         // Set audit log path
         let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
@@ -298,6 +324,8 @@ class AppState {
             refreshBalances()
             updateStableBalances()
             startStabilityTimer()
+            blockHeightService.start()
+            Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
         } catch {
@@ -324,6 +352,7 @@ class AppState {
         spliceTxid = nil
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
+        blockHeightService.stop()
         monitoredSpliceTxid = nil
         sweepOnchainStart = 0
         prevOnchainSats = 0
@@ -347,6 +376,9 @@ class AppState {
     }
 
     private func dropDatabaseServices() {
+        blockHeightService.stop()
+        blockHeightService.onHeightUpdated = nil
+        confirmationPollingService = nil
         nodeService.databaseService = nil
         nodeService.clearSavedMnemonic()
         tradeService = nil
@@ -523,6 +555,8 @@ class AppState {
                     fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .string(forKey: "funding_txid")
                     resumePendingSpliceConfirmation()
+                    blockHeightService.start()
+                    Task { await confirmationPollingService?.pollOnce() }
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -555,6 +589,8 @@ class AppState {
                 }
                 await MainActor.run {
                     phase = .wallet
+                    blockHeightService.start()
+                    Task { await confirmationPollingService?.pollOnce() }
                     refreshBalances()
                     updateStableBalances()
                 }
@@ -624,6 +660,7 @@ class AppState {
         heartbeatTimer = nil
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
+        blockHeightService.stop()
         monitoredSpliceTxid = nil
         if let observer = eventObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -747,6 +784,8 @@ class AppState {
                 mnemonic: ""
             )
             refreshBalances()
+            blockHeightService.start()
+            Task { await confirmationPollingService?.pollOnce() }
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()

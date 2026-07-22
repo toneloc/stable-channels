@@ -86,7 +86,7 @@ final class UnknownAddressDepositRecorder: DepositRecorder {
                 amountUSD: deposit.amountUSD,
                 btcPrice: deposit.btcPrice,
                 counterparty: nil,
-                status: "completed"
+                status: "pending"
             )
             return true
         } catch {
