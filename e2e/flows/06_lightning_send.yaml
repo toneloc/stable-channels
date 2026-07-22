@@ -15,7 +15,7 @@ env:
     file: helpers/create_invoice.js
 
 - tapOn: "Send"
-- tapOn: "(Lightning invoice or Onchain address|lnbc1\\.\\.\\.)"   # Android label / iOS placeholder
+- tapOn: "Invoice or onchain address"   # send-field placeholder (both platforms)
 - inputText: ${output.invoice}
 # Send button: Android has two "Send" texts (title + button, index 1);
 # iOS button is "Send Payment". hideKeyboard is unreliable on iOS sims.
@@ -35,10 +35,10 @@ env:
           text: "Send"
           index: 1
 
-# Success: Android shows a Done screen; iOS auto-dismisses to Home with a
-# "Payment confirmed" capsule (races the Done screen if it appears at all).
+# Success: Android shows a Done screen; iOS shows a "Payment sent" capsule.
+# ("Payment confirmed" kept as a fallback — some settlement paths still use it.)
 - extendedWaitUntil:
-    visible: "(Done|Payment confirmed.*)"
+    visible: "(Done|Payment sent.*|Payment confirmed.*)"
     timeout: 60000
 - tapOn:
     text: "Done"

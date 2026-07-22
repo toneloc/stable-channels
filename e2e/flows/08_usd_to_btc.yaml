@@ -17,21 +17,10 @@ tags: [android, ios, trade]
 - inputText: "20"
 - tapOn: "Continue"
 
-- assertVisible: "(Confirm Order|Confirm USD → BTC)"
-# Confirm button: Android "Confirm Order"; iOS button is labeled "USD → BTC"
-# (which also matches the sheet title -> index 1).
-- runFlow:
-    when:
-      platform: Android
-    commands:
-      - tapOn: "Confirm Order"
-- runFlow:
-    when:
-      platform: iOS
-    commands:
-      - tapOn:
-          text: "USD → BTC"
-          index: 1
+- assertVisible: "(Confirm Order|Review USD -> BTC)"
+# Confirm button is now "Confirm Order" on both platforms (iOS button was
+# relabeled from "USD → BTC" in the copy-changes PR).
+- tapOn: "Confirm Order"
 
 - extendedWaitUntil:
     visible: "Order (Confirmed|Pending)"

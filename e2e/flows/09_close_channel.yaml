@@ -1,7 +1,7 @@
-# Step 9 — Close Channel
+# Step 9 — Close channel
 # "User initiates an onchain cooperative close."
 # Identical labels on both platforms: Settings tab -> Channel row ->
-# Close Channel -> "Close Channel?" alert -> Close.
+# Close channel -> "Close channel" alert -> Close channel.
 appId: com.stablechannels.app
 tags: [android, ios, close]
 env:
@@ -11,20 +11,15 @@ env:
 - launchApp
 - tapOn: "Settings"
 - tapOn: "Channel"
-- tapOn: "Close Channel"
-- assertVisible: "Close Channel?"
-# Confirm: Android alert button is "Close"; iOS localizes it to
-# "Close Channel" (second match — the settings button is behind the alert).
-- runFlow:
-    when:
-      platform: Android
-    commands:
-      - tapOn: "Close"
-- runFlow:
-    when:
-      platform: iOS
-    commands:
-      - tapOn: "Close Channel"   # alert button; the settings one is occluded
+- tapOn: "Close channel"
+- assertVisible: "Close channel"
+# The copy-changes PR relabeled everything to "Close channel", so the alert
+# title, the confirm button, and the (occluded) settings button now share the
+# label. The settings button is behind the alert; the confirm button is the
+# last match. index: 1 targets it — verify on-device if the tap misses.
+- tapOn:
+    text: "Close channel"
+    index: 1
 
 # Cooperative close broadcasts; confirm it.
 - runScript:

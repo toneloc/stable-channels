@@ -15,21 +15,10 @@ tags: [android, ios, trade]
 - inputText: "75"      # large stable position — sized so a +1% move in flow 03 clears the $0.25 settlement threshold ($0.75 drift)
 - tapOn: "Continue"
 
-- assertVisible: "(Confirm Order|Confirm BTC → USD)"
-# Confirm button: Android "Confirm Order"; iOS button is labeled "BTC → USD"
-# (which also matches the sheet title -> index 1).
-- runFlow:
-    when:
-      platform: Android
-    commands:
-      - tapOn: "Confirm Order"
-- runFlow:
-    when:
-      platform: iOS
-    commands:
-      - tapOn:
-          text: "BTC → USD"
-          index: 1
+- assertVisible: "(Confirm Order|Review BTC -> USD)"
+# Confirm button is now "Confirm Order" on both platforms (iOS button was
+# relabeled from "BTC → USD" in the copy-changes PR).
+- tapOn: "Confirm Order"
 
 # SellScreen success step (SellScreen.kt:~255)
 - extendedWaitUntil:

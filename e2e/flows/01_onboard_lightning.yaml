@@ -24,7 +24,7 @@ env:
 
 # No channel yet -> JIT notice is shown (ReceiveScreen.kt:167)
 # Android and iOS word the JIT notice differently — match either.
-- assertVisible: "(First payment — a channel will be opened automatically via LSP|Make your first payment to activate the channel)"
+- assertVisible: "Get your first payment to activate your account"
 
 - tapOn: "0.00"       # amount placeholder (USD)
 - inputText: "85"     # canonical stable target — matches prod history, under the $100 JIT cap

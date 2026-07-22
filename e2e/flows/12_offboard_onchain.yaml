@@ -33,7 +33,7 @@ env:
     file: helpers/create_address.js
 
 - tapOn: "Send"
-- tapOn: "(Lightning invoice or Onchain address|lnbc1\\.\\.\\.)"   # Android label / iOS placeholder
+- tapOn: "Invoice or onchain address"   # send-field placeholder (both platforms)
 - inputText: ${output.address}
 # Android sweeps everything via Send Max; iOS has NO send-max affordance
 # (cross-platform gap, see diff-findings) — send a fixed amount instead.
@@ -54,7 +54,7 @@ env:
     index: 1
 
 - extendedWaitUntil:
-    visible: "(Done|Payment confirmed.*)"
+    visible: "(Done|Payment sent.*|Payment confirmed.*)"
     timeout: 60000
 - tapOn:
     text: "Done"
