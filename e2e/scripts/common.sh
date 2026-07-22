@@ -242,6 +242,15 @@ sc_autotune_docker_build_limits() {
     [ -n "${SC_DOCKER_CARGO_JOBS:-}" ] || export SC_DOCKER_CARGO_JOBS="$jobs"
     [ -n "${SC_DOCKER_CODEGEN_UNITS:-}" ] || export SC_DOCKER_CODEGEN_UNITS="$codegen"
 
+    # Compose >=2.34 defaults to building every service in one parallel BuildKit
+    # "bake" graph, which IGNORES COMPOSE_PARALLEL_LIMIT — all Rust images then
+    # compile at once and the concurrent rustc peaks OOM-kill the build on a
+    # memory-capped Docker VM (SIGKILL / ResourceExhausted). When we want serial
+    # builds, turn bake off so compose builds one service at a time.
+    if [ "$COMPOSE_PARALLEL_LIMIT" = "1" ]; then
+        [ -n "${COMPOSE_BAKE:-}" ] || export COMPOSE_BAKE=false
+    fi
+
     local detail="memory unknown; safe defaults"
     if [ -n "$bytes" ]; then
         detail="$(sc_human_bytes "$bytes") $source RAM"

@@ -8,9 +8,9 @@ ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=harness-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=harness-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=harness-target,target=/src/target \
     cargo build --release -j "$CARGO_BUILD_JOBS" \
     && cp /src/target/release/sc-e2e-harness /tmp/sc-e2e-harness
 

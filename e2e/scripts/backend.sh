@@ -26,11 +26,29 @@ if [ "${E2E_LSP_GUI:-0}" = "1" ]; then
     info "LSP GUI enabled — http://127.0.0.1:3003 once up"
 fi
 
+# On memory-capped Docker VMs (COMPOSE_PARALLEL_LIMIT=1 from the autotune),
+# build the Rust images ONE AT A TIME before `up`. Compose builds every service
+# in a single parallel BuildKit graph — COMPOSE_PARALLEL_LIMIT and COMPOSE_BAKE
+# do not serialize it — and concurrent rustc peaks on the big Lightning crates
+# get OOM-killed (SIGKILL / ResourceExhausted). Warm-cache builds are no-ops,
+# so the serial loop costs seconds unless something actually changed.
+sc_build_images_serially() {
+    local svc
+    for svc in ldk-server sc-lsp ldk-node lsp-gui; do
+        info "building image: $svc …"
+        docker compose build "$svc"
+    done
+}
+
 # Reuse existing images by default (a fast, cache-safe start). Editing any repo
 # file busts the `COPY . .` layer and forces a full Rust recompile, so only
 # rebuild on demand: `make rebuild` (REBUILD=1) — e.g. after changing the LSP
 # price hook. Missing images are still built automatically by compose.
-if [ "${REBUILD:-0}" = "1" ]; then
+if [ "${COMPOSE_PARALLEL_LIMIT:-1}" = "1" ]; then
+    sc_build_images_serially
+    info "docker compose up -d (images pre-built serially) …"
+    docker compose up -d --remove-orphans
+elif [ "${REBUILD:-0}" = "1" ]; then
     info "docker compose up -d --build (forced rebuild) …"
     docker compose up -d --build --remove-orphans
 else

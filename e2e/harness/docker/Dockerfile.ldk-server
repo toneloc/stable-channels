@@ -12,9 +12,9 @@ RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
 # experimental-lsps2-support: without it the [liquidity.lsps2_service] config
 # is dead code and JIT-channel requests are rejected ("without LSPS2 service
 # handler configured").
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,id=ldkserver-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=ldkserver-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=ldkserver-target,target=/src/target \
     cargo build --release -j "$CARGO_BUILD_JOBS" -p ldk-server --features experimental-lsps2-support \
     && cp /src/target/release/ldk-server /tmp/ldk-server
 
