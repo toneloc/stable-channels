@@ -123,9 +123,10 @@ pub struct StableChannelManager {
     spend_debounce: std::collections::HashMap<u128, u8>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
-    /// Send persisted allocations once after startup hydration. This repairs a wallet that missed
-    /// the original best-effort SYNC while keeping routine ticks free of control payments.
-    startup_sync_pending: bool,
+    /// Persisted allocations still awaiting their one-time startup SYNC. Tracking each channel
+    /// independently prevents one incoherent channel from blocking every other wallet.
+    startup_sync_pending: std::collections::HashSet<u128>,
+    startup_sync_initialized: bool,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -147,7 +148,8 @@ impl StableChannelManager {
             data_dir,
             spend_debounce: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
-            startup_sync_pending: true,
+            startup_sync_pending: std::collections::HashSet::new(),
+            startup_sync_initialized: false,
         }
     }
 
@@ -434,42 +436,56 @@ impl StableChannelManager {
             self.stable_channels.len()
         );
 
-        let startup_state_is_coherent = self
+        if !self.startup_sync_initialized && !self.stable_channels.is_empty() {
+            self.startup_sync_pending
+                .extend(self.stable_channels.iter().map(|sc| sc.user_channel_id));
+            self.startup_sync_initialized = true;
+        }
+        self.retry_startup_sync(ldk).await;
+    }
+
+    async fn retry_startup_sync(&mut self, ldk: &dyn LdkServerCalls) {
+        if self.startup_sync_pending.is_empty() {
+            return;
+        }
+        let live_ids: std::collections::HashSet<u128> = self
             .stable_channels
             .iter()
-            .all(|sc| sc.stable_receiver_btc.sats >= sc.backing_sats);
-        if self.startup_sync_pending
-            && !self.stable_channels.is_empty()
-            && startup_state_is_coherent
-        {
-            let syncs: Vec<_> = self
-                .stable_channels
-                .iter()
-                .map(|sc| {
-                    (
-                        sc.user_channel_id,
-                        sc.channel_id.to_string(),
-                        sc.expected_usd.0,
-                        sc.backing_sats,
-                        sc.counterparty.to_string(),
-                    )
-                })
-                .collect();
-            self.startup_sync_pending = false;
-            for (uid, channel_id, expected_usd, backing_sats, counterparty) in syncs {
-                if !self
-                    .send_sync_message(
-                        ldk,
-                        uid,
-                        &channel_id,
-                        expected_usd,
-                        backing_sats,
-                        &counterparty,
-                    )
-                    .await
-                {
-                    self.startup_sync_pending = true;
-                }
+            .map(|sc| sc.user_channel_id)
+            .collect();
+        self.startup_sync_pending
+            .retain(|uid| live_ids.contains(uid));
+
+        let syncs: Vec<_> = self
+            .stable_channels
+            .iter()
+            .filter(|sc| {
+                self.startup_sync_pending.contains(&sc.user_channel_id)
+                    && sc.stable_receiver_btc.sats >= sc.backing_sats
+            })
+            .map(|sc| {
+                (
+                    sc.user_channel_id,
+                    sc.channel_id.to_string(),
+                    sc.expected_usd.0,
+                    sc.backing_sats,
+                    sc.counterparty.to_string(),
+                )
+            })
+            .collect();
+        for (uid, channel_id, expected_usd, backing_sats, counterparty) in syncs {
+            if self
+                .send_sync_message(
+                    ldk,
+                    uid,
+                    &channel_id,
+                    expected_usd,
+                    backing_sats,
+                    &counterparty,
+                )
+                .await
+            {
+                self.startup_sync_pending.remove(&uid);
             }
         }
     }
@@ -478,6 +494,8 @@ impl StableChannelManager {
     pub async fn reconcile_if_empty(&mut self, ldk: &dyn LdkServerCalls, btc_price: f64) {
         if self.stable_channels.is_empty() {
             self.reconcile_from_grpc(ldk, btc_price).await;
+        } else {
+            self.retry_startup_sync(ldk).await;
         }
     }
 
@@ -489,13 +507,24 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
-        let target_uid = parse_user_channel_id(&user_channel_id);
-        if let Some(uid) = target_uid {
-            if self.stable_channels.iter().any(|sc| sc.user_channel_id == uid) {
-                self.handle_channel_ready_splice(uid, ldk, btc_price)
-                    .await;
-                return;
-            }
+        let Some(target_uid) = parse_user_channel_id(&user_channel_id) else {
+            stable_channels::audit::audit_event(
+                "CHANNEL_READY_UID_UNPARSEABLE",
+                serde_json::json!({
+                    "channel_id": channel_id,
+                    "user_channel_id": user_channel_id,
+                }),
+            );
+            return;
+        };
+        if self
+            .stable_channels
+            .iter()
+            .any(|sc| sc.user_channel_id == target_uid)
+        {
+            self.handle_channel_ready_splice(target_uid, ldk, btc_price)
+                .await;
+            return;
         }
 
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
@@ -522,13 +551,11 @@ impl StableChannelManager {
 
         let (our_sats, their_sats) = channel_peer_balances(&c);
 
-        let user_channel_id_u128 = parse_user_channel_id(&user_channel_id).unwrap_or(0);
-
         let new_sc = StableChannel {
             channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes(
                 parse_channel_id_hex(&c.channel_id),
             ),
-            user_channel_id: user_channel_id_u128,
+            user_channel_id: target_uid,
             counterparty: parse_pubkey_hex(&c.counterparty_node_id),
             is_stable_receiver: false,
             expected_usd: USD::from_f64(0.0),
@@ -555,7 +582,7 @@ impl StableChannelManager {
 
         if let Err(e) = self.db.save_channel(
             &c.channel_id,
-            &user_channel_id,
+            &format!("{}", target_uid),
             0.0,
             0,
             their_sats,
@@ -1056,7 +1083,7 @@ impl StableChannelManager {
         }
 
         for (uid, channel_id, expected_usd, backing_sats, counterparty) in backstop_syncs {
-            let _ = self
+            let sent = self
                 .send_sync_message(
                     ldk,
                     uid,
@@ -1066,6 +1093,9 @@ impl StableChannelManager {
                     &counterparty,
                 )
                 .await;
+            if !sent {
+                self.startup_sync_pending.insert(uid);
+            }
         }
     }
 
@@ -1323,7 +1353,7 @@ impl StableChannelManager {
             );
         }
         if deducted {
-            let _ = self
+            let sent = self
                 .send_sync_message(
                     ldk,
                     target_uid,
@@ -1333,6 +1363,9 @@ impl StableChannelManager {
                     &counterparty_hex,
                 )
                 .await;
+            if !sent {
+                self.startup_sync_pending.insert(target_uid);
+            }
         }
     }
 
@@ -1428,7 +1461,7 @@ impl StableChannelManager {
             serde_json::json!({ "channel_id": channel_id_hex, "user_channel_id": ucid_str, "deducted": deducted }),
         );
         if deducted {
-            let _ = self
+            let sent = self
                 .send_sync_message(
                     ldk,
                     uid,
@@ -1438,6 +1471,9 @@ impl StableChannelManager {
                     &counterparty_hex,
                 )
                 .await;
+            if !sent {
+                self.startup_sync_pending.insert(uid);
+            }
         }
     }
 
@@ -1602,17 +1638,24 @@ impl StableChannelManager {
                     return;
                 }
 
-                let derived_backing = stable_channels::stable::trade_backing_sats(
-                    their_sats,
-                    new_expected,
-                    quote_price,
-                );
-                if backing_sats > their_sats || backing_sats.abs_diff(derived_backing) > 1 {
+                let signed_backing_usd = backing_sats as f64 / 100_000_000.0 * quote_price;
+                let allocation_delta_usd = (signed_backing_usd - new_expected).abs();
+                let zero_allocation_is_consistent = if new_expected < 0.01 {
+                    backing_sats == 0
+                } else {
+                    backing_sats > 0
+                };
+                if backing_sats > their_sats
+                    || !zero_allocation_is_consistent
+                    || allocation_delta_usd
+                        > stable_channels::constants::STABILITY_THRESHOLD_USD
+                {
                     stable_channels::audit::audit_event(
                         "TRADE_ALLOCATION_INVALID",
                         serde_json::json!({
                             "signed_backing_sats": backing_sats,
-                            "derived_backing_sats": derived_backing,
+                            "signed_backing_usd": signed_backing_usd,
+                            "allocation_delta_usd": allocation_delta_usd,
                             "receiver_sats": their_sats,
                             "quote_price": quote_price,
                             "channel_id": chan.channel_id.clone(),
@@ -1720,7 +1763,7 @@ impl StableChannelManager {
                 "quote_deviation_percent": signed_allocation.map(|(_, _, deviation)| deviation),
             }),
         );
-        let _ = self
+        let sent = self
             .send_sync_message(
                 ldk,
                 target_uid,
@@ -1730,6 +1773,9 @@ impl StableChannelManager {
                 &counterparty,
             )
             .await;
+        if !sent {
+            self.startup_sync_pending.insert(target_uid);
+        }
     }
 }
 
@@ -2084,7 +2130,7 @@ mod tests {
             1,
             "startup hydration must resync persisted allocation"
         );
-        assert!(!mgr.startup_sync_pending);
+        assert!(mgr.startup_sync_pending.is_empty());
     }
 
     #[tokio::test]
@@ -2112,13 +2158,13 @@ mod tests {
         let failing = FakeLdkServer::new(channels.clone()).with_send_failure();
         mgr.reconcile_from_grpc(&failing as &dyn LdkServerCalls, 100_000.0)
             .await;
-        assert!(mgr.startup_sync_pending);
+        assert!(!mgr.startup_sync_pending.is_empty());
 
         let restored = FakeLdkServer::new(channels);
         mgr.reconcile_from_grpc(&restored as &dyn LdkServerCalls, 100_000.0)
             .await;
         assert_eq!(restored.sends.lock().unwrap().len(), 1);
-        assert!(!mgr.startup_sync_pending);
+        assert!(mgr.startup_sync_pending.is_empty());
 
         mgr.reconcile_from_grpc(&restored as &dyn LdkServerCalls, 100_000.0)
             .await;
@@ -2155,7 +2201,53 @@ mod tests {
             .await;
 
         assert!(fake.sends.lock().unwrap().is_empty());
-        assert!(mgr.startup_sync_pending);
+        assert!(!mgr.startup_sync_pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_syncs_coherent_channels_independently() {
+        let mut mgr = make_manager();
+        let second_channel_id = "22".repeat(32);
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                25.0,
+                60_000,
+                0,
+                None,
+            )
+            .unwrap();
+        mgr.db
+            .save_channel(&second_channel_id, "2", 20.0, 40_000, 10_000, None)
+            .unwrap();
+        let fake = FakeLdkServer::new(vec![
+            make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+            make_channel(
+                &second_channel_id,
+                "2",
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+        ]);
+
+        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
+
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+        assert!(mgr
+            .startup_sync_pending
+            .contains(&USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap()));
+        assert!(!mgr.startup_sync_pending.contains(&2));
     }
 
     #[tokio::test]
@@ -3081,6 +3173,46 @@ mod tests {
         let sync = crate::messages::parse_envelope(raw).unwrap();
         let payload: serde_json::Value = serde_json::from_str(&sync.payload).unwrap();
         assert_eq!(payload["backing_sats"], 49_950);
+    }
+
+    #[tokio::test]
+    async fn trade_accepts_economically_consistent_full_allocation_with_balance_skew() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+
+        // The wallet signed against a receiver balance five sats below the LSP's post-settlement
+        // observation. The pair is still fully collateralized and differs by only half a cent.
+        let env = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            50.0,
+            100_000.0,
+            49_995,
+        );
+        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 49_995);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

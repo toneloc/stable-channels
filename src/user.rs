@@ -162,7 +162,6 @@ pub struct PendingTrade {
 #[derive(Clone, Debug)]
 struct PendingTradePayment {
     new_expected_usd: f64,
-    price: f64,
     backing_sats: Option<u64>,
     trade_db_id: i64,
     action: String,
@@ -910,86 +909,75 @@ impl UserApp {
                     if payment_sent {
                         std::thread::sleep(Duration::from_secs(2));
                     }
+                }
 
-                    // Detect new onchain deposits
-                    {
-                        let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
-                        let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
-                        if current_onchain > prev_onchain_sats && !is_splicing {
-                            let deposit_sats = current_onchain - prev_onchain_sats;
-                            let amount_usd = if price > 0.0 {
-                                Some(deposit_sats as f64 / 100_000_000.0 * price)
-                            } else {
-                                None
-                            };
-                            // Try to find the txid from LDK's payment list
-                            let deposit_txid: Option<String> =
-                                node_arc.list_payments().iter().rev().find_map(|p| {
-                                    if p.direction == PaymentDirection::Inbound {
-                                        if let PaymentKind::Onchain { ref txid, .. } = p.kind {
-                                            return Some(txid.to_string());
-                                        }
+                // Housekeeping must continue during a price-feed outage. Only the optional USD
+                // metadata depends on price; balance observations and splice completion do not.
+                {
+                    let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
+                    let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
+                    if current_onchain > prev_onchain_sats && !is_splicing {
+                        let deposit_sats = current_onchain - prev_onchain_sats;
+                        let amount_usd =
+                            price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
+                        // Try to find the txid from LDK's payment list
+                        let deposit_txid: Option<String> =
+                            node_arc.list_payments().iter().rev().find_map(|p| {
+                                if p.direction == PaymentDirection::Inbound {
+                                    if let PaymentKind::Onchain { ref txid, .. } = p.kind {
+                                        return Some(txid.to_string());
                                     }
-                                    None
-                                });
-                            let _ = db.record_payment(
-                                None,
-                                "onchain",
-                                "received",
-                                deposit_sats * 1000,
-                                amount_usd,
-                                if price > 0.0 { Some(price) } else { None },
-                                None,
-                                "completed",
-                                deposit_txid.as_deref(),
-                                None,
-                            );
-                            audit_event(
-                                "ONCHAIN_DEPOSIT_DETECTED",
-                                json!({
-                                    "amount_sats": deposit_sats,
-                                    "prev_onchain": prev_onchain_sats,
-                                    "new_onchain": current_onchain,
-                                }),
-                            );
-                        }
-                        prev_onchain_sats = current_onchain;
-                    }
-
-                    // Auto-splice: if onchain balance exists and channel is ready,
-                    // splice it into the channel automatically.
-                    // The splice_flag stays true until the onchain balance drops
-                    // (confirming the splice tx landed), preventing duplicate splices.
-                    if splice_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        // Check if the onchain balance dropped since we started the splice
-                        let prev = splice_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
-                        let current = node_arc.list_balances().total_onchain_balance_sats;
-                        if prev > 0 && current < prev {
-                            splice_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                            splice_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
-                            if let Ok(mut pending) = pending_splice.lock() {
-                                if pending
-                                    .as_ref()
-                                    .map(|splice| splice.direction == "in")
-                                    .unwrap_or(false)
-                                {
-                                    *pending = None;
                                 }
-                            }
-                            audit_event(
-                                "AUTO_SPLICE_CONFIRMED",
-                                json!({
-                                    "prev_onchain": prev,
-                                    "new_onchain": current,
-                                }),
-                            );
-                        }
+                                None
+                            });
+                        let _ = db.record_payment(
+                            None,
+                            "onchain",
+                            "received",
+                            deposit_sats * 1000,
+                            amount_usd,
+                            price,
+                            None,
+                            "completed",
+                            deposit_txid.as_deref(),
+                            None,
+                        );
+                        audit_event(
+                            "ONCHAIN_DEPOSIT_DETECTED",
+                            json!({
+                                "amount_sats": deposit_sats,
+                                "prev_onchain": prev_onchain_sats,
+                                "new_onchain": current_onchain,
+                            }),
+                        );
                     }
+                    prev_onchain_sats = current_onchain;
+                }
 
-                    // Auto-splice trigger removed for iOS parity (2026-05-19): onchain →
-                    // channel splice is now user-initiated via the Swap button in the home
-                    // tab. The clear-flag-on-balance-drop path above remains so user-initiated
-                    // splices still get their in-progress flag cleared when confirmed.
+                // The splice flag stays set until BDK observes the on-chain spend.
+                if splice_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    let prev = splice_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
+                    let current = node_arc.list_balances().total_onchain_balance_sats;
+                    if prev > 0 && current < prev {
+                        splice_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                        splice_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
+                        if let Ok(mut pending) = pending_splice.lock() {
+                            if pending
+                                .as_ref()
+                                .map(|splice| splice.direction == "in")
+                                .unwrap_or(false)
+                            {
+                                *pending = None;
+                            }
+                        }
+                        audit_event(
+                            "AUTO_SPLICE_CONFIRMED",
+                            json!({
+                                "prev_onchain": prev,
+                                "new_onchain": current,
+                            }),
+                        );
+                    }
                 }
 
                 std::thread::sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
@@ -1388,9 +1376,9 @@ impl UserApp {
             }
             match Offer::from_str(&input) {
                 Ok(offer) => {
-                    let amount_msat = match self.send_amount.trim().parse::<f64>() {
-                        Ok(btc) if btc > 0.0 => (btc * 100_000_000_000.0) as u64,
-                        _ => {
+                    let amount_msat = match btc_amount_to_msat(&self.send_amount) {
+                        Some(amount_msat) => amount_msat,
+                        None => {
                             self.send_error = "Enter an amount in BTC".to_string();
                             return false;
                         }
@@ -2273,6 +2261,187 @@ impl UserApp {
         }
     }
 
+    fn handle_normal_payment_success(
+        &mut self,
+        payment_id: Option<PaymentId>,
+        payment_hash: &str,
+        fee_paid_msat: Option<u64>,
+        ack: &mut bool,
+    ) {
+        {
+            let mut sc = self.stable_channel.lock().unwrap();
+            update_balances(&self.node, &mut sc);
+        }
+        let price = self.stable_channel.lock().unwrap().latest_price;
+        let event_id = payment_id
+            .map(|pid| format!("{pid}"))
+            .unwrap_or_else(|| payment_hash.to_string());
+
+        match self.db.is_stability_payment(&event_id) {
+            Err(e) => {
+                *ack = false;
+                audit_event(
+                    "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
+                    json!({
+                        "payment_hash": payment_hash,
+                        "payment_id": event_id,
+                        "error": e.to_string(),
+                    }),
+                );
+                self.status_message =
+                    "Payment confirmed but accounting could not be saved; retrying".to_string();
+            }
+            Ok(is_stability_payment) => {
+                let needs_reconcile = !is_stability_payment;
+                if needs_reconcile && price <= 0.0 {
+                    *ack = false;
+                    audit_event(
+                        "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
+                        json!({
+                            "payment_hash": payment_hash,
+                            "payment_id": event_id,
+                        }),
+                    );
+                    return;
+                }
+
+                let pending =
+                    payment_id.and_then(|pid| self.pending_payments.get(&pid).cloned());
+                let payment_sent_message = pending
+                    .as_ref()
+                    .map(|p| {
+                        p.amount_usd
+                            .map(|usd| format!("Payment sent: {}", Self::format_price(usd)))
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "Payment sent: {}",
+                                    Self::format_msats_as_btc(p.amount_msat)
+                                )
+                            })
+                    })
+                    .unwrap_or_else(|| "Payment sent".to_string());
+                audit_event(
+                    "PAYMENT_SUCCESSFUL",
+                    json!({
+                        "payment_hash": payment_hash,
+                        "payment_id": event_id,
+                        "fee_paid_msat": fee_paid_msat,
+                    }),
+                );
+
+                if needs_reconcile {
+                    let persisted = {
+                        let mut sc = self.stable_channel.lock().unwrap();
+                        let before_reconcile = sc.clone();
+                        let old_expected_usd = sc.expected_usd.0;
+                        let usd_deducted = stable::reconcile_outgoing(&mut sc, price);
+                        sc.native_sats = sc
+                            .stable_receiver_btc
+                            .sats
+                            .saturating_sub(sc.backing_sats);
+                        stable::recompute_native(&mut sc);
+
+                        let result = self.db.persist_outgoing_reconciliation(
+                            &event_id,
+                            pending.as_ref().map(|p| p.payment_db_id),
+                            fee_paid_msat,
+                            &sc.channel_id.to_string(),
+                            &format!("{}", sc.user_channel_id),
+                            sc.expected_usd.0,
+                            sc.backing_sats,
+                            sc.native_sats,
+                            sc.note.as_deref(),
+                            Some(price),
+                        );
+                        match result {
+                            Ok(true) => Ok((
+                                true,
+                                usd_deducted,
+                                old_expected_usd,
+                                sc.expected_usd.0,
+                            )),
+                            Ok(false) => {
+                                *sc = before_reconcile;
+                                Ok((false, None, old_expected_usd, old_expected_usd))
+                            }
+                            Err(e) => {
+                                *sc = before_reconcile;
+                                Err(e)
+                            }
+                        }
+                    };
+
+                    match persisted {
+                        Ok((applied, usd_deducted, old_expected_usd, new_expected_usd)) => {
+                            if let Some(pid) = payment_id {
+                                self.pending_payments.remove(&pid);
+                            }
+                            if let Some(usd_deducted) = usd_deducted {
+                                audit_event(
+                                    "OUTGOING_STABLE_DEDUCTED",
+                                    json!({
+                                        "payment_hash": payment_hash,
+                                        "payment_id": event_id,
+                                        "usd_deducted": usd_deducted,
+                                        "old_expected_usd": old_expected_usd,
+                                        "new_expected_usd": new_expected_usd,
+                                        "btc_price": price,
+                                    }),
+                                );
+                            }
+                            audit_event(
+                                if applied {
+                                    "OUTGOING_RECONCILE_COMMITTED"
+                                } else {
+                                    "OUTGOING_RECONCILE_REPLAY"
+                                },
+                                json!({
+                                    "payment_hash": payment_hash,
+                                    "payment_id": event_id,
+                                }),
+                            );
+                        }
+                        Err(e) => {
+                            *ack = false;
+                            audit_event(
+                                "OUTGOING_RECONCILE_PERSIST_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash,
+                                    "payment_id": event_id,
+                                    "error": e.to_string(),
+                                }),
+                            );
+                            self.status_message =
+                                "Payment confirmed but accounting could not be saved; retrying"
+                                    .to_string();
+                        }
+                    }
+                } else if let Some(pending) = pending {
+                    let _ = self.db.update_payment_status(
+                        pending.payment_db_id,
+                        "completed",
+                        fee_paid_msat,
+                    );
+                    if let Some(pid) = payment_id {
+                        self.pending_payments.remove(&pid);
+                    }
+                } else {
+                    let _ = self.db.update_payment_status_by_pid(
+                        &event_id,
+                        "completed",
+                        fee_paid_msat,
+                    );
+                }
+
+                if *ack {
+                    self.update_balances();
+                    self.status_message = payment_sent_message.clone();
+                    self.show_toast(&payment_sent_message, "-");
+                }
+            }
+        }
+    }
+
     fn process_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             let mut ack = true;
@@ -2407,9 +2576,24 @@ impl UserApp {
                                         "SPLICE_OUT_RECONCILE_DEFERRED",
                                         json!({ "txid": txid_str.clone() }),
                                     );
+                                    // Do not acknowledge ChannelReady until the exact funding-output
+                                    // value and the accounting update are durable. LDK will replay the
+                                    // event after a crash instead of leaving a completed-but-unreconciled
+                                    // splice row with no startup work item.
+                                    ack = false;
                                 }
                                 SpliceReconcileAction::ReconcileNow => {
                                     let price = sc.latest_price;
+                                    if !price.is_finite() || price <= 0.0 {
+                                        audit_event(
+                                            "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
+                                            json!({
+                                                "txid": txid_str.clone(),
+                                                "source": "channel_ready_fallback",
+                                            }),
+                                        );
+                                        break;
+                                    }
                                     let mut reconciled = sc.clone();
                                     let usd_deducted =
                                         stable::reconcile_outgoing(&mut reconciled, price);
@@ -2622,14 +2806,53 @@ impl UserApp {
                             let price = sc.latest_price;
                             let old_expected = sc.expected_usd.0;
                             let live_receiver_sats = sc.stable_receiver_btc.sats;
+                            let pending_trade = match self.db.get_pending_trade_by_allocation(
+                                sync.expected_usd,
+                                sync.backing_sats,
+                            ) {
+                                Ok(trade) => trade,
+                                Err(e) => {
+                                    audit_event(
+                                        "DB_READ_FAILED",
+                                        json!({
+                                            "op": "get_pending_trade_by_allocation",
+                                            "payment_hash": &payment_hash_str,
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                    ack = false;
+                                    break 'sync true;
+                                }
+                            };
+                            if let Err(reason) = validate_incoming_sync_allocation(
+                                &sync,
+                                live_receiver_sats,
+                                price,
+                                pending_trade.is_some(),
+                            ) {
+                                audit_event(
+                                    "SYNC_V1_ALLOCATION_REJECTED",
+                                    json!({
+                                        "payment_hash": &payment_hash_str,
+                                        "reason": reason,
+                                        "expected_usd": sync.expected_usd,
+                                        "backing_sats": sync.backing_sats,
+                                        "live_receiver_sats": live_receiver_sats,
+                                        "btc_price": price,
+                                        "sync_version": sync.sync_version,
+                                    }),
+                                );
+                                break 'sync true;
+                            }
                             let native_sats = live_receiver_sats.saturating_sub(sync.backing_sats);
                             let user_channel_id = format!("{}", sc.user_channel_id);
-                            match self.db.apply_sync_if_newer(
+                            match self.db.apply_sync_if_newer_and_complete_trade(
                                 &user_channel_id,
                                 sync.sync_version,
                                 sync.expected_usd,
                                 sync.backing_sats,
                                 native_sats,
+                                pending_trade.as_ref().map(|trade| trade.id),
                             ) {
                                 Ok(true) => {
                                     stable::apply_trade_allocation(
@@ -2649,6 +2872,30 @@ impl UserApp {
                                             "payment_hash": &payment_hash_str,
                                         }),
                                     );
+                                    drop(sc);
+                                    if let Some(trade) = pending_trade {
+                                        self.pending_trade_payments
+                                            .retain(|_, pending| pending.trade_db_id != trade.id);
+                                        audit_event(
+                                            "TRADE_ACCEPTED_BY_LSP",
+                                            json!({
+                                                "trade_id": trade.id,
+                                                "action": trade.action,
+                                                "expected_usd": sync.expected_usd,
+                                                "backing_sats": sync.backing_sats,
+                                                "sync_version": sync.sync_version,
+                                            }),
+                                        );
+                                        let verb = if trade.action == "buy" {
+                                            "USD → BTC"
+                                        } else {
+                                            "BTC → USD"
+                                        };
+                                        self.show_toast(
+                                            &format!("{} order confirmed", verb),
+                                            "OK",
+                                        );
+                                    }
                                 }
                                 Ok(false) => {
                                     audit_event(
@@ -2848,11 +3095,10 @@ impl UserApp {
                 } => {
                     let payment_hash_str = format!("{payment_hash}");
 
-                    // Check if this is a pending trade payment. The in-memory map is empty after a
-                    // restart, so fall back to the persisted pending trade row — otherwise a trade
-                    // that settles across a restart would never apply_trade (peg left wrong).
-                    let mut pending_trade =
-                        payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                    // Payment success proves that the fee reached the LSP, not that it accepted the
+                    // signed allocation. Keep the trade pending until its signed SYNC_V1 arrives.
+                    let mut pending_trade = payment_id
+                        .and_then(|pid| self.pending_trade_payments.get(&pid).cloned());
                     if pending_trade.is_none() {
                         if let Some(pid) = payment_id {
                             if let Some(row) = self
@@ -2863,7 +3109,6 @@ impl UserApp {
                             {
                                 pending_trade = Some(PendingTradePayment {
                                     new_expected_usd: row.new_expected_usd,
-                                    price: row.btc_price,
                                     backing_sats: row.new_backing_sats,
                                     trade_db_id: row.id,
                                     action: row.action,
@@ -2873,252 +3118,61 @@ impl UserApp {
                     }
 
                     if let Some(trade) = pending_trade {
-                        // Trade payment confirmed — now apply the trade
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            // The trade fee has left the channel. Apply against the post-fee live
-                            // balance so native_sats cannot retain the pre-settlement amount.
-                            stable::update_balances(&self.node, &mut sc);
-                            if let Some(backing_sats) = trade.backing_sats {
-                                stable::apply_trade_allocation(
-                                    &mut sc,
-                                    trade.new_expected_usd,
-                                    backing_sats,
-                                );
-                            } else {
-                                stable::apply_trade(&mut sc, trade.new_expected_usd, trade.price);
-                            }
-                        }
-                        self.save_channel_settings();
-                        let _ = self.db.update_trade_status(trade.trade_db_id, "completed");
-
                         audit_event(
-                            "TRADE_CONFIRMED",
+                            "TRADE_FEE_CONFIRMED_AWAITING_SYNC",
                             json!({
                                 "payment_hash": payment_hash_str,
+                                "trade_id": trade.trade_db_id,
                                 "action": trade.action,
                                 "new_expected_usd": trade.new_expected_usd,
                                 "backing_sats": trade.backing_sats,
                                 "fee_paid_msat": fee_paid_msat,
                             }),
                         );
-
                         self.update_balances();
-                        let verb =
-                            if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
-                        self.show_toast(&format!("{} order confirmed", verb), "OK");
-                    } else {
-                        // Normal (non-trade) outgoing payment
-                        // Refresh channel balances from LDK
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                        }
-
-                        let price = {
-                            let sc = self.stable_channel.lock().unwrap();
-                            sc.latest_price
-                        };
-
-                        // LDK's PaymentId is the key persisted when a send starts. It equals the
-                        // payment hash for BOLT11/keysend today, but not for every payment kind.
-                        let event_id = payment_id
-                            .map(|pid| format!("{pid}"))
-                            .unwrap_or_else(|| payment_hash_str.clone());
-
-                        // A DB lookup error is not evidence that this is a user payment. Deferring
-                        // avoids incorrectly reconciling a stability payment during a DB outage.
-                        match self.db.is_stability_payment(&event_id) {
+                        self.status_message =
+                            "Trade fee confirmed; waiting for LSP acceptance".to_string();
+                    } else if let Some(pid) = payment_id {
+                        match self.db.is_trade_payment(&format!("{pid}")) {
                             Err(e) => {
                                 ack = false;
                                 audit_event(
-                                    "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
+                                    "TRADE_PAYMENT_CLASSIFICATION_FAILED",
                                     json!({
                                         "payment_hash": payment_hash_str,
-                                        "payment_id": event_id,
+                                        "payment_id": format!("{pid}"),
                                         "error": e.to_string(),
                                     }),
                                 );
-                                self.status_message =
-                                    "Payment confirmed but accounting could not be saved; retrying"
-                                        .to_string();
                             }
-                            Ok(is_stability_payment) => {
-                                let needs_reconcile = !is_stability_payment;
-
-                                if needs_reconcile && price <= 0.0 {
-                                    // No price yet — we can't size the peg overflow. Withhold the ack
-                                    // so LDK re-delivers after the background price refresh. No state
-                                    // was deducted or removed from the pending map, so retry is clean.
-                                    ack = false;
-                                    audit_event(
-                                        "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
-                                        json!({
-                                            "payment_hash": payment_hash_str,
-                                            "payment_id": event_id,
-                                        }),
-                                    );
-                                } else {
-                                    let pending = payment_id
-                                        .and_then(|pid| self.pending_payments.get(&pid).cloned());
-                                    let payment_sent_message = pending
-                                        .as_ref()
-                                        .map(|p| {
-                                            p.amount_usd
-                                                .map(|usd| {
-                                                    format!(
-                                                        "Payment sent: {}",
-                                                        Self::format_price(usd)
-                                                    )
-                                                })
-                                                .unwrap_or_else(|| {
-                                                    format!(
-                                                        "Payment sent: {}",
-                                                        Self::format_msats_as_btc(p.amount_msat)
-                                                    )
-                                                })
-                                        })
-                                        .unwrap_or_else(|| "Payment sent".to_string());
-
-                                    audit_event(
-                                        "PAYMENT_SUCCESSFUL",
-                                        json!({
-                                            "payment_hash": payment_hash_str,
-                                            "payment_id": event_id,
-                                            "fee_paid_msat": fee_paid_msat,
-                                        }),
-                                    );
-
-                                    if needs_reconcile {
-                                        // Hold the channel lock through the short SQLite transaction.
-                                        // On failure restore the pre-reconcile snapshot and leave the
-                                        // event unacked. A durable marker handles post-COMMIT replay.
-                                        let persisted = {
-                                            let mut sc = self.stable_channel.lock().unwrap();
-                                            let before_reconcile = sc.clone();
-                                            let old_expected_usd = sc.expected_usd.0;
-                                            let usd_deducted =
-                                                stable::reconcile_outgoing(&mut sc, price);
-
-                                            // Native-only sends do not change the peg, but their
-                                            // settled native allocation must still be persisted.
-                                            sc.native_sats = sc
-                                                .stable_receiver_btc
-                                                .sats
-                                                .saturating_sub(sc.backing_sats);
-                                            stable::recompute_native(&mut sc);
-
-                                            let result = self.db.persist_outgoing_reconciliation(
-                                                &event_id,
-                                                pending.as_ref().map(|p| p.payment_db_id),
-                                                fee_paid_msat,
-                                                &sc.channel_id.to_string(),
-                                                &format!("{}", sc.user_channel_id),
-                                                sc.expected_usd.0,
-                                                sc.backing_sats,
-                                                sc.native_sats,
-                                                sc.note.as_deref(),
-                                                if price > 0.0 { Some(price) } else { None },
-                                            );
-
-                                            match result {
-                                                Ok(true) => Ok((
-                                                    true,
-                                                    usd_deducted,
-                                                    old_expected_usd,
-                                                    sc.expected_usd.0,
-                                                )),
-                                                Ok(false) => {
-                                                    *sc = before_reconcile;
-                                                    Ok((
-                                                        false,
-                                                        None,
-                                                        old_expected_usd,
-                                                        old_expected_usd,
-                                                    ))
-                                                }
-                                                Err(e) => {
-                                                    *sc = before_reconcile;
-                                                    Err(e)
-                                                }
-                                            }
-                                        };
-
-                                        match persisted {
-                                            Ok((
-                                                applied,
-                                                usd_deducted,
-                                                old_expected_usd,
-                                                new_expected_usd,
-                                            )) => {
-                                                if let Some(pid) = payment_id {
-                                                    self.pending_payments.remove(&pid);
-                                                }
-                                                if let Some(usd_deducted) = usd_deducted {
-                                                    audit_event(
-                                                        "OUTGOING_STABLE_DEDUCTED",
-                                                        json!({
-                                                            "payment_hash": payment_hash_str,
-                                                            "payment_id": event_id,
-                                                            "usd_deducted": usd_deducted,
-                                                            "old_expected_usd": old_expected_usd,
-                                                            "new_expected_usd": new_expected_usd,
-                                                            "btc_price": price,
-                                                        }),
-                                                    );
-                                                }
-                                                audit_event(
-                                                    if applied {
-                                                        "OUTGOING_RECONCILE_COMMITTED"
-                                                    } else {
-                                                        "OUTGOING_RECONCILE_REPLAY"
-                                                    },
-                                                    json!({
-                                                        "payment_hash": payment_hash_str,
-                                                        "payment_id": event_id,
-                                                    }),
-                                                );
-                                            }
-                                            Err(e) => {
-                                                ack = false;
-                                                audit_event(
-                                                    "OUTGOING_RECONCILE_PERSIST_FAILED",
-                                                    json!({
-                                                        "payment_hash": payment_hash_str,
-                                                        "payment_id": event_id,
-                                                        "error": e.to_string(),
-                                                    }),
-                                                );
-                                                self.status_message = "Payment confirmed but accounting could not be saved; retrying".to_string();
-                                            }
-                                        }
-                                    } else if let Some(p) = pending {
-                                        // Stability payments were accounted when sent. Only complete
-                                        // their history row here.
-                                        let _ = self.db.update_payment_status(
-                                            p.payment_db_id,
-                                            "completed",
-                                            fee_paid_msat,
-                                        );
-                                        if let Some(pid) = payment_id {
-                                            self.pending_payments.remove(&pid);
-                                        }
-                                    } else {
-                                        let _ = self.db.update_payment_status_by_pid(
-                                            &event_id,
-                                            "completed",
-                                            fee_paid_msat,
-                                        );
-                                    }
-
-                                    if ack {
-                                        self.update_balances();
-                                        self.status_message = payment_sent_message.clone();
-                                        self.show_toast(&payment_sent_message, "-");
-                                    }
-                                }
+                            Ok(true) => {
+                                // SYNC_V1 can arrive first and atomically complete the trade. Do not
+                                // run ordinary outgoing reconciliation when LDK later reports its fee.
+                                audit_event(
+                                    "TRADE_FEE_CONFIRMED_AFTER_SYNC",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "payment_id": format!("{pid}"),
+                                        "fee_paid_msat": fee_paid_msat,
+                                    }),
+                                );
+                            }
+                            Ok(false) => {
+                                self.handle_normal_payment_success(
+                                    payment_id,
+                                    &payment_hash_str,
+                                    fee_paid_msat,
+                                    &mut ack,
+                                );
                             }
                         }
+                    } else {
+                        self.handle_normal_payment_success(
+                            payment_id,
+                            &payment_hash_str,
+                            fee_paid_msat,
+                            &mut ack,
+                        );
                     }
                 }
 
@@ -3128,8 +3182,34 @@ impl UserApp {
                     reason,
                 } => {
                     // Check if this is a pending trade payment
-                    let pending_trade =
+                    let mut pending_trade =
                         payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                    if pending_trade.is_none() {
+                        if let Some(pid) = payment_id {
+                            match self.db.get_pending_trade_by_payment_id(&format!("{pid}")) {
+                                Ok(Some(row)) => {
+                                    pending_trade = Some(PendingTradePayment {
+                                        new_expected_usd: row.new_expected_usd,
+                                        backing_sats: row.new_backing_sats,
+                                        trade_db_id: row.id,
+                                        action: row.action,
+                                    });
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    ack = false;
+                                    audit_event(
+                                        "TRADE_PAYMENT_CLASSIFICATION_FAILED",
+                                        json!({
+                                            "payment_id": format!("{pid}"),
+                                            "context": "payment_failed",
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     if let Some(trade) = pending_trade {
                         // Trade payment failed — mark as failed, don't apply trade
@@ -3149,7 +3229,7 @@ impl UserApp {
                             if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
                         self.status_message = format!("{} order failed: {:?}", verb, reason);
                         self.show_toast(&format!("{} order failed", verb), "X");
-                    } else {
+                    } else if ack {
                         // Check if this is a pending outgoing payment
                         let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
                         if let Some(p) = pending {
@@ -3375,11 +3455,19 @@ impl UserApp {
                 if let Some(new_value) = pending.resolved_new_value {
                     (new_value, false)
                 } else {
-                    let recv = pending.rx.as_ref().expect("unresolved lookup has receiver");
-                    let new_value = match recv.try_recv() {
-                        Ok(value) => value,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => return,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                    let new_value = match pending.rx.as_ref() {
+                        Some(recv) => match recv.try_recv() {
+                            Ok(value) => value,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                        },
+                        None => {
+                            audit_event(
+                                "SPLICE_OUT_LOOKUP_STATE_INVALID",
+                                json!({ "txid": pending.txid.clone() }),
+                            );
+                            None
+                        }
                     };
                     pending.resolved_new_value = Some(new_value);
                     pending.rx = None;
@@ -3442,6 +3530,18 @@ impl UserApp {
         let mut sc = self.stable_channel.lock().unwrap();
         update_balances(&self.node, &mut sc);
         let price = sc.latest_price;
+        if !price.is_finite() || price <= 0.0 {
+            drop(sc);
+            pending.retry_after = Some(
+                std::time::Instant::now() + Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS),
+            );
+            self.pending_splice_deduction = Some(pending);
+            audit_event(
+                "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
+                json!({ "source": "funding_lookup" }),
+            );
+            return;
+        }
         let mut reconciled = sc.clone();
         let (usd_deducted, source) = if let Some(splice_out_sats) = exact_splice_out_sats {
             (
@@ -9426,7 +9526,6 @@ impl UserApp {
                 payment_id,
                 PendingTradePayment {
                     new_expected_usd,
-                    price: btc_price,
                     backing_sats: Some(backing_sats),
                     trade_db_id,
                     action: "buy".to_string(),
@@ -9491,7 +9590,6 @@ impl UserApp {
                 payment_id,
                 PendingTradePayment {
                     new_expected_usd,
-                    price: btc_price,
                     backing_sats: Some(backing_sats),
                     trade_db_id,
                     action: "sell".to_string(),
@@ -10248,6 +10346,46 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
     })
 }
 
+fn validate_incoming_sync_allocation(
+    sync: &IncomingSync,
+    live_receiver_sats: u64,
+    current_price: f64,
+    matches_pending_trade: bool,
+) -> Result<(), &'static str> {
+    if sync.backing_sats > live_receiver_sats {
+        return Err("backing exceeds live receiver balance");
+    }
+    if sync.expected_usd < 0.01 {
+        return if sync.backing_sats == 0 {
+            Ok(())
+        } else {
+            Err("zero peg has nonzero backing")
+        };
+    }
+    if sync.backing_sats == 0 {
+        return Err("nonzero peg has no backing");
+    }
+
+    // A pending trade was priced, bounded, and signed by this wallet before it was sent. Other
+    // syncs are recovery/reconciliation messages, so independently reject allocations whose
+    // implied booking price is implausibly far from the wallet's current trusted price.
+    if matches_pending_trade {
+        return Ok(());
+    }
+    if !current_price.is_finite() || current_price <= 0.0 {
+        return Err("no trusted wallet price available");
+    }
+    let implied_booking_price =
+        sync.expected_usd / sync.backing_sats as f64 * SATS_IN_BTC as f64;
+    if !implied_booking_price.is_finite()
+        || implied_booking_price < current_price / 10.0
+        || implied_booking_price > current_price * 10.0
+    {
+        return Err("allocation implies an implausible booking price");
+    }
+    Ok(())
+}
+
 fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -10289,8 +10427,9 @@ mod tests {
     use super::{
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
         parse_incoming_sync, parse_trade_usd_cents, restrict_secret_file_permissions,
-        sats_for_usd_cents, splice_in_overlap_sats, splice_reconcile_action, write_secret_file,
-        IncomingSync, PendingSplice, SpliceReconcileAction, UserApp,
+        sats_for_usd_cents, splice_in_overlap_sats, splice_reconcile_action,
+        validate_incoming_sync_allocation, write_secret_file, IncomingSync, PendingSplice,
+        SpliceReconcileAction, UserApp,
     };
 
     #[test]
@@ -10370,6 +10509,61 @@ mod tests {
         assert_eq!(stable, 57_444);
         assert_eq!(native, 0);
         assert_eq!(usd, 0.0);
+    }
+
+    #[test]
+    fn incoming_sync_allocation_is_bounded_by_wallet_state() {
+        let sync = IncomingSync {
+            channel_id: "00".repeat(32),
+            expected_usd: 60.0,
+            backing_sats: 60_000,
+            sync_version: 1,
+        };
+        assert!(validate_incoming_sync_allocation(&sync, 100_000, 100_000.0, false).is_ok());
+
+        let overdrawn = IncomingSync {
+            backing_sats: 100_001,
+            ..sync.clone()
+        };
+        assert!(validate_incoming_sync_allocation(
+            &overdrawn,
+            100_000,
+            100_000.0,
+            true
+        )
+        .is_err());
+
+        let implausible = IncomingSync {
+            expected_usd: 10_000.0,
+            ..sync.clone()
+        };
+        assert!(validate_incoming_sync_allocation(
+            &implausible,
+            100_000,
+            100_000.0,
+            false
+        )
+        .is_err());
+        assert!(validate_incoming_sync_allocation(
+            &implausible,
+            100_000,
+            100_000.0,
+            true
+        )
+        .is_ok());
+
+        let inconsistent_zero = IncomingSync {
+            expected_usd: 0.0,
+            backing_sats: 1,
+            ..sync
+        };
+        assert!(validate_incoming_sync_allocation(
+            &inconsistent_zero,
+            100_000,
+            100_000.0,
+            true
+        )
+        .is_err());
     }
 
     #[test]

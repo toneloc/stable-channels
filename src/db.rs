@@ -442,6 +442,28 @@ impl Database {
         backing_sats: u64,
         native_sats: u64,
     ) -> SqliteResult<bool> {
+        self.apply_sync_if_newer_and_complete_trade(
+            user_channel_id,
+            sync_version,
+            expected_usd,
+            backing_sats,
+            native_sats,
+            None,
+        )
+    }
+
+    /// Apply a signed sync and, when it acknowledges a wallet-authored trade, complete that trade
+    /// in the same transaction. This closes the crash window between accepting the allocation and
+    /// marking its fee payment as a trade rather than an ordinary outgoing payment.
+    pub fn apply_sync_if_newer_and_complete_trade(
+        &self,
+        user_channel_id: &str,
+        sync_version: u64,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        trade_id: Option<i64>,
+    ) -> SqliteResult<bool> {
         if sync_version == 0
             || sync_version > i64::MAX as u64
             || !expected_usd.is_finite()
@@ -451,8 +473,9 @@ impl Database {
         {
             return Ok(false);
         }
-        let conn = self.conn.lock().unwrap();
-        let updated = conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
             "UPDATE channels
              SET expected_usd = ?1, stable_sats = ?2, native_sats = ?3,
                  sync_version = ?4, updated_at = strftime('%s', 'now')
@@ -466,7 +489,7 @@ impl Database {
             ],
         )?;
         if updated == 0 {
-            let exists: bool = conn.query_row(
+            let exists: bool = tx.query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM channels WHERE user_channel_id = ?1
                  )",
@@ -476,8 +499,20 @@ impl Database {
             if !exists {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
+            tx.commit()?;
+            return Ok(false);
         }
-        Ok(updated == 1)
+        if let Some(trade_id) = trade_id {
+            let completed = tx.execute(
+                "UPDATE trades SET status = 'completed' WHERE id = ?1 AND status = 'pending'",
+                params![trade_id],
+            )?;
+            if completed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn get_sync_version(&self, user_channel_id: &str) -> SqliteResult<Option<u64>> {
@@ -671,6 +706,47 @@ impl Database {
             },
         )
         .optional()
+    }
+
+    /// Match a signed allocation acknowledgment to a trade authored by this wallet. The LSP can
+    /// deliver SYNC_V1 before or after LDK reports the trade-fee payment as successful, so the
+    /// allocation itself is the stable correlation key.
+    pub fn get_pending_trade_by_allocation(
+        &self,
+        new_expected_usd: f64,
+        new_backing_sats: u64,
+    ) -> SqliteResult<Option<PendingTradeRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, new_expected_usd, btc_price, new_backing_sats, action FROM trades
+             WHERE status = 'pending'
+               AND new_backing_sats = ?1
+               AND ABS(new_expected_usd - ?2) <= 0.000000001
+             ORDER BY id DESC LIMIT 1",
+            params![new_backing_sats, new_expected_usd],
+            |row| {
+                Ok(PendingTradeRow {
+                    id: row.get(0)?,
+                    new_expected_usd: row.get(1)?,
+                    btc_price: row.get(2)?,
+                    new_backing_sats: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
+                    action: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Whether this payment id belongs to any trade, including one already completed by an
+    /// earlier SYNC_V1. This prevents an out-of-order PaymentSuccessful event from being
+    /// reconciled as an ordinary wallet send.
+    pub fn is_trade_payment(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM trades WHERE payment_id = ?1)",
+            params![payment_id],
+            |row| row.get(0),
+        )
     }
 
     /// Update trade status
@@ -2259,6 +2335,83 @@ mod tests {
             .expect("new exact-allocation trades must recover even when the target is zero");
         assert_eq!(pending.new_expected_usd, 0.0);
         assert_eq!(pending.new_backing_sats, Some(0));
+    }
+
+    #[test]
+    fn pending_trade_matches_signed_allocation_and_payment_id_remains_classified() {
+        let db = Database::open_in_memory().unwrap();
+        let trade_id = db
+            .record_trade(
+                "ch1",
+                "sell",
+                10.0,
+                0.0001,
+                100_000.0,
+                0.10,
+                60.0,
+                Some(60_000),
+                Some("trade-payment"),
+                "pending",
+            )
+            .unwrap();
+
+        let matched = db
+            .get_pending_trade_by_allocation(60.0, 60_000)
+            .unwrap()
+            .expect("exact wallet-authored allocation must match");
+        assert_eq!(matched.id, trade_id);
+        assert!(db
+            .get_pending_trade_by_allocation(60.01, 60_000)
+            .unwrap()
+            .is_none());
+        assert!(db.is_trade_payment("trade-payment").unwrap());
+
+        db.update_trade_status(trade_id, "completed").unwrap();
+        assert!(db.is_trade_payment("trade-payment").unwrap());
+        assert!(db
+            .get_pending_trade_by_allocation(60.0, 60_000)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn inbound_sync_atomically_completes_matching_trade() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        let trade_id = db
+            .record_trade(
+                "user-channel-1",
+                "sell",
+                10.0,
+                0.0001,
+                100_000.0,
+                0.10,
+                20.0,
+                Some(20_000),
+                Some("trade-payment"),
+                "pending",
+            )
+            .unwrap();
+
+        assert!(db
+            .apply_sync_if_newer_and_complete_trade(
+                "user-channel-1",
+                1,
+                20.0,
+                20_000,
+                4_000,
+                Some(trade_id),
+            )
+            .unwrap());
+        assert!(db
+            .get_pending_trade_by_payment_id("trade-payment")
+            .unwrap()
+            .is_none());
+        assert!(db.is_trade_payment("trade-payment").unwrap());
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 20.0);
+        assert_eq!(channel.backing_sats, 20_000);
     }
 
     #[test]

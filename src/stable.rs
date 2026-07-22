@@ -291,11 +291,16 @@ pub fn get_current_price(agent: &Agent) -> f64 {
 /// The sats effectively backing the stable position. If `backing_sats` was left unset (0) while a
 /// peg is active, derive it from the target so the stable value is the peg — never the full channel
 /// balance (which would count native BTC and fire a spurious PAY that drains it to the LSP).
-fn effective_backing_sats(backing_sats: u64, expected_usd: f64, price: f64) -> u64 {
+fn effective_backing_sats(
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+    receiver_sats: u64,
+) -> u64 {
     if backing_sats > 0 || expected_usd < 0.01 || price <= 0.0 {
         backing_sats
     } else {
-        (expected_usd / price * 100_000_000.0) as u64
+        ((expected_usd / price * 100_000_000.0) as u64).min(receiver_sats)
     }
 }
 
@@ -352,7 +357,7 @@ pub fn update_balances<'update_balance_lifetime>(
         let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
         let our_balance_sats =
             (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-        let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+        let their_balance_sats = channel.channel_value_sats.saturating_sub(our_balance_sats);
 
         if sc.is_stable_receiver {
             sc.stable_receiver_btc = Bitcoin::from_sats(our_balance_sats);
@@ -414,22 +419,17 @@ pub fn check_stability(
     sc: &mut StableChannel,
     price: f64,
 ) -> Option<StabilityPaymentInfo> {
-    let current_price = if price > 0.0 {
-        price
-    } else {
-        let cached_price = get_cached_price_no_fetch();
-        if cached_price > 0.0 {
-            cached_price
-        } else {
-            audit_event(
-                "STABILITY_SKIP",
-                json!({
-                    "reason": "no valid price available"
-                }),
-            );
-            return None;
-        }
-    };
+    if !price.is_finite() || price <= 0.0 {
+        audit_event(
+            "STABILITY_SKIP",
+            json!({
+                "reason": "caller supplied no valid current price",
+                "price": price,
+            }),
+        );
+        return None;
+    }
+    let current_price = price;
 
     sc.latest_price = current_price;
     let (success, _) = update_balances(node, sc);
@@ -468,7 +468,29 @@ pub fn check_stability(
     // Repair an unset backing (0 with a live peg + price) by deriving it from the target, so the
     // stable portion is valued at the peg — NOT the full channel balance, which would count native
     // BTC and trigger a spurious PAY that drains it to the LSP.
-    sc.backing_sats = effective_backing_sats(sc.backing_sats, target_usd, current_price);
+    sc.backing_sats = effective_backing_sats(
+        sc.backing_sats,
+        target_usd,
+        current_price,
+        sc.stable_receiver_btc.sats,
+    );
+    if sc.backing_sats > sc.stable_receiver_btc.sats {
+        audit_event(
+            "STABILITY_SKIP",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "reason": "backing exceeds live balance; awaiting spend reconciliation",
+                "backing_sats": sc.backing_sats,
+                "live_receiver_sats": sc.stable_receiver_btc.sats,
+            }),
+        );
+        return None;
+    }
+    sc.native_sats = sc
+        .stable_receiver_btc
+        .sats
+        .saturating_sub(sc.backing_sats);
+    recompute_native(sc);
 
     // Value of the stable portion only (excludes native BTC).
     let stable_usd_value = if sc.backing_sats > 0 {
@@ -642,12 +664,23 @@ mod tests {
     fn effective_backing_recomputes_when_unset() {
         // Unset backing (0) with a live peg + price → derived from the peg, not left at 0
         // (so the stable value can't balloon to the full channel balance and fire a bad PAY).
-        assert_eq!(effective_backing_sats(0, 100.0, 50_000.0), 200_000);
+        assert_eq!(
+            effective_backing_sats(0, 100.0, 50_000.0, 300_000),
+            200_000
+        );
         // Already-set backing is returned unchanged.
-        assert_eq!(effective_backing_sats(123_456, 100.0, 50_000.0), 123_456);
+        assert_eq!(
+            effective_backing_sats(123_456, 100.0, 50_000.0, 300_000),
+            123_456
+        );
+        // A legacy peg cannot repair to more backing than the wallet actually owns.
+        assert_eq!(
+            effective_backing_sats(0, 100.0, 100_000.0, 95_000),
+            95_000
+        );
         // No price / no peg → nothing to derive from; left as-is.
-        assert_eq!(effective_backing_sats(0, 100.0, 0.0), 0);
-        assert_eq!(effective_backing_sats(0, 0.0, 50_000.0), 0);
+        assert_eq!(effective_backing_sats(0, 100.0, 0.0, 300_000), 0);
+        assert_eq!(effective_backing_sats(0, 0.0, 50_000.0, 300_000), 0);
     }
 
     #[test]
