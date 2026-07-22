@@ -93,20 +93,50 @@ struct SendView: View {
         )
     }
 
+    private var counterpartyForwardingFeeParams: (baseMsat: UInt64, proportionalMillionths: UInt64) {
+        guard let channel = appState.nodeService.channels.first(where: \.isChannelReady) else {
+            return (
+                UInt64(Constants.lightningDefaultForwardingFeeBaseMsat),
+                UInt64(Constants.lightningDefaultForwardingFeeProportionalMillionths)
+            )
+        }
+        return (
+            UInt64(channel.counterpartyForwardingInfoFeeBaseMsat ?? Constants.lightningDefaultForwardingFeeBaseMsat),
+            UInt64(channel.counterpartyForwardingInfoFeeProportionalMillionths ?? Constants.lightningDefaultForwardingFeeProportionalMillionths)
+        )
+    }
+
     private func lightningFeeEstimateText(for sats: UInt64) -> String {
-        let feeSats = max(UInt64(ceil(Double(sats) * Constants.lightningRoutingFeeEstimateRate)), 1)
+        let params = counterpartyForwardingFeeParams
+        let amountMsat = saturatingMultiply(sats, 1_000)
+        let proportionalMsat = saturatingMultiply(amountMsat, params.proportionalMillionths) / 1_000_000
+        let feeMsat = saturatingAdd(params.baseMsat, proportionalMsat)
+        let feeSats = saturatingAdd(feeMsat, 999) / 1_000
+        guard feeSats > 0 else {
+            return String(localized: "info_lightning_lsp_fee_none", defaultValue: "No LSP routing fee expected")
+        }
         if appState.btcPrice > 0 {
             let usd = Double(feeSats) / Double(Constants.satsInBTC) * appState.btcPrice
             return String(
-                format: String(localized: "info_lightning_fee_estimate_with_usd", defaultValue: "Up to %@ (%@ BTC)"),
+                format: String(localized: "info_lightning_lsp_fee_estimate_with_usd", defaultValue: "~%@ (%@ BTC)"),
                 usd.usdFormatted,
                 feeSats.btcSpacedFormatted
             )
         }
         return String(
-            format: String(localized: "info_lightning_fee_estimate", defaultValue: "Up to %@ BTC"),
+            format: String(localized: "info_lightning_lsp_fee_estimate", defaultValue: "~%@ BTC"),
             feeSats.btcSpacedFormatted
         )
+    }
+
+    private func saturatingMultiply(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let result = lhs.multipliedReportingOverflow(by: rhs)
+        return result.overflow ? UInt64.max : result.partialValue
+    }
+
+    private func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        let result = lhs.addingReportingOverflow(rhs)
+        return result.overflow ? UInt64.max : result.partialValue
     }
 
     var body: some View {

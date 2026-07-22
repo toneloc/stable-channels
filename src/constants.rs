@@ -44,7 +44,6 @@ pub const DEFAULT_LSP_PUBKEY: &str =
 /// Default LSP address
 pub const DEFAULT_LSP_ADDRESS: &str = "stablechannels.com:9735";
 
-
 // ============================================================================
 // TIMING CONSTANTS
 // ============================================================================
@@ -98,8 +97,9 @@ pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
 /// there is no separate server-side percentage fee config.
 pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
 
-/// Conservative UI estimate for Lightning routing fees.
-pub const LIGHTNING_ROUTING_FEE_ESTIMATE_RATE: f64 = 0.01;
+/// LDK channel-config defaults for outbound forwarding fees.
+pub const LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT: u64 = 1_000;
+pub const LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS: u64 = 0;
 
 /// Approximate virtual bytes used for on-chain fee estimates shown before send.
 pub const ESTIMATED_ONCHAIN_SEND_VBYTES: u64 = 140;

@@ -50,8 +50,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.lightningdevkit.ldknode.Bolt11Invoice
 import org.lightningdevkit.ldknode.Offer
-import kotlin.math.ceil
-import kotlin.math.max
 
 enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
 
@@ -125,22 +123,45 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         InputType.BOLT12, InputType.ONCHAIN -> manualAmountSats
         InputType.UNKNOWN -> 0
     }
+    fun saturatingMultiply(lhs: Long, rhs: Long): Long {
+        if (lhs <= 0L || rhs <= 0L) return 0L
+        return if (lhs > Long.MAX_VALUE / rhs) Long.MAX_VALUE else lhs * rhs
+    }
+
+    fun saturatingAdd(lhs: Long, rhs: Long): Long {
+        if (lhs >= Long.MAX_VALUE - rhs) return Long.MAX_VALUE
+        return lhs + rhs
+    }
 
     val displayUSD = if (btcPrice > 0 && displaySats > 0) (displaySats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
+    val forwardingChannel = appState.nodeService.channels.firstOrNull { it.isChannelReady }
+    val forwardingFeeBaseMsat = forwardingChannel
+        ?.counterpartyForwardingInfoFeeBaseMsat
+        ?.toLong()
+        ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT
+    val forwardingFeeProportionalMillionths = forwardingChannel
+        ?.counterpartyForwardingInfoFeeProportionalMillionths
+        ?.toLong()
+        ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS
     val lightningFeeSats = if (displaySats > 0) {
-        max(ceil(displaySats * Constants.LIGHTNING_ROUTING_FEE_ESTIMATE_RATE).toLong(), 1L)
+        val amountMsat = saturatingMultiply(displaySats, 1_000L)
+        val proportionalMsat = saturatingMultiply(amountMsat, forwardingFeeProportionalMillionths) / 1_000_000L
+        val feeMsat = saturatingAdd(forwardingFeeBaseMsat, proportionalMsat)
+        saturatingAdd(feeMsat, 999L) / 1_000L
     } else {
         0L
     }
-    val lightningFeeText = if (lightningFeeSats > 0) {
+    val lightningFeeText = if (lightningFeeSats == 0L) {
+        "Expected LSP routing fee: none"
+    } else if (lightningFeeSats > 0) {
         val feeUsd = if (btcPrice > 0) {
             " (${((lightningFeeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice).usdFormatted()})"
         } else {
             ""
         }
-        "Expected fee: up to ${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
+        "Expected LSP routing fee: ~${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
     } else {
-        "Expected fee: up to 1%"
+        "Expected LSP routing fee uses channel config"
     }
     val onchainVbytes = if (isSendMax) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
     val onchainFeeText = feeRateSatVb?.let { rate ->

@@ -3140,10 +3140,49 @@ impl UserApp {
         format!("Fee ({:.0}%)", STABLE_CHANNEL_TRADE_FEE_RATE * 100.0)
     }
 
-    fn estimated_lightning_fee_sats(amount_sats: u64) -> u64 {
-        ((amount_sats as f64) * LIGHTNING_ROUTING_FEE_ESTIMATE_RATE)
-            .ceil()
-            .max(1.0) as u64
+    fn counterparty_forwarding_fee_params(&self) -> (u64, u64) {
+        self.node
+            .list_channels()
+            .iter()
+            .find(|c| c.is_channel_ready)
+            .map(|channel| {
+                (
+                    channel
+                        .counterparty_forwarding_info_fee_base_msat
+                        .map(u64::from)
+                        .unwrap_or(LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT),
+                    channel
+                        .counterparty_forwarding_info_fee_proportional_millionths
+                        .map(u64::from)
+                        .unwrap_or(LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS),
+                )
+            })
+            .unwrap_or((
+                LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT,
+                LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS,
+            ))
+    }
+
+    fn estimated_lightning_fee_sats(&self, amount_sats: u64) -> u64 {
+        let (base_msat, proportional_millionths) = self.counterparty_forwarding_fee_params();
+        let amount_msat = amount_sats.saturating_mul(1000);
+        let proportional_msat = amount_msat.saturating_mul(proportional_millionths) / 1_000_000;
+        base_msat
+            .saturating_add(proportional_msat)
+            .saturating_add(999)
+            / 1000
+    }
+
+    fn lightning_fee_text(&self, amount_sats: u64) -> String {
+        let fee_sats = self.estimated_lightning_fee_sats(amount_sats);
+        if fee_sats == 0 {
+            "Expected LSP routing fee: none".to_string()
+        } else {
+            format!(
+                "Expected LSP routing fee: ~{}",
+                Self::format_sats_as_btc(fee_sats)
+            )
+        }
     }
 
     /// Parse a USD amount. Tolerant of leading `$`, spaces, commas, and
@@ -7421,7 +7460,6 @@ impl UserApp {
                         if let Some(amount_msat) = invoice.amount_milli_satoshis() {
                             let amount_sats = amount_msat.saturating_add(999) / 1000;
                             let amount_btc = amount_sats as f64 / SATS_IN_BTC as f64;
-                            let fee_sats = Self::estimated_lightning_fee_sats(amount_sats);
                             let price = self.stable_channel.lock().unwrap().latest_price;
                             let usd_str = if price > 0.0 {
                                 format!(" (${:.2})", amount_btc * price)
@@ -7429,19 +7467,37 @@ impl UserApp {
                                 String::new()
                             };
                             format!(
-                                "Amount: {}{}; expected routing fee: up to {}",
+                                "Amount: {}{}; {}",
                                 Self::format_sats_as_btc(amount_sats),
                                 usd_str,
-                                Self::format_sats_as_btc(fee_sats)
+                                self.lightning_fee_text(amount_sats)
                             )
                         } else {
-                            "Expected routing fee: up to 1% of the amount sent".to_string()
+                            if let Ok(amount_btc) = self.send_amount.trim().parse::<f64>() {
+                                let amount_sats = (amount_btc * SATS_IN_BTC as f64) as u64;
+                                if amount_sats > 0 {
+                                    self.lightning_fee_text(amount_sats)
+                                } else {
+                                    "Expected LSP routing fee uses channel config".to_string()
+                                }
+                            } else {
+                                "Expected LSP routing fee uses channel config".to_string()
+                            }
                         }
                     }
                     Err(_) => String::new(),
                 }
             } else {
-                "Expected routing fee: up to 1% of the amount sent".to_string()
+                if let Ok(amount_btc) = self.send_amount.trim().parse::<f64>() {
+                    let amount_sats = (amount_btc * SATS_IN_BTC as f64) as u64;
+                    if amount_sats > 0 {
+                        self.lightning_fee_text(amount_sats)
+                    } else {
+                        "Expected LSP routing fee uses channel config".to_string()
+                    }
+                } else {
+                    "Expected LSP routing fee uses channel config".to_string()
+                }
             };
 
             if !fee_text.is_empty() {
@@ -8114,7 +8170,9 @@ impl UserApp {
 
                 // Stable-channel trade fee
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(Self::stable_trade_fee_label()).color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(Self::stable_trade_fee_label()).color(Color32::DARK_GRAY),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("-{}", Self::format_price(fee_usd)))
@@ -8472,7 +8530,9 @@ impl UserApp {
 
                 // Stable-channel trade fee
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(Self::stable_trade_fee_label()).color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(Self::stable_trade_fee_label()).color(Color32::DARK_GRAY),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("-{}", Self::format_price(fee_usd)))
