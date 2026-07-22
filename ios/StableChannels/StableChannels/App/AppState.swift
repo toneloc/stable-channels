@@ -805,11 +805,11 @@ class AppState {
         guard let db = databaseService,
               let latest = db.latestReceivedPayment() else { return }
         if let usd = latest.amountUSD {
-            statusMessage = "Received \(usd.usdFormatted)"
+            statusMessage = "Payment received: \(usd.usdFormatted)"
         } else if let usd = usdValue(sats: latest.amountSats, rowPrice: latest.btcPrice) {
-            statusMessage = "Received \(usd.usdFormatted)"
+            statusMessage = "Payment received: \(usd.usdFormatted)"
         } else {
-            statusMessage = "Received \(latest.amountSats.btcSpacedFormatted) BTC"
+            statusMessage = "Payment received: \(latest.amountSats.btcSpacedFormatted) BTC"
         }
     }
 
@@ -828,6 +828,20 @@ class AppState {
             return nil
         }
         return Double(sats) / Double(Constants.satsInBTC) * price
+    }
+
+    private func sentPaymentStatusMessage(paymentId: PaymentId?) -> String {
+        guard let paymentId,
+              let payment = databaseService?.payment(paymentId: "\(paymentId)") else {
+            return "Payment sent"
+        }
+        if let usd = payment.amountUSD {
+            return "Payment sent: \(usd.usdFormatted)"
+        }
+        if let usd = usdValue(sats: payment.amountSats, rowPrice: payment.btcPrice) {
+            return "Payment sent: \(usd.usdFormatted)"
+        }
+        return "Payment sent: \(payment.amountSats.btcSpacedFormatted) BTC"
     }
 
     // MARK: - Gossip Data Management
@@ -1151,7 +1165,7 @@ class AppState {
                 if let txid, !txid.isEmpty {
                     startSpliceConfirmationMonitor(txid: txid)
                 }
-                statusMessage = "Swap pending confirmation"
+                statusMessage = "Move pending confirmation"
             }
 
             saveChannelToDB()
@@ -1363,12 +1377,12 @@ class AppState {
         guard persistence.isNewPayment else { return }
 
         if let usd = amountUSD {
-            statusMessage = "Received \(usd.usdFormatted)"
+            statusMessage = "Payment received: \(usd.usdFormatted)"
         } else if let usd = usdValue(sats: amountMsat / 1000, rowPrice: nil) {
-            statusMessage = "Received \(usd.usdFormatted)"
+            statusMessage = "Payment received: \(usd.usdFormatted)"
         } else {
             let sats = amountMsat / 1000
-            statusMessage = "Received \(sats.btcSpacedFormatted) BTC"
+            statusMessage = "Payment received: \(sats.btcSpacedFormatted) BTC"
         }
 
         // Trigger payment received animation
@@ -1490,7 +1504,7 @@ class AppState {
             "payment_hash": paymentHashStr,
             "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
         ])
-        statusMessage = "Payment confirmed"
+        statusMessage = sentPaymentStatusMessage(paymentId: paymentId)
     }
 
     private func handleStabilityPaymentSuccessful(
@@ -1789,7 +1803,7 @@ class AppState {
         }
         isSweeping = true
         pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address)
-        statusMessage = "Swap pending..."
+        statusMessage = "Move pending..."
     }
 
     func cancelPendingSpliceStart() {
@@ -1885,7 +1899,7 @@ class AppState {
         }
         monitoredSpliceTxid = nil
         spliceConfirmationTask = nil
-        statusMessage = "Swap confirmed"
+        statusMessage = "Move confirmed"
 
         AuditService.log("SPLICE_CONFIRMED", data: [
             "txid": txid,

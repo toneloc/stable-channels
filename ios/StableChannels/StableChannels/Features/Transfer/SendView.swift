@@ -83,10 +83,10 @@ struct SendView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section(String(localized: "header_invoice_address", defaultValue: "Invoice, Offer, or Address")) {
+                Section(String(localized: "header_invoice_address", defaultValue: "To")) {
                     TextField(
                         String(localized: "placeholder_invoice",
-                               defaultValue: "Paste invoice, bolt12 offer, or address..."),
+                               defaultValue: "Invoice or onchain address"),
                         text: $input,
                         axis: .vertical
                     )
@@ -255,8 +255,9 @@ struct SendView: View {
                 if success {
                     Section {
                         VStack(spacing: 4) {
+                            let sentTitle = displayUSD.map { "Payment sent: \($0.usdFormatted)" } ?? "Payment sent"
                             Label(
-                                String(localized: "success_sent", defaultValue: "Payment sent!"),
+                                sentTitle,
                                 systemImage: "checkmark.circle.fill"
                             )
                             .foregroundStyle(.green)
@@ -285,7 +286,7 @@ struct SendView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
                         } else {
-                            Text(String(localized: "button_send_payment", defaultValue: "Send Payment"))
+                            Text(String(localized: "button_send_payment", defaultValue: "Send"))
                                 .fontWeight(.semibold)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
@@ -469,8 +470,6 @@ struct SendView: View {
             }
 
             success = true
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            dismiss()
         } catch {
             errorMessage = error.localizedDescription
         }

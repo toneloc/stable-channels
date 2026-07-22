@@ -326,7 +326,7 @@ struct HomeView: View {
     private var savingsSection: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(String(localized: "label_on_chain", defaultValue: "Onchain"))
+                Text(String(localized: "label_on_chain", defaultValue: "Onchain Account"))
                     .font(.caption.bold())
                 Spacer()
                 Text(showBTC
@@ -355,7 +355,7 @@ struct HomeView: View {
                     Button {
                         appState.sweepToChannel()
                     } label: {
-                        Text(String(localized: "button_swap", defaultValue: "Swap"))
+                        Text(String(localized: "button_swap", defaultValue: "Move"))
                             .font(.caption.bold())
                             .padding(.horizontal, 16)
                             .padding(.vertical, 6)
@@ -373,7 +373,7 @@ struct HomeView: View {
                 if !hasReadyChannel {
                     Text(String(
                         localized: "hint_create_wallet",
-                        defaultValue: "Receive over Lightning to create your Stable Wallet"
+                        defaultValue: "Get your first payment to activate your account"
                     ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -382,7 +382,7 @@ struct HomeView: View {
                 // 4. No channel, confirmed deposit — just needs a Lightning receive
                 Text(String(
                     localized: "hint_create_wallet",
-                    defaultValue: "Receive over Lightning to create your Stable Wallet"
+                    defaultValue: "Get your first payment to activate your account"
                 ))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -410,7 +410,7 @@ struct HomeView: View {
             )
         case .sweep(let txid):
             pendingRowImpl(
-                text: String(localized: "status_sweeping", defaultValue: "Swap pending..."),
+                text: String(localized: "status_sweeping", defaultValue: "Move pending..."),
                 txid: txid
             )
         case .close(let txid):

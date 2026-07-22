@@ -329,7 +329,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Onchain", style = MaterialTheme.typography.labelMedium)
+                            Text("Onchain Account", style = MaterialTheme.typography.labelMedium)
                             Text(
                                 onchainUSD.usdFormatted(),
                                 style = MaterialTheme.typography.labelSmall,
@@ -339,7 +339,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         if (isSweeping) {
                             // 1. Splice-in in progress
                             Spacer(Modifier.height(4.dp))
-                            PendingRow("Swap pending...", appState.spliceTxid, context)
+                            PendingRow("Move pending...", appState.spliceTxid, context)
                         } else if (isChannelClosing) {
                             // 2. Channel closing
                             Spacer(Modifier.height(4.dp))
@@ -352,10 +352,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column {
-                                    Text("Move to Stability", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text("and Spending Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                                Text("Move to Lightning Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Button(
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
@@ -384,14 +381,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                             PendingRow(text, effectiveTxid, context)
                             if (!hasReadyChannel) {
-                                Text("Receive over Lightning to create your Trading and Spending Account",
+                                Text("Get your first payment to activate your account",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         } else {
                             // 4. No channel, confirmed deposit — just needs Lightning
                             Spacer(Modifier.height(4.dp))
-                            Text("Receive over Lightning to create your Trading and Spending Account",
+                            Text("Get your first payment to activate your account",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

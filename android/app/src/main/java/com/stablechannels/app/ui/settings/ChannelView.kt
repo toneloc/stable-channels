@@ -117,7 +117,7 @@ fun ChannelView(appState: AppState) {
                     ),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444))
                 ) {
-                    Text("Close Channel")
+                    Text("Close channel")
                 }
             }
         } else if (appState.isChannelClosing) {
@@ -164,8 +164,8 @@ fun ChannelView(appState: AppState) {
             onDismissRequest = { showCloseConfirm = false },
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
-            title = { Text("Close Channel?") },
-            text = { Text("This will cooperatively close the channel and sweep funds onchain.") },
+            title = { Text("Close channel") },
+            text = { Text("This will cooperatively close the channel and return your funds to your onchain wallet after confirmation.") },
             confirmButton = {
                 TextButton(onClick = {
                     showCloseConfirm = false
@@ -180,7 +180,7 @@ fun ChannelView(appState: AppState) {
                             appState.isChannelClosing = false
                         }
                     }
-                }) { Text("Close", color = MaterialTheme.colorScheme.error) }
+                }) { Text("Close channel", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
                 TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
