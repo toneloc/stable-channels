@@ -109,6 +109,13 @@ min_payment_size_msat        = 1000000
 proxy_address = "127.0.0.1:9050"
 ```
 
+LDK Server's LSPS2 channel-opening fee is configured here. The current Stable
+Channels prod-parity value is `channel_opening_fee_ppm = 0`, with
+`min_channel_opening_fee_msat = 0`, so JIT channel opens do not add an LSP
+opening fee. Stable-channel buy/sell trades separately use a 1% client-side
+trade fee (`STABLE_CHANNEL_TRADE_FEE_RATE`) sent to the LSP as the TRADE_V1
+keysend amount.
+
 For the LdkLog route to return content, set `[log] file = "/some/path/ldk-server.log"` in the same config so a file exists to tail.
 
 Comment out the `[bitcoind]`, `[electrum]`, and `[liquidity.lsps2_client]` blocks. The `[tor]` block must stay uncommented even if Tor isn't running.

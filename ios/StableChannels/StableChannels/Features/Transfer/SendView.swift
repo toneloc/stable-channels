@@ -14,6 +14,7 @@ struct SendView: View {
     @State private var success = false
     @State private var sentAmountSats: UInt64 = 0
     @State private var qrAlertMessage = ""
+    @State private var feeRateSatVb: UInt64?
 
     private enum InputType {
         case bolt11
@@ -80,6 +81,34 @@ struct SendView: View {
         return Double(displaySats) / Double(Constants.satsInBTC) * price
     }
 
+    private var onchainFeeEstimateText: String {
+        guard let feeRateSatVb else {
+            return String(localized: "info_fee_estimating", defaultValue: "Estimating...")
+        }
+        let feeSats = feeRateSatVb * Constants.estimatedOnchainSendVBytes
+        return String(
+            format: String(localized: "info_onchain_fee_estimate_value", defaultValue: "~%@ BTC (%llu sat/vB)"),
+            feeSats.btcSpacedFormatted,
+            feeRateSatVb
+        )
+    }
+
+    private func lightningFeeEstimateText(for sats: UInt64) -> String {
+        let feeSats = max(UInt64(ceil(Double(sats) * Constants.lightningRoutingFeeEstimateRate)), 1)
+        if appState.btcPrice > 0 {
+            let usd = Double(feeSats) / Double(Constants.satsInBTC) * appState.btcPrice
+            return String(
+                format: String(localized: "info_lightning_fee_estimate_with_usd", defaultValue: "Up to %@ (%@ BTC)"),
+                usd.usdFormatted,
+                feeSats.btcSpacedFormatted
+            )
+        }
+        return String(
+            format: String(localized: "info_lightning_fee_estimate", defaultValue: "Up to %@ BTC"),
+            feeSats.btcSpacedFormatted
+        )
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -125,7 +154,7 @@ struct SendView: View {
                                     Text(String(localized: "label_fee_row", defaultValue: "Fee"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text(String(localized: "info_fee_approx", defaultValue: "< 1%"))
+                                    Text(lightningFeeEstimateText(for: sats))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -154,7 +183,7 @@ struct SendView: View {
                                         Text(String(localized: "label_fee_row", defaultValue: "Fee"))
                                             .foregroundStyle(.secondary)
                                         Spacer()
-                                        Text(String(localized: "info_fee_approx", defaultValue: "< 1%"))
+                                        Text(lightningFeeEstimateText(for: displaySats))
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
@@ -189,7 +218,7 @@ struct SendView: View {
                                     Text(String(localized: "label_fee", defaultValue: "Fee"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text(String(localized: "info_fee_approx", defaultValue: "< 1%"))
+                                    Text(lightningFeeEstimateText(for: displaySats))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -223,7 +252,7 @@ struct SendView: View {
                                     Text(String(localized: "label_network_fee", defaultValue: "Network fee"))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text(String(localized: "label_network_fee", defaultValue: "Network fee"))
+                                    Text(onchainFeeEstimateText)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -310,6 +339,9 @@ struct SendView: View {
                 }
             }
             .qrInputToolbar(text: $input, sanitize: QRCodeExtractor.sanitizePaymentInput)
+            .task {
+                feeRateSatVb = await appState.feeRateService.currentRate()
+            }
         }
     }
 

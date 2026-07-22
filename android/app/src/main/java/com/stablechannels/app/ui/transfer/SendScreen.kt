@@ -50,6 +50,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.lightningdevkit.ldknode.Bolt11Invoice
 import org.lightningdevkit.ldknode.Offer
+import kotlin.math.ceil
+import kotlin.math.max
 
 enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
 
@@ -63,6 +65,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var showScanner by remember { mutableStateOf(false) }
     var isExtractingQR by remember { mutableStateOf(false) }
+    var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val activity = context.findActivity()
@@ -124,6 +127,32 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     }
 
     val displayUSD = if (btcPrice > 0 && displaySats > 0) (displaySats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
+    val lightningFeeSats = if (displaySats > 0) {
+        max(ceil(displaySats * Constants.LIGHTNING_ROUTING_FEE_ESTIMATE_RATE).toLong(), 1L)
+    } else {
+        0L
+    }
+    val lightningFeeText = if (lightningFeeSats > 0) {
+        val feeUsd = if (btcPrice > 0) {
+            " (${((lightningFeeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice).usdFormatted()})"
+        } else {
+            ""
+        }
+        "Expected fee: up to ${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
+    } else {
+        "Expected fee: up to 1%"
+    }
+    val onchainVbytes = if (isSendMax) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
+    val onchainFeeText = feeRateSatVb?.let { rate ->
+        val feeSats = rate * onchainVbytes
+        "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
+    } ?: "Estimating network fee..."
+
+    LaunchedEffect(inputType) {
+        if (inputType == InputType.ONCHAIN && feeRateSatVb == null) {
+            feeRateSatVb = withContext(Dispatchers.IO) { appState.currentFeeRateSatVb() ?: 2L }
+        }
+    }
 
     // Photo picker launcher for QR extraction (Task 7.4)
     val photoPickerLauncher = rememberLauncherForActivityResult(
@@ -386,6 +415,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    lightningFeeText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             // Amount input (USD) — for amountless bolt11, bolt12, onchain
@@ -468,6 +503,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         manualAmountSats.btcSpacedFormatted(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (inputType == InputType.ONCHAIN) onchainFeeText else lightningFeeText,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
