@@ -164,6 +164,13 @@ impl Database {
             [],
         ); // Ignore error if column already exists
 
+        // Monotonic version for signed SYNC_V1 state. The LSP increments this before sending;
+        // the wallet persists the last accepted value with the allocation it protects.
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN sync_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+
         // Migration: Add closed_at column. NULL = active, unix timestamp = soft-closed.
         // We never hard-delete channel rows from reconcile / handle_channel_closed —
         // they're marked closed so closed-channel forensics survive transient gRPC blips.
@@ -400,6 +407,89 @@ impl Database {
             ],
         )?;
         Ok(updated > 0)
+    }
+
+    /// Atomically reserve the next outbound SYNC_V1 version for a channel.
+    pub fn next_sync_version(&self, user_channel_id: &str) -> SqliteResult<u64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE channels
+             SET sync_version = sync_version + 1
+             WHERE user_channel_id = ?1 AND sync_version < 9223372036854775807",
+            params![user_channel_id],
+        )?;
+        if updated == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let version: i64 = tx.query_row(
+            "SELECT sync_version FROM channels WHERE user_channel_id = ?1",
+            params![user_channel_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(version as u64)
+    }
+
+    /// Apply a signed inbound SYNC_V1 allocation only when its version is newer.
+    /// The version and allocation share one SQLite statement, so a crash cannot
+    /// persist one without the other. Returns false for stale/replayed versions.
+    pub fn apply_sync_if_newer(
+        &self,
+        user_channel_id: &str,
+        sync_version: u64,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+    ) -> SqliteResult<bool> {
+        if sync_version == 0
+            || sync_version > i64::MAX as u64
+            || !expected_usd.is_finite()
+            || expected_usd < 0.0
+            || backing_sats > i64::MAX as u64
+            || native_sats > i64::MAX as u64
+        {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE channels
+             SET expected_usd = ?1, stable_sats = ?2, native_sats = ?3,
+                 sync_version = ?4, updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?5 AND sync_version < ?4",
+            params![
+                expected_usd,
+                backing_sats as i64,
+                native_sats as i64,
+                sync_version as i64,
+                user_channel_id,
+            ],
+        )?;
+        if updated == 0 {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM channels WHERE user_channel_id = ?1
+                 )",
+                params![user_channel_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        Ok(updated == 1)
+    }
+
+    pub fn get_sync_version(&self, user_channel_id: &str) -> SqliteResult<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        let version = conn
+            .query_row(
+                "SELECT sync_version FROM channels WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(version.map(|value| value.max(0) as u64))
     }
 
     /// Hard-delete a channel row. Reserved for explicit admin purge; reconcile
@@ -1527,6 +1617,53 @@ mod tests {
         assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.native_sats, 50_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
+    }
+
+    #[test]
+    fn sync_versions_are_monotonic_and_persisted() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+
+        assert_eq!(db.next_sync_version("user-channel-1").unwrap(), 1);
+        assert_eq!(db.next_sync_version("user-channel-1").unwrap(), 2);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+        assert!(db.next_sync_version("missing").is_err());
+    }
+
+    #[test]
+    fn inbound_sync_replay_cannot_overwrite_newer_state() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+
+        assert!(db
+            .apply_sync_if_newer("user-channel-1", 2, 20.0, 20_000, 4_000)
+            .unwrap());
+        assert!(!db
+            .apply_sync_if_newer("user-channel-1", 2, 12.0, 12_000, 1_000)
+            .unwrap());
+        assert!(!db
+            .apply_sync_if_newer("user-channel-1", 1, 11.0, 11_000, 2_000)
+            .unwrap());
+        assert!(!db
+            .apply_sync_if_newer("user-channel-1", 3, 30.0, u64::MAX, 0)
+            .unwrap());
+
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 20.0);
+        assert_eq!(channel.backing_sats, 20_000);
+        assert_eq!(channel.native_sats, 4_000);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+    }
+
+    #[test]
+    fn inbound_sync_for_missing_channel_is_an_error() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(matches!(
+            db.apply_sync_if_newer("missing", 1, 10.0, 10_000, 5_000),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
     }
 
     #[test]

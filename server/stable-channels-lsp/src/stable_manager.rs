@@ -1027,8 +1027,26 @@ impl StableChannelManager {
         backing_sats: u64,
         counterparty: &str,
     ) {
-        let payload =
-            crate::messages::build_sync_payload(user_channel_id, expected_usd, backing_sats);
+        let sync_version = match self.db.next_sync_version(&format!("{}", user_channel_id)) {
+            Ok(version) => version,
+            Err(e) => {
+                stable_channels::audit::audit_event(
+                    "SYNC_MESSAGE_FAILED",
+                    serde_json::json!({
+                        "user_channel_id": format!("{}", user_channel_id),
+                        "stage": "reserve_version",
+                        "error": e.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        let payload = crate::messages::build_sync_payload(
+            user_channel_id,
+            expected_usd,
+            backing_sats,
+            sync_version,
+        );
         let signature = match ldk
             .sign_message(SignMessageRequest {
                 message: payload.as_bytes().to_vec().into(),
@@ -1082,6 +1100,7 @@ impl StableChannelManager {
                         "user_channel_id": format!("{}", user_channel_id),
                         "expected_usd": expected_usd,
                         "backing_sats": backing_sats,
+                        "sync_version": sync_version,
                     }),
                 );
             },
@@ -2644,6 +2663,9 @@ mod tests {
     async fn send_sync_message_keysends_signed_tlv() {
         let mgr = make_manager();
         let fake = FakeLdkServer::new(vec![]);
+        mgr.db
+            .save_channel("sync-channel", "7", 25.0, 31_250, 0, None)
+            .unwrap();
         mgr.send_sync_message(
             &fake as &dyn LdkServerCalls,
             7u128,
@@ -2672,6 +2694,8 @@ mod tests {
         assert_eq!(v["user_channel_id"], "7");
         assert_eq!(v["expected_usd"], 25.0);
         assert_eq!(v["backing_sats"], 31_250);
+        assert_eq!(v["sync_version"], 1);
+        assert_eq!(mgr.db.get_sync_version("7").unwrap(), Some(1));
     }
 
     #[tokio::test]

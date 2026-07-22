@@ -14,9 +14,11 @@ use ldk_node::payment::{PaymentDirection, PaymentKind};
 use qrcode::QrCode;
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read as IoRead, Write};
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -174,6 +176,57 @@ struct PendingPayment {
     amount_usd: Option<f64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct IncomingSync {
+    user_channel_id: u128,
+    expected_usd: f64,
+    backing_sats: u64,
+    sync_version: u64,
+}
+
+struct BackupSnapshotDir {
+    path: PathBuf,
+}
+
+impl BackupSnapshotDir {
+    fn create() -> Result<Self, String> {
+        let parent = std::env::temp_dir();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        for attempt in 0..100u32 {
+            let path = parent.join(format!(
+                "stable-channels-backup-{}-{}-{}",
+                std::process::id(),
+                timestamp,
+                attempt
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            builder.mode(0o700);
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Failed to create private backup workspace: {}", e)),
+            }
+        }
+
+        Err("Failed to allocate a private backup workspace".to_string())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for BackupSnapshotDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingSplice {
     pub direction: String, // "in" or "out"
@@ -324,6 +377,8 @@ pub struct UserApp {
 
     // Non-blocking daily price update
     daily_prices_receiver: Option<std::sync::mpsc::Receiver<bool>>,
+    // ZIP creation runs off-thread; completion is polled from the UI loop.
+    backup_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     // Startup historical/intraday Kraken backfill — off-thread so it never blocks the first frame.
     historical_backfill_receiver: Option<std::sync::mpsc::Receiver<bool>>,
     // In-flight splice-out esplora lookup; the deduction is applied when it lands.
@@ -465,6 +520,17 @@ impl UserApp {
         // Determine mnemonic for wallet
         let seed_phrase_path = data_dir.join("seed_phrase");
         let keys_seed_path = data_dir.join("keys_seed");
+        for secret_path in [&seed_phrase_path, &keys_seed_path] {
+            if secret_path.exists() {
+                restrict_secret_file_permissions(secret_path).map_err(|e| {
+                    format!(
+                        "Failed to secure wallet secret {}: {}",
+                        secret_path.display(),
+                        e
+                    )
+                })?;
+            }
+        }
         let mut mnemonic_words: Option<String> = None;
         let mut node_entropy: Option<ldk_node::entropy::NodeEntropy> = None;
 
@@ -492,7 +558,7 @@ impl UserApp {
             }
             let mnemonic = ldk_node::entropy::generate_entropy_mnemonic(None);
             let words = mnemonic.to_string();
-            std::fs::write(&seed_phrase_path, &words).expect("Failed to save seed phrase");
+            write_secret_file(&seed_phrase_path, &words).expect("Failed to save seed phrase");
             let entropy = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic, None);
             node_entropy = Some(entropy);
             mnemonic_words = Some(words);
@@ -658,6 +724,7 @@ impl UserApp {
             pending_trade_payments: HashMap::new(),
             pending_payments: HashMap::new(),
             daily_prices_receiver: None,
+            backup_receiver: None,
             historical_backfill_receiver: None,
             pending_splice_deduction: None,
             bar_chart_show_btc: false,
@@ -2357,44 +2424,85 @@ impl UserApp {
                                 );
                                 continue;
                             }
-                            if let Some(expected_usd) =
-                                payload.get("expected_usd").and_then(|v| v.as_f64())
-                            {
-                                if expected_usd < 0.0 || !expected_usd.is_finite() {
-                                    continue;
-                                }
-                                let backing_sats =
-                                    payload.get("backing_sats").and_then(|v| v.as_u64());
-                                let mut sc = self.stable_channel.lock().unwrap();
-                                stable::update_balances(&self.node, &mut sc);
-                                let price = sc.latest_price;
-                                let old_expected = sc.expected_usd.0;
-                                let live_receiver_sats = sc.stable_receiver_btc.sats;
-                                if let Some(backing_sats) = backing_sats {
-                                    stable::apply_trade_allocation(
-                                        &mut sc,
-                                        expected_usd,
-                                        backing_sats,
-                                    );
-                                } else {
-                                    stable::apply_trade(&mut sc, expected_usd, price);
-                                }
-                                drop(sc);
-                                self.save_channel_settings();
-
+                            let Some(sync) = parse_incoming_sync(&payload) else {
                                 audit_event(
-                                    "SYNC_V1_APPLIED",
+                                    "SYNC_V1_PAYLOAD_INVALID",
+                                    json!({ "payment_hash": &payment_hash_str }),
+                                );
+                                break 'sync true;
+                            };
+
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            if sync.user_channel_id != sc.user_channel_id {
+                                audit_event(
+                                    "SYNC_V1_CHANNEL_MISMATCH",
                                     json!({
-                                        "old_expected_usd": old_expected,
-                                        "new_expected_usd": expected_usd,
-                                        "backing_sats": backing_sats,
-                                        "live_receiver_sats": live_receiver_sats,
-                                        "btc_price": price,
                                         "payment_hash": &payment_hash_str,
+                                        "payload_user_channel_id": format!("{}", sync.user_channel_id),
+                                        "wallet_user_channel_id": format!("{}", sc.user_channel_id),
+                                        "sync_version": sync.sync_version,
                                     }),
                                 );
                                 break 'sync true;
                             }
+
+                            stable::update_balances(&self.node, &mut sc);
+                            let price = sc.latest_price;
+                            let old_expected = sc.expected_usd.0;
+                            let live_receiver_sats = sc.stable_receiver_btc.sats;
+                            let native_sats = live_receiver_sats.saturating_sub(sync.backing_sats);
+                            let user_channel_id = format!("{}", sync.user_channel_id);
+                            match self.db.apply_sync_if_newer(
+                                &user_channel_id,
+                                sync.sync_version,
+                                sync.expected_usd,
+                                sync.backing_sats,
+                                native_sats,
+                            ) {
+                                Ok(true) => {
+                                    stable::apply_trade_allocation(
+                                        &mut sc,
+                                        sync.expected_usd,
+                                        sync.backing_sats,
+                                    );
+                                    audit_event(
+                                        "SYNC_V1_APPLIED",
+                                        json!({
+                                            "old_expected_usd": old_expected,
+                                            "new_expected_usd": sync.expected_usd,
+                                            "backing_sats": sync.backing_sats,
+                                            "sync_version": sync.sync_version,
+                                            "live_receiver_sats": live_receiver_sats,
+                                            "btc_price": price,
+                                            "payment_hash": &payment_hash_str,
+                                        }),
+                                    );
+                                }
+                                Ok(false) => {
+                                    audit_event(
+                                        "SYNC_V1_REPLAY_REJECTED",
+                                        json!({
+                                            "payment_hash": &payment_hash_str,
+                                            "user_channel_id": user_channel_id,
+                                            "sync_version": sync.sync_version,
+                                        }),
+                                    );
+                                }
+                                Err(e) => {
+                                    audit_event(
+                                        "DB_WRITE_FAILED",
+                                        json!({
+                                            "op": "apply_sync_if_newer",
+                                            "payment_hash": &payment_hash_str,
+                                            "user_channel_id": user_channel_id,
+                                            "sync_version": sync.sync_version,
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                    ack = false;
+                                }
+                            }
+                            break 'sync true;
                         }
                         false
                     };
@@ -6185,14 +6293,21 @@ impl UserApp {
                 ui.label(RichText::new("Save a full backup of your wallet data.").size(12.0).color(theme::MUTED));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let backup_btn = egui::Button::new(RichText::new("Download Backup").size(12.0).color(Color32::WHITE))
-                        .fill(blue)
-                        .corner_radius(theme::RADIUS_PILL);
-                    if ui.add(backup_btn).clicked() {
-                        match self.create_backup() {
-                            Ok(_) => self.show_toast("Backup saved!", "OK"),
-                            Err(e) => { self.show_toast("Backup failed", "!"); self.status_message = format!("Backup failed: {}", e); }
-                        }
+                    let backup_in_progress = self.backup_receiver.is_some();
+                    let backup_label = if backup_in_progress {
+                        "Creating Backup..."
+                    } else {
+                        "Download Backup"
+                    };
+                    let backup_btn = egui::Button::new(
+                        RichText::new(backup_label)
+                            .size(12.0)
+                            .color(Color32::WHITE),
+                    )
+                    .fill(blue)
+                    .corner_radius(theme::RADIUS_PILL);
+                    if ui.add_enabled(!backup_in_progress, backup_btn).clicked() {
+                        self.start_backup();
                     }
                 });
                 ui.add_space(4.0);
@@ -8937,7 +9052,8 @@ impl UserApp {
                     ] {
                         std::fs::remove_file(data_dir.join(name)).ok();
                     }
-                    if let Err(e) = std::fs::write(data_dir.join("seed_phrase"), &mnemonic_str) {
+                    if let Err(e) = write_secret_file(&data_dir.join("seed_phrase"), &mnemonic_str)
+                    {
                         self.restore_error = format!("Failed to save seed: {}", e);
                         return;
                     }
@@ -9134,32 +9250,81 @@ impl UserApp {
             });
     }
 
-    /// Create a backup zip of the data directory and save to Downloads
-    fn create_backup(&mut self) -> Result<String, String> {
+    fn start_backup(&mut self) {
+        if self.backup_receiver.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.backup_receiver = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::create_backup());
+        });
+    }
+
+    /// Create a backup zip of the data directory and save to Downloads.
+    /// This performs blocking I/O and must only be called from a worker thread.
+    fn create_backup() -> Result<String, String> {
         let data_dir = get_user_data_dir();
 
-        // Get downloads directory
         let downloads_dir =
             dirs::download_dir().ok_or_else(|| "Could not find Downloads folder".to_string())?;
 
-        // Create timestamped filename
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        Self::create_backup_archive(&data_dir, &downloads_dir)
+    }
+
+    fn create_backup_archive(data_dir: &Path, output_dir: &Path) -> Result<String, String> {
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| format!("Failed to create backup directory: {}", e))?;
+        let snapshot_dir = BackupSnapshotDir::create()?;
+
+        // Build under a non-zip name and publish only after every snapshot verifies.
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         let backup_filename = format!("stable_channels_backup_{}.zip", timestamp);
-        let backup_path = downloads_dir.join(&backup_filename);
+        let backup_path = output_dir.join(&backup_filename);
+        let partial_path = output_dir.join(format!(
+            ".{}.{}.partial",
+            backup_filename,
+            std::process::id()
+        ));
 
-        // Create the zip file
-        let file = File::create(&backup_path)
-            .map_err(|e| format!("Failed to create backup file: {}", e))?;
-        let mut zip = zip::ZipWriter::new(file);
+        let archive_result = (|| -> Result<(), String> {
+            let mut file_options = OpenOptions::new();
+            file_options.write(true).create_new(true);
+            #[cfg(unix)]
+            file_options.mode(0o600);
+            let file = file_options
+                .open(&partial_path)
+                .map_err(|e| format!("Failed to create backup file: {}", e))?;
+            let mut zip = zip::ZipWriter::new(file);
 
-        let options =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
 
-        // Walk through data directory and add files
-        Self::add_dir_to_zip(&mut zip, &data_dir, &data_dir, &options)?;
+            // SQLite databases are snapshotted into a private temporary directory.
+            // Their live WAL/journal files must never be copied independently.
+            let mut snapshot_index = 0u64;
+            Self::add_dir_to_zip(
+                &mut zip,
+                data_dir,
+                data_dir,
+                snapshot_dir.path(),
+                &mut snapshot_index,
+                &options,
+            )?;
 
-        zip.finish()
-            .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+            zip.finish()
+                .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+            Ok(())
+        })();
+
+        if let Err(e) = archive_result {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&partial_path, &backup_path) {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(format!("Failed to publish backup file: {}", e));
+        }
 
         Ok(backup_path.to_string_lossy().to_string())
     }
@@ -9168,6 +9333,8 @@ impl UserApp {
         zip: &mut zip::ZipWriter<File>,
         dir: &Path,
         base: &Path,
+        snapshot_dir: &Path,
+        snapshot_index: &mut u64,
         options: &zip::write::FileOptions,
     ) -> Result<(), String> {
         if !dir.exists() {
@@ -9191,19 +9358,29 @@ impl UserApp {
                 zip.add_directory(&name, *options)
                     .map_err(|e| format!("Failed to add directory: {}", e))?;
                 // Recursively add contents
-                Self::add_dir_to_zip(zip, &path, base, options)?;
+                Self::add_dir_to_zip(zip, &path, base, snapshot_dir, snapshot_index, options)?;
+            } else if is_sqlite_sidecar(&path) {
+                continue;
             } else {
+                let snapshot_path;
+                let archive_source = if is_sqlite_database(&path) {
+                    snapshot_path =
+                        snapshot_dir.join(format!("database-snapshot-{}.sqlite", *snapshot_index));
+                    *snapshot_index += 1;
+                    snapshot_sqlite_database(&path, &snapshot_path)?;
+                    snapshot_path.as_path()
+                } else {
+                    path.as_path()
+                };
+
                 // Add file
                 zip.start_file(&name, *options)
                     .map_err(|e| format!("Failed to start file: {}", e))?;
 
-                let mut file =
-                    File::open(&path).map_err(|e| format!("Failed to open file: {}", e))?;
-                let mut buffer = Vec::new();
-                file.read_to_end(&mut buffer)
-                    .map_err(|e| format!("Failed to read file: {}", e))?;
-                zip.write_all(&buffer)
-                    .map_err(|e| format!("Failed to write file: {}", e))?;
+                let mut file = File::open(archive_source)
+                    .map_err(|e| format!("Failed to open {} for backup: {}", path.display(), e))?;
+                std::io::copy(&mut file, zip)
+                    .map_err(|e| format!("Failed to archive {}: {}", path.display(), e))?;
             }
         }
 
@@ -9221,6 +9398,27 @@ impl App for UserApp {
         ctx.set_visuals(visuals);
 
         self.process_events();
+
+        // Poll backup worker without blocking rendering.
+        if let Some(rx) = self.backup_receiver.take() {
+            match rx.try_recv() {
+                Ok(Ok(path)) => {
+                    self.status_message = format!("Backup saved to {}", path);
+                    self.show_toast("Backup saved!", "OK");
+                }
+                Ok(Err(e)) => {
+                    self.status_message = format!("Backup failed: {}", e);
+                    self.show_toast("Backup failed", "!");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.backup_receiver = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status_message = "Backup worker stopped unexpectedly".to_string();
+                    self.show_toast("Backup failed", "!");
+                }
+            }
+        }
 
         // Poll background fee rate fetch
         if let Some(ref rx) = self.fee_rate_receiver {
@@ -9657,6 +9855,117 @@ fn collapse_double_paste(input: String) -> String {
     input
 }
 
+fn is_sqlite_database(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "db" | "sqlite" | "sqlite3"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_sqlite_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let name = name.to_ascii_lowercase();
+            name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal")
+        })
+        .unwrap_or(false)
+}
+
+fn snapshot_sqlite_database(source: &Path, destination: &Path) -> Result<(), String> {
+    let source_conn =
+        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|e| format!("Failed to open SQLite database {}: {}", source.display(), e))?;
+    source_conn
+        .busy_timeout(Duration::from_secs(15))
+        .map_err(|e| format!("Failed to configure SQLite backup timeout: {}", e))?;
+
+    let destination_string = destination.to_string_lossy().into_owned();
+    source_conn
+        .execute("VACUUM INTO ?1", rusqlite::params![destination_string])
+        .map_err(|e| {
+            format!(
+                "Failed to create consistent snapshot of {}: {}",
+                source.display(),
+                e
+            )
+        })?;
+
+    let snapshot_conn = rusqlite::Connection::open_with_flags(
+        destination,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("Failed to open SQLite snapshot for verification: {}", e))?;
+    let integrity: String = snapshot_conn
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(|e| format!("Failed to verify SQLite snapshot: {}", e))?;
+    if integrity != "ok" {
+        return Err(format!(
+            "SQLite snapshot of {} failed integrity check: {}",
+            source.display(),
+            integrity
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
+    if payload.get("type").and_then(|value| value.as_str()) != Some(SYNC_MESSAGE_TYPE) {
+        return None;
+    }
+    let user_channel_id = payload
+        .get("user_channel_id")?
+        .as_str()?
+        .parse::<u128>()
+        .ok()?;
+    let expected_usd = payload.get("expected_usd")?.as_f64()?;
+    let backing_sats = payload.get("backing_sats")?.as_u64()?;
+    let sync_version = payload.get("sync_version")?.as_u64()?;
+    if !expected_usd.is_finite()
+        || expected_usd < 0.0
+        || sync_version == 0
+        || sync_version > i64::MAX as u64
+        || backing_sats > i64::MAX as u64
+    {
+        return None;
+    }
+    Some(IncomingSync {
+        user_channel_id,
+        expected_usd,
+        backing_sats,
+        sync_version,
+    })
+}
+
+fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
+}
+
+fn restrict_secret_file_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn btc_amount_to_msat(input: &str) -> Option<u64> {
     let btc = input.trim().parse::<f64>().ok()?;
     if !btc.is_finite() || btc <= 0.0 || btc > 21_000_000.0 {
@@ -9674,7 +9983,8 @@ fn btc_amount_to_msat(input: &str) -> Option<u64> {
 mod tests {
     use super::{
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
-        parse_trade_usd_cents, sats_for_usd_cents, UserApp,
+        parse_incoming_sync, parse_trade_usd_cents, restrict_secret_file_permissions,
+        sats_for_usd_cents, write_secret_file, IncomingSync, UserApp,
     };
 
     #[test]
@@ -9794,5 +10104,141 @@ mod tests {
         assert_eq!(UserApp::format_price(1_234.5), "$1,234.50");
         assert_eq!(UserApp::format_price(-0.005), "-$0.01");
         assert_eq!(UserApp::format_price(f64::NAN), "$0.00");
+    }
+
+    #[test]
+    fn sync_payload_requires_channel_and_monotonic_version() {
+        let payload = serde_json::json!({
+            "type": "SYNC_V1",
+            "user_channel_id": "7",
+            "expected_usd": 25.0,
+            "backing_sats": 31_250,
+            "sync_version": 4,
+        });
+        assert_eq!(
+            parse_incoming_sync(&payload),
+            Some(IncomingSync {
+                user_channel_id: 7,
+                expected_usd: 25.0,
+                backing_sats: 31_250,
+                sync_version: 4,
+            })
+        );
+
+        let mut missing_version = payload.clone();
+        missing_version
+            .as_object_mut()
+            .unwrap()
+            .remove("sync_version");
+        assert_eq!(parse_incoming_sync(&missing_version), None);
+
+        let mut zero_version = payload;
+        zero_version["sync_version"] = serde_json::json!(0);
+        assert_eq!(parse_incoming_sync(&zero_version), None);
+
+        let oversized_balance = serde_json::json!({
+            "type": "SYNC_V1",
+            "user_channel_id": "7",
+            "expected_usd": 25.0,
+            "backing_sats": u64::MAX,
+            "sync_version": 5,
+        });
+        assert_eq!(parse_incoming_sync(&oversized_balance), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seed_file_is_written_and_repaired_as_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seed_phrase");
+        write_secret_file(&path, "test seed").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        restrict_secret_file_permissions(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn backup_archive_can_be_created_off_thread() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("wallet.dat"), b"wallet state").unwrap();
+
+        let source_path = source.path().to_path_buf();
+        let output_path = output.path().to_path_buf();
+        let archive =
+            std::thread::spawn(move || UserApp::create_backup_archive(&source_path, &output_path))
+                .join()
+                .unwrap()
+                .unwrap();
+        assert!(std::path::Path::new(&archive).exists());
+    }
+
+    #[test]
+    fn backup_snapshots_live_sqlite_and_excludes_sidecars() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let database_path = source.path().join("ldk_node_data.sqlite");
+        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .execute("CREATE TABLE wallet_state (value INTEGER NOT NULL)", [])
+            .unwrap();
+        connection
+            .execute("INSERT INTO wallet_state VALUES (1)", [])
+            .unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute("INSERT INTO wallet_state VALUES (2)", [])
+            .unwrap();
+        std::fs::write(source.path().join("orphan.db-journal"), b"stale journal").unwrap();
+
+        let source_path = source.path().to_path_buf();
+        let output_path = output.path().to_path_buf();
+        let backup_worker =
+            std::thread::spawn(move || UserApp::create_backup_archive(&source_path, &output_path));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(transaction);
+
+        let archive_path = backup_worker.join().unwrap().unwrap();
+        let archive_file = std::fs::File::open(archive_path).unwrap();
+        let mut archive = zip::ZipArchive::new(archive_file).unwrap();
+        assert!(archive.by_name("ldk_node_data.sqlite-wal").is_err());
+        assert!(archive.by_name("ldk_node_data.sqlite-shm").is_err());
+        assert!(archive.by_name("orphan.db-journal").is_err());
+
+        let extracted_path = output.path().join("snapshot.sqlite");
+        {
+            let mut archived_database = archive.by_name("ldk_node_data.sqlite").unwrap();
+            let mut extracted = std::fs::File::create(&extracted_path).unwrap();
+            std::io::copy(&mut archived_database, &mut extracted).unwrap();
+        }
+        let snapshot = rusqlite::Connection::open(extracted_path).unwrap();
+        let row_count: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM wallet_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "uncommitted writes must not enter a backup");
+    }
+
+    #[test]
+    fn failed_database_snapshot_leaves_no_backup_file() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("corrupt.db"), b"not sqlite").unwrap();
+
+        assert!(UserApp::create_backup_archive(source.path(), output.path()).is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
     }
 }
