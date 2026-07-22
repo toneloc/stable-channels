@@ -56,6 +56,14 @@ pub fn forward_fingerprint(
     )
 }
 
+/// A still-pending trade recoverable after a restart (the in-memory pending-trade map is empty on launch).
+pub struct PendingTradeRow {
+    pub id: i64,
+    pub new_expected_usd: f64,
+    pub btc_price: f64,
+    pub action: String,
+}
+
 impl Database {
     /// Open or create the database at the given directory path.
     pub fn open(data_dir: &Path) -> SqliteResult<Self> {
@@ -113,6 +121,7 @@ impl Database {
                 amount_btc REAL NOT NULL DEFAULT 0.0,
                 btc_price REAL NOT NULL,
                 fee_usd REAL NOT NULL DEFAULT 0.0,
+                new_expected_usd REAL NOT NULL DEFAULT 0.0,
                 payment_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
@@ -125,6 +134,13 @@ impl Database {
             "ALTER TABLE trades ADD COLUMN amount_btc REAL NOT NULL DEFAULT 0.0",
             [],
         ); // Ignore error if column already exists
+
+        // Migration: persist new_expected_usd so a trade settling after a restart can be
+        // finalized from its pending row (the in-memory pending-trade map is empty on launch).
+        let _ = conn.execute(
+            "ALTER TABLE trades ADD COLUMN new_expected_usd REAL NOT NULL DEFAULT 0.0",
+            [],
+        );
 
         // Migration: Add stable_sats column to channels table if missing
         // stable_sats tracks the BTC backing the stable portion (excludes native BTC)
@@ -517,19 +533,45 @@ impl Database {
         amount_btc: f64,
         btc_price: f64,
         fee_usd: f64,
+        new_expected_usd: f64,
         payment_id: Option<&str>,
         status: &str,
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO trades (channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
-                                 payment_id, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                 new_expected_usd, payment_id, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status
+                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, new_expected_usd,
+                payment_id, status
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Look up a still-pending trade by its payment_id, for restart recovery. Only returns rows
+    /// that stored new_expected_usd (> 0), i.e. recorded on the current schema.
+    pub fn get_pending_trade_by_payment_id(
+        &self,
+        payment_id: &str,
+    ) -> SqliteResult<Option<PendingTradeRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, new_expected_usd, btc_price, action FROM trades
+             WHERE payment_id = ?1 AND status = 'pending' AND new_expected_usd > 0.0
+             ORDER BY id DESC LIMIT 1",
+            params![payment_id],
+            |row| {
+                Ok(PendingTradeRow {
+                    id: row.get(0)?,
+                    new_expected_usd: row.get(1)?,
+                    btc_price: row.get(2)?,
+                    action: row.get(3)?,
+                })
+            },
+        )
+        .optional()
     }
 
     /// Update trade status
@@ -783,6 +825,16 @@ impl Database {
     pub fn payment_exists(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT 1 FROM payments WHERE payment_id = ?1 LIMIT 1")?;
+        let exists = stmt.exists(params![payment_id])?;
+        Ok(exists)
+    }
+
+    /// Whether a payment (by payment_id) is a recorded stability (peg-maintenance) payment.
+    pub fn is_stability_payment(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM payments WHERE payment_id = ?1 AND payment_type = 'stability' LIMIT 1",
+        )?;
         let exists = stmt.exists(params![payment_id])?;
         Ok(exists)
     }
@@ -1610,6 +1662,7 @@ mod tests {
             0.00025,
             100000.0,
             0.25,
+            75.0,
             Some("pay123"),
             "completed",
         )
@@ -1622,6 +1675,7 @@ mod tests {
             0.000099,
             101000.0,
             0.10,
+            60.0,
             Some("pay456"),
             "completed",
         )

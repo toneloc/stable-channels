@@ -150,6 +150,7 @@ pub struct PendingTrade {
     pub btc_price: f64,
     pub fee_usd: f64,
     pub btc_amount: f64,
+    pub btc_sats: u64,
     pub net_amount_usd: f64,
 }
 
@@ -1885,15 +1886,16 @@ impl UserApp {
         new_expected_usd: f64,
         fee_usd: f64,
         trade_action: &str,
+        trade_price: f64,
     ) -> Option<PaymentId> {
-        // Grab channel identifiers, counterparty, price from StableChannel
-        let (channel_id_str, user_channel_id_str, counterparty, price, old_expected_usd) = {
+        // Grab channel identifiers and counterparty from StableChannel. The fee and the local
+        // settlement use the quote the user reviewed on the confirmation screen.
+        let (channel_id_str, user_channel_id_str, counterparty, old_expected_usd) = {
             let sc = self.stable_channel.lock().unwrap();
             (
                 sc.channel_id.to_string(),
                 format!("{}", sc.user_channel_id),
                 sc.counterparty,
-                sc.latest_price,
                 sc.expected_usd.0,
             )
         };
@@ -1926,8 +1928,8 @@ impl UserApp {
         };
 
         // Calculate fee in msats (sent to LSP as keysend amount)
-        let fee_msats = if price > 0.0 && fee_usd > 0.0 {
-            let fee_btc = fee_usd / price;
+        let fee_msats = if trade_price > 0.0 && fee_usd > 0.0 {
+            let fee_btc = fee_usd / trade_price;
             let fee_sats = (fee_btc * 100_000_000.0) as u64;
             fee_sats * 1000 // convert to msats
         } else {
@@ -1957,6 +1959,7 @@ impl UserApp {
                         "new_expected_usd": new_expected_usd,
                         "fee_usd": fee_usd,
                         "fee_msats": amt_msat,
+                        "btc_price": trade_price,
                         "status": "pending",
                     }),
                 );
@@ -2143,6 +2146,7 @@ impl UserApp {
         amount_usd: f64,
         amount_btc: f64,
         fee_usd: f64,
+        new_expected_usd: f64,
         payment_id: Option<&str>,
         status: &str,
     ) -> i64 {
@@ -2158,6 +2162,7 @@ impl UserApp {
             amount_btc,
             self.btc_price,
             fee_usd,
+            new_expected_usd,
             payment_id,
             status,
         ) {
@@ -2415,6 +2420,7 @@ impl UserApp {
                                 payload.get("expected_usd").and_then(|v| v.as_f64())
                             {
                                 let mut sc = self.stable_channel.lock().unwrap();
+                                stable::update_balances(&self.node, &mut sc);
                                 let price = sc.latest_price;
                                 let old_expected = sc.expected_usd.0;
                                 stable::apply_trade(&mut sc, expected_usd, price);
@@ -2605,14 +2611,36 @@ impl UserApp {
                 } => {
                     let payment_hash_str = format!("{payment_hash}");
 
-                    // Check if this is a pending trade payment
-                    let pending_trade =
+                    // Check if this is a pending trade payment. The in-memory map is empty after a
+                    // restart, so fall back to the persisted pending trade row — otherwise a trade
+                    // that settles across a restart would never apply_trade (peg left wrong).
+                    let mut pending_trade =
                         payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                    if pending_trade.is_none() {
+                        if let Some(pid) = payment_id {
+                            if let Some(row) = self
+                                .db
+                                .get_pending_trade_by_payment_id(&format!("{pid}"))
+                                .ok()
+                                .flatten()
+                            {
+                                pending_trade = Some(PendingTradePayment {
+                                    new_expected_usd: row.new_expected_usd,
+                                    price: row.btc_price,
+                                    trade_db_id: row.id,
+                                    action: row.action,
+                                });
+                            }
+                        }
+                    }
 
                     if let Some(trade) = pending_trade {
                         // Trade payment confirmed — now apply the trade
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
+                            // The trade fee has left the channel. Apply against the post-fee live
+                            // balance so native_sats cannot retain the pre-settlement amount.
+                            stable::update_balances(&self.node, &mut sc);
                             stable::apply_trade(&mut sc, trade.new_expected_usd, trade.price);
                         }
                         self.save_channel_settings();
@@ -2634,21 +2662,6 @@ impl UserApp {
                         self.show_toast(&format!("{} order confirmed", verb), "OK");
                     } else {
                         // Normal (non-trade) outgoing payment
-                        let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
-                        let payment_sent_message = pending
-                            .as_ref()
-                            .map(|p| {
-                                p.amount_usd
-                                    .map(|usd| format!("Payment sent: {}", Self::format_price(usd)))
-                                    .unwrap_or_else(|| {
-                                        format!(
-                                            "Payment sent: {}",
-                                            Self::format_msats_as_btc(p.amount_msat)
-                                        )
-                                    })
-                            })
-                            .unwrap_or_else(|| "Payment sent".to_string());
-
                         // Refresh channel balances from LDK
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
@@ -2660,72 +2673,108 @@ impl UserApp {
                             sc.latest_price
                         };
 
-                        audit_event(
-                            "PAYMENT_SUCCESSFUL",
-                            json!({
-                                "payment_hash": payment_hash_str,
-                                "fee_paid_msat": fee_paid_msat,
-                            }),
-                        );
+                        // Stability payments are already balanced by check_stability; only genuine
+                        // user sends reconcile against the stable position here.
+                        let needs_reconcile =
+                            !self.db.is_stability_payment(&payment_hash_str).unwrap_or(false);
 
-                        // Reconcile stable balance
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            let old_expected = sc.expected_usd.0;
-                            if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
-                                audit_event(
-                                    "OUTGOING_STABLE_DEDUCTED",
-                                    json!({
-                                        "payment_hash": payment_hash_str,
-                                        "usd_deducted": usd_deducted,
-                                        "old_expected_usd": old_expected,
-                                        "new_expected_usd": sc.expected_usd.0,
-                                        "btc_price": price,
-                                    }),
-                                );
-                            }
-                        }
-
-                        if let Some(p) = pending {
-                            // Update existing pending record to completed + fee
-                            let _ = self.db.update_payment_status(
-                                p.payment_db_id,
-                                "completed",
-                                fee_paid_msat,
+                        if needs_reconcile && price <= 0.0 {
+                            // No price yet — we can't size the peg overflow. Withhold the ack so LDK
+                            // re-delivers and we reconcile once the price feed returns; the background
+                            // loop keeps refreshing it, so redelivery makes progress. Nothing has been
+                            // deducted or removed from the pending map, so the retry is clean.
+                            ack = false;
+                            audit_event(
+                                "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
+                                json!({ "payment_hash": payment_hash_str }),
                             );
                         } else {
-                            // Try to confirm a pending stability payment by payment_hash
-                            let updated = self
-                                .db
-                                .update_payment_status_by_pid(
-                                    &payment_hash_str,
+                            let pending =
+                                payment_id.and_then(|pid| self.pending_payments.remove(&pid));
+                            let payment_sent_message = pending
+                                .as_ref()
+                                .map(|p| {
+                                    p.amount_usd
+                                        .map(|usd| {
+                                            format!("Payment sent: {}", Self::format_price(usd))
+                                        })
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Payment sent: {}",
+                                                Self::format_msats_as_btc(p.amount_msat)
+                                            )
+                                        })
+                                })
+                                .unwrap_or_else(|| "Payment sent".to_string());
+
+                            audit_event(
+                                "PAYMENT_SUCCESSFUL",
+                                json!({
+                                    "payment_hash": payment_hash_str,
+                                    "fee_paid_msat": fee_paid_msat,
+                                }),
+                            );
+
+                            if needs_reconcile {
+                                let mut sc = self.stable_channel.lock().unwrap();
+                                let old_expected = sc.expected_usd.0;
+                                if let Some(usd_deducted) =
+                                    stable::reconcile_outgoing(&mut sc, price)
+                                {
+                                    audit_event(
+                                        "OUTGOING_STABLE_DEDUCTED",
+                                        json!({
+                                            "payment_hash": payment_hash_str,
+                                            "usd_deducted": usd_deducted,
+                                            "old_expected_usd": old_expected,
+                                            "new_expected_usd": sc.expected_usd.0,
+                                            "btc_price": price,
+                                        }),
+                                    );
+                                }
+                            }
+
+                            if let Some(p) = pending {
+                                // Update existing pending record to completed + fee
+                                let _ = self.db.update_payment_status(
+                                    p.payment_db_id,
                                     "completed",
                                     fee_paid_msat,
-                                )
-                                .unwrap_or(0);
-                            if updated == 0
-                                && !self.db.payment_exists(&payment_hash_str).unwrap_or(false)
-                            {
-                                // Completely unknown payment — record as completed
-                                let _ = self.db.record_payment(
-                                    Some(&payment_hash_str),
-                                    "lightning",
-                                    "sent",
-                                    0,
-                                    None,
-                                    if price > 0.0 { Some(price) } else { None },
-                                    None,
-                                    "completed",
-                                    None,
-                                    None,
                                 );
+                            } else {
+                                // Try to confirm a pending stability payment by payment_hash
+                                let updated = self
+                                    .db
+                                    .update_payment_status_by_pid(
+                                        &payment_hash_str,
+                                        "completed",
+                                        fee_paid_msat,
+                                    )
+                                    .unwrap_or(0);
+                                if updated == 0
+                                    && !self.db.payment_exists(&payment_hash_str).unwrap_or(false)
+                                {
+                                    // Completely unknown payment — record as completed
+                                    let _ = self.db.record_payment(
+                                        Some(&payment_hash_str),
+                                        "lightning",
+                                        "sent",
+                                        0,
+                                        None,
+                                        if price > 0.0 { Some(price) } else { None },
+                                        None,
+                                        "completed",
+                                        None,
+                                        None,
+                                    );
+                                }
                             }
-                        }
 
-                        self.save_channel_settings();
-                        self.update_balances();
-                        self.status_message = payment_sent_message.clone();
-                        self.show_toast(&payment_sent_message, "-");
+                            self.save_channel_settings();
+                            self.update_balances();
+                            self.status_message = payment_sent_message.clone();
+                            self.show_toast(&payment_sent_message, "-");
+                        }
                     }
                 }
 
@@ -4462,16 +4511,21 @@ impl UserApp {
             let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
 
             // Get balance info
-            let (btc_price, last_update, expected_usd) = {
+            let (btc_price, last_update, expected_usd, backing_sats) = {
                 let sc = self.stable_channel.lock().unwrap();
-                (sc.latest_price, sc.timestamp, sc.expected_usd.0)
+                (
+                    sc.latest_price,
+                    sc.timestamp,
+                    sc.expected_usd.0,
+                    sc.backing_sats,
+                )
             };
 
-            // If no active channel, stability is gone - show $0 stabilized
-            // Claimable lightning balances are NOT added to total because they overlap
-            // with pending_sweep or onchain once the sweep tx is broadcast/confirmed.
+            // The green bucket is the user's fixed USD claim. Collateral's live market value can
+            // temporarily drift while a stability payment is pending, but that must not make the
+            // displayed peg move with BTC. The top total remains the real-time sat valuation.
             let stabilized_usd = if has_active_channel {
-                expected_usd
+                expected_usd.max(0.0)
             } else {
                 0.0
             };
@@ -4500,6 +4554,12 @@ impl UserApp {
             };
             let total_btc = total_sats as f64 / 100_000_000.0;
             let total_usd = total_btc * btc_price;
+            let (stable_sats, native_sats, native_usd) = channel_balance_split(
+                balances.total_lightning_balance_sats,
+                backing_sats,
+                expected_usd,
+                btc_price,
+            );
 
             // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
             ui.horizontal(|ui| {
@@ -4649,11 +4709,6 @@ impl UserApp {
             let btc_color = Color32::from_rgb(255, 149, 0);
 
             if has_active_channel && total_usd > 0.01 {
-                let (_, native_usd) = channel_native_split(
-                    balances.total_lightning_balance_sats,
-                    stabilized_usd,
-                    btc_price,
-                );
                 let bar_total_usd = stabilized_usd + native_usd;
                 let synth_ratio = if bar_total_usd > 0.0 {
                     (stabilized_usd / bar_total_usd).clamp(0.0, 1.0) as f32
@@ -4881,11 +4936,7 @@ impl UserApp {
                                 );
                             });
                             let stable_text = if self.bar_chart_show_btc {
-                                let synth_btc = if btc_price > 0.0 {
-                                    stabilized_usd / btc_price
-                                } else {
-                                    0.0
-                                };
+                                let synth_btc = stable_sats as f64 / 100_000_000.0;
                                 format!("{} BTC", Self::format_btc_spaced(synth_btc))
                             } else {
                                 Self::format_price(stabilized_usd)
@@ -4902,11 +4953,7 @@ impl UserApp {
                                 ui.label(RichText::new("BTC").size(13.0).color(btc_color).strong());
                             });
                             let native_text = if self.bar_chart_show_btc {
-                                let native_btc = if btc_price > 0.0 {
-                                    native_usd / btc_price
-                                } else {
-                                    0.0
-                                };
+                                let native_btc = native_sats as f64 / 100_000_000.0;
                                 format!("{} BTC", Self::format_btc_spaced(native_btc))
                             } else {
                                 Self::format_price(native_usd)
@@ -7942,10 +7989,11 @@ impl UserApp {
         ui.add_space(5.0);
 
         // Show available USD balance (the stabilized amount)
-        let available_usd = {
+        let available_usd_cents = {
             let sc = self.stable_channel.lock().unwrap();
-            sc.expected_usd.0
+            floor_usd_cents(sc.expected_usd.0)
         };
+        let available_usd = available_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!("Available: {}", Self::format_price(available_usd)))
                 .size(14.0)
@@ -7977,8 +8025,9 @@ impl UserApp {
                 });
 
             // BTC equivalent below input
-            if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
-                if amount > 0.0 {
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                if amount_cents > 0 {
+                    let amount = amount_cents as f64 / 100.0;
                     let btc_price = get_cached_price_no_fetch();
                     if btc_price > 0.0 {
                         let btc = amount / btc_price;
@@ -8005,12 +8054,8 @@ impl UserApp {
         ui.add_space(20.0);
 
         // Next button — enabled when amount is a positive number
-        let has_amount = self
-            .trade_amount_input
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| v > 0.0)
+        let has_amount = parse_trade_usd_cents(&self.trade_amount_input)
+            .map(|v| v > 0)
             .unwrap_or(false);
         let btn_color = if has_amount {
             theme::PRIMARY
@@ -8036,9 +8081,10 @@ impl UserApp {
         });
 
         if should_process {
-            if let Ok(amount) = self.trade_amount_input.parse::<f64>() {
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                let amount = amount_cents as f64 / 100.0;
                 // Validate user has enough USD
-                if amount > available_usd {
+                if amount_cents > available_usd_cents {
                     self.trade_error = format!(
                         "Insufficient balance. You have {} available.",
                         Self::format_price(available_usd)
@@ -8046,9 +8092,14 @@ impl UserApp {
                 } else {
                     // Calculate trade details (use non-blocking cached price)
                     let btc_price = get_cached_price_no_fetch();
+                    if btc_price < 1.0 || !btc_price.is_finite() {
+                        self.trade_error = "Invalid price".to_string();
+                        return;
+                    }
                     let fee_usd = Self::stable_trade_fee(amount);
                     let net_amount = amount - fee_usd;
                     let btc_amount = net_amount / btc_price;
+                    let btc_sats = (btc_amount * SATS_IN_BTC as f64).floor() as u64;
 
                     self.pending_trade = Some(PendingTrade {
                         action: TradeAction::BuyBtc,
@@ -8056,6 +8107,7 @@ impl UserApp {
                         btc_price,
                         fee_usd,
                         btc_amount,
+                        btc_sats,
                         net_amount_usd: net_amount,
                     });
                     self.show_confirm_trade = true;
@@ -8223,7 +8275,7 @@ impl UserApp {
             }
         });
         if should_confirm {
-            self.execute_buy(amount_usd);
+            self.execute_buy(amount_usd, btc_price);
             if self.trade_error.is_empty() {
                 self.trade_success = Some(TradeAction::BuyBtc);
                 self.pending_trade = None;
@@ -8282,18 +8334,24 @@ impl UserApp {
         );
         ui.add_space(5.0);
 
-        // Show available BTC balance (in USD terms) = total - stabilized
+        // Show the native allocation valued in USD. A price quote changes its value, not which
+        // sats belong to it.
         let btc_price = get_cached_price_no_fetch();
-        let available_btc_usd = {
+        let native_sats = {
             let sc = self.stable_channel.lock().unwrap();
-            let total_usd = if sc.is_stable_receiver {
-                sc.stable_receiver_usd.0
-            } else {
-                sc.stable_provider_usd.0
-            };
-            // BTC portion is total minus the stabilized USD amount
-            (total_usd - sc.expected_usd.0).max(0.0)
+            let (_, native_sats, _) = channel_balance_split(
+                sc.stable_receiver_btc.sats,
+                sc.backing_sats,
+                sc.expected_usd.0,
+                btc_price,
+            );
+            native_sats
         };
+        // A hard spending limit must never be formatted upward. Otherwise an exact displayed
+        // maximum can exceed the underlying sats by a fraction of a cent.
+        let available_btc_usd_cents =
+            floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * btc_price);
+        let available_btc_usd = available_btc_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!(
                 "Available: {}",
@@ -8328,9 +8386,9 @@ impl UserApp {
                 });
 
             // BTC equivalent below input
-            if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
-                if amount > 0.0 && btc_price > 0.0 {
-                    let btc = amount / btc_price;
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                if amount_cents > 0 && btc_price > 0.0 {
+                    let btc = amount_cents as f64 / 100.0 / btc_price;
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!("\u{2248} {:.8} BTC", btc))
@@ -8353,12 +8411,8 @@ impl UserApp {
         ui.add_space(20.0);
 
         // Next button — enabled when amount is a positive number
-        let has_amount = self
-            .trade_amount_input
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| v > 0.0)
+        let has_amount = parse_trade_usd_cents(&self.trade_amount_input)
+            .map(|v| v > 0)
             .unwrap_or(false);
         let btn_color = if has_amount {
             theme::PRIMARY
@@ -8384,18 +8438,26 @@ impl UserApp {
         });
 
         if should_process {
-            if let Ok(amount) = self.trade_amount_input.parse::<f64>() {
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                let amount = amount_cents as f64 / 100.0;
                 // Validate user has enough BTC to sell
-                if amount > available_btc_usd {
+                if amount_cents > available_btc_usd_cents {
                     self.trade_error = format!(
                         "Insufficient BTC. You have {} available.",
                         Self::format_price(available_btc_usd)
                     );
+                } else if btc_price < 1.0 || !btc_price.is_finite() {
+                    self.trade_error = "Invalid price".to_string();
                 } else {
                     // Calculate trade details
                     let fee_usd = Self::stable_trade_fee(amount);
                     let net_amount = amount - fee_usd;
-                    let btc_amount = amount / btc_price; // BTC being sold
+                    let btc_sats = sats_for_usd_cents(amount_cents, btc_price).unwrap_or(0);
+                    if btc_sats == 0 || btc_sats > native_sats {
+                        self.trade_error = "Amount exceeds the available BTC sats".to_string();
+                        return;
+                    }
+                    let btc_amount = btc_sats as f64 / SATS_IN_BTC as f64;
 
                     self.pending_trade = Some(PendingTrade {
                         action: TradeAction::SellBtc,
@@ -8403,6 +8465,7 @@ impl UserApp {
                         btc_price,
                         fee_usd,
                         btc_amount,
+                        btc_sats,
                         net_amount_usd: net_amount,
                     });
                     self.show_confirm_trade = true;
@@ -8455,6 +8518,7 @@ impl UserApp {
         let btc_price = trade.btc_price;
         let fee_usd = trade.fee_usd;
         let btc_amount = trade.btc_amount;
+        let btc_sats = trade.btc_sats;
         let net_amount = trade.net_amount_usd;
 
         // Header
@@ -8570,7 +8634,7 @@ impl UserApp {
             }
         });
         if should_confirm {
-            self.execute_sell(amount_usd);
+            self.execute_sell(amount_usd, btc_price, btc_sats);
             if self.trade_error.is_empty() {
                 self.trade_success = Some(TradeAction::SellBtc);
                 self.pending_trade = None;
@@ -8831,25 +8895,30 @@ impl UserApp {
         });
     }
 
-    fn execute_buy(&mut self, amount_usd: f64) {
+    fn execute_buy(&mut self, amount_usd: f64, btc_price: f64) {
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
-        let (current_expected_usd, btc_price) = {
+        let current_expected_usd = {
             let sc = self.stable_channel.lock().unwrap();
-            (sc.expected_usd.0, sc.latest_price)
+            sc.expected_usd.0
         };
 
-        if btc_price < 1.0 {
+        if btc_price < 1.0 || !btc_price.is_finite() {
             self.trade_error = "Invalid price".to_string();
             return;
         }
 
         // Buying BTC means reducing the stabilized USD amount
         // Subtract full amount (fee comes out of the trade)
-        let new_expected_usd = (current_expected_usd - amount_usd).max(0.0);
+        let remaining_usd = (current_expected_usd - amount_usd).max(0.0);
+        let new_expected_usd = if remaining_usd < 0.01 {
+            0.0
+        } else {
+            remaining_usd
+        };
 
-        if amount_usd > current_expected_usd {
+        if floor_usd_cents(amount_usd) > floor_usd_cents(current_expected_usd) {
             self.trade_error = "Amount exceeds available USD".to_string();
             return;
         }
@@ -8859,13 +8928,14 @@ impl UserApp {
         } else {
             0.0
         };
-        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "buy") {
+        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "buy", btc_price) {
             let payment_id_str = format!("{payment_id}");
             let trade_db_id = self.record_trade(
                 "buy",
                 amount_usd,
                 btc_amount,
                 fee_usd,
+                new_expected_usd,
                 Some(&payment_id_str),
                 "pending",
             );
@@ -8886,32 +8956,30 @@ impl UserApp {
         self.trade_error.clear();
     }
 
-    fn execute_sell(&mut self, amount_usd: f64) {
+    fn execute_sell(&mut self, amount_usd: f64, btc_price: f64, btc_sats: u64) {
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
-        let (current_expected_usd, total_usd, btc_price) = {
+        let (current_expected_usd, native_sats) = {
             let sc = self.stable_channel.lock().unwrap();
-            let total = if sc.is_stable_receiver {
-                sc.stable_receiver_usd.0
-            } else {
-                sc.stable_provider_usd.0
-            };
-            (sc.expected_usd.0, total, sc.latest_price)
+            let (_, native_sats, _) = channel_balance_split(
+                sc.stable_receiver_btc.sats,
+                sc.backing_sats,
+                sc.expected_usd.0,
+                btc_price,
+            );
+            (sc.expected_usd.0, native_sats)
         };
 
-        if btc_price < 1.0 {
+        if btc_price < 1.0 || !btc_price.is_finite() {
             self.trade_error = "Invalid price".to_string();
             return;
         }
 
-        // Can't sell more BTC than you have
-        let available_btc_usd = (total_usd - current_expected_usd).max(0.0);
-        if amount_usd > available_btc_usd {
-            self.trade_error = format!(
-                "Amount exceeds BTC holdings (${:.2} available)",
-                available_btc_usd
-            );
+        // Revalidate the accepted sat amount, not its moving USD value. Price movement between
+        // the amount and confirmation screens does not change how many native sats are owned.
+        if btc_sats == 0 || btc_sats > native_sats {
+            self.trade_error = format!("BTC balance changed ({} sats available)", native_sats);
             return;
         }
 
@@ -8919,14 +8987,15 @@ impl UserApp {
         // Add net amount (after fee) to stable
         let new_expected_usd = current_expected_usd + net_amount;
 
-        let btc_amount = net_amount / btc_price;
-        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "sell") {
+        let btc_amount = btc_sats as f64 / SATS_IN_BTC as f64;
+        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "sell", btc_price) {
             let payment_id_str = format!("{payment_id}");
             let trade_db_id = self.record_trade(
                 "sell",
                 amount_usd,
                 btc_amount,
                 fee_usd,
+                new_expected_usd,
                 Some(&payment_id_str),
                 "pending",
             );
@@ -9402,53 +9471,174 @@ pub fn run() {
     }
 }
 
-/// Mobile-parity channel split: native = channel sats above the peg target (saturating, never negative), valued at price. Mirrors iOS HomeView.
-fn channel_native_split(lightning_sats: u64, target_usd: f64, price: f64) -> (u64, f64) {
-    if price <= 0.0 {
-        return (0, 0.0);
+/// Parse a user-entered USD trade amount into its exact cent representation. Trades are quoted
+/// and validated in cents, so values with more than two decimal places are intentionally rejected.
+fn parse_trade_usd_cents(input: &str) -> Option<u64> {
+    let cleaned: String = input
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '$' && *c != ',' && *c != '_')
+        .collect();
+    if cleaned.is_empty() {
+        return None;
     }
-    let stable_sats = (target_usd / price * 100_000_000.0) as u64;
+
+    let mut parts = cleaned.split('.');
+    let whole = parts.next()?;
+    let fraction = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || fraction.len() > 2
+        || (!whole.is_empty() && !whole.bytes().all(|b| b.is_ascii_digit()))
+        || (!fraction.is_empty() && !fraction.bytes().all(|b| b.is_ascii_digit()))
+        || (whole.is_empty() && fraction.is_empty())
+    {
+        return None;
+    }
+
+    let whole_cents = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().ok()?.checked_mul(100)?
+    };
+    let fraction_cents = match fraction.len() {
+        0 => 0,
+        1 => fraction.parse::<u64>().ok()?.checked_mul(10)?,
+        2 => fraction.parse::<u64>().ok()?,
+        _ => return None,
+    };
+    whole_cents.checked_add(fraction_cents)
+}
+
+/// Return only whole spendable cents. A hard maximum must be rounded down, never up like a
+/// presentation-only currency value.
+fn floor_usd_cents(usd: f64) -> u64 {
+    if !usd.is_finite() || usd <= 0.0 {
+        return 0;
+    }
+    let cents = usd * 100.0;
+    if cents >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        (cents + 1e-9).floor() as u64
+    }
+}
+
+/// Sats required to cover an exact cent-denominated USD amount at a fixed quote. Round up so the
+/// order can never claim more USD than the selected sats are worth.
+fn sats_for_usd_cents(cents: u64, price: f64) -> Option<u64> {
+    if cents == 0 || !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let sats = cents as f64 / 100.0 / price * SATS_IN_BTC as f64;
+    if !sats.is_finite() || sats > u64::MAX as f64 {
+        None
+    } else {
+        Some(sats.ceil() as u64)
+    }
+}
+
+/// Split the live channel using its persisted sat allocation. Price values the native bucket but
+/// never moves sats between buckets; stable + native therefore always equals the live balance.
+fn channel_balance_split(
+    lightning_sats: u64,
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+) -> (u64, u64, f64) {
+    let normalized_backing =
+        stable::normalize_backing_sats(lightning_sats, backing_sats, expected_usd, price);
+    let stable_sats = normalized_backing.min(lightning_sats);
     let native_sats = lightning_sats.saturating_sub(stable_sats);
-    let native_usd = native_sats as f64 / 100_000_000.0 * price;
-    (native_sats, native_usd)
+    let native_usd = if price > 0.0 {
+        native_sats as f64 / 100_000_000.0 * price
+    } else {
+        0.0
+    };
+    (stable_sats, native_sats, native_usd)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::channel_native_split;
+    use super::{
+        channel_balance_split, floor_usd_cents, parse_trade_usd_cents, sats_for_usd_cents,
+    };
 
     #[test]
-    fn native_split_under_peg_is_zero() {
-        let (sats, usd) = channel_native_split(95_000, 100.0, 100_000.0);
-        assert_eq!(sats, 0);
-        assert!((usd - 0.0).abs() < 1e-9);
+    fn trade_usd_input_is_exactly_cent_denominated() {
+        assert_eq!(parse_trade_usd_cents("10.61"), Some(1_061));
+        assert_eq!(parse_trade_usd_cents("$1,000.5"), Some(100_050));
+        assert_eq!(parse_trade_usd_cents(".09"), Some(9));
+        assert_eq!(parse_trade_usd_cents("10.611"), None);
+        assert_eq!(parse_trade_usd_cents("-1.00"), None);
     }
 
     #[test]
-    fn native_split_over_peg() {
-        let (sats, usd) = channel_native_split(150_000, 100.0, 100_000.0);
-        assert_eq!(sats, 50_000);
+    fn spendable_usd_limit_is_floored_not_rounded() {
+        assert_eq!(floor_usd_cents(10.6099), 1_060);
+        assert_eq!(floor_usd_cents(10.61), 1_061);
+        assert_eq!(floor_usd_cents(f64::NAN), 0);
+    }
+
+    #[test]
+    fn displayed_native_limit_always_fits_available_sats() {
+        let native_sats = 15_978;
+        let price = 66_395.1;
+        let available_usd = native_sats as f64 / 100_000_000.0 * price;
+        let available_cents = floor_usd_cents(available_usd);
+        let required_sats = sats_for_usd_cents(available_cents, price).unwrap();
+
+        assert_eq!(available_cents, 1_060);
+        assert!(required_sats <= native_sats);
+    }
+
+    #[test]
+    fn balance_split_uses_backing_not_current_price() {
+        let at_trade_price = channel_balance_split(150_000, 100_000, 100.0, 100_000.0);
+        let after_price_move = channel_balance_split(150_000, 100_000, 100.0, 120_000.0);
+        assert_eq!(at_trade_price.0, 100_000);
+        assert_eq!(at_trade_price.1, 50_000);
+        assert_eq!(after_price_move.0, 100_000);
+        assert_eq!(after_price_move.1, 50_000);
+        assert!(after_price_move.2 > at_trade_price.2);
+    }
+
+    #[test]
+    fn balance_split_over_peg() {
+        let (stable, native, usd) = channel_balance_split(150_000, 100_000, 100.0, 100_000.0);
+        assert_eq!(stable, 100_000);
+        assert_eq!(native, 50_000);
         assert!((usd - 50.0).abs() < 1e-6);
     }
 
     #[test]
-    fn native_split_exactly_pegged() {
-        let (sats, usd) = channel_native_split(100_000, 100.0, 100_000.0);
-        assert_eq!(sats, 0);
+    fn balance_split_exactly_pegged() {
+        let (stable, native, usd) = channel_balance_split(100_000, 100_000, 100.0, 100_000.0);
+        assert_eq!(stable, 100_000);
+        assert_eq!(native, 0);
         assert!((usd - 0.0).abs() < 1e-9);
     }
 
     #[test]
-    fn native_split_zero_price() {
-        let (sats, usd) = channel_native_split(150_000, 100.0, 0.0);
-        assert_eq!(sats, 0);
+    fn balance_split_zero_price_preserves_sats() {
+        let (stable, native, usd) = channel_balance_split(150_000, 100_000, 100.0, 0.0);
+        assert_eq!(stable, 100_000);
+        assert_eq!(native, 50_000);
         assert_eq!(usd, 0.0);
     }
 
     #[test]
-    fn native_split_zero_lightning() {
-        let (sats, usd) = channel_native_split(0, 100.0, 100_000.0);
-        assert_eq!(sats, 0);
+    fn balance_split_backing_above_live_clamps_to_live() {
+        let (stable, native, usd) = channel_balance_split(95_000, 100_000, 100.0, 100_000.0);
+        assert_eq!(stable, 95_000);
+        assert_eq!(native, 0);
+        assert_eq!(usd, 0.0);
+    }
+
+    #[test]
+    fn balance_split_absorbs_sub_cent_trade_dust() {
+        let (stable, native, usd) = channel_balance_split(57_444, 57_441, 38.055, 66_250.21);
+        assert_eq!(stable, 57_444);
+        assert_eq!(native, 0);
         assert_eq!(usd, 0.0);
     }
 }

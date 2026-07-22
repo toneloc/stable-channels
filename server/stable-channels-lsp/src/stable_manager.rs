@@ -18,6 +18,17 @@ use stable_channels::db::Database;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
 
+/// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
+/// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
+/// assigns the funder's current commitment fee to the remote peer.
+fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
+    let local_sats = (channel.outbound_capacity_msat / 1000)
+        .saturating_add(channel.unspendable_punishment_reserve.unwrap_or(0));
+    let remote_sats = (channel.inbound_capacity_msat / 1000)
+        .saturating_add(channel.counterparty_unspendable_punishment_reserve);
+    (local_sats, remote_sats)
+}
+
 /// Tiny trait of the gRPC methods the manager calls, so run_tick and handlers can be unit-tested with a fake.
 #[async_trait]
 pub trait LdkServerCalls: Send + Sync {
@@ -198,9 +209,7 @@ impl StableChannelManager {
         let expected_usd = USD::from_f64(expected_usd_f);
         let expected_btc = Bitcoin::from_usd(expected_usd, btc_price);
 
-        let unspendable = channel.unspendable_punishment_reserve.unwrap_or(0);
-        let our_balance_sats = (channel.outbound_capacity_msat / 1000) + unspendable;
-        let their_balance_sats = channel.channel_value_sats.saturating_sub(our_balance_sats);
+        let (our_balance_sats, their_balance_sats) = channel_peer_balances(&channel);
 
         let stable_provider_btc = Bitcoin::from_sats(our_balance_sats);
         let stable_receiver_btc = Bitcoin::from_sats(their_balance_sats);
@@ -386,9 +395,7 @@ impl StableChannelManager {
             };
 
             // Balances come from the live channel. expected_usd/backing/native/note are the persisted intent.
-            let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-            let our_sats = (c.outbound_capacity_msat / 1000) + unspendable;
-            let their_sats = c.channel_value_sats.saturating_sub(our_sats);
+            let (our_sats, their_sats) = channel_peer_balances(c);
 
             let stable_provider_btc = Bitcoin::from_sats(our_sats);
             let stable_receiver_btc = Bitcoin::from_sats(their_sats);
@@ -470,9 +477,7 @@ impl StableChannelManager {
             return;
         };
 
-        let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-        let our_sats = (c.outbound_capacity_msat / 1000) + unspendable;
-        let their_sats = c.channel_value_sats.saturating_sub(our_sats);
+        let (our_sats, their_sats) = channel_peer_balances(&c);
 
         let user_channel_id_u128 = parse_user_channel_id(&user_channel_id).unwrap_or(0);
 
@@ -657,9 +662,7 @@ impl StableChannelManager {
             }) else {
                 continue;
             };
-            let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-            let our_sats = (c.outbound_capacity_msat / 1000) + unspendable;
-            let their_sats = c.channel_value_sats.saturating_sub(our_sats);
+            let (_, their_sats) = channel_peer_balances(c);
             let drop = sc.stable_receiver_btc.sats.saturating_sub(their_sats);
             if drop > 0 && drop.abs_diff(amount_sats) <= 1 {
                 matches.push((i, c, their_sats));
@@ -766,9 +769,7 @@ impl StableChannelManager {
             }
             let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };
 
-            let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-            let our_sats = (c.outbound_capacity_msat / 1000) + unspendable;
-            let their_sats = c.channel_value_sats.saturating_sub(our_sats);
+            let (our_sats, their_sats) = channel_peer_balances(c);
             sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
             sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
             sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, btc_price);
@@ -1146,9 +1147,7 @@ impl StableChannelManager {
         else {
             return; // channel vanished from the server
         };
-        let unspendable = chan.unspendable_punishment_reserve.unwrap_or(0);
-        let lsp_sats = (chan.outbound_capacity_msat / 1000) + unspendable;
-        let post_user_sats = chan.channel_value_sats.saturating_sub(lsp_sats);
+        let (_, post_user_sats) = channel_peer_balances(&chan);
         let channel_id_hex = chan.channel_id.clone();
 
         let persisted = {
@@ -1264,9 +1263,7 @@ impl StableChannelManager {
         else {
             return;
         };
-        let unspendable = c.unspendable_punishment_reserve.unwrap_or(0);
-        let our_sats = (c.outbound_capacity_msat / 1000) + unspendable;
-        let their_sats = c.channel_value_sats.saturating_sub(our_sats);
+        let (our_sats, their_sats) = channel_peer_balances(&c);
         let channel_id_hex = c.channel_id.clone();
         let new_channel_id_bytes = parse_channel_id_hex(&c.channel_id);
 
@@ -1450,9 +1447,7 @@ impl StableChannelManager {
             stable_channels::audit::audit_event("TRADE_CHANNEL_UID_UNPARSEABLE", serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": chan.user_channel_id.clone() }));
             return;
         };
-        let unspendable = chan.unspendable_punishment_reserve.unwrap_or(0);
-        let our_sats = (chan.outbound_capacity_msat / 1000) + unspendable;
-        let their_sats = chan.channel_value_sats.saturating_sub(our_sats);
+        let (our_sats, their_sats) = channel_peer_balances(&chan);
         let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price).0;
         let new_expected = payload.expected_usd;
         // Epsilon absorbs f64 boundary rounding so a spend-driven push landing at ~receiver_usd is admitted; residual drift self-heals.
@@ -1741,13 +1736,16 @@ mod tests {
         outbound_msat: u64,
         is_usable: bool,
     ) -> GrpcChannel {
+        let remote_sats = value_sats.saturating_sub(outbound_msat / 1000);
         GrpcChannel {
             channel_id: channel_id.to_string(),
             counterparty_node_id: counterparty.to_string(),
             user_channel_id: user_channel_id.to_string(),
             unspendable_punishment_reserve: Some(0),
+            counterparty_unspendable_punishment_reserve: 0,
             channel_value_sats: value_sats,
             outbound_capacity_msat: outbound_msat,
+            inbound_capacity_msat: remote_sats.saturating_mul(1000),
             is_usable,
             is_channel_ready: true,
             is_outbound: true,
@@ -2020,6 +2018,55 @@ mod tests {
             mgr.stable_channels[0].native_sats,
             "native_channel_btc must match native_sats after a forward",
         );
+    }
+
+    #[tokio::test]
+    async fn forwarded_overflow_uses_remote_capacity_not_commitment_fee_residual() {
+        let mut mgr = make_manager();
+        let uid = 189476124653200987495269098788434301048u128;
+        // Exact production regression: the 151,958-sat funding output has 659 sats reserved for
+        // the funder's commitment fee. After the forward, the remote user owns 67,595 sats and
+        // the LSP owns 83,704; channel_value - LSP would incorrectly report 68,254 for the user.
+        let mut channel = make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            151_958,
+            83_704_000,
+            true,
+        );
+        channel.inbound_capacity_msat = 67_595_000;
+        let fake = FakeLdkServer::new(vec![channel]);
+        seed_channel(
+            &mut mgr,
+            uid,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            46.4,
+            70_433,
+            4_740,
+            75_173,
+            65_877.7,
+        );
+
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.to_string(),
+            Some("next-ucid-production-regression".to_string()),
+            CHANNEL_ID_HEX.to_string(),
+            "next-channel".to_string(),
+            COUNTERPARTY_HEX.to_string(),
+            "next-node".to_string(),
+            7_578_000,
+            0,
+            &fake as &dyn LdkServerCalls,
+            66_000.96,
+        )
+        .await;
+
+        let expected = 46.4 - (2_838.0 / 100_000_000.0 * 66_000.96);
+        let sc = &mgr.stable_channels[0];
+        assert!((sc.expected_usd.0 - expected).abs() < 1e-9);
+        assert_eq!(sc.stable_receiver_btc.sats, 67_595);
     }
 
     #[tokio::test]
