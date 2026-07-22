@@ -640,7 +640,7 @@ class DatabaseService {
         let rawConfs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
         let confs = min(rawConfs, required)
         try execute(
-            "UPDATE payments SET confirmations = ?, tx_block_height = COALESCE(tx_block_height, ?), status = CASE WHEN ? >= ? THEN 'completed' ELSE status END WHERE id = ?",
+            "UPDATE payments SET confirmations = ?, tx_block_height = ?, status = CASE WHEN ? >= ? THEN 'completed' ELSE status END WHERE id = ?",
             params: [
                 .integer(Int64(confs)),
                 .integer(Int64(txBlockHeight)),
