@@ -10,6 +10,7 @@ struct OnChainSendView: View {
     @State private var errorMessage: String?
     @State private var txid: String?
     @State private var spliceSuccess = false
+    @State private var feeRateSatVb: UInt64?
 
     private var amountSats: UInt64? {
         guard let usd = Double(amountUSDStr), usd > 0, appState.btcPrice > 0 else { return nil }
@@ -20,12 +21,29 @@ struct OnChainSendView: View {
         appState.nodeService.channels.contains { $0.isChannelReady }
     }
 
+    private var feeEstimateText: String {
+        guard let feeRateSatVb else {
+            return String(localized: "info_fee_estimating", defaultValue: "Estimating network fee...")
+        }
+        let vbytes = sendAll ? Constants.estimatedOnchainSendAllVBytes : Constants.estimatedOnchainSendVBytes
+        let feeSats = feeRateSatVb * vbytes
+        return String(
+            format: String(
+                localized: "info_onchain_fee_estimate_sentence",
+                defaultValue: "Expected network fee: ~%@ BTC (%llu sat/vB)"
+            ),
+            feeSats.btcSpacedFormatted,
+            feeRateSatVb
+        )
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
                     addressCard
                     amountCard
+                    infoCard(icon: "bitcoinsign.circle", text: feeEstimateText)
                     if hasReadyChannel {
                         infoCard(
                             icon: "arrow.up.arrow.down",
@@ -68,6 +86,9 @@ struct OnChainSendView: View {
             .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send Onchain"))
             .navigationBarTitleDisplayMode(.inline)
             .qrInputToolbar(text: $address, sanitize: QRCodeExtractor.sanitizeAddress)
+            .task {
+                feeRateSatVb = await appState.feeRateService.currentRate()
+            }
         }
     }
 

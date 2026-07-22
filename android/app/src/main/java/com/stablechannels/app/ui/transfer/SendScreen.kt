@@ -63,6 +63,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var showScanner by remember { mutableStateOf(false) }
     var isExtractingQR by remember { mutableStateOf(false) }
+    var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val activity = context.findActivity()
@@ -122,8 +123,57 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         InputType.BOLT12, InputType.ONCHAIN -> manualAmountSats
         InputType.UNKNOWN -> 0
     }
+    fun saturatingMultiply(lhs: Long, rhs: Long): Long {
+        if (lhs <= 0L || rhs <= 0L) return 0L
+        return if (lhs > Long.MAX_VALUE / rhs) Long.MAX_VALUE else lhs * rhs
+    }
+
+    fun saturatingAdd(lhs: Long, rhs: Long): Long {
+        if (lhs >= Long.MAX_VALUE - rhs) return Long.MAX_VALUE
+        return lhs + rhs
+    }
 
     val displayUSD = if (btcPrice > 0 && displaySats > 0) (displaySats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
+    val forwardingChannel = appState.nodeService.channels.firstOrNull { it.isChannelReady }
+    val forwardingFeeBaseMsat = forwardingChannel
+        ?.counterpartyForwardingInfoFeeBaseMsat
+        ?.toLong()
+        ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT
+    val forwardingFeeProportionalMillionths = forwardingChannel
+        ?.counterpartyForwardingInfoFeeProportionalMillionths
+        ?.toLong()
+        ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS
+    val lightningFeeSats = if (displaySats > 0) {
+        val amountMsat = saturatingMultiply(displaySats, 1_000L)
+        val proportionalMsat = saturatingMultiply(amountMsat, forwardingFeeProportionalMillionths) / 1_000_000L
+        val feeMsat = saturatingAdd(forwardingFeeBaseMsat, proportionalMsat)
+        saturatingAdd(feeMsat, 999L) / 1_000L
+    } else {
+        0L
+    }
+    val lightningFeeText = if (lightningFeeSats == 0L) {
+        "Expected fee: none"
+    } else if (lightningFeeSats > 0) {
+        val feeUsd = if (btcPrice > 0) {
+            " (${((lightningFeeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice).usdFormatted()})"
+        } else {
+            ""
+        }
+        "Expected fee: ~${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
+    } else {
+        "Expected fee: depends on amount"
+    }
+    val onchainVbytes = if (isSendMax) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
+    val onchainFeeText = feeRateSatVb?.let { rate ->
+        val feeSats = rate * onchainVbytes
+        "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
+    } ?: "Estimating network fee..."
+
+    LaunchedEffect(inputType) {
+        if (inputType == InputType.ONCHAIN && feeRateSatVb == null) {
+            feeRateSatVb = withContext(Dispatchers.IO) { appState.currentFeeRateSatVb() ?: 2L }
+        }
+    }
 
     // Photo picker launcher for QR extraction (Task 7.4)
     val photoPickerLauncher = rememberLauncherForActivityResult(
@@ -386,6 +436,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    lightningFeeText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             // Amount input (USD) — for amountless bolt11, bolt12, onchain
@@ -468,6 +524,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Spacer(Modifier.height(4.dp))
                     Text(
                         manualAmountSats.btcSpacedFormatted(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (inputType == InputType.ONCHAIN) onchainFeeText else lightningFeeText,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

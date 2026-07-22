@@ -26,6 +26,7 @@ import com.stablechannels.app.util.usdFormatted
 import com.stablechannels.app.util.btcSpacedFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
@@ -36,11 +37,21 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
     var successTxid by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+    val feeVbytes = if (sendAll) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
+    val feeEstimateText = feeRateSatVb?.let { rate ->
+        val feeSats = rate * feeVbytes
+        "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
+    } ?: "Estimating network fee..."
+
+    LaunchedEffect(Unit) {
+        feeRateSatVb = withContext(Dispatchers.IO) { appState.currentFeeRateSatVb() ?: 2L }
+    }
 
     Column(
         modifier = Modifier
@@ -253,6 +264,13 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     )
                 }
             }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                feeEstimateText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             error?.let {
                 Spacer(Modifier.height(8.dp))

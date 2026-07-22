@@ -35,13 +35,26 @@ struct SellView: View {
         Double(amountStr) ?? 0
     }
 
+    private var feeUSD: Double {
+        amountUSD * Constants.stableChannelTradeFeeRate
+    }
+
+    private var netAmountUSD: Double {
+        amountUSD - feeUSD
+    }
+
+    private var feeLabel: String {
+        String(format: "Fee (%.0f%%)", Constants.stableChannelTradeFeeRate * 100)
+    }
+
     private var btcAmount: Double {
         guard appState.btcPrice > 0 else { return 0 }
         return amountUSD / appState.btcPrice
     }
 
     private var btcAmountFinal: Double {
-        btcAmount * 0.99
+        guard appState.btcPrice > 0 else { return 0 }
+        return netAmountUSD / appState.btcPrice
     }
 
     var body: some View {
@@ -129,8 +142,8 @@ struct SellView: View {
                     String(format: "$%.2f", amountUSD)
                 )
                 confirmRow(
-                    String(localized: "label_fee_percent", defaultValue: "Fee (1%)"),
-                    String(format: "$%.2f", amountUSD * 0.01)
+                    feeLabel,
+                    String(format: "$%.2f", feeUSD)
                 )
                 confirmRow(
                     String(localized: "label_btc_price", defaultValue: "BTC Price"),
@@ -139,7 +152,7 @@ struct SellView: View {
                 Divider()
                 confirmRow(
                     String(localized: "label_you_receive", defaultValue: "You receive"),
-                    String(format: "$%.2f USD", amountUSD * 0.99),
+                    String(format: "$%.2f USD", netAmountUSD),
                     bold: true
                 )
             }
@@ -190,7 +203,7 @@ struct SellView: View {
                 Text(String(localized: "trade_sold_btc_for", defaultValue: "Converted ") + String(
                     format: "%.8f",
                     btcAmountFinal
-                ) + " BTC for " + (amountUSD * 0.99).usdFormatted)
+                ) + " BTC for " + netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -204,7 +217,7 @@ struct SellView: View {
                 Text(String(localized: "trade_selling_btc_for", defaultValue: "Converting ") + String(
                     format: "%.8f",
                     btcAmountFinal
-                ) + " BTC for " + (amountUSD * 0.99).usdFormatted)
+                ) + " BTC for " + netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
@@ -237,7 +250,6 @@ struct SellView: View {
         appState.ensureLSPConnected()
         let sc = appState.stableChannel
         let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: appState.btcPrice).amount
-        let feeUSD = amountUSD * 0.01 // 1% fee
         let price = appState.btcPrice
         do {
             guard let result = try appState.tradeService?.executeSell(

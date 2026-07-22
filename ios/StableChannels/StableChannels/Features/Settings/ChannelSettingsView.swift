@@ -110,7 +110,8 @@ struct ChannelSettingsView: View {
             isPresented: $showCloseChannelAlert
         ) {
             Button(String(localized: "alert_close_channel_cancel", defaultValue: "Cancel"), role: .cancel) { }
-            Button(String(localized: "alert_close_channel_confirm", defaultValue: "Close channel"), role: .destructive) {
+            Button(String(localized: "alert_close_channel_confirm", defaultValue: "Close channel"),
+                   role: .destructive) {
                 closeChannel()
             }
         } message: {

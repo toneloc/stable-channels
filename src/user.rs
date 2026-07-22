@@ -3132,6 +3132,59 @@ impl UserApp {
         )
     }
 
+    fn stable_trade_fee(amount_usd: f64) -> f64 {
+        amount_usd * STABLE_CHANNEL_TRADE_FEE_RATE
+    }
+
+    fn stable_trade_fee_label() -> String {
+        format!("Fee ({:.0}%)", STABLE_CHANNEL_TRADE_FEE_RATE * 100.0)
+    }
+
+    fn counterparty_forwarding_fee_params(&self) -> (u64, u64) {
+        self.node
+            .list_channels()
+            .iter()
+            .find(|c| c.is_channel_ready)
+            .map(|channel| {
+                (
+                    channel
+                        .counterparty_forwarding_info_fee_base_msat
+                        .map(u64::from)
+                        .unwrap_or(LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT),
+                    channel
+                        .counterparty_forwarding_info_fee_proportional_millionths
+                        .map(u64::from)
+                        .unwrap_or(LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS),
+                )
+            })
+            .unwrap_or((
+                LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT,
+                LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS,
+            ))
+    }
+
+    fn estimated_lightning_fee_sats(&self, amount_sats: u64) -> u64 {
+        let (base_msat, proportional_millionths) = self.counterparty_forwarding_fee_params();
+        let amount_msat = amount_sats.saturating_mul(1000);
+        let proportional_msat = amount_msat.saturating_mul(proportional_millionths) / 1_000_000;
+        base_msat
+            .saturating_add(proportional_msat)
+            .saturating_add(999)
+            / 1000
+    }
+
+    fn lightning_fee_text(&self, amount_sats: u64) -> String {
+        let fee_sats = self.estimated_lightning_fee_sats(amount_sats);
+        if fee_sats == 0 {
+            "Expected fee: none".to_string()
+        } else {
+            format!(
+                "Expected fee: ~{}",
+                Self::format_sats_as_btc(fee_sats)
+            )
+        }
+    }
+
     /// Parse a USD amount. Tolerant of leading `$`, spaces, commas, and
     /// underscores so `$1,250.50` and `1250.50` both work.
     fn parse_usd(input: &str) -> Option<f64> {
@@ -7379,13 +7432,19 @@ impl UserApp {
             }
 
             let fee_text = if is_onchain {
-                // On-chain: ~140 vB for simple send, ~250 vB for send-all (more inputs)
-                let vbytes: u64 = if self.send_all { 250 } else { 140 };
+                let vbytes: u64 = if self.send_all {
+                    ESTIMATED_ONCHAIN_SEND_ALL_VBYTES
+                } else {
+                    ESTIMATED_ONCHAIN_SEND_VBYTES
+                };
                 match self.cached_fee_rate {
                     Some(rate) => {
                         let estimated_fee = rate * vbytes;
-                        let fee_btc = estimated_fee as f64 / 100_000_000.0;
-                        format!("Estimated fee: ~{:.8} BTC ({} sat/vB)", fee_btc, rate)
+                        format!(
+                            "Expected network fee: ~{} ({} sat/vB)",
+                            Self::format_sats_as_btc(estimated_fee),
+                            rate
+                        )
                     }
                     None => "Estimating fee...".to_string(),
                 }
@@ -7399,8 +7458,8 @@ impl UserApp {
                 match Bolt11Invoice::from_str(invoice_str) {
                     Ok(invoice) => {
                         if let Some(amount_msat) = invoice.amount_milli_satoshis() {
-                            let amount_btc = amount_msat as f64 / 1000.0 / 100_000_000.0;
-                            let fee_btc = amount_btc / 100.0;
+                            let amount_sats = amount_msat.saturating_add(999) / 1000;
+                            let amount_btc = amount_sats as f64 / SATS_IN_BTC as f64;
                             let price = self.stable_channel.lock().unwrap().latest_price;
                             let usd_str = if price > 0.0 {
                                 format!(" (${:.2})", amount_btc * price)
@@ -7408,19 +7467,37 @@ impl UserApp {
                                 String::new()
                             };
                             format!(
-                                "Amount: {:.8} BTC{} + ~{:.8} BTC routing fee",
-                                amount_btc,
+                                "Amount: {}{}; {}",
+                                Self::format_sats_as_btc(amount_sats),
                                 usd_str,
-                                fee_btc.max(0.00000001)
+                                self.lightning_fee_text(amount_sats)
                             )
                         } else {
-                            "Variable amount invoice (no fee estimate)".to_string()
+                            if let Ok(amount_btc) = self.send_amount.trim().parse::<f64>() {
+                                let amount_sats = (amount_btc * SATS_IN_BTC as f64) as u64;
+                                if amount_sats > 0 {
+                                    self.lightning_fee_text(amount_sats)
+                                } else {
+                                    "Expected fee: depends on amount".to_string()
+                                }
+                            } else {
+                                "Expected fee: depends on amount".to_string()
+                            }
                         }
                     }
                     Err(_) => String::new(),
                 }
             } else {
-                "Routing fee: typically < 1%".to_string()
+                if let Ok(amount_btc) = self.send_amount.trim().parse::<f64>() {
+                    let amount_sats = (amount_btc * SATS_IN_BTC as f64) as u64;
+                    if amount_sats > 0 {
+                        self.lightning_fee_text(amount_sats)
+                    } else {
+                        "Expected fee: depends on amount".to_string()
+                    }
+                } else {
+                    "Expected fee: depends on amount".to_string()
+                }
             };
 
             if !fee_text.is_empty() {
@@ -7976,7 +8053,7 @@ impl UserApp {
                 } else {
                     // Calculate trade details (use non-blocking cached price)
                     let btc_price = get_cached_price_no_fetch();
-                    let fee_usd = amount * 0.01; // 1% fee
+                    let fee_usd = Self::stable_trade_fee(amount);
                     let net_amount = amount - fee_usd;
                     let btc_amount = net_amount / btc_price;
 
@@ -8091,9 +8168,11 @@ impl UserApp {
 
                 ui.add_space(8.0);
 
-                // Fee (1%)
+                // Stable-channel trade fee
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Fee (1%)").color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(Self::stable_trade_fee_label()).color(Color32::DARK_GRAY),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("-{}", Self::format_price(fee_usd)))
@@ -8321,7 +8400,7 @@ impl UserApp {
                     );
                 } else {
                     // Calculate trade details
-                    let fee_usd = amount * 0.01; // 1% fee
+                    let fee_usd = Self::stable_trade_fee(amount);
                     let net_amount = amount - fee_usd;
                     let btc_amount = amount / btc_price; // BTC being sold
 
@@ -8449,9 +8528,11 @@ impl UserApp {
 
                 ui.add_space(8.0);
 
-                // Fee (1%)
+                // Stable-channel trade fee
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Fee (1%)").color(Color32::DARK_GRAY));
+                    ui.label(
+                        RichText::new(Self::stable_trade_fee_label()).color(Color32::DARK_GRAY),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("-{}", Self::format_price(fee_usd)))
@@ -8585,9 +8666,16 @@ impl UserApp {
                         ui.add_space(5.0);
                     }
 
-                    // Show fee rate
+                    // Show expected network fee
                     let fee_text = match self.cached_fee_rate {
-                        Some(rate) => format!("Fee rate: {} sat/vB", rate),
+                        Some(rate) => {
+                            let estimated_fee = rate * ESTIMATED_CHANNEL_CLOSE_VBYTES;
+                            format!(
+                                "Expected network fee: ~{} ({} sat/vB)",
+                                Self::format_sats_as_btc(estimated_fee),
+                                rate
+                            )
+                        }
                         None => "Fetching fee rate...".to_string(),
                     };
                     ui.label(RichText::new(fee_text).size(12.0).color(theme::MUTED));
@@ -8751,7 +8839,7 @@ impl UserApp {
     }
 
     fn execute_buy(&mut self, amount_usd: f64) {
-        let fee_usd = amount_usd * 0.01; // 1% fee
+        let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
         let (current_expected_usd, btc_price) = {
@@ -8806,7 +8894,7 @@ impl UserApp {
     }
 
     fn execute_sell(&mut self, amount_usd: f64) {
-        let fee_usd = amount_usd * 0.01; // 1% fee
+        let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
         let (current_expected_usd, total_usd, btc_price) = {

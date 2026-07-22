@@ -42,7 +42,8 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     val maxBuyUSD = sc.expectedUSD.amount
     val amountUSD = amountText.toDoubleOrNull() ?: 0.0
-    val feeUSD = amountUSD * 0.01
+    val feeUSD = amountUSD * Constants.STABLE_CHANNEL_TRADE_FEE_RATE
+    val feeLabel = String.format(Locale.US, "Fee (%.0f%%)", Constants.STABLE_CHANNEL_TRADE_FEE_RATE * 100)
     val btcAmount = if (btcPrice > 0) (amountUSD - feeUSD) / btcPrice else 0.0
 
     Column(
@@ -190,7 +191,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     Column(modifier = Modifier.padding(16.dp)) {
                         ConfirmRow("Amount", amountUSD.usdFormatted())
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        ConfirmRow("Fee (1%)", feeUSD.usdFormatted())
+                        ConfirmRow(feeLabel, feeUSD.usdFormatted())
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         ConfirmRow("BTC Price", btcPrice.usdFormatted())
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)

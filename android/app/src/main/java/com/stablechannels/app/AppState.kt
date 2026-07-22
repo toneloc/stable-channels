@@ -1432,6 +1432,9 @@ class AppState(private val context: Context) : ViewModel() {
         return null
     }
 
+    /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
+    fun currentFeeRateSatVb(): Long? = fetchFeeRate()
+
     /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */
     private suspend fun resolveChainUrl(): String {
         return withContext(Dispatchers.IO) {

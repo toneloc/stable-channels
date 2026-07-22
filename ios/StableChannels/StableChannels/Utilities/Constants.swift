@@ -59,6 +59,13 @@ enum Constants {
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     static let minDisplayUSD: Double = 2.0
     static let maxChannelUSD: Double = 100.0
+    /// Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount.
+    static let stableChannelTradeFeeRate: Double = 0.01
+    static let lightningDefaultForwardingFeeBaseMsat: UInt32 = 1_000
+    static let lightningDefaultForwardingFeeProportionalMillionths: UInt32 = 0
+    static let estimatedOnchainSendVBytes: UInt64 = 140
+    static let estimatedOnchainSendAllVBytes: UInt64 = 250
+    static let estimatedChannelCloseVBytes: UInt64 = 180
 
     // MARK: - Channel
 

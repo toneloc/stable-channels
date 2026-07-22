@@ -44,7 +44,6 @@ pub const DEFAULT_LSP_PUBKEY: &str =
 /// Default LSP address
 pub const DEFAULT_LSP_ADDRESS: &str = "stablechannels.com:9735";
 
-
 // ============================================================================
 // TIMING CONSTANTS
 // ============================================================================
@@ -91,6 +90,21 @@ pub const MIN_DISPLAY_USD: f64 = 2.0;
 
 /// Auto-sweep: minimum on-chain sats to trigger splice_in
 pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
+
+/// Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount.
+///
+/// The LSP currently accepts the amount attached to the signed trade message;
+/// there is no separate server-side percentage fee config.
+pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
+
+/// LDK channel-config defaults for outbound forwarding fees.
+pub const LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT: u64 = 1_000;
+pub const LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS: u64 = 0;
+
+/// Approximate virtual bytes used for on-chain fee estimates shown before send.
+pub const ESTIMATED_ONCHAIN_SEND_VBYTES: u64 = 140;
+pub const ESTIMATED_ONCHAIN_SEND_ALL_VBYTES: u64 = 250;
+pub const ESTIMATED_CHANNEL_CLOSE_VBYTES: u64 = 180;
 
 // ============================================================================
 // CHANNEL CONSTANTS
