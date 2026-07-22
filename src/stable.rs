@@ -125,22 +125,46 @@ pub fn reconcile_forwarded(
 ///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` if fully covered by native.
 pub fn deduct_outgoing(sc: &mut StableChannel, amount_sats: u64, price: f64) -> Option<f64> {
-    if sc.expected_usd.0 <= 0.01 || price <= 0.0 {
+    let receiver_sats_before = sc.stable_receiver_btc.sats;
+    let backing_sats_before = sc.backing_sats;
+    deduct_outgoing_from_snapshot(
+        sc,
+        receiver_sats_before,
+        backing_sats_before,
+        amount_sats,
+        price,
+    )
+}
+
+/// Deduct a known outgoing amount using the allocation immediately before the spend.
+/// This remains correct when the live channel balance has already advanced to its post-splice
+/// state by the time the asynchronous funding-output lookup completes.
+pub fn deduct_outgoing_from_snapshot(
+    sc: &mut StableChannel,
+    receiver_sats_before: u64,
+    backing_sats_before: u64,
+    amount_sats: u64,
+    price: f64,
+) -> Option<f64> {
+    if !price.is_finite() || price <= 0.0 {
         return None;
     }
 
-    let native_sats = sc.native_channel_btc.sats;
+    let native_sats = receiver_sats_before.saturating_sub(backing_sats_before);
     if amount_sats <= native_sats {
         return None; // Fully covered by native BTC
     }
 
     let overflow_sats = amount_sats - native_sats;
-    let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
+    let usd_to_deduct = (overflow_sats as f64 / SATS_IN_BTC as f64 * price)
+        .min(sc.expected_usd.0.max(0.0));
     let new_expected = (sc.expected_usd.0 - usd_to_deduct).max(0.0);
 
     sc.expected_usd = USD::from_f64(new_expected);
-    let btc_amount = new_expected / price;
-    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    sc.backing_sats = backing_sats_before.saturating_sub(overflow_sats);
+    if new_expected == 0.0 {
+        sc.backing_sats = 0;
+    }
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
@@ -343,6 +367,7 @@ pub fn update_balances<'update_balance_lifetime>(
 
         // Native BTC is the portion not backing the stable position
         let native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+        sc.native_sats = native_sats;
         sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 
         audit_event(
@@ -795,6 +820,39 @@ mod tests {
         assert!((sc.expected_usd.0 - 92.0).abs() < 1e-9);
         assert_eq!(sc.backing_sats, 90_000);
         assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn splice_out_snapshot_is_stable_after_live_balance_advances() {
+        // Production regression: ChannelReady exposed the post-splice 1,742 sats before the
+        // funding-output lookup returned. The deduction must still use the pre-splice allocation.
+        let price = 65_872.5;
+        let mut sc = test_sc(31.4424, price, 1_742);
+        sc.backing_sats = 47_615;
+        sc.native_sats = 0;
+
+        let deducted =
+            deduct_outgoing_from_snapshot(&mut sc, 92_022, 47_615, 90_280, price).unwrap();
+
+        assert!((deducted - 30.217691925).abs() < 1e-9);
+        assert!((sc.expected_usd.0 - 1.224708075).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 1_742);
+        assert_eq!(sc.native_sats, 0);
+        assert_eq!(sc.native_channel_btc.sats, 0);
+    }
+
+    #[test]
+    fn splice_out_releases_remaining_backing_when_expected_usd_reaches_zero() {
+        let mut sc = test_sc(0.005, 65_000.0, 250);
+        sc.backing_sats = 500;
+
+        let deducted =
+            deduct_outgoing_from_snapshot(&mut sc, 500, 500, 250, 65_000.0).unwrap();
+
+        assert!((deducted - 0.005).abs() < f64::EPSILON);
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+        assert_eq!(sc.native_sats, 250);
     }
 
     // ================================================================

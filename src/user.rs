@@ -176,9 +176,9 @@ struct PendingPayment {
     amount_usd: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct IncomingSync {
-    user_channel_id: u128,
+    channel_id: String,
     expected_usd: f64,
     backing_sats: u64,
     sync_version: u64,
@@ -232,6 +232,8 @@ pub struct PendingSplice {
     pub direction: String, // "in" or "out"
     pub amount_sats: u64,
     pub address: Option<String>, // For splice_out
+    pub onchain_sats_at_start: u64,
+    pub channel_value_sats_at_start: u64,
 }
 
 #[derive(Clone)]
@@ -264,9 +266,38 @@ impl Toast {
 /// A splice-out deduction awaiting its off-thread esplora funding-output lookup.
 struct PendingSpliceDeduction {
     old_value_sats: u64,
+    receiver_sats_at_start: u64,
+    backing_sats_at_start: u64,
     txid: String,
     vout: u32,
-    rx: std::sync::mpsc::Receiver<Option<u64>>,
+    channel_ready_seen: bool,
+    rx: Option<std::sync::mpsc::Receiver<Option<u64>>>,
+    resolved_new_value: Option<Option<u64>>,
+    retry_after: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpliceReconcileAction {
+    AlreadyReconciled,
+    NoOutgoingDeduction,
+    DeferToFundingLookup,
+    ReconcileNow,
+}
+
+fn splice_reconcile_action(
+    direction: Option<&str>,
+    already_reconciled: bool,
+    funding_lookup_pending: bool,
+) -> SpliceReconcileAction {
+    if already_reconciled {
+        SpliceReconcileAction::AlreadyReconciled
+    } else if direction == Some("in") {
+        SpliceReconcileAction::NoOutgoingDeduction
+    } else if funding_lookup_pending {
+        SpliceReconcileAction::DeferToFundingLookup
+    } else {
+        SpliceReconcileAction::ReconcileNow
+    }
 }
 
 pub struct UserApp {
@@ -796,6 +827,7 @@ impl UserApp {
         let db = self.db.clone();
         let splice_flag = Arc::clone(&self.auto_splice_in_progress);
         let splice_onchain_start = Arc::clone(&self.auto_splice_onchain_at_start);
+        let pending_splice = Arc::clone(&self.pending_splice);
 
         std::thread::spawn(move || {
             fn current_unix_time() -> i64 {
@@ -935,6 +967,15 @@ impl UserApp {
                         if prev > 0 && current < prev {
                             splice_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                             splice_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
+                            if let Ok(mut pending) = pending_splice.lock() {
+                                if pending
+                                    .as_ref()
+                                    .map(|splice| splice.direction == "in")
+                                    .unwrap_or(false)
+                                {
+                                    *pending = None;
+                                }
+                            }
                             audit_event(
                                 "AUTO_SPLICE_CONFIRMED",
                                 json!({
@@ -1462,8 +1503,10 @@ impl UserApp {
                                     // Block auto-splice while this splice is in flight
                                     self.auto_splice_in_progress
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
+                                    let onchain_sats_at_start =
+                                        self.node.list_balances().total_onchain_balance_sats;
                                     self.auto_splice_onchain_at_start.store(
-                                        self.node.list_balances().total_onchain_balance_sats,
+                                        onchain_sats_at_start,
                                         std::sync::atomic::Ordering::Relaxed,
                                     );
 
@@ -1471,6 +1514,8 @@ impl UserApp {
                                         direction: "out".to_string(),
                                         amount_sats,
                                         address: Some(input.clone()),
+                                        onchain_sats_at_start,
+                                        channel_value_sats_at_start: ch.channel_value_sats,
                                     });
                                     // Record pending withdrawal in payment history immediately
                                     let amount_msat = amount_sats * 1000;
@@ -1621,10 +1666,29 @@ impl UserApp {
         }
 
         let balances = self.node.list_balances();
+        let current_channel_value_sats = self
+            .node
+            .list_channels()
+            .iter()
+            .find(|channel| channel.is_channel_ready)
+            .map(|channel| channel.channel_value_sats)
+            .unwrap_or(0);
+        let pending_splice = self
+            .pending_splice
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let splice_overlap_sats = splice_in_overlap_sats(
+            pending_splice.as_ref(),
+            current_channel_value_sats,
+            balances.total_onchain_balance_sats,
+        );
 
         // Detect incoming payment: total sats went up → trigger balance flash
-        let total_sats_now =
-            balances.total_lightning_balance_sats + balances.total_onchain_balance_sats;
+        let total_sats_now = balances
+            .total_lightning_balance_sats
+            .saturating_add(balances.total_onchain_balance_sats)
+            .saturating_sub(splice_overlap_sats);
         if self.last_known_total_sats > 0 && total_sats_now > self.last_known_total_sats {
             self.payment_flash_at = Some(std::time::Instant::now());
         }
@@ -1636,8 +1700,8 @@ impl UserApp {
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
 
-        self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
-        self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+        self.total_balance_btc = total_sats_now as f64 / 100_000_000.0;
+        self.total_balance_usd = self.total_balance_btc * self.btc_price;
 
         // Clear syncing state once we have valid price AND stable_channel has been updated
         if self.is_syncing && current_price > 0.0 {
@@ -1758,6 +1822,8 @@ impl UserApp {
                     direction: "in".to_string(),
                     amount_sats: splice_amount,
                     address: None,
+                    onchain_sats_at_start: balances.total_onchain_balance_sats,
+                    channel_value_sats_at_start: ch.channel_value_sats,
                 });
                 let _ = self.db.record_payment(
                     None,
@@ -2242,6 +2308,26 @@ impl UserApp {
                             .db
                             .is_splice_stable_reconciled(&txid_str)
                             .unwrap_or(false);
+                    let pending_splice_direction =
+                        self.pending_splice.lock().ok().and_then(|guard| {
+                            guard.as_ref().map(|splice| splice.direction.clone())
+                        });
+                    let splice_direction = pending_splice_direction.clone().or_else(|| {
+                        (txid_str != "unknown")
+                            .then(|| self.db.get_splice_direction(&txid_str).ok().flatten())
+                            .flatten()
+                    });
+                    let keep_splice_in_pending = splice_direction.as_deref() == Some("in");
+                    let funding_lookup_pending = self
+                        .pending_splice_deduction
+                        .as_ref()
+                        .map(|pending| pending.txid == txid_str)
+                        .unwrap_or(false);
+                    let reconcile_action = splice_reconcile_action(
+                        splice_direction.as_deref(),
+                        splice_already_reconciled,
+                        funding_lookup_pending,
+                    );
                     let is_splice;
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
@@ -2266,51 +2352,136 @@ impl UserApp {
                                     .unwrap_or(false);
                             }
                         }
-                        is_splice = ours && (completed_splice || channel_id_changed);
+                        is_splice = ours
+                            && (completed_splice
+                                || channel_id_changed
+                                || splice_direction.is_some());
                         update_balances(&self.node, &mut sc);
 
                         // After splice confirms, reconcile: if splice-out exceeded
                         // native BTC, the overflow eats into the stable position.
                         if is_splice {
-                            if splice_already_reconciled {
-                                // SpliceNegotiated already deducted this splice-out precisely
-                                // (esplora); skip reconcile_outgoing so the pre-existing under-peg
-                                // gap isn't deducted a second time.
-                                audit_event(
-                                    "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
-                                    json!({ "txid": txid_str.clone() }),
-                                );
-                            } else {
-                                let price = sc.latest_price;
-                                if let Some(usd_deducted) =
-                                    stable::reconcile_outgoing(&mut sc, price)
-                                {
+                            match reconcile_action {
+                                SpliceReconcileAction::AlreadyReconciled => {
                                     audit_event(
-                                        "SPLICE_OUT_STABLE_DEDUCTED",
-                                        json!({
-                                            "usd_deducted": usd_deducted,
-                                            "new_expected_usd": sc.expected_usd.0,
-                                            "btc_price": price,
-                                        }),
+                                        "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                                        json!({ "txid": txid_str.clone() }),
                                     );
                                 }
+                                SpliceReconcileAction::NoOutgoingDeduction => {
+                                    match self.db.persist_splice_reconciliation(
+                                        &txid_str,
+                                        &sc.channel_id.to_string(),
+                                        &format!("{}", sc.user_channel_id),
+                                        sc.expected_usd.0,
+                                        sc.backing_sats,
+                                        sc.native_sats,
+                                        sc.note.as_deref(),
+                                    ) {
+                                        Ok(_) => audit_event(
+                                            "SPLICE_IN_RECONCILED",
+                                            json!({ "txid": txid_str.clone() }),
+                                        ),
+                                        Err(e) => {
+                                            ack = false;
+                                            audit_event(
+                                                "DB_WRITE_FAILED",
+                                                json!({
+                                                    "op": "persist_splice_reconciliation",
+                                                    "txid": txid_str.clone(),
+                                                    "error": e.to_string(),
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }
+                                SpliceReconcileAction::DeferToFundingLookup => {
+                                    if let Some(pending) = self
+                                        .pending_splice_deduction
+                                        .as_mut()
+                                        .filter(|pending| pending.txid == txid_str)
+                                    {
+                                        pending.channel_ready_seen = true;
+                                    }
+                                    audit_event(
+                                        "SPLICE_OUT_RECONCILE_DEFERRED",
+                                        json!({ "txid": txid_str.clone() }),
+                                    );
+                                }
+                                SpliceReconcileAction::ReconcileNow => {
+                                    let price = sc.latest_price;
+                                    let mut reconciled = sc.clone();
+                                    let usd_deducted =
+                                        stable::reconcile_outgoing(&mut reconciled, price);
+                                    match self.db.persist_splice_reconciliation(
+                                        &txid_str,
+                                        &reconciled.channel_id.to_string(),
+                                        &format!("{}", reconciled.user_channel_id),
+                                        reconciled.expected_usd.0,
+                                        reconciled.backing_sats,
+                                        reconciled.native_sats,
+                                        reconciled.note.as_deref(),
+                                    ) {
+                                        Ok(true) => {
+                                            *sc = reconciled;
+                                            if let Some(usd_deducted) = usd_deducted {
+                                                audit_event(
+                                                    "SPLICE_OUT_STABLE_DEDUCTED",
+                                                    json!({
+                                                        "usd_deducted": usd_deducted,
+                                                        "new_expected_usd": sc.expected_usd.0,
+                                                        "btc_price": price,
+                                                        "source": "channel_ready_fallback",
+                                                    }),
+                                                );
+                                            }
+                                        }
+                                        Ok(false) => audit_event(
+                                            "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                                            json!({ "txid": txid_str.clone() }),
+                                        ),
+                                        Err(e) => {
+                                            ack = false;
+                                            audit_event(
+                                                "DB_WRITE_FAILED",
+                                                json!({
+                                                    "op": "persist_splice_reconciliation",
+                                                    "txid": txid_str.clone(),
+                                                    "error": e.to_string(),
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }
                             }
-                            // Splice complete: clear the auto-splice flag (bg-thread
-                            // clear only handles splice-in via balance drop;
-                            // splice-out needs this explicit clear).
-                            self.auto_splice_in_progress
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            self.auto_splice_onchain_at_start
-                                .store(0, std::sync::atomic::Ordering::Relaxed);
+                            // A zero-conf splice-in becomes channel-ready before BDK removes the
+                            // spent input. Keep its accounting marker until the on-chain balance
+                            // drops. Splice-out can be cleared immediately here.
+                            if ack && !keep_splice_in_pending {
+                                self.auto_splice_in_progress
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                                self.auto_splice_onchain_at_start
+                                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                                *self.pending_splice.lock().unwrap() = None;
+                            }
                         }
                     }
-                    self.save_channel_settings();
-                    self.update_balances(); // Update UI immediately
+                    if ack {
+                        if !is_splice
+                            || reconcile_action != SpliceReconcileAction::DeferToFundingLookup
+                        {
+                            self.save_channel_settings();
+                        }
+                        self.update_balances(); // Update UI immediately
+                    }
 
                     // Splice rows were already completed above (exact txid match,
                     // or the legacy latest-row fallback). Everything else with a
                     // known funding txid is a regular channel open.
-                    if !completed_splice && txid_str != "unknown" {
+                    if !completed_splice
+                        && splice_direction.is_none()
+                        && txid_str != "unknown"
+                    {
                         let _ = self
                             .db
                             .update_payment_confirmations(&txid_str, 1, "completed");
@@ -2433,13 +2604,14 @@ impl UserApp {
                             };
 
                             let mut sc = self.stable_channel.lock().unwrap();
-                            if sync.user_channel_id != sc.user_channel_id {
+                            let wallet_channel_id = sc.channel_id.to_string();
+                            if sync.channel_id != wallet_channel_id {
                                 audit_event(
                                     "SYNC_V1_CHANNEL_MISMATCH",
                                     json!({
                                         "payment_hash": &payment_hash_str,
-                                        "payload_user_channel_id": format!("{}", sync.user_channel_id),
-                                        "wallet_user_channel_id": format!("{}", sc.user_channel_id),
+                                        "payload_channel_id": sync.channel_id.clone(),
+                                        "wallet_channel_id": wallet_channel_id,
                                         "sync_version": sync.sync_version,
                                     }),
                                 );
@@ -2451,7 +2623,7 @@ impl UserApp {
                             let old_expected = sc.expected_usd.0;
                             let live_receiver_sats = sc.stable_receiver_btc.sats;
                             let native_sats = live_receiver_sats.saturating_sub(sync.backing_sats);
-                            let user_channel_id = format!("{}", sync.user_channel_id);
+                            let user_channel_id = format!("{}", sc.user_channel_id);
                             match self.db.apply_sync_if_newer(
                                 &user_channel_id,
                                 sync.sync_version,
@@ -3065,8 +3237,12 @@ impl UserApp {
 
                     // Record/update splice payment
                     let txid_str = new_funding_txo.txid.to_string();
-                    if let Some(splice) = self.pending_splice.lock().unwrap().take() {
-                        if splice.direction == "in" {
+                    let pending_direction =
+                        self.pending_splice.lock().ok().and_then(|guard| {
+                            guard.as_ref().map(|splice| splice.direction.clone())
+                        });
+                    if let Some(direction) = pending_direction.as_deref() {
+                        if direction == "in" {
                             // Auto-splice (splice_in) was already recorded in background thread
                             // — just update it with the txid now that we know it
                             let _ = self.db.set_pending_splice_txid(&txid_str);
@@ -3091,6 +3267,8 @@ impl UserApp {
                         }
                     }
 
+                    let live_splice_out = pending_direction.as_deref() == Some("out");
+
                     // Deduct stable balance if splice-out exceeded native BTC.
                     // Uses the same capacity-delta approach as the LSP (via bitcoind)
                     // so both sides compute identical expected_usd.
@@ -3104,21 +3282,34 @@ impl UserApp {
                         .find(|c| c.user_channel_id.0 == user_channel_id.0)
                         .map(|c| c.channel_value_sats);
 
-                    if let Some(old_value) = old_channel_value_sats {
-                        // Run the esplora lookup off the UI thread; the deduction is applied in
-                        // poll_pending_splice_deduction() when the result lands (never blocks).
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let txid_for_lookup = txid_str.clone();
-                        std::thread::spawn(move || {
-                            let _ = tx
-                                .send(Self::lookup_funding_output_sats_esplora(&txid_for_lookup, vout));
-                        });
-                        self.pending_splice_deduction = Some(PendingSpliceDeduction {
-                            old_value_sats: old_value,
-                            txid: txid_str.clone(),
-                            vout,
-                            rx,
-                        });
+                    if live_splice_out {
+                        if let Some(old_value) = old_channel_value_sats {
+                            let (receiver_sats_at_start, backing_sats_at_start) = {
+                                let sc = self.stable_channel.lock().unwrap();
+                                (sc.stable_receiver_btc.sats, sc.backing_sats)
+                            };
+                            // Run the esplora lookup off the UI thread; the deduction is applied in
+                            // poll_pending_splice_deduction() when the result lands (never blocks).
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let txid_for_lookup = txid_str.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(Self::lookup_funding_output_sats_esplora(
+                                    &txid_for_lookup,
+                                    vout,
+                                ));
+                            });
+                            self.pending_splice_deduction = Some(PendingSpliceDeduction {
+                                old_value_sats: old_value,
+                                receiver_sats_at_start,
+                                backing_sats_at_start,
+                                txid: txid_str.clone(),
+                                vout,
+                                channel_ready_seen: false,
+                                rx: Some(rx),
+                                resolved_new_value: None,
+                                retry_after: None,
+                            });
+                        }
                     }
 
                     self.status_message = format!("Splice pending - tx: {}", new_funding_txo.txid);
@@ -3171,61 +3362,146 @@ impl UserApp {
     /// Apply a deferred splice-out deduction once its background esplora lookup lands.
     /// Non-blocking: returns immediately while the lookup is still in flight.
     fn poll_pending_splice_deduction(&mut self) {
-        let recv = match self.pending_splice_deduction.as_ref() {
-            Some(p) => p.rx.try_recv(),
+        let (new_value_opt, newly_resolved) = match self.pending_splice_deduction.as_mut() {
+            Some(pending) => {
+                if pending
+                    .retry_after
+                    .is_some_and(|retry_after| std::time::Instant::now() < retry_after)
+                {
+                    return;
+                }
+                pending.retry_after = None;
+
+                if let Some(new_value) = pending.resolved_new_value {
+                    (new_value, false)
+                } else {
+                    let recv = pending.rx.as_ref().expect("unresolved lookup has receiver");
+                    let new_value = match recv.try_recv() {
+                        Ok(value) => value,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                    };
+                    pending.resolved_new_value = Some(new_value);
+                    pending.rx = None;
+                    (new_value, true)
+                }
+            }
             None => return,
         };
-        let new_value_opt = match recv {
-            Ok(v) => v,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return, // still looking up
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => None, // lookup thread died
-        };
-        let pending = self.pending_splice_deduction.take().unwrap();
-        match new_value_opt {
+        let mut pending = self.pending_splice_deduction.take().unwrap();
+        if self
+            .db
+            .is_splice_stable_reconciled(&pending.txid)
+            .unwrap_or(false)
+        {
+            audit_event(
+                "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                json!({ "txid": pending.txid.clone(), "source": "funding_lookup" }),
+            );
+            return;
+        }
+
+        let exact_splice_out_sats = match new_value_opt {
             Some(new_value) => {
-                audit_event(
-                    "SPLICE_PENDING_LOOKUP",
-                    json!({
-                        "old_channel_sats": pending.old_value_sats,
-                        "new_channel_sats": new_value,
-                        "delta_sats": (new_value as i64) - (pending.old_value_sats as i64),
-                    }),
-                );
-                if new_value < pending.old_value_sats {
-                    let splice_out_sats = pending.old_value_sats - new_value;
-                    let mut sc = self.stable_channel.lock().unwrap();
-                    let price = sc.latest_price;
-                    if let Some(usd_deducted) =
-                        stable::deduct_outgoing(&mut sc, splice_out_sats, price)
-                    {
-                        audit_event(
-                            "SPLICE_OUT_STABLE_DEDUCTED",
-                            json!({
-                                "splice_out_sats": splice_out_sats,
-                                "usd_deducted": usd_deducted,
-                                "new_expected_usd": sc.expected_usd.0,
-                                "btc_price": price,
-                            }),
-                        );
-                    }
-                    drop(sc);
-                    self.save_channel_settings();
+                if newly_resolved {
+                    audit_event(
+                        "SPLICE_PENDING_LOOKUP",
+                        json!({
+                            "old_channel_sats": pending.old_value_sats,
+                            "new_channel_sats": new_value,
+                            "delta_sats": (new_value as i64) - (pending.old_value_sats as i64),
+                        }),
+                    );
                 }
-                // This splice was reconciled here authoritatively; block a second deduction at ChannelReady.
-                let _ = self.db.mark_splice_stable_reconciled(&pending.txid);
+                (new_value < pending.old_value_sats).then_some(pending.old_value_sats - new_value)
             }
             None => {
-                println!(
-                    "[SplicePending] Could not look up funding output {}:{}",
-                    pending.txid, pending.vout
-                );
+                if newly_resolved {
+                    println!(
+                        "[SplicePending] Could not look up funding output {}:{}",
+                        pending.txid, pending.vout
+                    );
+                    audit_event(
+                        "SPLICE_PENDING_LOOKUP_FAILED",
+                        json!({
+                            "txid": pending.txid.clone(),
+                            "vout": pending.vout,
+                        }),
+                    );
+                }
+                None
+            }
+        };
+
+        // If ChannelReady has not arrived yet, a failed or inconsistent lookup can simply leave
+        // reconciliation to that event's balance-based fallback.
+        if exact_splice_out_sats.is_none() && !pending.channel_ready_seen {
+            return;
+        }
+
+        let mut sc = self.stable_channel.lock().unwrap();
+        update_balances(&self.node, &mut sc);
+        let price = sc.latest_price;
+        let mut reconciled = sc.clone();
+        let (usd_deducted, source) = if let Some(splice_out_sats) = exact_splice_out_sats {
+            (
+                stable::deduct_outgoing_from_snapshot(
+                    &mut reconciled,
+                    pending.receiver_sats_at_start,
+                    pending.backing_sats_at_start,
+                    splice_out_sats,
+                    price,
+                ),
+                "funding_lookup",
+            )
+        } else {
+            (
+                stable::reconcile_outgoing(&mut reconciled, price),
+                "channel_ready_lookup_fallback",
+            )
+        };
+
+        match self.db.persist_splice_reconciliation(
+            &pending.txid,
+            &reconciled.channel_id.to_string(),
+            &format!("{}", reconciled.user_channel_id),
+            reconciled.expected_usd.0,
+            reconciled.backing_sats,
+            reconciled.native_sats,
+            reconciled.note.as_deref(),
+        ) {
+            Ok(true) => {
+                *sc = reconciled;
                 audit_event(
-                    "SPLICE_PENDING_LOOKUP_FAILED",
+                    "SPLICE_OUT_STABLE_RECONCILED",
                     json!({
-                        "txid": pending.txid,
-                        "vout": pending.vout,
+                        "txid": pending.txid.clone(),
+                        "splice_out_sats": exact_splice_out_sats,
+                        "usd_deducted": usd_deducted,
+                        "new_expected_usd": sc.expected_usd.0,
+                        "new_backing_sats": sc.backing_sats,
+                        "btc_price": price,
+                        "source": source,
                     }),
                 );
+            }
+            Ok(false) => audit_event(
+                "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                json!({ "txid": pending.txid.clone(), "source": source }),
+            ),
+            Err(e) => {
+                audit_event(
+                    "DB_WRITE_FAILED",
+                    json!({
+                        "op": "persist_splice_reconciliation",
+                        "txid": pending.txid.clone(),
+                        "error": e.to_string(),
+                        "will_retry": true,
+                    }),
+                );
+                drop(sc);
+                pending.retry_after = Some(std::time::Instant::now() + Duration::from_secs(1));
+                self.pending_splice_deduction = Some(pending);
             }
         }
     }
@@ -4658,7 +4934,12 @@ impl UserApp {
     fn show_home_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Check if we have an active, ready channel (not just pending)
-            let has_active_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+            let channels = self.node.list_channels();
+            let active_channel = channels.iter().find(|channel| channel.is_channel_ready);
+            let has_active_channel = active_channel.is_some();
+            let current_channel_value_sats = active_channel
+                .map(|channel| channel.channel_value_sats)
+                .unwrap_or(0);
 
             // Get fresh balances
             let balances = self.node.list_balances();
@@ -4709,25 +4990,27 @@ impl UserApp {
                 0.0
             };
             // Total balance calculation:
-            // - Splice-in pending: lightning already reflects the post-splice
-            //   capacity but onchain hasn't dropped yet — adding both would
-            //   double-count the splice amount until BDK sees the spent UTXO.
-            //   Show lightning only during this window. Matches iOS
-            //   `if isSweeping { return lightningBalanceSats }` at
-            //   AppState.swift:95.
-            // - Active channel (no pending splice-in): lightning + onchain.
+            // - Before splice-in promotion, Lightning and on-chain are independent.
+            // - After promotion but before BDK removes the spent input, subtract the
+            //   recorded pre-splice on-chain balance exactly once.
+            // - Outside that overlap window, add Lightning and on-chain normally.
             // - No channel: pending_sweep + onchain (lightning_balances
             //   overlaps with pending_sweep/onchain after close).
-            let pending_splice_in = self
+            let pending_splice = self
                 .pending_splice
                 .lock()
                 .ok()
-                .and_then(|guard| guard.as_ref().map(|s| s.direction == "in"))
-                .unwrap_or(false);
-            let total_sats = if pending_splice_in {
-                balances.total_lightning_balance_sats
-            } else if has_active_channel {
-                balances.total_lightning_balance_sats + total_onchain_sats
+                .and_then(|guard| guard.clone());
+            let splice_overlap_sats = splice_in_overlap_sats(
+                pending_splice.as_ref(),
+                current_channel_value_sats,
+                total_onchain_sats,
+            );
+            let total_sats = if has_active_channel {
+                balances
+                    .total_lightning_balance_sats
+                    .saturating_add(total_onchain_sats)
+                    .saturating_sub(splice_overlap_sats)
             } else {
                 pending_sweep_sats + total_onchain_sats
             };
@@ -5157,14 +5440,16 @@ impl UserApp {
             // confirmed funds, unconfirmed deposits, and pending channel-close
             // sweeps. Folds in what used to be a separate "Bitcoin (pending)"
             // section. Matches iOS savingsSection 4-state layout.
-            let has_any_onchain_activity = total_onchain_sats > 0 || pending_sweep_sats > 0;
+            let splicing = self
+                .auto_splice_in_progress
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let accounted_onchain_sats = total_onchain_sats.saturating_sub(splice_overlap_sats);
+            let has_any_onchain_activity =
+                accounted_onchain_sats > 0 || pending_sweep_sats > 0 || splicing;
             if has_any_onchain_activity {
                 let has_ready_channel =
                     self.node.list_channels().iter().any(|c| c.is_channel_ready);
-                let splicing = self
-                    .auto_splice_in_progress
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let total_visible_sats = total_onchain_sats + pending_sweep_sats;
+                let total_visible_sats = accounted_onchain_sats + pending_sweep_sats;
                 let total_visible_btc = total_visible_sats as f64 / 100_000_000.0;
 
                 ui.add_space(8.0);
@@ -9843,6 +10128,26 @@ fn channel_balance_split(
     (stable_sats, native_sats, native_usd)
 }
 
+/// During a zero-conf splice-in, LDK can expose the increased channel value before its on-chain
+/// wallet has removed the spent input. Subtract only that known overlap, and only after channel
+/// promotion; before promotion both balances are still independent and must both be counted.
+fn splice_in_overlap_sats(
+    pending: Option<&PendingSplice>,
+    current_channel_value_sats: u64,
+    current_onchain_sats: u64,
+) -> u64 {
+    let Some(pending) = pending.filter(|pending| pending.direction == "in") else {
+        return 0;
+    };
+    if current_channel_value_sats > pending.channel_value_sats_at_start
+        && current_onchain_sats >= pending.onchain_sats_at_start
+    {
+        pending.onchain_sats_at_start
+    } else {
+        0
+    }
+}
+
 fn collapse_double_paste(input: String) -> String {
     let len = input.len();
     let midpoint = len / 2;
@@ -9919,11 +10224,11 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
     if payload.get("type").and_then(|value| value.as_str()) != Some(SYNC_MESSAGE_TYPE) {
         return None;
     }
-    let user_channel_id = payload
-        .get("user_channel_id")?
-        .as_str()?
-        .parse::<u128>()
-        .ok()?;
+    let channel_id = payload.get("channel_id")?.as_str()?;
+    if channel_id.len() != 64 || !channel_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel_id = channel_id.to_ascii_lowercase();
     let expected_usd = payload.get("expected_usd")?.as_f64()?;
     let backing_sats = payload.get("backing_sats")?.as_u64()?;
     let sync_version = payload.get("sync_version")?.as_u64()?;
@@ -9936,7 +10241,7 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
         return None;
     }
     Some(IncomingSync {
-        user_channel_id,
+        channel_id,
         expected_usd,
         backing_sats,
         sync_version,
@@ -9984,7 +10289,8 @@ mod tests {
     use super::{
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
         parse_incoming_sync, parse_trade_usd_cents, restrict_secret_file_permissions,
-        sats_for_usd_cents, write_secret_file, IncomingSync, UserApp,
+        sats_for_usd_cents, splice_in_overlap_sats, splice_reconcile_action, write_secret_file,
+        IncomingSync, PendingSplice, SpliceReconcileAction, UserApp,
     };
 
     #[test]
@@ -10067,6 +10373,61 @@ mod tests {
     }
 
     #[test]
+    fn splice_in_overlap_is_counted_exactly_once_after_channel_promotion() {
+        let pending = PendingSplice {
+            direction: "in".to_string(),
+            amount_sats: 60_598,
+            address: None,
+            onchain_sats_at_start: 60_598,
+            channel_value_sats_at_start: 102_345,
+        };
+
+        // Negotiation has started, but the channel still has its old value.
+        assert_eq!(splice_in_overlap_sats(Some(&pending), 102_345, 60_598), 0);
+
+        // LDK promoted the splice while BDK still reports the spent on-chain input.
+        let overlap = splice_in_overlap_sats(Some(&pending), 162_719, 60_598);
+        assert_eq!(overlap, 60_598);
+        assert_eq!(62_400u64 + 60_598 - overlap, 62_400);
+        assert_eq!(60_598u64.saturating_sub(overlap), 0);
+
+        // Once BDK observes the spend, there is no overlap left to subtract.
+        assert_eq!(splice_in_overlap_sats(Some(&pending), 162_719, 0), 0);
+    }
+
+    #[test]
+    fn splice_out_never_suppresses_onchain_balance() {
+        let pending = PendingSplice {
+            direction: "out".to_string(),
+            amount_sats: 20_000,
+            address: Some("tb1qexample".to_string()),
+            onchain_sats_at_start: 10_000,
+            channel_value_sats_at_start: 100_000,
+        };
+        assert_eq!(splice_in_overlap_sats(Some(&pending), 80_000, 30_000), 0);
+    }
+
+    #[test]
+    fn splice_reconciliation_has_one_authoritative_path() {
+        assert_eq!(
+            splice_reconcile_action(Some("out"), false, true),
+            SpliceReconcileAction::DeferToFundingLookup
+        );
+        assert_eq!(
+            splice_reconcile_action(Some("out"), false, false),
+            SpliceReconcileAction::ReconcileNow
+        );
+        assert_eq!(
+            splice_reconcile_action(Some("in"), false, true),
+            SpliceReconcileAction::NoOutgoingDeduction
+        );
+        assert_eq!(
+            splice_reconcile_action(Some("out"), true, true),
+            SpliceReconcileAction::AlreadyReconciled
+        );
+    }
+
+    #[test]
     fn double_paste_is_collapsed() {
         let invoice = "lnbc".repeat(20);
         assert_eq!(
@@ -10107,10 +10468,12 @@ mod tests {
     }
 
     #[test]
-    fn sync_payload_requires_channel_and_monotonic_version() {
+    fn sync_payload_requires_shared_channel_and_monotonic_version() {
+        let channel_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let payload = serde_json::json!({
             "type": "SYNC_V1",
-            "user_channel_id": "7",
+            "channel_id": channel_id,
+            "user_channel_id": "different-node-local-id-is-ignored",
             "expected_usd": 25.0,
             "backing_sats": 31_250,
             "sync_version": 4,
@@ -10118,7 +10481,7 @@ mod tests {
         assert_eq!(
             parse_incoming_sync(&payload),
             Some(IncomingSync {
-                user_channel_id: 7,
+                channel_id: channel_id.to_string(),
                 expected_usd: 25.0,
                 backing_sats: 31_250,
                 sync_version: 4,
@@ -10138,12 +10501,21 @@ mod tests {
 
         let oversized_balance = serde_json::json!({
             "type": "SYNC_V1",
-            "user_channel_id": "7",
+            "channel_id": channel_id,
             "expected_usd": 25.0,
             "backing_sats": u64::MAX,
             "sync_version": 5,
         });
         assert_eq!(parse_incoming_sync(&oversized_balance), None);
+
+        let malformed_channel = serde_json::json!({
+            "type": "SYNC_V1",
+            "channel_id": "not-a-channel",
+            "expected_usd": 25.0,
+            "backing_sats": 31_250,
+            "sync_version": 5,
+        });
+        assert_eq!(parse_incoming_sync(&malformed_channel), None);
     }
 
     #[cfg(unix)]

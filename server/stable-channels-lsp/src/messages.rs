@@ -46,14 +46,14 @@ pub struct RegisterPushSigned {
 
 /// Build the SYNC_V1 payload string (the exact bytes the daemon signs and ships).
 pub fn build_sync_payload(
-    user_channel_id: u128,
+    channel_id: &str,
     expected_usd: f64,
     backing_sats: u64,
     sync_version: u64,
 ) -> String {
     serde_json::json!({
         "type": stable_channels::constants::SYNC_MESSAGE_TYPE,
-        "user_channel_id": format!("{}", user_channel_id),
+        "channel_id": channel_id,
         "expected_usd": expected_usd,
         "backing_sats": backing_sats,
         "sync_version": sync_version,
@@ -93,10 +93,11 @@ mod tests {
 
     #[test]
     fn sync_payload_has_expected_shape() {
-        let payload = build_sync_payload(7u128, 25.0, 31_250, 4);
+        let channel_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let payload = build_sync_payload(channel_id, 25.0, 31_250, 4);
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["type"], "SYNC_V1");
-        assert_eq!(v["user_channel_id"], "7");
+        assert_eq!(v["channel_id"], channel_id);
         assert_eq!(v["expected_usd"], 25.0);
         assert_eq!(v["backing_sats"], 31_250);
         assert_eq!(v["sync_version"], 4);

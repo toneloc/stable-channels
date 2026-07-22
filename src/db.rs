@@ -1271,18 +1271,6 @@ impl Database {
         Ok(rows)
     }
 
-    /// Mark a splice (by funding txid) as already stable-reconciled by the SpliceNegotiated
-    /// esplora deduction, so ChannelReady's reconcile_outgoing won't double-count it.
-    pub fn mark_splice_stable_reconciled(&self, txid: &str) -> SqliteResult<usize> {
-        let conn = self.conn.lock().unwrap();
-        let rows = conn.execute(
-            "UPDATE payments SET stable_reconciled = 1
-             WHERE payment_type IN ('splice_in','splice_out') AND txid = ?1",
-            params![txid],
-        )?;
-        Ok(rows)
-    }
-
     /// Whether the splice with this funding txid was already stable-reconciled.
     pub fn is_splice_stable_reconciled(&self, txid: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
@@ -1293,6 +1281,93 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Return the recorded splice direction ("in" or "out") for a funding transaction.
+    pub fn get_splice_direction(&self, txid: &str) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT CASE payment_type
+                        WHEN 'splice_in' THEN 'in'
+                        WHEN 'splice_out' THEN 'out'
+                    END
+             FROM payments
+             WHERE txid = ?1 AND payment_type IN ('splice_in','splice_out')
+             ORDER BY id DESC LIMIT 1",
+            params![txid],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Atomically persist post-splice allocation state and its durable idempotency marker.
+    /// Returns false when this funding transaction was already reconciled.
+    pub fn persist_splice_reconciliation(
+        &self,
+        txid: &str,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        note: Option<&str>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<bool> = (|| {
+            let payment = conn
+                .query_row(
+                    "SELECT id, stable_reconciled FROM payments
+                     WHERE txid = ?1 AND payment_type IN ('splice_in','splice_out')
+                     ORDER BY id DESC LIMIT 1",
+                    params![txid],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+            if payment.1 {
+                return Ok(false);
+            }
+
+            let updated = conn.execute(
+                "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                     note = ?4, user_channel_id = ?5, native_sats = ?6,
+                                     closed_at = NULL, updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?5",
+                params![
+                    channel_id,
+                    expected_usd,
+                    backing_sats as i64,
+                    note,
+                    user_channel_id,
+                    native_sats as i64,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+
+            conn.execute(
+                "UPDATE payments SET status = 'completed', stable_reconciled = 1 WHERE id = ?1",
+                params![payment.0],
+            )?;
+            Ok(true)
+        })();
+
+        match result {
+            Ok(applied) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(applied),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     /// Update confirmations and status for a payment by txid
@@ -1583,6 +1658,96 @@ mod tests {
         // plain record_settlement leaves user_channel_id as NULL (returns None)
         db.record_settlement("pmt2", "sync").unwrap();
         assert_eq!(db.get_settlement_channel("pmt2").unwrap(), None);
+    }
+
+    #[test]
+    fn splice_reconciliation_direction_and_state_commit_once() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel(
+            "channel-before",
+            "user-channel",
+            31.4424,
+            47_615,
+            44_407,
+            None,
+        )
+        .unwrap();
+        db.record_payment(
+            None,
+            "splice_out",
+            "sent",
+            90_094_000,
+            Some(59.34),
+            Some(65_872.5),
+            None,
+            "pending",
+            None,
+            Some("tb1qexample"),
+        )
+        .unwrap();
+        assert_eq!(db.set_pending_splice_out_txid("splice-txid").unwrap(), 1);
+        assert_eq!(
+            db.get_splice_direction("splice-txid").unwrap().as_deref(),
+            Some("out")
+        );
+
+        assert!(db
+            .persist_splice_reconciliation(
+                "splice-txid",
+                "channel-after",
+                "user-channel",
+                1.224708075,
+                1_742,
+                0,
+                None,
+            )
+            .unwrap());
+        assert!(!db
+            .persist_splice_reconciliation(
+                "splice-txid",
+                "channel-after",
+                "user-channel",
+                0.0,
+                0,
+                1_742,
+                None,
+            )
+            .unwrap());
+
+        let channel = db.load_channel("user-channel").unwrap().unwrap();
+        assert!((channel.expected_usd - 1.224708075).abs() < 1e-9);
+        assert_eq!(channel.backing_sats, 1_742);
+        assert_eq!(channel.native_sats, 0);
+        assert!(db.is_splice_stable_reconciled("splice-txid").unwrap());
+
+        db.record_payment(
+            None,
+            "splice_out",
+            "sent",
+            1_000,
+            None,
+            None,
+            None,
+            "pending",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.set_pending_splice_out_txid("rollback-txid").unwrap(), 1);
+        assert!(db
+            .persist_splice_reconciliation(
+                "rollback-txid",
+                "missing-channel",
+                "missing-user-channel",
+                0.0,
+                0,
+                0,
+                None,
+            )
+            .is_err());
+        assert!(!db
+            .is_splice_stable_reconciled("rollback-txid")
+            .unwrap());
     }
 
     #[test]

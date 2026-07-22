@@ -123,6 +123,9 @@ pub struct StableChannelManager {
     spend_debounce: std::collections::HashMap<u128, u8>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
+    /// Send persisted allocations once after startup hydration. This repairs a wallet that missed
+    /// the original best-effort SYNC while keeping routine ticks free of control payments.
+    startup_sync_pending: bool,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -144,6 +147,7 @@ impl StableChannelManager {
             data_dir,
             spend_debounce: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
+            startup_sync_pending: true,
         }
     }
 
@@ -429,6 +433,45 @@ impl StableChannelManager {
             "[stable] reconciled {} stable channel(s) from sqlite",
             self.stable_channels.len()
         );
+
+        let startup_state_is_coherent = self
+            .stable_channels
+            .iter()
+            .all(|sc| sc.stable_receiver_btc.sats >= sc.backing_sats);
+        if self.startup_sync_pending
+            && !self.stable_channels.is_empty()
+            && startup_state_is_coherent
+        {
+            let syncs: Vec<_> = self
+                .stable_channels
+                .iter()
+                .map(|sc| {
+                    (
+                        sc.user_channel_id,
+                        sc.channel_id.to_string(),
+                        sc.expected_usd.0,
+                        sc.backing_sats,
+                        sc.counterparty.to_string(),
+                    )
+                })
+                .collect();
+            self.startup_sync_pending = false;
+            for (uid, channel_id, expected_usd, backing_sats, counterparty) in syncs {
+                if !self
+                    .send_sync_message(
+                        ldk,
+                        uid,
+                        &channel_id,
+                        expected_usd,
+                        backing_sats,
+                        &counterparty,
+                    )
+                    .await
+                {
+                    self.startup_sync_pending = true;
+                }
+            }
+        }
     }
 
     /// Self-heal: if the in-memory list is empty (startup/reconnect reconcile skipped on a cold price cache), rebuild it from truth; a populated list is left untouched so a transient empty snapshot can't wipe it.
@@ -760,7 +803,7 @@ impl StableChannelManager {
         let cooldown = stable_channels::constants::STABILITY_PAYMENT_COOLDOWN_SECS as i64;
 
         // Accepted USD and sat allocations for backstop SYNCs sent after the iter_mut borrow ends.
-        let mut backstop_syncs: Vec<(u128, f64, u64, String)> = Vec::new();
+        let mut backstop_syncs: Vec<(u128, String, f64, u64, String)> = Vec::new();
         const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
 
         for sc in self.stable_channels.iter_mut() {
@@ -816,6 +859,7 @@ impl StableChannelManager {
                         }
                         backstop_syncs.push((
                             uid,
+                            c.channel_id.clone(),
                             sc.expected_usd.0,
                             sc.backing_sats,
                             sc.counterparty.to_string(),
@@ -1011,22 +1055,32 @@ impl StableChannelManager {
             }
         }
 
-        for (uid, expected_usd, backing_sats, counterparty) in backstop_syncs {
-            self.send_sync_message(ldk, uid, expected_usd, backing_sats, &counterparty)
+        for (uid, channel_id, expected_usd, backing_sats, counterparty) in backstop_syncs {
+            let _ = self
+                .send_sync_message(
+                    ldk,
+                    uid,
+                    &channel_id,
+                    expected_usd,
+                    backing_sats,
+                    &counterparty,
+                )
                 .await;
         }
     }
 
     /// Sign a SYNC_V1 payload and keysend it (1 msat) to the counterparty in custom TLV 13377331.
-    /// Best effort: a send failure is audited, never propagated. Mutates no state.
+    /// Best effort: a send failure is audited and returned to the caller. Allocation state is
+    /// unchanged, while the monotonic sync version is durably reserved before signing.
     pub async fn send_sync_message(
         &self,
         ldk: &dyn LdkServerCalls,
         user_channel_id: u128,
+        channel_id: &str,
         expected_usd: f64,
         backing_sats: u64,
         counterparty: &str,
-    ) {
+    ) -> bool {
         let sync_version = match self.db.next_sync_version(&format!("{}", user_channel_id)) {
             Ok(version) => version,
             Err(e) => {
@@ -1034,15 +1088,16 @@ impl StableChannelManager {
                     "SYNC_MESSAGE_FAILED",
                     serde_json::json!({
                         "user_channel_id": format!("{}", user_channel_id),
+                        "channel_id": channel_id,
                         "stage": "reserve_version",
                         "error": e.to_string(),
                     }),
                 );
-                return;
+                return false;
             }
         };
         let payload = crate::messages::build_sync_payload(
-            user_channel_id,
+            channel_id,
             expected_usd,
             backing_sats,
             sync_version,
@@ -1059,11 +1114,12 @@ impl StableChannelManager {
                     "SYNC_MESSAGE_FAILED",
                     serde_json::json!({
                         "user_channel_id": format!("{}", user_channel_id),
+                        "channel_id": channel_id,
                         "stage": "sign",
                         "error": e.to_string(),
                     }),
                 );
-                return;
+                return false;
             }
         };
         let envelope = crate::messages::build_envelope(payload, signature);
@@ -1098,20 +1154,26 @@ impl StableChannelManager {
                     "SYNC_MESSAGE_SENT",
                     serde_json::json!({
                         "user_channel_id": format!("{}", user_channel_id),
+                        "channel_id": channel_id,
                         "expected_usd": expected_usd,
                         "backing_sats": backing_sats,
                         "sync_version": sync_version,
                     }),
                 );
+                true
             },
-            Err(e) => stable_channels::audit::audit_event(
-                "SYNC_MESSAGE_FAILED",
-                serde_json::json!({
-                    "user_channel_id": format!("{}", user_channel_id),
-                    "stage": "send",
-                    "error": e.to_string(),
-                }),
-            ),
+            Err(e) => {
+                stable_channels::audit::audit_event(
+                    "SYNC_MESSAGE_FAILED",
+                    serde_json::json!({
+                        "user_channel_id": format!("{}", user_channel_id),
+                        "channel_id": channel_id,
+                        "stage": "send",
+                        "error": e.to_string(),
+                    }),
+                );
+                false
+            }
         }
     }
 
@@ -1261,13 +1323,15 @@ impl StableChannelManager {
             );
         }
         if deducted {
-            self.send_sync_message(
-                ldk,
-                target_uid,
-                expected_usd_f,
-                backing_sats,
-                &counterparty_hex,
-            )
+            let _ = self
+                .send_sync_message(
+                    ldk,
+                    target_uid,
+                    &channel_id_hex,
+                    expected_usd_f,
+                    backing_sats,
+                    &counterparty_hex,
+                )
                 .await;
         }
     }
@@ -1364,7 +1428,15 @@ impl StableChannelManager {
             serde_json::json!({ "channel_id": channel_id_hex, "user_channel_id": ucid_str, "deducted": deducted }),
         );
         if deducted {
-            self.send_sync_message(ldk, uid, expected_usd_f, backing, &counterparty_hex)
+            let _ = self
+                .send_sync_message(
+                    ldk,
+                    uid,
+                    &channel_id_hex,
+                    expected_usd_f,
+                    backing,
+                    &counterparty_hex,
+                )
                 .await;
         }
     }
@@ -1648,14 +1720,16 @@ impl StableChannelManager {
                 "quote_deviation_percent": signed_allocation.map(|(_, _, deviation)| deviation),
             }),
         );
-        self.send_sync_message(
-            ldk,
-            target_uid,
-            expected_usd_f,
-            backing,
-            &counterparty,
-        )
-        .await;
+        let _ = self
+            .send_sync_message(
+                ldk,
+                target_uid,
+                &channel_id_hex,
+                expected_usd_f,
+                backing,
+                &counterparty,
+            )
+            .await;
     }
 }
 
@@ -1980,12 +2054,21 @@ mod tests {
         // Simulate a restart: empty in-memory Vec but a persisted stable channel row in sqlite.
         let mut mgr = make_manager();
         // Persist a row directly (bypass the in-memory Vec) to mimic a prior session.
-        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, 25.0, 40_000, 10_000, Some("persisted")).unwrap();
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                25.0,
+                40_000,
+                10_000,
+                Some("persisted"),
+            )
+            .unwrap();
         assert_eq!(mgr.stable_channels.len(), 0, "fresh manager starts empty");
 
         // The live LDK Server still reports the channel.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
             100_000, 50_000_000, true,
         )]);
         mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0).await;
@@ -1996,6 +2079,83 @@ mod tests {
         assert_eq!(sc.backing_sats, 40_000, "persisted backing_sats preserved");
         assert_eq!(sc.note.as_deref(), Some("persisted"), "persisted note preserved");
         assert_eq!(sc.counterparty.to_string(), COUNTERPARTY_HEX, "counterparty resolved from live channel");
+        assert_eq!(
+            fake.sends.lock().unwrap().len(),
+            1,
+            "startup hydration must resync persisted allocation"
+        );
+        assert!(!mgr.startup_sync_pending);
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_retries_failed_sync() {
+        let mut mgr = make_manager();
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                25.0,
+                40_000,
+                10_000,
+                None,
+            )
+            .unwrap();
+        let channels = vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )];
+
+        let failing = FakeLdkServer::new(channels.clone()).with_send_failure();
+        mgr.reconcile_from_grpc(&failing as &dyn LdkServerCalls, 100_000.0)
+            .await;
+        assert!(mgr.startup_sync_pending);
+
+        let restored = FakeLdkServer::new(channels);
+        mgr.reconcile_from_grpc(&restored as &dyn LdkServerCalls, 100_000.0)
+            .await;
+        assert_eq!(restored.sends.lock().unwrap().len(), 1);
+        assert!(!mgr.startup_sync_pending);
+
+        mgr.reconcile_from_grpc(&restored as &dyn LdkServerCalls, 100_000.0)
+            .await;
+        assert_eq!(
+            restored.sends.lock().unwrap().len(),
+            1,
+            "successful startup sync is sent only once"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_defers_sync_when_live_balance_is_below_backing() {
+        let mut mgr = make_manager();
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                25.0,
+                60_000,
+                0,
+                None,
+            )
+            .unwrap();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+
+        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
+
+        assert!(fake.sends.lock().unwrap().is_empty());
+        assert!(mgr.startup_sync_pending);
     }
 
     #[tokio::test]
@@ -2666,14 +2826,17 @@ mod tests {
         mgr.db
             .save_channel("sync-channel", "7", 25.0, 31_250, 0, None)
             .unwrap();
-        mgr.send_sync_message(
-            &fake as &dyn LdkServerCalls,
-            7u128,
-            25.0,
-            31_250,
-            COUNTERPARTY_HEX,
-        )
-            .await;
+        assert!(
+            mgr.send_sync_message(
+                &fake as &dyn LdkServerCalls,
+                7u128,
+                CHANNEL_ID_HEX,
+                25.0,
+                31_250,
+                COUNTERPARTY_HEX,
+            )
+            .await
+        );
 
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
@@ -2691,7 +2854,7 @@ mod tests {
         assert_eq!(env.signature, "fake-sig");
         let v: serde_json::Value = serde_json::from_str(&env.payload).unwrap();
         assert_eq!(v["type"], "SYNC_V1");
-        assert_eq!(v["user_channel_id"], "7");
+        assert_eq!(v["channel_id"], CHANNEL_ID_HEX);
         assert_eq!(v["expected_usd"], 25.0);
         assert_eq!(v["backing_sats"], 31_250);
         assert_eq!(v["sync_version"], 1);
