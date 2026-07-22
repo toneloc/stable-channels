@@ -218,6 +218,7 @@ pub struct UserApp {
     background_started: bool,
     audit_log_path: String,
     show_log_window: bool,
+    show_diagnostics_window: bool,
     log_contents: String,
     log_last_read: std::time::Instant,
 
@@ -585,6 +586,7 @@ impl UserApp {
             cached_fee_rate: None,
             fee_rate_receiver: None,
             show_log_window: false,
+            show_diagnostics_window: false,
             log_contents: String::new(),
             log_last_read: std::time::Instant::now(),
             audit_log_path,
@@ -6298,6 +6300,33 @@ impl UserApp {
 
             ui.add_space(20.0);
 
+            // ── SUPPORT section ─────────────────────────────
+            let support_color = Color32::from_rgb(76, 175, 80); // Green to match Phoenix
+            section_header(ui, "SUPPORT", support_color);
+            egui::Frame::new()
+                .fill(theme::CARD_FILL)
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD as u8))
+                .stroke(egui::Stroke::new(1.0, theme::CARD_STROKE))
+                .inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 12 })
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            icon_badge(ui, "🩺", support_color);
+                            ui.add_space(8.0);
+                            ui.label(RichText::new("Logs & Diagnostics").size(13.0).color(Color32::BLACK));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let btn = egui::Button::new(RichText::new("View").size(11.0).color(support_color))
+                                    .fill(support_color.gamma_multiply(0.12)).stroke(egui::Stroke::NONE).corner_radius(theme::RADIUS_PILL);
+                                if ui.add(btn).clicked() {
+                                    self.show_diagnostics_window = true;
+                                }
+                            });
+                        });
+                    });
+                });
+
+            ui.add_space(20.0);
+
             // ── DANGER ZONE section ──────────────────────────────────────
             let danger = theme::DANGER_HOVER;
             section_header(ui, "DANGER ZONE", danger);
@@ -8855,6 +8884,74 @@ impl UserApp {
         self.trade_error.clear();
     }
 
+    fn show_diagnostics_window_if_open(&mut self, ctx: &egui::Context) {
+        if !self.show_diagnostics_window {
+            return;
+        }
+        
+        let mut is_open = self.show_diagnostics_window;
+        let mut do_export = false;
+        
+        egui::Window::new("Logs & Diagnostics")
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut is_open)
+            .show(ctx, |ui| {
+                let icon_badge = |ui: &mut egui::Ui, symbol: &str, color: Color32| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 4.0, color.gamma_multiply(0.12));
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        symbol,
+                        egui::FontId::proportional(14.0),
+                        color
+                    );
+                };
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(
+                        "Save app logs to a file for debugging and support."
+                    ).size(12.0).color(Color32::DARK_GRAY));
+                    
+                    ui.add_space(12.0);
+                    let support_color = Color32::from_rgb(76, 175, 80);
+
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "📤", support_color);
+                        ui.add_space(8.0);
+                        if ui.add(egui::Button::new(
+                            RichText::new("Share the logs").size(14.0).color(support_color),
+                        ).fill(Color32::TRANSPARENT).frame(false)).clicked() {
+                            do_export = true;
+                        }
+                    });
+                    
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        icon_badge(ui, "ℹ️", support_color);
+                        ui.add_space(8.0);
+                        if ui.add(egui::Button::new(
+                            RichText::new("Download logs").size(14.0).color(support_color),
+                        ).fill(Color32::TRANSPARENT).frame(false)).clicked() {
+                            do_export = true;
+                        }
+                    });
+                });
+            });
+            
+        self.show_diagnostics_window = is_open;
+        if do_export {
+            if export_logs_to_zip() {
+                self.show_toast("Exported to Downloads!", "✅");
+            } else {
+                self.show_toast("Export failed", "❌");
+            }
+        }
+    }
+
     fn show_log_window_if_open(&mut self, ctx: &egui::Context) {
         if !self.show_log_window {
             return;
@@ -9112,6 +9209,7 @@ impl App for UserApp {
             self.show_jit_choice_modal(ctx);
         }
         self.show_log_window_if_open(ctx);
+        self.show_diagnostics_window_if_open(ctx);
 
         // Render toast notifications on top
         self.render_toasts(ctx);
@@ -9341,5 +9439,26 @@ mod tests {
         let (sats, usd) = channel_native_split(0, 100.0, 100_000.0);
         assert_eq!(sats, 0);
         assert_eq!(usd, 0.0);
+=======
+fn export_logs_to_zip() -> bool {
+    let data_dir = crate::constants::get_user_data_dir();
+    let out_dir = dirs::download_dir().unwrap_or_else(|| data_dir.clone());
+    let zip_path = out_dir.join("stable_channels_logs.zip");
+    if let Ok(file) = std::fs::File::create(&zip_path) {
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for filename in &["app_debug.log", "audit_log.txt", "ldk-node.log"] {
+            let file_path = data_dir.join(filename);
+            if let Ok(mut src) = std::fs::File::open(&file_path) {
+                let _ = zip.start_file(*filename, options);
+                let _ = std::io::copy(&mut src, &mut zip);
+            }
+        }
+        let _ = zip.finish();
+        true
+    } else {
+        false
+>>>>>>> d635c6f (feat: Add Logs & Diagnostics UI to Android, iOS, and Desktop)
     }
 }
