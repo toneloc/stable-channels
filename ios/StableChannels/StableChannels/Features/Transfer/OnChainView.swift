@@ -28,7 +28,10 @@ struct OnChainSendView: View {
         let vbytes = sendAll ? Constants.estimatedOnchainSendAllVBytes : Constants.estimatedOnchainSendVBytes
         let feeSats = feeRateSatVb * vbytes
         return String(
-            format: String(localized: "info_onchain_fee_estimate_sentence", defaultValue: "Expected network fee: ~%@ BTC (%llu sat/vB)"),
+            format: String(
+                localized: "info_onchain_fee_estimate_sentence",
+                defaultValue: "Expected network fee: ~%@ BTC (%llu sat/vB)"
+            ),
             feeSats.btcSpacedFormatted,
             feeRateSatVb
         )

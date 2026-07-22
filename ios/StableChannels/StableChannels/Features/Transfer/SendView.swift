@@ -102,7 +102,8 @@ struct SendView: View {
         }
         return (
             UInt64(channel.counterpartyForwardingInfoFeeBaseMsat ?? Constants.lightningDefaultForwardingFeeBaseMsat),
-            UInt64(channel.counterpartyForwardingInfoFeeProportionalMillionths ?? Constants.lightningDefaultForwardingFeeProportionalMillionths)
+            UInt64(channel.counterpartyForwardingInfoFeeProportionalMillionths ?? Constants
+                .lightningDefaultForwardingFeeProportionalMillionths)
         )
     }
 
