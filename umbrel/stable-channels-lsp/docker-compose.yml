@@ -53,7 +53,6 @@ services:
     depends_on: [sc-lsp]
     environment:
       SC_LSP_UPSTREAM: https://stable-channels-lsp_sc-lsp_1:3002
-      SC_NETWORK: bitcoin
     volumes:
       # Read sc-lsp's generated api_key so /setup can display it.
       - ${APP_DATA_DIR}/data/sc-lsp:/run/sc-lsp:ro

@@ -4,9 +4,29 @@
 # /setup so the user can copy it into the GUI connection screen without SSH.
 # The sc-lsp storage dir is mounted read-only at /run/sc-lsp; behind Umbrel's
 # app_proxy the page is gated by the user's Umbrel login.
+find_api_key() {
+    preferred="${SC_NETWORK:-}"
+    if [ -z "$preferred" ] && [ -s /run/sc-lsp/network ]; then
+        preferred="$(sed -n '1p' /run/sc-lsp/network 2>/dev/null || true)"
+    fi
+    if [ -n "$preferred" ] && [ -s "/run/sc-lsp/${preferred}/api_key" ]; then
+        printf '%s\n' "/run/sc-lsp/${preferred}/api_key"
+        return 0
+    fi
+    if [ -s /run/sc-lsp/bitcoin/api_key ]; then
+        printf '%s\n' /run/sc-lsp/bitcoin/api_key
+        return 0
+    fi
+    for candidate in /run/sc-lsp/*/api_key; do
+        [ -s "$candidate" ] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
 (
-    key_file="/run/sc-lsp/${SC_NETWORK:-bitcoin}/api_key"
-    until [ -s "$key_file" ]; do sleep 5; done
+    until key_file="$(find_api_key)"; do sleep 5; done
     hex="$(od -An -tx1 "$key_file" | tr -d ' \n')"
     mkdir -p /usr/share/nginx/html/setup
     # Bare key for the GUI's zero-input auto-connect (fetched same-origin).

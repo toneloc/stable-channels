@@ -75,6 +75,46 @@ fn install_theme(ctx: &egui::Context) {
     ctx.set_pixels_per_point(1.1);
 }
 
+#[cfg(target_arch = "wasm32")]
+async fn fetch_setup_key(win: &web_sys::Window) -> Option<String> {
+	use wasm_bindgen::JsCast;
+
+	let resp = wasm_bindgen_futures::JsFuture::from(win.fetch_with_str("/setup/key.txt")).await.ok()?;
+	let resp = resp.dyn_into::<web_sys::Response>().ok()?;
+	if !resp.ok() {
+		return None;
+	}
+	let text = resp.text().ok()?;
+	let text = wasm_bindgen_futures::JsFuture::from(text).await.ok()?;
+	let key = text.as_string()?.trim().to_string();
+	(key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())).then_some(key)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: i32) {
+	use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+
+	let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+		let resolve_from_timer = resolve.clone();
+		let callback = Closure::once_into_js(move || {
+			let _ = resolve_from_timer.call0(&JsValue::UNDEFINED);
+		});
+		let scheduled = web_sys::window()
+			.and_then(|win| {
+				win.set_timeout_with_callback_and_timeout_and_arguments_0(
+					callback.as_ref().unchecked_ref(),
+					ms,
+				)
+				.ok()
+			})
+			.is_some();
+		if !scheduled {
+			let _ = resolve.call0(&JsValue::UNDEFINED);
+		}
+	});
+	let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
 pub struct LspServerApp {
 	pub state: AppState,
 	#[cfg(not(target_arch = "wasm32"))]
@@ -122,28 +162,20 @@ impl LspServerApp {
 
 		#[cfg(target_arch = "wasm32")]
 		let auto_key = {
-			use wasm_bindgen::JsCast;
 			let slot = std::rc::Rc::new(std::cell::RefCell::new(None));
 			let filled = slot.clone();
 			let ctx = cc.egui_ctx.clone();
 			wasm_bindgen_futures::spawn_local(async move {
 				let Some(win) = web_sys::window() else { return };
-				let Ok(resp) =
-					wasm_bindgen_futures::JsFuture::from(win.fetch_with_str("/setup/key.txt")).await
-				else {
-					return;
-				};
-				let Ok(resp) = resp.dyn_into::<web_sys::Response>() else { return };
-				if !resp.ok() {
-					return;
-				}
-				let Ok(text) = resp.text() else { return };
-				let Ok(text) = wasm_bindgen_futures::JsFuture::from(text).await else { return };
-				let Some(text) = text.as_string() else { return };
-				let key = text.trim().to_string();
-				if key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()) {
-					*filled.borrow_mut() = Some(key);
-					ctx.request_repaint();
+				let mut delay_ms = 500_i32;
+				loop {
+					if let Some(key) = fetch_setup_key(&win).await {
+						*filled.borrow_mut() = Some(key);
+						ctx.request_repaint();
+						break;
+					}
+					sleep_ms(delay_ms).await;
+					delay_ms = (delay_ms * 2).min(5_000);
 				}
 			});
 			slot

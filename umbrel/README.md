@@ -85,9 +85,9 @@ to trade memory for speed.
 
 - **LSPS2 restart landmine (UPSTREAM, MUST FIX FIRST):** persisted LSPS2
   service state can fail to reload and brick node startup with an unlogged
-  "Failed to read from store." — see `explore-lsp-restart-issue.txt` at the
-  repo root. Umbrel boxes restart constantly; do not ship to real users until
-  the upstream fix (or a carried patch) lands in the ldk-server image.
+  "Failed to read from store." Umbrel boxes restart constantly; do not ship to
+  real users until the upstream fix (or a carried patch) lands in the
+  ldk-server image.
 - **Backups:** `backupIgnore` excludes the channel-state sqlite databases on
   purpose — restoring stale channel state onto live channels is the
   force-close-by-rollback scenario. The seed (`data/ldk-server/keys_mnemonic`)

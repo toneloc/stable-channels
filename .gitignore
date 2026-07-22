@@ -222,6 +222,9 @@ server/lsp-server-gui/dist/
 server/stable-channels-lsp/data/
 sc-config.toml
 
+# Local investigation notes
+explore-lsp-restart-issue.txt
+
 # Tier-1 Umbrel sim runtime state (contains node keys) — never commit
 umbrel/test/.sim-app-data/
 

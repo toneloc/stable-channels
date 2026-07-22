@@ -1,7 +1,6 @@
 #!/bin/sh
 # Self-healing wrapper for ldk-server: defuses the LSPS2 persisted-state
-# restart landmine (see explore-lsp-restart-issue.txt at the repo root)
-# without patching upstream.
+# restart landmine without patching upstream.
 #
 # ldk-node (rev f2e44fd, liquidity/mod.rs:283) swallows LiquidityManager::new
 # errors into a bare "Failed to build LDK Node: Failed to read from store."
