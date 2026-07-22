@@ -152,16 +152,16 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         0L
     }
     val lightningFeeText = if (lightningFeeSats == 0L) {
-        "Expected LSP routing fee: none"
+        "Expected fee: none"
     } else if (lightningFeeSats > 0) {
         val feeUsd = if (btcPrice > 0) {
             " (${((lightningFeeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice).usdFormatted()})"
         } else {
             ""
         }
-        "Expected LSP routing fee: ~${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
+        "Expected fee: ~${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
     } else {
-        "Expected LSP routing fee uses channel config"
+        "Expected fee: depends on amount"
     }
     val onchainVbytes = if (isSendMax) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
     val onchainFeeText = feeRateSatVb?.let { rate ->

@@ -3176,10 +3176,10 @@ impl UserApp {
     fn lightning_fee_text(&self, amount_sats: u64) -> String {
         let fee_sats = self.estimated_lightning_fee_sats(amount_sats);
         if fee_sats == 0 {
-            "Expected LSP routing fee: none".to_string()
+            "Expected fee: none".to_string()
         } else {
             format!(
-                "Expected LSP routing fee: ~{}",
+                "Expected fee: ~{}",
                 Self::format_sats_as_btc(fee_sats)
             )
         }
@@ -7478,10 +7478,10 @@ impl UserApp {
                                 if amount_sats > 0 {
                                     self.lightning_fee_text(amount_sats)
                                 } else {
-                                    "Expected LSP routing fee uses channel config".to_string()
+                                    "Expected fee: depends on amount".to_string()
                                 }
                             } else {
-                                "Expected LSP routing fee uses channel config".to_string()
+                                "Expected fee: depends on amount".to_string()
                             }
                         }
                     }
@@ -7493,10 +7493,10 @@ impl UserApp {
                     if amount_sats > 0 {
                         self.lightning_fee_text(amount_sats)
                     } else {
-                        "Expected LSP routing fee uses channel config".to_string()
+                        "Expected fee: depends on amount".to_string()
                     }
                 } else {
-                    "Expected LSP routing fee uses channel config".to_string()
+                    "Expected fee: depends on amount".to_string()
                 }
             };
 

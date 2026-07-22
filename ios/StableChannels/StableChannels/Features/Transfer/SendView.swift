@@ -114,7 +114,7 @@ struct SendView: View {
         let feeMsat = saturatingAdd(params.baseMsat, proportionalMsat)
         let feeSats = saturatingAdd(feeMsat, 999) / 1_000
         guard feeSats > 0 else {
-            return String(localized: "info_lightning_lsp_fee_none", defaultValue: "No LSP routing fee expected")
+            return String(localized: "info_lightning_lsp_fee_none", defaultValue: "No fee expected")
         }
         if appState.btcPrice > 0 {
             let usd = Double(feeSats) / Double(Constants.satsInBTC) * appState.btcPrice
