@@ -15,7 +15,7 @@ env:
     file: helpers/create_invoice.js
 
 - tapOn: "Send"
-- tapOn: "Invoice or onchain address"   # send-field placeholder (both platforms)
+- tapOn: "(To|Invoice or onchain address)"   # Android shows the label "To" until focused; iOS shows the placeholder
 - inputText: ${output.invoice}
 # Send button: Android has two "Send" texts (title + button, index 1);
 # iOS button is "Send Payment". hideKeyboard is unreliable on iOS sims.

@@ -13,7 +13,7 @@ env:
     file: helpers/create_address.js
 
 - tapOn: "Send"
-- tapOn: "Invoice or onchain address"   # send-field placeholder (both platforms)
+- tapOn: "(To|Invoice or onchain address)"   # Android shows the label "To" until focused; iOS shows the placeholder
 - inputText: ${output.address}
 
 # Onchain input needs an amount. extendedWaitUntil (not a bare assert) so a slow
