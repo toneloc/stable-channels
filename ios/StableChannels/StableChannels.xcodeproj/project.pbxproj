@@ -23,6 +23,10 @@
 		3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3940DC5406ABC63AA090441A /* DatabaseService.swift */; };
 		491D2E883008F96B0009FADF /* PaymentDetailCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */; };
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
+		492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */; };
+		492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */; };
+		492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AB300CC81D003EC383 /* EsploraError.swift */; };
+		492B54B1300CE85C003EC383 /* ConfirmationPollingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */; };
 		496A44432FCD4F75005AF12F /* QRInputToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44422FCD4F75005AF12F /* QRInputToolbar.swift */; };
 		496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */; };
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
@@ -51,6 +55,11 @@
 		499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */; };
 		499DBE7B2FD2F06F003E89F9 /* TxidLinkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */; };
 		499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */; };
+		499F1E503009F02300936944 /* BlockHeightProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4A3009F02300936944 /* BlockHeightProvider.swift */; };
+		499F1E513009F02300936944 /* BlockHeightService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4B3009F02300936944 /* BlockHeightService.swift */; };
+		499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */; };
+		499F1E553009F02300936944 /* ConfirmationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E4C3009F02300936944 /* ConfirmationService.swift */; };
+		499F1E573009F03E00936944 /* PaymentProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E563009F03E00936944 /* PaymentProgress.swift */; };
 		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
@@ -154,6 +163,10 @@
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailCoordinator.swift; sourceTree = "<group>"; };
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
+		492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightResolver.swift; sourceTree = "<group>"; };
+		492B54AB300CC81D003EC383 /* EsploraError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraError.swift; sourceTree = "<group>"; };
+		492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationResolver.swift; sourceTree = "<group>"; };
+		492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmationPollingService.swift; sourceTree = "<group>"; };
 		496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractor.swift; sourceTree = "<group>"; };
 		496A44422FCD4F75005AF12F /* QRInputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRInputToolbar.swift; sourceTree = "<group>"; };
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
@@ -182,6 +195,11 @@
 		499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncherTests.swift; sourceTree = "<group>"; };
 		499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepositRecorder.swift; sourceTree = "<group>"; };
 		499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidLinkStore.swift; sourceTree = "<group>"; };
+		499F1E4A3009F02300936944 /* BlockHeightProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightProvider.swift; sourceTree = "<group>"; };
+		499F1E4B3009F02300936944 /* BlockHeightService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightService.swift; sourceTree = "<group>"; };
+		499F1E4C3009F02300936944 /* ConfirmationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmationService.swift; sourceTree = "<group>"; };
+		499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationProvider.swift; sourceTree = "<group>"; };
+		499F1E563009F03E00936944 /* PaymentProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentProgress.swift; sourceTree = "<group>"; };
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
@@ -289,6 +307,7 @@
 			isa = PBXGroup;
 			children = (
 				ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */,
+				499F1E563009F03E00936944 /* PaymentProgress.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
 			);
@@ -407,11 +426,17 @@
 				49E4D8A02FED848F002AF338 /* BackupError.swift */,
 				49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
+				499F1E4A3009F02300936944 /* BlockHeightProvider.swift */,
+				492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */,
+				499F1E4B3009F02300936944 /* BlockHeightService.swift */,
 				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */,
+				492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */,
+				499F1E4C3009F02300936944 /* ConfirmationService.swift */,
 				CB7BB840EC5C451056C5C21D /* CryptoService.swift */,
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
 				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
+				492B54AB300CC81D003EC383 /* EsploraError.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
@@ -423,6 +448,8 @@
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
 				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
 				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
+				499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */,
+				492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
 			);
@@ -691,6 +718,13 @@
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
 				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
+				499F1E503009F02300936944 /* BlockHeightProvider.swift in Sources */,
+				492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */,
+				492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */,
+				492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */,
+				499F1E513009F02300936944 /* BlockHeightService.swift in Sources */,
+				499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */,
+				499F1E553009F02300936944 /* ConfirmationService.swift in Sources */,
 				49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */,
 				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */,
@@ -717,6 +751,7 @@
 				C1911B3A7E4C92444F07A5C6 /* OnChainView.swift in Sources */,
 				49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */,
 				6B789335CAF664AC4DA75B1A /* PaymentDetailView.swift in Sources */,
+				492B54B1300CE85C003EC383 /* ConfirmationPollingService.swift in Sources */,
 				8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */,
 				4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */,
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
@@ -748,6 +783,7 @@
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
 				49E4D8A32FED84B7002AF338 /* BackupServiceProtocol.swift in Sources */,
 				55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */,
+				499F1E573009F03E00936944 /* PaymentProgress.swift in Sources */,
 				6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */,
 				2C4A664F5F0343319A539889 /* BackupModels.swift in Sources */,
 				A9F8B3821ACA38AD4DF869BD /* CloudBackupService.swift in Sources */,

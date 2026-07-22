@@ -32,17 +32,17 @@ struct MainTabView: View {
                 .tag(Tab.settings)
         }
         .environment(coordinator)
-        .onChange(of: coordinator.selectedPayment) { _, newValue in
+        .onChange(of: coordinator.paymentId) { _, newValue in
             if newValue != nil, selectedTab != .history {
                 selectedTab = .history
             }
         }
         .sheet(item: Binding(
-            get: { coordinator.selectedPayment },
-            set: { coordinator.selectedPayment = $0 }
-        )) { payment in
+            get: { coordinator.paymentId.map(PaymentIdentifier.init) },
+            set: { coordinator.paymentId = $0?.id }
+        )) { id in
             PaymentDetailView(
-                payment: payment,
+                paymentId: id.id,
                 displayPrice: historyDisplayPrice
             )
         }
@@ -51,4 +51,8 @@ struct MainTabView: View {
     private var historyDisplayPrice: Double {
         appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
     }
+}
+
+private struct PaymentIdentifier: Identifiable, Equatable {
+    let id: Int64
 }
