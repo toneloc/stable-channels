@@ -220,6 +220,12 @@ struct HomeView: View {
                         .animation(.default, value: appState.totalBalanceUSD)
                         .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
                         .accessibilityIdentifier("home_total_balance_usd")
+                        // .contentTransition(.numericText()) leaves the element's
+                        // text empty / its derived accessibility label frozen at the
+                        // launch-time value (VoiceOver reads a stale balance; the E2E
+                        // copyTextFrom reads "$0.00" forever). Explicit label tracks
+                        // the state and re-evaluates on every balance change.
+                        .accessibilityLabel(appState.totalBalanceUSD.usdFormatted)
                     Text(String(localized: "label_usd", defaultValue: "USD"))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
