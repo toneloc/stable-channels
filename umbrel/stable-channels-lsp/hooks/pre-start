@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Renders ldk-server.toml + sc-lsp.toml into ${APP_DATA_DIR}/data/config from
+# the Bitcoin app's exports (sourced by Umbrel before this hook runs).
+# Idempotent: re-rendered on every start so RPC credential rotation and
+# network changes are picked up.
+set -euo pipefail
+
+APP_DATA_DIR="${APP_DATA_DIR:?APP_DATA_DIR not set}"
+CONF_DIR="${APP_DATA_DIR}/data/config"
+
+BITCOIN_IP="${APP_BITCOIN_NODE_IP:?APP_BITCOIN_NODE_IP not set (is the Bitcoin app installed?)}"
+BITCOIN_RPC_PORT="${APP_BITCOIN_RPC_PORT:-8332}"
+BITCOIN_RPC_USER="${APP_BITCOIN_RPC_USER:?APP_BITCOIN_RPC_USER not set}"
+BITCOIN_RPC_PASS="${APP_BITCOIN_RPC_PASS:?APP_BITCOIN_RPC_PASS not set}"
+
+# Umbrel reports "mainnet"; LDK/rust-bitcoin expect "bitcoin".
+case "${APP_BITCOIN_NETWORK:-mainnet}" in
+    mainnet|bitcoin) NETWORK="bitcoin" ;;
+    testnet)         NETWORK="testnet" ;;
+    signet)          NETWORK="signet" ;;
+    regtest)         NETWORK="regtest" ;;
+    *) echo "unsupported APP_BITCOIN_NETWORK: ${APP_BITCOIN_NETWORK}" >&2; exit 1 ;;
+esac
+
+# Umbrel-injected container names (<app-id>_<service>_1) — used as the gRPC
+# hostname, so the TLS cert SAN must include the ldk-server one (same class of
+# issue as the e2e stack's "[tls] hosts" gotcha).
+LDK_SERVER_HOST="stable-channels-lsp_ldk-server_1"
+
+mkdir -p "${CONF_DIR}" \
+         "${APP_DATA_DIR}/data/ldk-server" \
+         "${APP_DATA_DIR}/data/sc-lsp"
+
+printf '%s\n' "${NETWORK}" > "${APP_DATA_DIR}/data/sc-lsp/network"
+
+cat > "${CONF_DIR}/ldk-server.toml" <<EOF
+# Rendered by hooks/pre-start — do not edit; changes are overwritten on start.
+[node]
+network = "${NETWORK}"
+alias = "Stable Channels"
+listening_addresses = ["0.0.0.0:9735"]
+grpc_service_address = "0.0.0.0:3536"
+
+[storage.disk]
+dir_path = "/data/ldk-server"
+
+[bitcoind]
+rpc_address = "${BITCOIN_IP}:${BITCOIN_RPC_PORT}"
+rpc_user = "${BITCOIN_RPC_USER}"
+rpc_password = "${BITCOIN_RPC_PASS}"
+
+# LSPS2 service — values mirror the production bidaemon deployment.
+[liquidity.lsps2_service]
+advertise_service = true
+channel_opening_fee_ppm = 0
+channel_over_provisioning_ppm = 1000000
+min_channel_opening_fee_msat = 0
+min_channel_lifetime = 100
+max_client_to_self_delay = 1024
+min_payment_size_msat = 0
+max_payment_size_msat = 100000000000
+client_trusts_lsp = true
+disable_client_reserve = false
+
+[log]
+level = "Info"
+log_to_file = true
+
+[tls]
+hosts = ["${LDK_SERVER_HOST}"]
+EOF
+
+cat > "${CONF_DIR}/sc-lsp.toml" <<EOF
+# Rendered by hooks/pre-start — do not edit; changes are overwritten on start.
+[node]
+rest_service_address = "0.0.0.0:3002"
+network = "${NETWORK}"
+
+[storage.disk]
+dir_path = "/data/stable-channels-lsp"
+
+[ldk_server]
+config_path = "/etc/sc-lsp/ldk-server.toml"
+grpc_address = "${LDK_SERVER_HOST}:3536"
+cert_path    = "/data/ldk-server/tls.crt"
+api_key_path = "/data/ldk-server/${NETWORK}/api_key"
+EOF
+
+# Umbrel runs hooks as root; the tier-1 Mac sim (umbrel/test/) does not, and
+# Docker Desktop handles bind-mount ownership itself.
+if [ "$(id -u)" = "0" ]; then
+    chown -R 1000:1000 "${APP_DATA_DIR}/data"
+fi

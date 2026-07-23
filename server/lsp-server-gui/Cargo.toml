@@ -24,17 +24,22 @@ bytes = "1.4.0"
 # Native-only dependencies
 tokio = { version = "1.38.0", features = ["rt-multi-thread", "sync"], optional = true }
 rfd = { version = "0.15", optional = true, default-features = false, features = ["gtk3"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Web-only dependencies
 wasm-bindgen-futures = { version = "0.4", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement"], optional = true }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Response"], optional = true }
 log = { version = "0.4", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+# rustls/ring don't build on wasm32-unknown-unknown; only main.rs's native
+# entry point installs the crypto provider anyway.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+# wasm32-unknown-unknown has no default entropy source; route through the browser.
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"

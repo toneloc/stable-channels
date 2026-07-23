@@ -1,0 +1,40 @@
+manifestVersion: 1
+id: stable-channels-lsp
+category: bitcoin
+name: Stable Channels LSP
+version: "8fe11de"
+tagline: Run a Lightning LSP with USD-stabilized channels
+description: >-
+  Stable Channels LSP is a Lightning Service Provider daemon that offers
+  just-in-time (JIT) channel opens and USD-stabilized channel balances to
+  Stable Channels wallet users. It runs an LDK-based Lightning node against
+  your Umbrel's Bitcoin node, an LSPS2 liquidity service, and a web dashboard
+  for balances, channels, payments, and the audit log.
+
+
+  First-run setup: open the app, then visit the /setup page to copy your
+  auto-generated API key into the dashboard's connection screen.
+
+
+  NOTE: your node's Lightning identity and channel funds live in this app's
+  data directory. Back up the seed (keys_mnemonic) securely. Channel state
+  databases are excluded from Umbrel backups on purpose — restoring stale
+  channel state onto live channels risks force-closes; recovery is via the
+  seed.
+releaseNotes: ""
+developer: Stable Channels
+website: https://stablechannels.com
+dependencies: [bitcoin]
+repo: https://github.com/toneloc/stable-channels
+support: https://github.com/toneloc/stable-channels/issues
+port: 3003
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+backupIgnore:
+  - data/ldk-server/*/ldk-server.log*
+  - data/ldk-server/*/ldk_node_data.sqlite
+  - data/ldk-server/*/ldk_server_data.sqlite
+submitter: toneloc
+submission: https://github.com/getumbrel/umbrel-apps/pull/TODO

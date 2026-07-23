@@ -32,16 +32,16 @@ impl fmt::Display for LspRestError {
 /// Defines error codes for categorizing SC daemon REST errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LspRestErrorCode {
-	/// Please refer to [`ldk_server_client::ldk_server_grpc::error::ErrorCode::InvalidRequestError`].
+	/// Please refer to [`ldk_server_grpc::error::ErrorCode::InvalidRequestError`].
 	InvalidRequestError,
 
-	/// Please refer to [`ldk_server_client::ldk_server_grpc::error::ErrorCode::AuthError`].
+	/// Please refer to [`ldk_server_grpc::error::ErrorCode::AuthError`].
 	AuthError,
 
-	/// Please refer to [`ldk_server_client::ldk_server_grpc::error::ErrorCode::LightningError`].
+	/// Please refer to [`ldk_server_grpc::error::ErrorCode::LightningError`].
 	LightningError,
 
-	/// Please refer to [`ldk_server_client::ldk_server_grpc::error::ErrorCode::InternalServerError`].
+	/// Please refer to [`ldk_server_grpc::error::ErrorCode::InternalServerError`].
 	InternalServerError,
 
 	/// There is an unknown error, it could be a client-side bug, unrecognized error-code, network error

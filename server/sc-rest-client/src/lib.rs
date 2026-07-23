@@ -14,4 +14,4 @@ pub mod error;
 pub use sc_protos;
 
 /// LDK Server gRPC proto types used for proxied endpoints.
-pub use ldk_server_client::ldk_server_grpc;
+pub use ldk_server_grpc;
