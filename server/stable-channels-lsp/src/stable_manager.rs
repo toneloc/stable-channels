@@ -1128,6 +1128,7 @@ impl StableChannelManager {
         };
         let payload = crate::messages::build_sync_payload(
             channel_id,
+            &format!("{}", user_channel_id),
             expected_usd,
             backing_sats,
             sync_version,
@@ -2947,6 +2948,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&env.payload).unwrap();
         assert_eq!(v["type"], "SYNC_V1");
         assert_eq!(v["channel_id"], CHANNEL_ID_HEX);
+        assert_eq!(v["user_channel_id"], "7");
         assert_eq!(v["expected_usd"], 25.0);
         assert_eq!(v["backing_sats"], 31_250);
         assert_eq!(v["sync_version"], 1);
