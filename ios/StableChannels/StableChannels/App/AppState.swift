@@ -759,6 +759,7 @@ class AppState {
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
         monitoredSpliceTxid = nil
+        mempoolWebSocketService.disconnect()
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -789,6 +790,7 @@ class AppState {
             print("[App] Node still running (grace period), reconnecting")
             ensureLSPConnected()
             refreshBalances()
+            mempoolWebSocketService.connect()
             updateStableBalances()
             resumePendingSpliceConfirmation()
             return

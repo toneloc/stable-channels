@@ -64,6 +64,7 @@ final class MempoolWebSocketService {
     private var pendingOutboundMessages: [String] = []
     private var processedTxids: [String: Date] = [:]
     private let processedTxidTTL: TimeInterval = 900 // 15 minutes
+    private var processedTxidPurgeCounter: Int = 0
     private var isManualDisconnect: Bool = false
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
@@ -283,9 +284,13 @@ final class MempoolWebSocketService {
 
     private func recordProcessedTx(_ txid: String) {
         processedTxids[txid] = Date()
-        // Purge expired entries to bound memory
-        processedTxids = processedTxids.filter { _, date in
-            Date().timeIntervalSince(date) < processedTxidTTL
+        processedTxidPurgeCounter += 1
+        if processedTxidPurgeCounter >= 50 {
+            let cutoff = Date().timeIntervalSince1970 - processedTxidTTL
+            processedTxids = processedTxids.filter { _, date in
+                date.timeIntervalSince1970 > cutoff
+            }
+            processedTxidPurgeCounter = 0
         }
     }
 
