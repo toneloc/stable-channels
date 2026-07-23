@@ -1,21 +1,102 @@
-use egui::{Color32, RichText, Ui};
 use crate::ui::layout::{AMBER, SECONDARY};
+use egui::{Color32, RichText, Ui};
 
 /// A big headline figure with a small muted secondary line, in a framed card.
+#[allow(dead_code)]
 pub fn stat_card(ui: &mut Ui, title: &str, big_value: &str, secondary: &str) {
+    stat_card_inner(ui, title, None, big_value, secondary);
+}
+
+/// A headline figure with a compact info affordance beside the title.
+pub fn stat_card_with_info(ui: &mut Ui, title: &str, help: &str, big_value: &str, secondary: &str) {
+    stat_card_inner(ui, title, Some(help), big_value, secondary);
+}
+
+fn stat_card_inner(ui: &mut Ui, title: &str, help: Option<&str>, big_value: &str, secondary: &str) {
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::same(12.0))
         .rounding(egui::Rounding::same(8.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).small().color(SECONDARY));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).small().color(SECONDARY));
+                    if let Some(help) = help {
+                        ui.add_space(4.0);
+                        info_icon(ui, help);
+                    }
+                });
                 ui.label(RichText::new(big_value).size(24.0).strong());
                 if !secondary.is_empty() {
                     ui.label(RichText::new(secondary).small().color(SECONDARY));
                 }
             });
         });
+}
+
+/// Draw a small hover-only info affordance with no button chrome.
+pub fn info_icon(ui: &mut Ui, help: impl Into<egui::WidgetText>) -> egui::Response {
+    let size = egui::vec2(14.0, 14.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let center = rect.center();
+    let color = SECONDARY;
+    let stroke = if response.hovered() {
+        egui::Stroke::new(1.15, AMBER)
+    } else {
+        egui::Stroke::new(1.0, color)
+    };
+
+    if response.hovered() {
+        ui.painter()
+            .circle_filled(center, 6.5, AMBER.gamma_multiply(0.12));
+    }
+
+    ui.painter().circle_stroke(center, 6.0, stroke);
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        "i",
+        egui::FontId::proportional(9.5),
+        if response.hovered() { AMBER } else { color },
+    );
+
+    response.on_hover_text(help)
+}
+
+/// Plain label with a compact info icon.
+pub fn label_with_info(ui: &mut Ui, label: &str, help: &str) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add_space(4.0);
+        info_icon(ui, help);
+    });
+}
+
+/// Muted label with a compact info icon, useful in key/value grids.
+pub fn muted_label_with_info(ui: &mut Ui, label: &str, help: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(SECONDARY));
+        ui.add_space(4.0);
+        info_icon(ui, help);
+    });
+}
+
+/// Strong label with a compact info icon.
+pub fn strong_label_with_info(ui: &mut Ui, label: &str, help: &str) {
+    ui.horizontal(|ui| {
+        ui.strong(label);
+        ui.add_space(4.0);
+        info_icon(ui, help);
+    });
+}
+
+/// Table header label with a compact info icon.
+pub fn table_header_with_info(ui: &mut Ui, label: &str, help: &str) {
+    ui.horizontal(|ui| {
+        ui.strong(label);
+        ui.add_space(4.0);
+        info_icon(ui, help);
+    });
 }
 
 /// A small non-interactive status pill: white text on a dimmed color chip.
@@ -86,7 +167,11 @@ pub enum NotConnectedAction {
 }
 
 /// Centered "not connected" state with actions, used by every screen's connection gate.
-pub fn not_connected(ui: &mut Ui, status: &crate::state::ConnectionStatus, server_url: &str) -> NotConnectedAction {
+pub fn not_connected(
+    ui: &mut Ui,
+    status: &crate::state::ConnectionStatus,
+    server_url: &str,
+) -> NotConnectedAction {
     let mut action = NotConnectedAction::None;
     ui.vertical_centered(|ui| {
         ui.add_space(40.0);
@@ -95,20 +180,34 @@ pub fn not_connected(ui: &mut Ui, status: &crate::state::ConnectionStatus, serve
                 ui.label(RichText::new("⚠").size(32.0));
                 ui.label(RichText::new(format!("Can't reach the LSP at {}", server_url)).strong());
                 ui.label(RichText::new(e).small().weak());
-                ui.label(RichText::new("Make sure the daemon is running.").small().weak());
+                ui.label(
+                    RichText::new("Make sure the daemon is running.")
+                        .small()
+                        .weak(),
+                );
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("⚙ Open Settings").clicked() { action = NotConnectedAction::OpenSettings; }
-                    if ui.button("⟳ Retry").clicked() { action = NotConnectedAction::Retry; }
+                    if ui.button("⚙ Open Settings").clicked() {
+                        action = NotConnectedAction::OpenSettings;
+                    }
+                    if ui.button("⟳ Retry").clicked() {
+                        action = NotConnectedAction::Retry;
+                    }
                 });
-            },
+            }
             _ => {
                 ui.label(RichText::new("🔌").size(32.0));
                 ui.label(RichText::new("Not connected to an LSP").strong());
-                ui.label(RichText::new("Open Settings to configure the connection.").small().weak());
+                ui.label(
+                    RichText::new("Open Settings to configure the connection.")
+                        .small()
+                        .weak(),
+                );
                 ui.add_space(8.0);
-                if ui.button("⚙ Open Settings").clicked() { action = NotConnectedAction::OpenSettings; }
-            },
+                if ui.button("⚙ Open Settings").clicked() {
+                    action = NotConnectedAction::OpenSettings;
+                }
+            }
         }
         ui.add_space(40.0);
     });

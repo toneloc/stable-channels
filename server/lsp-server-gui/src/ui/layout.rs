@@ -28,18 +28,22 @@ pub fn page(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 
 /// Like `page` but wraps the content in a vertical scroll (for detail/form tabs).
 pub fn page_scrolled(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        add(ui);
-    });
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            add(ui);
+        });
 }
 
 /// Horizontally-scrollable region that fills the window width but never renders narrower than `min_width` (scrolls instead of cropping).
 pub fn h_scroll(ui: &mut Ui, min_width: f32, add: impl FnOnce(&mut Ui)) {
     let avail = ui.available_width();
-    egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
-        ui.set_width(avail.max(min_width));
-        add(ui);
-    });
+    egui::ScrollArea::horizontal()
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.set_width(avail.max(min_width));
+            add(ui);
+        });
 }
 
 /// Split `total` width across columns by weight (proportional fill). Returns per-column widths.
@@ -66,28 +70,59 @@ pub fn card(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 // Side-by-side cards are done inline at the call site with `ui.columns` (Recipe C), not via a helper — that lets each card body borrow `&mut app` without overlap.
 
 /// Label:value rows — SECONDARY labels, PRIMARY values, bounded spacing.
+#[allow(dead_code)]
 pub fn kv_grid(ui: &mut Ui, id_salt: &str, rows: &[(&str, &str)]) {
-    egui::Grid::new(id_salt).num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-        for (k, v) in rows {
-            ui.label(RichText::new(*k).color(SECONDARY));
-            ui.label(RichText::new(*v).color(PRIMARY));
-            ui.end_row();
-        }
-    });
+    egui::Grid::new(id_salt)
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            for (k, v) in rows {
+                ui.label(RichText::new(*k).color(SECONDARY));
+                ui.label(RichText::new(*v).color(PRIMARY));
+                ui.end_row();
+            }
+        });
 }
 
 /// Row list for `kv_grid_custom`: label paired with a closure that renders the value cell.
+#[allow(dead_code)]
 pub type KvRows<'a> = Vec<(&'a str, Box<dyn FnOnce(&mut Ui) + 'a>)>;
 
+/// Row list for key/value grids whose labels can include help text.
+pub type KvInfoRows<'a> = Vec<(&'a str, Option<&'a str>, Box<dyn FnOnce(&mut Ui) + 'a>)>;
+
 /// Like `kv_grid` but each value cell is rendered by a closure (copy buttons, pills…).
+#[allow(dead_code)]
 pub fn kv_grid_custom(ui: &mut Ui, id_salt: &str, rows: KvRows) {
-    egui::Grid::new(id_salt).num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-        for (k, v) in rows {
-            ui.label(RichText::new(k).color(SECONDARY));
-            v(ui);
-            ui.end_row();
-        }
-    });
+    egui::Grid::new(id_salt)
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            for (k, v) in rows {
+                ui.label(RichText::new(k).color(SECONDARY));
+                v(ui);
+                ui.end_row();
+            }
+        });
+}
+
+/// Like `kv_grid_custom`, but label cells may include compact info affordances.
+pub fn kv_grid_custom_info(ui: &mut Ui, id_salt: &str, rows: KvInfoRows) {
+    egui::Grid::new(id_salt)
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            for (k, help, v) in rows {
+                match help {
+                    Some(help) => crate::ui::widgets::muted_label_with_info(ui, k, help),
+                    None => {
+                        ui.label(RichText::new(k).color(SECONDARY));
+                    }
+                }
+                v(ui);
+                ui.end_row();
+            }
+        });
 }
 
 #[cfg(test)]
