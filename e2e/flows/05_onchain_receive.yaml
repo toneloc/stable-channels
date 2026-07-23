@@ -33,10 +33,12 @@ env:
     timeout: 240000              # iOS onchain sync interval is 120s
 - tapOn: "(Swap|Move)"
 
-# "Moving all onchain funds..." is transient — on regtest the splice
-# negotiates in ~1s and the status moves on. Assert it opportunistically.
+# The sweep-start status is transient — on regtest the splice negotiates in
+# ~1s and the status moves on. Assert it opportunistically. Copy differs by
+# platform: Android "Moving all onchain funds to channel...", iOS "Fetching
+# fee rate..." then "Move pending...".
 - assertVisible:
-    text: "Moving all onchain funds to channel.*"
+    text: "(Moving all onchain funds to channel|Fetching fee rate|Move pending).*"
     optional: true
 - runScript:
     file: helpers/mine_blocks.js

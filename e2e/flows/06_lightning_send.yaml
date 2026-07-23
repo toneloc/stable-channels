@@ -15,7 +15,21 @@ env:
     file: helpers/create_invoice.js
 
 - tapOn: "Send"
-- tapOn: "(To|Invoice or onchain address)"   # Android shows the label "To" until focused; iOS shows the placeholder
+# Focus the send field. Platform-split: on Android the unfocused
+# OutlinedTextField renders its LABEL ("To"); on iOS "To" is a Section header
+# ABOVE the field — tapping it focuses nothing (regression seen as an empty
+# form: input lands nowhere, no Send button appears). Tap the placeholder,
+# which is the TextField itself, on iOS.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
 - inputText: ${output.invoice}
 # Send button: Android has two "Send" texts (title + button, index 1);
 # iOS button is "Send Payment". hideKeyboard is unreliable on iOS sims.
