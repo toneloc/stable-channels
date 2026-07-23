@@ -1,0 +1,64 @@
+# Step 6 — Lightning Send
+# "User sends a Lightning payment to another app. Funds are first taken from
+#  BTC balance, overflow taken from USD."
+# Selectors verified against SendScreen.kt.
+appId: com.stablechannels.app
+tags: [android, ios, send]
+env:
+  HARNESS_API: "http://localhost:9737"
+  INVOICE_MSAT: "5000000"     # 5k sats
+---
+- launchApp
+
+# Counterparty creates the invoice we will pay
+- runScript:
+    file: helpers/create_invoice.js
+
+- tapOn: "Send"
+# Focus the send field. Platform-split: on Android the unfocused
+# OutlinedTextField renders its LABEL ("To"); on iOS "To" is a Section header
+# ABOVE the field — tapping it focuses nothing (regression seen as an empty
+# form: input lands nowhere, no Send button appears). Tap the placeholder,
+# which is the TextField itself, on iOS.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- inputText: ${output.invoice}
+# Send button: Android has two "Send" texts (title + button, index 1);
+# iOS button is "Send Payment". hideKeyboard is unreliable on iOS sims.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+      - tapOn:
+          text: "Send"
+          index: 1
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          text: "Send"
+          index: 1
+
+# Success: Android shows a Done screen; iOS shows a "Payment sent" capsule.
+# ("Payment confirmed" kept as a fallback — some settlement paths still use it.)
+- extendedWaitUntil:
+    visible: "(Done|Payment sent.*|Payment confirmed.*)"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+# TODO(assertion, overflow): to test the BTC-first/overflow-from-USD ordering
+# (diff-findings.txt Finding on reconcileOutgoing), run this flow twice:
+#   a) invoice < native BTC  -> USD balance unchanged
+#   b) invoice > native BTC  -> USD balance reduced by exactly the overflow

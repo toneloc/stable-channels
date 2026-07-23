@@ -10,32 +10,50 @@ enum Constants {
 
     // MARK: - Default Configuration
 
-    static let defaultNetwork = "bitcoin"
+    // Overridable via TestOverrides (debug builds only) for E2E regtest runs.
+    static var defaultNetwork: String { TestOverrides.shared.network ?? "bitcoin" }
     static let defaultUserAlias = "user"
     static let defaultUserPort: UInt16 = 9736
     static let defaultLSPAlias = "lsp"
     static let defaultLSPPort: UInt16 = 9735
 
-    static let primaryChainURL = "https://blockstream.info/api"
-    static let fallbackChainURL = "https://mempool.space/api"
-    static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
+    static var primaryChainURL: String {
+        TestOverrides.shared.primaryChainUrl ?? "https://blockstream.info/api"
+    }
+
+    static var fallbackChainURL: String {
+        TestOverrides.shared.fallbackChainUrl ?? "https://mempool.space/api"
+    }
+
+    static var esploraChainURLs: [String] { [primaryChainURL, fallbackChainURL] }
     static let txExplorerURL = "https://mempool.space/tx"
 
-    static let feeRateBlockstreamURL = primaryChainURL
+    static var feeRateBlockstreamURL: String { primaryChainURL }
     static let feeRateMempoolURL = "https://mempool.space"
 
     // MARK: - Service Endpoints
 
-    static let lspPushRegisterURL = "https://stablechannels.com/api/register-push"
-    static let lspChannelExistsURL = "https://stablechannels.com/api/channel-exists"
+    static var lspPushRegisterURL: String {
+        TestOverrides.shared.pushRegisterUrl ?? "https://stablechannels.com/api/register-push"
+    }
+
+    static var lspChannelExistsURL: String {
+        TestOverrides.shared.channelExistsUrl ?? "https://stablechannels.com/api/channel-exists"
+    }
+
     static let privacyPolicyURL = "https://stablechannels.com/privacy.html"
 
     static func txExplorerLink(for txid: String) -> URL? {
         URL(string: "\(txExplorerURL)/\(txid)")
     }
 
-    static let defaultLSPPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
-    static let defaultLSPAddress = "stablechannels.com:9735"
+    static var defaultLSPPubkey: String {
+        TestOverrides.shared.lspPubkey ?? "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
+    }
+
+    static var defaultLSPAddress: String {
+        TestOverrides.shared.lspAddress ?? "stablechannels.com:9735"
+    }
 
     // MARK: - Timing
 
@@ -43,8 +61,15 @@ enum Constants {
     static let priceFetchRetryDelayMs: UInt64 = 300
     static let priceFetchMaxRetries = 3
 
-    static let onchainWalletSyncIntervalSecs: UInt64 = 120
-    static let lightningWalletSyncIntervalSecs: UInt64 = 60
+    // E2E override shortens both (regtest blocks are on demand).
+    static var onchainWalletSyncIntervalSecs: UInt64 {
+        TestOverrides.shared.syncIntervalSecs ?? 120
+    }
+
+    static var lightningWalletSyncIntervalSecs: UInt64 {
+        TestOverrides.shared.syncIntervalSecs ?? 60
+    }
+
     static let feeRateCacheUpdateIntervalSecs: UInt64 = 1200
 
     static let invoiceExpirySecs: UInt32 = 3600
@@ -81,7 +106,14 @@ enum Constants {
 
     // MARK: - Price Feeds
 
-    static let defaultPriceFeeds: [PriceFeedConfig] = [
+    static var defaultPriceFeeds: [PriceFeedConfig] {
+        if let base = TestOverrides.shared.priceFeedBase {
+            return TestOverrides.priceFeeds(base: base)
+        }
+        return prodPriceFeeds
+    }
+
+    private static let prodPriceFeeds: [PriceFeedConfig] = [
         PriceFeedConfig(
             name: "Bitstamp",
             urlFormat: "https://www.bitstamp.net/api/v2/ticker/btcusd/",

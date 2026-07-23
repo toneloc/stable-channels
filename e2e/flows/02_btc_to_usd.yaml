@@ -1,0 +1,30 @@
+# Step 2 — BTC -> USD
+# "User converts BTC into USD exposure."
+# Selectors verified against HomeScreen.kt / SellScreen.kt.
+appId: com.stablechannels.app
+tags: [android, ios, trade]
+---
+- launchApp
+- extendedWaitUntil:
+    visible: "BTC → USD"      # disabled until channel ready
+    timeout: 30000
+- tapOn: "BTC → USD"
+
+- assertVisible: "(Amount \\(USD\\)|How much BTC to convert to USD\\?)"   # Android / iOS copy
+- tapOn: "0.00"
+- inputText: "75"      # large stable position — sized so a +1% move in flow 03 clears the $0.25 settlement threshold ($0.75 drift)
+- tapOn: "Continue"
+
+- assertVisible: "(Confirm Order|Review BTC -> USD)"
+# Confirm button is now "Confirm Order" on both platforms (iOS button was
+# relabeled from "BTC → USD" in the copy-changes PR).
+- tapOn: "Confirm Order"
+
+# SellScreen success step (SellScreen.kt:~255)
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 30000
+- tapOn: "Done"
+
+# Back on Home
+- assertVisible: "USD → BTC"

@@ -1,0 +1,49 @@
+# Step 5 — Onchain Receive
+# "User receives an onchain payment, first to the 'onchain box'; then spliced in."
+appId: com.stablechannels.app
+tags: [android, onchain, receive]
+env:
+  HARNESS_API: "http://localhost:9737"
+  SEND_SATS: "100000"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+- tapOn: "Receive"
+- tapOn: "Onchain"          # ReceiveScreen toolbar -> FundWalletScreen
+
+# Address on the Fund Wallet screen (regtest = bcrt1...)
+- extendedWaitUntil:
+    visible: "(bc|tb|bcrt)1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "(bc|tb|bcrt)1.*"
+- runScript:
+    file: helpers/send_onchain.js
+- runScript:
+    file: helpers/mine_blocks.js
+
+- tapOn: "(Back|Receive)"    # Android Back / iOS nav-back (labeled by prev screen)
+- tapOn:
+    text: "(Cancel|Done)"
+    optional: true
+
+# Deposit confirms -> the onchain card appears on Home with a Swap button
+- extendedWaitUntil:
+    visible: "(Swap|Move)"       # Android / iOS label
+    timeout: 240000              # iOS onchain sync interval is 120s
+- tapOn: "(Swap|Move)"
+
+# The sweep-start status is transient — on regtest the splice negotiates in
+# ~1s and the status moves on. Assert it opportunistically. Copy differs by
+# platform: Android "Moving all onchain funds to channel...", iOS "Fetching
+# fee rate..." then "Move pending...".
+- assertVisible:
+    text: "(Moving all onchain funds to channel|Fetching fee rate|Move pending).*"
+    optional: true
+- runScript:
+    file: helpers/mine_blocks.js
+
+# Durable signal: splice confirms, onchain drains, the Swap button clears.
+- extendedWaitUntil:
+    notVisible: "(Swap|Move)"
+    timeout: 240000

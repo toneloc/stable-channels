@@ -94,7 +94,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         when {
             lower.startsWith("lnbc") || lower.startsWith("lntb") || lower.startsWith("lnts") -> InputType.BOLT11
             lower.startsWith("lno") -> InputType.BOLT12
-            lower.startsWith("bc1") || lower.startsWith("1") || lower.startsWith("3") || lower.startsWith("tb1") -> InputType.ONCHAIN
+            // bcrt1 = regtest (E2E harness); the node validates network at send.
+            lower.startsWith("bc1") || lower.startsWith("1") || lower.startsWith("3") ||
+                lower.startsWith("tb1") || lower.startsWith("bcrt1") -> InputType.ONCHAIN
             else -> InputType.UNKNOWN
         }
     }

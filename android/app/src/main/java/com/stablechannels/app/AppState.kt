@@ -262,7 +262,7 @@ class AppState(private val context: Context) : ViewModel() {
                         return@launch
                     }
                     loadChannelFromDB()  // reload — SPS may have incremented backingSats while we waited
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(ldkNetwork(), chainUrl, null)
                     nodeStartRetryJob?.cancel()
                     nodeStartRetryJob = null
                     _phase.value = Phase.WALLET
@@ -322,7 +322,7 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(ldkNetwork(), chainUrl, null)
                     _phase.value = Phase.WALLET
                     refreshBalances()
                     reregisterPushTokenIfNeeded()
@@ -343,7 +343,7 @@ class AppState(private val context: Context) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+                nodeService.start(ldkNetwork(), chainUrl, mnemonic)
                 _phase.value = Phase.WALLET
                 refreshBalances()
                 reregisterPushTokenIfNeeded()
@@ -454,7 +454,7 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 loadChannelFromDB()
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, null)
+                nodeService.start(ldkNetwork(), chainUrl, null)
                 nodeStartRetryJob?.cancel()
                 nodeStartRetryJob = null
                 _phase.value = Phase.WALLET
@@ -1431,6 +1431,9 @@ class AppState(private val context: Context) : ViewModel() {
         }
         return null
     }
+
+    /** Network from Constants.DEFAULT_NETWORK — "regtest" only via TestOverrides (E2E). */
+    private fun ldkNetwork(): Network = Constants.LDK_NETWORK
 
     /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()

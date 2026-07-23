@@ -1,0 +1,51 @@
+# Step 1 — Onboard over Lightning
+# "User funds a Stable Channel with a Lightning payment from another app."
+# Fresh install -> receive first payment -> JIT channel opens via LSP.
+appId: com.stablechannels.app
+tags: [android, ios, onboard]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+# NOTE: no clearState here — pm clear would also wipe test_config.json and
+# relaunch the app against MAINNET. Fresh state is prepared by ../run.sh
+# (pm clear + re-push config) before maestro starts.
+- launchApp
+
+# iOS first launch shows the notifications permission dialog; Android doesn't.
+- tapOn:
+    text: "Allow"
+    optional: true
+
+# Home reachable — Receive pulses when there is no channel yet
+- extendedWaitUntil:
+    visible: "Receive"
+    timeout: 60000
+- tapOn: "Receive"
+
+# No channel yet -> JIT notice is shown (ReceiveScreen.kt:167)
+# Android and iOS word the JIT notice differently — match either.
+- assertVisible: "Get your first payment to activate your account"
+
+- tapOn: "0.00"       # amount placeholder (USD)
+- inputText: "85"     # canonical stable target — matches prod history, under the $100 JIT cap
+- tapOn: "Generate Invoice"
+
+- extendedWaitUntil:
+    visible: "(Copy|Your Lightning Invoice)"   # Android button / iOS label
+    timeout: 20000
+- copyTextFrom:
+    text: "ln.*"      # the truncated invoice text element
+- runScript:
+    file: helpers/pay_invoice.js
+
+# The app auto-dismisses the receive sheet when the payment lands — Cancel
+# only needs tapping if we beat the dismissal.
+- tapOn:
+    text: "(Cancel|Done)"   # Android: Cancel; iOS: Done
+    optional: true
+
+# Onboarded: payment banner + trade buttons enabled on Home.
+- extendedWaitUntil:
+    visible: "(Payment received|Received).*"   # Android / iOS copy
+    timeout: 120000
+- assertVisible: "USD → BTC"

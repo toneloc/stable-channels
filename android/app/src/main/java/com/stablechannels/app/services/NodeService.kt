@@ -85,13 +85,16 @@ class NodeService(private val context: Context) {
             val builder = Builder.fromConfig(config)
             builder.setChainSourceEsplora(esploraURL, null)
 
-            val rgsUrl = when (network) {
-                Network.BITCOIN -> Constants.RGSServer.BITCOIN
-                Network.SIGNET -> Constants.RGSServer.SIGNET
-                Network.TESTNET -> Constants.RGSServer.TESTNET
-                else -> Constants.RGSServer.BITCOIN
+            // Regtest (E2E harness) has no RGS server — fall back to P2P gossip.
+            if (network != Network.REGTEST) {
+                val rgsUrl = when (network) {
+                    Network.BITCOIN -> Constants.RGSServer.BITCOIN
+                    Network.SIGNET -> Constants.RGSServer.SIGNET
+                    Network.TESTNET -> Constants.RGSServer.TESTNET
+                    else -> Constants.RGSServer.BITCOIN
+                }
+                builder.setGossipSourceRgs(rgsUrl)
             }
-            builder.setGossipSourceRgs(rgsUrl)
 
             builder.setLiquiditySourceLsps2(
                 Constants.DEFAULT_LSP_PUBKEY,

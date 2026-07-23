@@ -10,6 +10,9 @@ user = []
 lsp = []
 exchange = []
 regtest = []
+# Enables E2E-only hooks such as regtest mock price feeds. Do not enable for
+# production release artifacts.
+e2e = []
 
 [dependencies]
 chrono = "0.4"
@@ -82,4 +85,3 @@ members = [
 # macOS / Linux builds.
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1"
-

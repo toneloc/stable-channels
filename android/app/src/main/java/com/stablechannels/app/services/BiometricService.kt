@@ -79,6 +79,11 @@ object BiometricService {
         reason: String,
         allowDeviceCredential: Boolean = true
     ): AuthResult {
+        // E2E harness bypass — debug builds with test_config.json only
+        // (emulators have no lock screen; the prompt would fail instantly).
+        if (com.stablechannels.app.util.TestOverrides.disableSendAuth) {
+            return AuthResult.SUCCESS
+        }
         // Check availability before showing prompt
         val biometricManager = BiometricManager.from(activity)
         val authenticators = if (allowDeviceCredential) {

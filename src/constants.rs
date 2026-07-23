@@ -153,6 +153,45 @@ impl PriceFeedConfig {
 }
 
 pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
+    // E2E hook: SC_PRICE_FEED_BASE replaces every feed with the regtest
+    // harness's /feeds/* mirrors (same JSON shapes as the real feeds), so
+    // tests can move the price deterministically. Price feeds drive settlement,
+    // so this is gated by BOTH a build-time E2E feature and runtime SC_E2E=1.
+    // Production release artifacts should never be built with the E2E feature.
+    let e2e_enabled = cfg!(feature = "e2e") && std::env::var("SC_E2E").is_ok_and(|v| v == "1");
+    if e2e_enabled {
+        if let Ok(base) = std::env::var("SC_PRICE_FEED_BASE") {
+            if !base.is_empty() {
+                return vec![
+                    PriceFeedConfig::new(
+                        "Bitstamp",
+                        &format!("{base}/feeds/bitstamp"),
+                        vec!["last"],
+                    ),
+                    PriceFeedConfig::new(
+                        "CoinGecko",
+                        &format!("{base}/feeds/coingecko"),
+                        vec!["bitcoin", "usd"],
+                    ),
+                    PriceFeedConfig::new(
+                        "Kraken",
+                        &format!("{base}/feeds/kraken"),
+                        vec!["result", "XXBTZUSD", "c"],
+                    ),
+                    PriceFeedConfig::new(
+                        "Coinbase",
+                        &format!("{base}/feeds/coinbase"),
+                        vec!["data", "amount"],
+                    ),
+                    PriceFeedConfig::new(
+                        "Blockchain.com",
+                        &format!("{base}/feeds/blockchain"),
+                        vec!["USD", "last"],
+                    ),
+                ];
+            }
+        }
+    }
     vec![
         PriceFeedConfig::new(
             "Bitstamp",
@@ -221,6 +260,20 @@ pub fn audit_log_path_for(mode: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
 
     #[test]
     fn test_sats_in_btc_constant() {
@@ -231,6 +284,26 @@ mod tests {
     fn test_default_price_feeds_not_empty() {
         let feeds = get_default_price_feeds();
         assert!(!feeds.is_empty());
+    }
+
+    #[test]
+    fn test_e2e_price_feed_override_requires_feature_and_flag() {
+        let _guard = env_lock().lock().unwrap();
+        let old_e2e = std::env::var("SC_E2E").ok();
+        let old_base = std::env::var("SC_PRICE_FEED_BASE").ok();
+
+        std::env::set_var("SC_E2E", "1");
+        std::env::set_var("SC_PRICE_FEED_BASE", "http://127.0.0.1:9737");
+
+        let feeds = get_default_price_feeds();
+        let uses_mock_feeds = feeds
+            .iter()
+            .all(|feed| feed.url_format.starts_with("http://127.0.0.1:9737"));
+
+        assert_eq!(uses_mock_feeds, cfg!(feature = "e2e"));
+
+        restore_env("SC_E2E", old_e2e);
+        restore_env("SC_PRICE_FEED_BASE", old_base);
     }
 
     #[test]

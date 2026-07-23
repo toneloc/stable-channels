@@ -1,0 +1,110 @@
+# Step 12 — Offboard Onchain
+# "User sends an onchain payment to another app. Balance shows 0."
+# Uses "Send Max" (SendScreen.kt:419). No channel at this point (post-close),
+# so this is a plain onchain send, not a splice-out.
+appId: com.stablechannels.app
+tags: [android, ios, send, onchain, offboard]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+
+# Confirm the pending channel-close output BEFORE sweeping so Send Max spends
+# the full balance in a single tx (regtest doesn't auto-mine; an unconfirmed or
+# late-confirming output otherwise lingers as a non-zero remainder and makes the
+# final settle-to-zero slow/variable).
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    visible: "Send"      # home reachable + wallet synced to the confirmed balance
+    timeout: 30000
+
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - copyTextFrom:
+          id: "home_total_balance_usd"
+      - runScript:
+          file: helpers/remember_usd_balance.js
+
+- runScript:
+    file: helpers/create_address.js
+
+- tapOn: "Send"
+# Focus the send field. Platform-split: on Android the unfocused
+# OutlinedTextField renders its LABEL ("To"); on iOS "To" is a Section header
+# ABOVE the field — tapping it focuses nothing (regression seen as an empty
+# form: input lands nowhere, no Send button appears). Tap the placeholder,
+# which is the TextField itself, on iOS.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- inputText: ${output.address}
+# Android sweeps everything via Send Max; iOS has NO send-max affordance
+# (cross-platform gap, see diff-findings) — send a fixed amount instead.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Send Max"
+      - hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "0.00"
+      - inputText: "150"
+- tapOn:
+    text: "Send"
+    index: 1
+
+- extendedWaitUntil:
+    visible: "(Done|Payment sent.*|Payment confirmed.*)"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+- runScript:
+    file: helpers/mine_blocks.js
+
+# End state: Android (swept) shows \$0; iOS keeps the remainder (no
+# send-max) — assert the balance dropped instead.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      # Balance drained to ~zero. The USD total renders as per-character text
+      # nodes ('$','0','.','0','0' — animated digits), so no node ever matches
+      # a "$0.00" regex; assert on the BTC line instead, which is one node
+      # (digit groups separated by U+2009 thin spaces — matched with '.').
+      # Accept <=999 sats of dust (Send Max can leave the onchain miner fee /
+      # a late-confirming output), mirroring the old $0.xx tolerance. The sweep
+      # confirmation + wallet re-sync is slow and variable on regtest, so allow
+      # a generous window before settling to zero.
+      - extendedWaitUntil:
+          visible: "0\\.00.000.\\d\\d\\d BTC"
+          timeout: 240000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "\\$[1-9][0-9]\\.[0-9][0-9]"
+          timeout: 240000
+      - copyTextFrom:
+          id: "home_total_balance_usd"
+      - runScript:
+          env:
+            BEFORE_USD: ${output.offboardBeforeUsd}
+            MIN_DROP_USD: "100"
+          file: helpers/assert_usd_balance_dropped.js

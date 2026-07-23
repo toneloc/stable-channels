@@ -1,0 +1,65 @@
+# Step 7 — Onchain Send
+# "User sends an onchain payment to another app." With a ready channel this
+# routes via splice-out (SendScreen.kt: result = "Splice-out initiated").
+appId: com.stablechannels.app
+tags: [android, ios, send, onchain]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp
+
+- runScript:
+    file: helpers/create_address.js
+
+- tapOn: "Send"
+# Focus the send field. Platform-split: on Android the unfocused
+# OutlinedTextField renders its LABEL ("To"); on iOS "To" is a Section header
+# ABOVE the field — tapping it focuses nothing (regression seen as an empty
+# form: input lands nowhere, no Send button appears). Tap the placeholder,
+# which is the TextField itself, on iOS.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- inputText: ${output.address}
+
+# Onchain input needs an amount. extendedWaitUntil (not a bare assert) so a slow
+# screen transition on a loaded machine doesn't race to an instant failure.
+- extendedWaitUntil:
+    visible: "(Amount \\(USD\\)|Onchain Address)"   # Android label / iOS chip
+    timeout: 20000
+- tapOn: "0.00"
+- inputText: "5"
+# Both platforms label the button "Send", colliding with the sheet title
+# -> index 1. hideKeyboard is unreliable on iOS sims (Android-only).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+
+- extendedWaitUntil:
+    visible: "Splice-out initiated"
+    timeout: 60000
+# Android shows a success screen with Done; iOS shows the inline status —
+# dismiss the sheet either way.
+- tapOn:
+    text: "(Done|Cancel)"
+    optional: true
+
+- runScript:
+    file: helpers/mine_blocks.js
+# Move pending row clears once the splice confirms
+- extendedWaitUntil:
+    notVisible: "Move pending.*"
+    timeout: 180000

@@ -14,6 +14,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.text
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
@@ -143,7 +145,10 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 text = inv.take(30) + "..." + inv.takeLast(10),
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
+                // Semantic text = FULL invoice: the visible text is truncated,
+                // which screen readers and UI automation can't use.
+                modifier = Modifier.clearAndSetSemantics { text = AnnotatedString(inv) }
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

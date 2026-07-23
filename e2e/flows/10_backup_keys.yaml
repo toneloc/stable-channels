@@ -1,0 +1,44 @@
+# Step 10 — Back Up Keys
+# "User copies from the screen."
+# Settings -> Backup -> reveal seed -> exercise copy confirmation.
+appId: com.stablechannels.app
+tags: [android, ios, keys]
+---
+- launchApp
+
+- tapOn: "Settings"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Backup"
+
+- scrollUntilVisible:
+    element:
+      text: "(Backup Seed Words|View Seed Words)"
+    direction: DOWN
+    timeout: 30000
+- tapOn: "(Backup Seed Words|View Seed Words)"
+
+- extendedWaitUntil:
+    visible: "(Copy Seed Words|Copy to Clipboard)"
+    timeout: 30000
+- tapOn: "(Copy Seed Words|Copy to Clipboard)"
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - assertVisible: "Copy Seed Phrase?"
+      - tapOn: "Copy"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - assertVisible: "Copy Seed Words?"
+      - tapOn: "Copy Anyway"
+
+- assertVisible: "Copied"
+- tapOn:
+    text: "Cancel"
+    optional: true

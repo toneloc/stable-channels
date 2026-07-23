@@ -33,7 +33,8 @@ struct SendView: View {
         } else if trimmed.hasPrefix("lno") {
             return .bolt12
         } else if trimmed.hasPrefix("bc1") || trimmed.hasPrefix("1") || trimmed.hasPrefix("3") || trimmed
-            .hasPrefix("tb1") {
+            .hasPrefix("tb1") || trimmed.hasPrefix("bcrt1") {
+            // bcrt1 = regtest (E2E harness); the node validates network at send.
             return .onchain
         }
         return .unknown

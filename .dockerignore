@@ -1,0 +1,25 @@
+# Keep the docker build context lean (sc-lsp builds with repo root as context;
+# without this the context is tens of GB).
+.git
+target/
+e2e/harness/target/
+e2e/harness/harness-data/
+e2e/harness/.env
+e2e/.last-run.log
+e2e/.dd-ios/
+e2e/.mac-user*/
+umbrel/test/.sim-app-data/
+umbrel/test/.umbrelos-data/
+umbrel/test/store-server/store-repo/
+android/
+ios/
+wiki/
+*.txt
+*.md
+*.log
+*.aab
+*.apk
+*.jks
+*.jks.enc
+tls.crt
+chart.html

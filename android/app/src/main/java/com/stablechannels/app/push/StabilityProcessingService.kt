@@ -177,7 +177,7 @@ class StabilityProcessingService : Service() {
 
             val config = Config(
                 storageDirPath = dataDir.absolutePath,
-                network = Network.BITCOIN,
+                network = Constants.LDK_NETWORK,
                 listeningAddresses = null,
                 announcementAddresses = null,
                 nodeAlias = null,
