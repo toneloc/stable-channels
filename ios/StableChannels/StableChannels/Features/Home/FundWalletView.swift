@@ -28,7 +28,11 @@ struct FundWalletView: View {
                                 let addr = try await appState.nodeService.newOnchainAddress()
                                 address = addr
                                 bitcoinURI = QRCodeUtility.generateBitcoinURI(from: addr)
+                                let oldAddr = appState.transactionLinkService.onchainReceiveAddress
                                 appState.transactionLinkService.onchainReceiveAddress = addr
+                                if let oldAddr, !oldAddr.isEmpty, oldAddr != addr {
+                                    appState.mempoolWebSocketService.untrackAddress(oldAddr)
+                                }
                                 appState.mempoolWebSocketService.trackAddress(addr)
                             } catch {
                                 loadError = error
