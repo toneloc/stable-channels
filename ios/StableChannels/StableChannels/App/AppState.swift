@@ -2254,6 +2254,7 @@ class AppState {
                 "address_known": "\(transactionLinkService.onchainReceiveAddress != nil)"
             ])
         }
+        prevOnchainSats = currentOnchain
     }
 
     private func handleWebSocketTransactionDetected(addressOrTxid: String, txid: String, amountSats: Int64) {
