@@ -64,14 +64,19 @@ final class TxidResolutionService {
             AuditService.log("RESOLVER_NOT_CONFIGURED", data: ["type": "close", "opId": opId])
             return
         }
+        var fundingTxid: String?
         if let db = databaseService,
-           let op = db.fetchPendingOperation(opId: opId),
-           let fundingTxid = op.fundingOutpointTxid {
+           let op = db.fetchPendingOperation(opId: opId) {
+            fundingTxid = op.fundingOutpointTxid
+        }
+        if let fundingTxid {
             mempoolWebSocketService?.trackTx(fundingTxid)
         }
         closeLauncher.launch(opId: opId, delaySeconds: delaySeconds) { [weak self] in
             guard let self, let db = self.databaseService else { return }
             await self.closeTxidResolver?.resolve(opId: opId, databaseService: db)
+
+            if let fundingTxid { mempoolWebSocketService?.untrackTx(fundingTxid) }
         }
     }
 
