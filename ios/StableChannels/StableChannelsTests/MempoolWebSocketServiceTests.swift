@@ -97,12 +97,14 @@ final class MempoolWebSocketServiceTests: XCTestCase {
     // MARK: - JSON Decoding via handleMessage
 
     func testAddressTransactionDecoding() {
+        let specificTxid = makeValidTxid()
         let json = makeAddressTransactionJSON(
+            txid: specificTxid,
             voutAddress: "bc1qtestaddress123",
             voutValue: 50_000
         )
 
-        let txid = makeValidTxid()
+        let txid = specificTxid
         var capturedTxid: String?
         var capturedAmount: Int64?
 
