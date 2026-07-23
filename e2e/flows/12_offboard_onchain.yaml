@@ -69,12 +69,16 @@ env:
     when:
       platform: Android
     commands:
-      # Balance drained to ~zero. Accept sub-dollar dust ($0.00–$0.xx: Send Max
-      # can leave the onchain miner fee / a late-confirming output). The sweep
+      # Balance drained to ~zero. The USD total renders as per-character text
+      # nodes ('$','0','.','0','0' — animated digits), so no node ever matches
+      # a "$0.00" regex; assert on the BTC line instead, which is one node
+      # (digit groups separated by U+2009 thin spaces — matched with '.').
+      # Accept <=999 sats of dust (Send Max can leave the onchain miner fee /
+      # a late-confirming output), mirroring the old $0.xx tolerance. The sweep
       # confirmation + wallet re-sync is slow and variable on regtest, so allow
       # a generous window before settling to zero.
       - extendedWaitUntil:
-          visible: "\\$0(\\.\\d\\d)?"
+          visible: "0\\.00.000.\\d\\d\\d BTC"
           timeout: 240000
 - runFlow:
     when:
