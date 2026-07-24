@@ -50,7 +50,7 @@ async fn run(state: AppState) {
         };
         info!("[event_loop] subscribed");
         {
-            let btc_price = stable_channels::price_feeds::get_cached_price_no_fetch();
+            let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
             if btc_price > 0.0 {
                 state
                     .stable_manager
@@ -84,7 +84,7 @@ async fn dispatch(
             return;
         },
     };
-    let btc_price = stable_channels::price_feeds::get_cached_price_no_fetch();
+    let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
     let mut mgr = state.stable_manager.lock().await;
     let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
     match envelope.event {

@@ -55,6 +55,70 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
     Some(usd_to_deduct)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverbackedRepair {
+    pub backing_sats_before: u64,
+    pub backing_sats_after: u64,
+    pub expected_usd_before: f64,
+    pub expected_usd_after: f64,
+    pub usd_deducted: f64,
+}
+
+/// Repair a persisted allocation whose stable backing exceeds the wallet's live channel balance.
+/// This is the durable-startup counterpart of outgoing-payment reconciliation: native sats are
+/// exhausted first, then the missing stable sats reduce the USD claim at the current trusted price.
+pub fn repair_overbacked_allocation(
+    sc: &mut StableChannel,
+    price: f64,
+) -> Option<OverbackedRepair> {
+    let live_receiver_sats = sc.stable_receiver_btc.sats;
+    if sc.backing_sats <= live_receiver_sats || !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+
+    let backing_sats_before = sc.backing_sats;
+    let expected_usd_before = sc.expected_usd.0.max(0.0);
+    let missing_backing_sats = backing_sats_before - live_receiver_sats;
+    let usd_deducted =
+        (missing_backing_sats as f64 / SATS_IN_BTC as f64 * price).min(expected_usd_before);
+    let expected_usd_after = (expected_usd_before - usd_deducted).max(0.0);
+
+    sc.expected_usd = USD::from_f64(expected_usd_after);
+    sc.backing_sats = if expected_usd_after < 0.01 {
+        0
+    } else {
+        live_receiver_sats
+    };
+    sc.native_sats = live_receiver_sats.saturating_sub(sc.backing_sats);
+    recompute_native(sc);
+    sc.last_stability_payment = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let repair = OverbackedRepair {
+        backing_sats_before,
+        backing_sats_after: sc.backing_sats,
+        expected_usd_before,
+        expected_usd_after,
+        usd_deducted,
+    };
+    audit_event(
+        "OVERBACKED_ALLOCATION_REPAIRED",
+        json!({
+            "user_channel_id": format!("{}", sc.user_channel_id),
+            "live_receiver_sats": live_receiver_sats,
+            "backing_sats_before": repair.backing_sats_before,
+            "backing_sats_after": repair.backing_sats_after,
+            "expected_usd_before": repair.expected_usd_before,
+            "expected_usd_after": repair.expected_usd_after,
+            "usd_deducted": repair.usd_deducted,
+            "btc_price": price,
+        }),
+    );
+    Some(repair)
+}
+
 /// Reconcile an outgoing forwarded payment on the LSP side.
 ///
 /// The LSP knows the total sats forwarded and the user's current balance.
@@ -405,6 +469,8 @@ pub struct StabilityPaymentInfo {
     pub amount_msat: u64,
     pub counterparty: String,
     pub btc_price: f64,
+    pub backing_sats_before: u64,
+    pub backing_sats_after: u64,
 }
 
 /// Check and enforce stability for a channel.
@@ -474,16 +540,7 @@ pub fn check_stability(
         current_price,
         sc.stable_receiver_btc.sats,
     );
-    if sc.backing_sats > sc.stable_receiver_btc.sats {
-        audit_event(
-            "STABILITY_SKIP",
-            json!({
-                "user_channel_id": format!("{}", sc.user_channel_id),
-                "reason": "backing exceeds live balance; awaiting spend reconciliation",
-                "backing_sats": sc.backing_sats,
-                "live_receiver_sats": sc.stable_receiver_btc.sats,
-            }),
-        );
+    if repair_overbacked_allocation(sc, current_price).is_some() {
         return None;
     }
     sc.native_sats = sc
@@ -613,6 +670,7 @@ pub fn check_stability(
             // This accounts the payment against the stable pool, not native BTC.
             // Don't recompute native_sats here — receiver balance hasn't updated yet
             // (HTLC still in flight). Native will be recomputed on next balance refresh.
+            let previous_backing = sc.backing_sats;
             let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
             sc.backing_sats = new_backing;
 
@@ -633,6 +691,8 @@ pub fn check_stability(
                 amount_msat: amt,
                 counterparty: counterparty_str,
                 btc_price: sc.latest_price,
+                backing_sats_before: previous_backing,
+                backing_sats_after: new_backing,
             })
         }
         Err(e) => {
@@ -824,6 +884,32 @@ mod tests {
         let mut sc = test_sc(500.0, 100_000.0, 300_000);
         sc.backing_sats = 0;
         assert!(reconcile_outgoing(&mut sc, 100_000.0).is_none());
+    }
+
+    #[test]
+    fn overbacked_allocation_is_repaired_from_live_balance() {
+        let mut sc = test_sc(100.0, 100_000.0, 80_000);
+        sc.backing_sats = 100_000;
+        sc.native_sats = 0;
+
+        let repair = repair_overbacked_allocation(&mut sc, 100_000.0).unwrap();
+
+        assert_eq!(repair.backing_sats_before, 100_000);
+        assert_eq!(repair.backing_sats_after, 80_000);
+        assert!((repair.usd_deducted - 20.0).abs() < 1e-6);
+        assert!((sc.expected_usd.0 - 80.0).abs() < 1e-6);
+        assert_eq!(sc.backing_sats, 80_000);
+        assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn overbacked_repair_waits_for_a_valid_price() {
+        let mut sc = test_sc(100.0, 100_000.0, 80_000);
+        sc.backing_sats = 100_000;
+
+        assert!(repair_overbacked_allocation(&mut sc, 0.0).is_none());
+        assert_eq!(sc.expected_usd.0, 100.0);
+        assert_eq!(sc.backing_sats, 100_000);
     }
 
     #[test]

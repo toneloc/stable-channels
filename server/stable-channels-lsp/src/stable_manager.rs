@@ -18,6 +18,8 @@ use stable_channels::db::Database;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
 
+const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
+
 /// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
 /// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
 /// assigns the funder's current commitment fee to the remote peer.
@@ -27,6 +29,53 @@ fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     let remote_sats = (channel.inbound_capacity_msat / 1000)
         .saturating_add(channel.counterparty_unspendable_punishment_reserve);
     (local_sats, remote_sats)
+}
+
+/// Reproduce the wallet's trade-fee calculation from the allocation transition. Buys reduce the
+/// target by the gross amount. Sells increase it by the net amount, so the gross amount must be
+/// recovered before applying the one-percent fee. The wallet pays whole sats, with a one-msat
+/// minimum for a zero-sat fee.
+fn expected_trade_fee_msat(
+    old_expected_usd: f64,
+    new_expected_usd: f64,
+    quote_price: f64,
+) -> Option<u64> {
+    let fee_rate = stable_channels::constants::STABLE_CHANNEL_TRADE_FEE_RATE;
+    if !old_expected_usd.is_finite()
+        || old_expected_usd < 0.0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd < 0.0
+        || !quote_price.is_finite()
+        || quote_price <= 0.0
+        || !fee_rate.is_finite()
+        || !(0.0..1.0).contains(&fee_rate)
+    {
+        return None;
+    }
+
+    let target_delta = (new_expected_usd - old_expected_usd).abs();
+    let gross_usd = if new_expected_usd > old_expected_usd {
+        target_delta / (1.0 - fee_rate)
+    } else {
+        target_delta
+    };
+    let fee_sats = gross_usd * fee_rate / quote_price * 100_000_000.0;
+    if !fee_sats.is_finite() || fee_sats < 0.0 || fee_sats > (u64::MAX / 1000) as f64 {
+        return None;
+    }
+
+    Some((fee_sats as u64).saturating_mul(1000).max(1))
+}
+
+fn trade_fee_tolerance_msat(expected_msat: u64, has_signed_quote: bool) -> u64 {
+    if has_signed_quote {
+        return 0;
+    }
+
+    // Transitional legacy wallets did not sign their quote. Admit the same maximum price skew as
+    // signed trades, plus one sat for whole-sat rounding, while still rejecting material underpay.
+    ((expected_msat as f64 * MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0).ceil() as u64)
+        .max(1000)
 }
 
 /// Tiny trait of the gRPC methods the manager calls, so run_tick and handlers can be unit-tested with a fake.
@@ -651,7 +700,8 @@ impl StableChannelManager {
                         );
                     }
                 }
-                self.handle_trade_message(&raw, ldk, btc_price).await;
+                self.handle_trade_message(&raw, amount_msat, ldk, btc_price)
+                    .await;
             } else {
                 if let Some(pid) = payment_id.as_deref() {
                     if let Err(e) = self.db.record_settlement(pid, "stability") {
@@ -1483,6 +1533,7 @@ impl StableChannelManager {
     pub async fn handle_trade_message(
         &mut self,
         raw: &str,
+        amount_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -1596,6 +1647,61 @@ impl StableChannelManager {
             stable_channels::audit::audit_event("TRADE_CHANNEL_UID_UNPARSEABLE", serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": chan.user_channel_id.clone() }));
             return;
         };
+        let Some(current_expected_usd) = self
+            .stable_channels
+            .iter()
+            .find(|sc| sc.user_channel_id == target_uid)
+            .map(|sc| sc.expected_usd.0)
+        else {
+            stable_channels::audit::audit_event(
+                "TRADE_STABLE_ENTRY_NOT_FOUND",
+                serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": format!("{}", target_uid) }),
+            );
+            return;
+        };
+
+        let fee_price = payload.quote_price.unwrap_or(btc_price);
+        let Some(expected_fee_msat) = expected_trade_fee_msat(
+            current_expected_usd,
+            payload.expected_usd,
+            fee_price,
+        ) else {
+            stable_channels::audit::audit_event(
+                "TRADE_FEE_INVALID",
+                serde_json::json!({
+                    "reason": "fee inputs are invalid",
+                    "old_expected_usd": current_expected_usd,
+                    "new_expected_usd": payload.expected_usd,
+                    "fee_price": fee_price,
+                    "amount_msat": amount_msat,
+                    "channel_id": chan.channel_id.clone(),
+                    "user_channel_id": chan.user_channel_id.clone(),
+                }),
+            );
+            return;
+        };
+        let tolerance_msat =
+            trade_fee_tolerance_msat(expected_fee_msat, payload.quote_price.is_some());
+        let fee_matches = amount_msat
+            .map(|actual| actual.abs_diff(expected_fee_msat) <= tolerance_msat)
+            .unwrap_or(false);
+        if !fee_matches {
+            stable_channels::audit::audit_event(
+                "TRADE_FEE_INVALID",
+                serde_json::json!({
+                    "reason": if amount_msat.is_some() { "incorrect amount" } else { "missing amount" },
+                    "actual_fee_msat": amount_msat,
+                    "expected_fee_msat": expected_fee_msat,
+                    "tolerance_msat": tolerance_msat,
+                    "old_expected_usd": current_expected_usd,
+                    "new_expected_usd": payload.expected_usd,
+                    "fee_price": fee_price,
+                    "channel_id": chan.channel_id.clone(),
+                    "user_channel_id": chan.user_channel_id.clone(),
+                }),
+            );
+            return;
+        }
         let (our_sats, their_sats) = channel_peer_balances(&chan);
         let new_expected = payload.expected_usd;
         let signed_allocation = match (payload.quote_price, payload.backing_sats) {
@@ -1621,7 +1727,6 @@ impl StableChannelManager {
 
                 // Both peers run their own price feed. Admit small observation-time differences,
                 // but reject a quote far enough away to change the economic trade materially.
-                const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
                 let quote_deviation_percent =
                     ((quote_price - btc_price) / btc_price * 100.0).abs();
                 if quote_deviation_percent > MAX_TRADE_QUOTE_DEVIATION_PERCENT {
@@ -2324,7 +2429,15 @@ mod tests {
             type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
             value: env.into_bytes().into(),
         }];
-        mgr.handle_payment_received(records, Some("pay_test_1".to_string()), None, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        let fee_msat = expected_trade_fee_msat(0.0, 8.0, 100_000.0).unwrap();
+        mgr.handle_payment_received(
+            records,
+            Some("pay_test_1".to_string()),
+            Some(fee_msat),
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 8.0).abs() < 1e-6);
         assert_eq!(
@@ -3118,6 +3231,52 @@ mod tests {
             .as_secs()
     }
 
+    async fn handle_trade_with_valid_fee(
+        mgr: &mut StableChannelManager,
+        envelope: &str,
+        ldk: &dyn LdkServerCalls,
+        lsp_price: f64,
+    ) {
+        let signed = crate::messages::parse_envelope(envelope).unwrap();
+        let payload = crate::messages::parse_trade_payload(&signed.payload).unwrap();
+        let current_expected = mgr
+            .stable_channels
+            .iter()
+            .find(|sc| {
+                payload
+                    .user_channel_id
+                    .as_deref()
+                    .and_then(parse_user_channel_id)
+                    == Some(sc.user_channel_id)
+            })
+            .map(|sc| sc.expected_usd.0)
+            .unwrap_or(0.0);
+        let fee_msat = expected_trade_fee_msat(
+            current_expected,
+            payload.expected_usd,
+            payload.quote_price.unwrap_or(lsp_price),
+        )
+        .unwrap();
+        mgr.handle_trade_message(envelope, Some(fee_msat), ldk, lsp_price)
+            .await;
+    }
+
+    #[test]
+    fn trade_fee_matches_wallet_buy_and_sell_rounding() {
+        assert_eq!(
+            expected_trade_fee_msat(100.0, 50.0, 100_000.0),
+            Some(500_000)
+        );
+        assert_eq!(
+            expected_trade_fee_msat(50.0, 99.5, 100_000.0),
+            Some(500_000)
+        );
+        assert_eq!(
+            expected_trade_fee_msat(50.0, 50.0, 100_000.0),
+            Some(1)
+        );
+    }
+
     #[tokio::test]
     async fn trade_applies_valid_target() {
         let mut mgr = make_manager();
@@ -3127,9 +3286,58 @@ mod tests {
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn trade_rejects_underpaid_signed_fee() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+        let env = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            49.95,
+            100_000.0,
+            49_950,
+        );
+
+        mgr.handle_trade_message(
+            &env,
+            Some(1),
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3164,8 +3372,13 @@ mod tests {
             100_000.0,
             49_950,
         );
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_500.0)
-            .await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_500.0,
+        )
+        .await;
 
         assert_eq!(mgr.stable_channels[0].backing_sats, 49_950);
         assert_eq!(mgr.stable_channels[0].native_sats, 50);
@@ -3209,8 +3422,13 @@ mod tests {
             100_000.0,
             49_995,
         );
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0)
-            .await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 49_995);
@@ -3247,8 +3465,13 @@ mod tests {
             100_000.0,
             49_000,
         );
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0)
-            .await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 5.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 5_000);
@@ -3264,7 +3487,13 @@ mod tests {
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 3.0, 3_000, 47_000, 50_000, 100_000.0);
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 3.0).abs() < 1e-6); // unchanged
     }
@@ -3278,7 +3507,13 @@ mod tests {
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 999.0);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 0.0).abs() < 1e-6); // unchanged
     }
@@ -3295,7 +3530,13 @@ mod tests {
         // A wallet-push lands at receiver_usd plus a sub-epsilon overshoot (independent f64 paths).
         let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD / 2.0;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!(
             (mgr.stable_channels[0].expected_usd.0 - target).abs() < 1e-6,
@@ -3311,7 +3552,13 @@ mod tests {
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 5.0, 5_000, 45_000, 50_000, 100_000.0);
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6); // unchanged
     }
@@ -3327,7 +3574,13 @@ mod tests {
         // A captured signed trade replayed a day later must be rejected (replay protection).
         let stale = test_unix_now() - 86_400;
         let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, stale);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!(
             (mgr.stable_channels[0].expected_usd.0 - 0.0).abs() < 1e-6,
@@ -3347,7 +3600,13 @@ mod tests {
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
         let stale = test_unix_now() - 86_400;
         let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, stale);
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
         let stale_ev = events.iter().find(|(e, _)| e == "TRADE_STALE")
@@ -3365,7 +3624,13 @@ mod tests {
 
         // A trade signed just now is within the window and applies normally.
         let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, test_unix_now());
-        mgr.handle_trade_message(&env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a fresh signed trade must apply");
     }

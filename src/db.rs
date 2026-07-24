@@ -23,6 +23,15 @@ pub struct PaymentPersistence {
     pub clamped: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StabilityPaymentRollback {
+    pub user_channel_id: Option<String>,
+    pub backing_sats_before: Option<u64>,
+    pub backing_sats_after: Option<u64>,
+    /// True only when the channel still held this payment's optimistic allocation and was restored.
+    pub restored: bool,
+}
+
 /// Returns true if `err` is the distinct missing-channel-row condition from
 /// `record_payment_and_maybe_update_backing` — i.e. a backing update was
 /// requested but no `channels` row exists for the user_channel_id. Callers
@@ -207,6 +216,9 @@ impl Database {
                 btc_price REAL,
                 counterparty TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
+                user_channel_id TEXT,
+                backing_sats_before INTEGER,
+                backing_sats_after INTEGER,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )",
             [],
@@ -223,6 +235,18 @@ impl Database {
             "ALTER TABLE payments ADD COLUMN fee_msat INTEGER NOT NULL DEFAULT 0",
             [],
         ); // Ignore error if column already exists
+
+        // Metadata needed to conditionally roll back an optimistic stability allocation when LDK
+        // later reports PaymentFailed. NULL values identify legacy payment rows.
+        let _ = conn.execute("ALTER TABLE payments ADD COLUMN user_channel_id TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN backing_sats_before INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN backing_sats_after INTEGER",
+            [],
+        );
 
         // Migration: Add on-chain fields to payments table
         let _ = conn.execute("ALTER TABLE payments ADD COLUMN txid TEXT", []);
@@ -1153,6 +1177,169 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Persist a sent stability payment and its optimistic channel allocation in one transaction.
+    /// The before/after values make a later PaymentFailed rollback both durable across restart and
+    /// conditional, so it cannot overwrite a newer trade, sync, or reconciliation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_pending_stability_payment(
+        &self,
+        payment_id: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: f64,
+        counterparty: &str,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats_before: u64,
+        backing_sats_after: u64,
+        native_sats: u64,
+        note: Option<&str>,
+    ) -> SqliteResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<i64> = (|| {
+            let before = i64::try_from(backing_sats_before)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            let after = i64::try_from(backing_sats_after)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            let native = i64::try_from(native_sats)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            let amount = i64::try_from(amount_msat)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+
+            conn.execute(
+                "INSERT INTO payments
+                    (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+                     counterparty, status, user_channel_id, backing_sats_before,
+                     backing_sats_after)
+                 VALUES (?1, 'stability', 'sent', ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)",
+                params![
+                    payment_id,
+                    amount,
+                    amount_usd,
+                    btc_price,
+                    counterparty,
+                    user_channel_id,
+                    before,
+                    after,
+                ],
+            )?;
+            let payment_db_id = conn.last_insert_rowid();
+
+            let updated = conn.execute(
+                "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                     note = ?4, user_channel_id = ?5, native_sats = ?6,
+                                     closed_at = NULL, updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?5",
+                params![channel_id, expected_usd, after, note, user_channel_id, native],
+            )?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO channels
+                        (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, note)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                        user_channel_id = ?2, expected_usd = ?3, stable_sats = ?4,
+                        native_sats = ?5, note = ?6, closed_at = NULL,
+                        updated_at = strftime('%s', 'now')",
+                    params![channel_id, user_channel_id, expected_usd, after, native, note],
+                )?;
+            }
+
+            Ok(payment_db_id)
+        })();
+        match result {
+            Ok(id) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(id),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Mark a pending stability payment failed and restore its prior backing only if no newer
+    /// accounting transition has replaced the optimistic after-state.
+    pub fn fail_pending_stability_payment(
+        &self,
+        payment_id: &str,
+    ) -> SqliteResult<Option<StabilityPaymentRollback>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<Option<StabilityPaymentRollback>> = (|| {
+            let row: Option<(i64, Option<String>, Option<i64>, Option<i64>)> = conn
+                .query_row(
+                    "SELECT id, user_channel_id, backing_sats_before, backing_sats_after
+                     FROM payments
+                     WHERE payment_id = ?1 AND payment_type = 'stability'
+                       AND direction = 'sent' AND status = 'pending'
+                     ORDER BY id DESC LIMIT 1",
+                    params![payment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((payment_db_id, user_channel_id, before_i64, after_i64)) = row else {
+                return Ok(None);
+            };
+
+            conn.execute(
+                "UPDATE payments SET status = 'failed' WHERE id = ?1 AND status = 'pending'",
+                params![payment_db_id],
+            )?;
+
+            let backing_sats_before = before_i64.and_then(|value| u64::try_from(value).ok());
+            let backing_sats_after = after_i64.and_then(|value| u64::try_from(value).ok());
+            let restored = match (
+                user_channel_id.as_deref(),
+                backing_sats_before,
+                backing_sats_after,
+            ) {
+                (Some(uid), Some(before), Some(after)) => {
+                    let before = i64::try_from(before).ok();
+                    let after = i64::try_from(after).ok();
+                    match (before, after) {
+                        (Some(before), Some(after)) => {
+                            conn.execute(
+                                "UPDATE channels SET stable_sats = ?1,
+                                                     updated_at = strftime('%s', 'now')
+                                 WHERE user_channel_id = ?2 AND stable_sats = ?3",
+                                params![before, uid, after],
+                            )? > 0
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+
+            Ok(Some(StabilityPaymentRollback {
+                user_channel_id,
+                backing_sats_before,
+                backing_sats_after,
+                restored,
+            }))
+        })();
+        match result {
+            Ok(rollback) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(rollback),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
     ///
     /// The dedup check runs inside `BEGIN IMMEDIATE` so concurrent writers
@@ -2013,6 +2200,88 @@ mod tests {
                 .backing_sats,
             0
         );
+    }
+
+    #[test]
+    fn failed_stability_payment_restores_its_optimistic_backing() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 100.0, 120_000, 20_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "stability-1",
+            20_000_000,
+            Some(20.0),
+            100_000.0,
+            "counterparty",
+            "channel-1",
+            "user-channel-1",
+            100.0,
+            120_000,
+            100_000,
+            20_000,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            100_000
+        );
+
+        let rollback = db
+            .fail_pending_stability_payment("stability-1")
+            .unwrap()
+            .unwrap();
+        assert!(rollback.restored);
+        assert_eq!(rollback.backing_sats_before, Some(120_000));
+        assert_eq!(rollback.backing_sats_after, Some(100_000));
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            120_000
+        );
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "failed");
+        assert!(db
+            .fail_pending_stability_payment("stability-1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn late_stability_failure_does_not_overwrite_newer_allocation() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 100.0, 120_000, 20_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "stability-1",
+            20_000_000,
+            Some(20.0),
+            100_000.0,
+            "counterparty",
+            "channel-1",
+            "user-channel-1",
+            100.0,
+            120_000,
+            100_000,
+            20_000,
+            None,
+        )
+        .unwrap();
+        db.save_channel("channel-1", "user-channel-1", 80.0, 80_000, 40_000, None)
+            .unwrap();
+
+        let rollback = db
+            .fail_pending_stability_payment("stability-1")
+            .unwrap()
+            .unwrap();
+        assert!(!rollback.restored);
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 80.0);
+        assert_eq!(channel.backing_sats, 80_000);
     }
 
     #[test]

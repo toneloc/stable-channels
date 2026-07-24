@@ -786,25 +786,6 @@ impl UserApp {
 
         {
             let mut sc = app.stable_channel.lock().unwrap();
-            if let Some(payment_info) = stable::check_stability(&app.node, &mut sc, btc_price) {
-                // Record sent stability payment as pending (confirmed on PaymentSuccessful)
-                let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
-                    * payment_info.btc_price;
-                let _ = app.db.record_payment(
-                    Some(&payment_info.payment_id),
-                    "stability",
-                    "sent",
-                    payment_info.amount_msat,
-                    Some(amount_usd),
-                    Some(payment_info.btc_price),
-                    Some(&payment_info.counterparty),
-                    "pending",
-                    None,
-                    None,
-                );
-                // Persist updated backing_sats
-                app.save_channel_settings();
-            }
             update_balances(&app.node, &mut sc);
         }
 
@@ -861,40 +842,63 @@ impl UserApp {
                     // Brief lock to update values
                     if let Ok(mut sc) = sc_arc.lock() {
                         if !node_arc.list_channels().is_empty() {
-                            if let Some(payment_info) =
-                                stable_channels::stable::check_stability(&node_arc, &mut sc, price)
+                            stable_channels::stable::update_balances(&node_arc, &mut sc);
+                            if stable_channels::stable::repair_overbacked_allocation(
+                                &mut sc, price,
+                            )
+                            .is_some()
                             {
+                                if let Err(e) = db.save_channel(
+                                    &sc.channel_id.to_string(),
+                                    &format!("{}", sc.user_channel_id),
+                                    sc.expected_usd.0,
+                                    sc.backing_sats,
+                                    sc.native_sats,
+                                    sc.note.as_deref(),
+                                ) {
+                                    audit_event(
+                                        "OVERBACKED_REPAIR_PERSIST_FAILED",
+                                        json!({
+                                            "user_channel_id": format!("{}", sc.user_channel_id),
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                }
+                            }
+
+                            if let Some(payment_info) = stable_channels::stable::check_stability(
+                                &node_arc, &mut sc, price,
+                            ) {
                                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
                                 let amount_usd =
                                     (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
                                         * payment_info.btc_price;
-                                let _ = db.record_payment(
-                                    Some(&payment_info.payment_id),
-                                    "stability",
-                                    "sent",
+                                if let Err(e) = db.record_pending_stability_payment(
+                                    &payment_info.payment_id,
                                     payment_info.amount_msat,
                                     Some(amount_usd),
-                                    Some(payment_info.btc_price),
-                                    Some(&payment_info.counterparty),
-                                    "pending",
-                                    None,
-                                    None,
-                                );
-                                payment_sent = true;
-
-                                // Persist updated backing_sats to DB
-                                let ch_id = sc.channel_id.to_string();
-                                let uch_id = format!("{}", sc.user_channel_id);
-                                if sc.expected_usd.0 > 0.0 {
-                                    let _ = db.save_channel(
-                                        &ch_id,
-                                        &uch_id,
-                                        sc.expected_usd.0,
-                                        sc.backing_sats,
-                                        sc.native_sats,
-                                        sc.note.as_deref(),
+                                    payment_info.btc_price,
+                                    &payment_info.counterparty,
+                                    &sc.channel_id.to_string(),
+                                    &format!("{}", sc.user_channel_id),
+                                    sc.expected_usd.0,
+                                    payment_info.backing_sats_before,
+                                    payment_info.backing_sats_after,
+                                    sc.native_sats,
+                                    sc.note.as_deref(),
+                                ) {
+                                    audit_event(
+                                        "STABILITY_PAYMENT_PERSIST_FAILED",
+                                        json!({
+                                            "payment_id": payment_info.payment_id,
+                                            "user_channel_id": format!("{}", sc.user_channel_id),
+                                            "backing_sats_before": payment_info.backing_sats_before,
+                                            "backing_sats_after": payment_info.backing_sats_after,
+                                            "error": e.to_string(),
+                                        }),
                                     );
                                 }
+                                payment_sent = true;
                             }
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
                         }
@@ -2117,12 +2121,46 @@ impl UserApp {
 
         // Try to load from database by user_channel_id (stable across splices)
         if let Ok(Some(record)) = self.db.load_channel(&user_channel_id_str) {
-            let mut sc = self.stable_channel.lock().unwrap();
-            sc.expected_usd = USD::from_f64(record.expected_usd);
-            sc.backing_sats = record.backing_sats;
-            sc.native_sats = record.native_sats;
-            if record.note.is_some() {
-                sc.note = record.note;
+            let repaired_snapshot = {
+                let mut sc = self.stable_channel.lock().unwrap();
+                sc.expected_usd = USD::from_f64(record.expected_usd);
+                sc.backing_sats = record.backing_sats;
+                sc.native_sats = record.native_sats;
+                if record.note.is_some() {
+                    sc.note = record.note;
+                }
+                stable::update_balances(&self.node, &mut sc);
+                let price = sc.latest_price;
+                stable::repair_overbacked_allocation(&mut sc, price).map(|_| {
+                    (
+                        sc.channel_id.to_string(),
+                        format!("{}", sc.user_channel_id),
+                        sc.expected_usd.0,
+                        sc.backing_sats,
+                        sc.native_sats,
+                        sc.note.clone(),
+                    )
+                })
+            };
+            if let Some((channel_id, user_channel_id, expected, backing, native, note)) =
+                repaired_snapshot
+            {
+                if let Err(e) = self.db.save_channel(
+                    &channel_id,
+                    &user_channel_id,
+                    expected,
+                    backing,
+                    native,
+                    note.as_deref(),
+                ) {
+                    audit_event(
+                        "OVERBACKED_REPAIR_PERSIST_FAILED",
+                        json!({
+                            "user_channel_id": user_channel_id,
+                            "error": e.to_string(),
+                        }),
+                    );
+                }
             }
             return;
         }
@@ -3181,73 +3219,147 @@ impl UserApp {
                     payment_hash,
                     reason,
                 } => {
-                    // Check if this is a pending trade payment
-                    let mut pending_trade =
-                        payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
-                    if pending_trade.is_none() {
-                        if let Some(pid) = payment_id {
-                            match self.db.get_pending_trade_by_payment_id(&format!("{pid}")) {
-                                Ok(Some(row)) => {
-                                    pending_trade = Some(PendingTradePayment {
-                                        new_expected_usd: row.new_expected_usd,
-                                        backing_sats: row.new_backing_sats,
-                                        trade_db_id: row.id,
-                                        action: row.action,
-                                    });
+                    let mut handled_stability_failure = false;
+                    if let Some(pid) = payment_id {
+                        match self
+                            .db
+                            .fail_pending_stability_payment(&format!("{pid}"))
+                        {
+                            Ok(Some(rollback)) => {
+                                handled_stability_failure = true;
+                                let mut memory_restored = false;
+                                if rollback.restored {
+                                    if let (Some(uid), Some(before), Some(after)) = (
+                                        rollback.user_channel_id.as_deref(),
+                                        rollback.backing_sats_before,
+                                        rollback.backing_sats_after,
+                                    ) {
+                                        let mut sc = self.stable_channel.lock().unwrap();
+                                        if format!("{}", sc.user_channel_id) == uid
+                                            && sc.backing_sats == after
+                                        {
+                                            sc.backing_sats = before;
+                                            sc.native_sats = sc
+                                                .stable_receiver_btc
+                                                .sats
+                                                .saturating_sub(before);
+                                            stable::recompute_native(&mut sc);
+                                            sc.last_stability_payment = 0;
+                                            sc.payment_made = false;
+                                            memory_restored = true;
+                                        }
+                                    }
                                 }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    ack = false;
-                                    audit_event(
-                                        "TRADE_PAYMENT_CLASSIFICATION_FAILED",
-                                        json!({
-                                            "payment_id": format!("{pid}"),
-                                            "context": "payment_failed",
-                                            "error": e.to_string(),
-                                        }),
-                                    );
-                                }
+
+                                audit_event(
+                                    "STABILITY_PAYMENT_FAILED_RECONCILED",
+                                    json!({
+                                        "payment_id": format!("{pid}"),
+                                        "payment_hash": payment_hash.map(|h| format!("{h}")),
+                                        "reason": format!("{:?}", reason),
+                                        "user_channel_id": rollback.user_channel_id,
+                                        "backing_sats_before": rollback.backing_sats_before,
+                                        "backing_sats_after": rollback.backing_sats_after,
+                                        "database_restored": rollback.restored,
+                                        "memory_restored": memory_restored,
+                                    }),
+                                );
+                                self.status_message = if rollback.restored {
+                                    "Stability payment failed; allocation restored".to_string()
+                                } else {
+                                    "Stability payment failed; newer allocation preserved"
+                                        .to_string()
+                                };
+                                self.show_toast("Stability payment failed", "X");
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                handled_stability_failure = true;
+                                ack = false;
+                                audit_event(
+                                    "STABILITY_PAYMENT_FAILURE_PERSIST_FAILED",
+                                    json!({
+                                        "payment_id": format!("{pid}"),
+                                        "error": e.to_string(),
+                                    }),
+                                );
                             }
                         }
                     }
 
-                    if let Some(trade) = pending_trade {
-                        // Trade payment failed — mark as failed, don't apply trade
-                        let _ = self.db.update_trade_status(trade.trade_db_id, "failed");
-
-                        audit_event(
-                            "TRADE_FAILED",
-                            json!({
-                                "payment_hash": payment_hash.map(|h| format!("{h}")),
-                                "action": trade.action,
-                                "new_expected_usd": trade.new_expected_usd,
-                                "reason": format!("{:?}", reason),
-                            }),
-                        );
-
-                        let verb =
-                            if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
-                        self.status_message = format!("{} order failed: {:?}", verb, reason);
-                        self.show_toast(&format!("{} order failed", verb), "X");
-                    } else if ack {
-                        // Check if this is a pending outgoing payment
-                        let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
-                        if let Some(p) = pending {
-                            let _ = self
-                                .db
-                                .update_payment_status(p.payment_db_id, "failed", None);
+                    if !handled_stability_failure {
+                        // Check if this is a pending trade payment
+                        let mut pending_trade =
+                            payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                        if pending_trade.is_none() {
+                            if let Some(pid) = payment_id {
+                                match self.db.get_pending_trade_by_payment_id(&format!("{pid}")) {
+                                    Ok(Some(row)) => {
+                                        pending_trade = Some(PendingTradePayment {
+                                            new_expected_usd: row.new_expected_usd,
+                                            backing_sats: row.new_backing_sats,
+                                            trade_db_id: row.id,
+                                            action: row.action,
+                                        });
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        ack = false;
+                                        audit_event(
+                                            "TRADE_PAYMENT_CLASSIFICATION_FAILED",
+                                            json!({
+                                                "payment_id": format!("{pid}"),
+                                                "context": "payment_failed",
+                                                "error": e.to_string(),
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
                         }
 
-                        audit_event(
-                            "PAYMENT_FAILED",
-                            json!({
-                                "payment_hash": payment_hash.map(|h| format!("{h}")),
-                                "reason": format!("{:?}", reason),
-                            }),
-                        );
+                        if let Some(trade) = pending_trade {
+                            // Trade payment failed — mark as failed, don't apply trade
+                            let _ = self.db.update_trade_status(trade.trade_db_id, "failed");
 
-                        self.status_message = format!("Payment failed: {:?}", reason);
-                        self.show_toast("Payment failed", "X");
+                            audit_event(
+                                "TRADE_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash.map(|h| format!("{h}")),
+                                    "action": trade.action,
+                                    "new_expected_usd": trade.new_expected_usd,
+                                    "reason": format!("{:?}", reason),
+                                }),
+                            );
+
+                            let verb = if trade.action == "buy" {
+                                "USD → BTC"
+                            } else {
+                                "BTC → USD"
+                            };
+                            self.status_message = format!("{} order failed: {:?}", verb, reason);
+                            self.show_toast(&format!("{} order failed", verb), "X");
+                        } else if ack {
+                            // Check if this is a pending outgoing payment
+                            let pending =
+                                payment_id.and_then(|pid| self.pending_payments.remove(&pid));
+                            if let Some(p) = pending {
+                                let _ = self
+                                    .db
+                                    .update_payment_status(p.payment_db_id, "failed", None);
+                            }
+
+                            audit_event(
+                                "PAYMENT_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash.map(|h| format!("{h}")),
+                                    "reason": format!("{:?}", reason),
+                                }),
+                            );
+
+                            self.status_message = format!("Payment failed: {:?}", reason);
+                            self.show_toast("Payment failed", "X");
+                        }
                     }
                 }
 

@@ -9,7 +9,7 @@ use sc_protos::stable::{
     ListSettlementPaymentsResponse, ListStableChannelsRequest, ListStableChannelsResponse,
     SettlementPayment, StableChannelInfo,
 };
-use stable_channels::price_feeds::get_cached_price_no_fetch;
+use stable_channels::price_feeds::get_fresh_cached_price_no_fetch;
 
 use crate::handlers::{decode_body, error_response, ok_response};
 use crate::stable_manager::EditOutcome;
@@ -23,7 +23,7 @@ pub async fn list_stable_channels(
         return resp;
     }
 
-    let latest_price = get_cached_price_no_fetch();
+    let latest_price = get_fresh_cached_price_no_fetch();
 
     let mgr = state.stable_manager.lock().await;
     let channels = mgr
@@ -54,7 +54,7 @@ pub async fn edit_stable_channel(
         Err(resp) => return resp,
     };
 
-    let btc_price = stable_channels::price_feeds::get_cached_price_no_fetch();
+    let btc_price = get_fresh_cached_price_no_fetch();
 
     let EditOutcome { ok, status } = {
         let mut mgr = state.stable_manager.lock().await;
