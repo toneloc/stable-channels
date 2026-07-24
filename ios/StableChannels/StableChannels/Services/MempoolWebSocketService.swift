@@ -1,6 +1,8 @@
 import Foundation
 import os.log
 
+// MARK: - Model
+
 struct MempoolWSBlock: Decodable {
     let height: UInt32
 }
@@ -57,11 +59,12 @@ struct MempoolWSMessage: Decodable {
 /// Manages a native Swift `URLSessionWebSocketTask` connection to Mempool.space
 /// for real-time sub-second incoming payment alerts, txid resolution, and block tip updates.
 @MainActor
-final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
+final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, MempoolWebSocketProtocol {
     private(set) var isConnected: Bool = false
     private let wsEndpointURL: URL
     private let logger = Logger(subsystem: "com.stablechannels", category: "websocket")
     private let decoder = JSONDecoder()
+    private let matcher = TransactionMatcher()
 
     private var urlSession: URLSession?
     private var webSocketTask: URLSessionWebSocketTask?
@@ -70,7 +73,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
     private var pendingOutboundMessages: [String] = []
     private var processedTxids: [String: Date] = [:]
     private let processedTxidTTL: TimeInterval = 900 // 15 minutes
-    private var processedTxidPurgeCounter: Int = 0
+    private var lastPurgeTime: Date = .distantPast
     private var isManualDisconnect: Bool = false
     private var reconnectTask: Task<Void, Never>?
 
@@ -85,18 +88,18 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         super.init()
     }
 
+    // MARK: - Connection Lifecycle
+
     /// Establishes the WebSocket connection and starts the message listener loop.
     func connect() {
         guard !isConnected else { return }
 
-        // Cancel any existing task and reconnect loop before creating a new one
         reconnectTask?.cancel()
         reconnectTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isManualDisconnect = false
 
-        // Invalidate old session to prevent resource leaks
         urlSession?.invalidateAndCancel()
         let config = URLSessionConfiguration.default
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
@@ -106,7 +109,6 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         webSocketTask?.resume()
 
         logger.info("[WebSocket] Initiated connection to \(self.wsEndpointURL.absoluteString)")
-        // Note: isConnected is set to true in urlSession(_:didOpenWithProtocol:)
     }
 
     nonisolated func urlSession(
@@ -120,16 +122,9 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
             self.logger.info("[WebSocket] Connected to Mempool WebSocket successfully")
             AuditService.log("WEBSOCKET_CONNECTED", data: ["url": self.wsEndpointURL.absoluteString])
 
-            // Re-subscribe to any previously tracked addresses and txids
             self.syncTracking()
-
-            // Subscribe to real-time block header updates
             self.trackBlocks()
-
-            // Flush any pending outbound messages buffered while disconnected
             self.flushPendingMessages()
-
-            // Start async listening loop
             self.receiveMessages()
         }
     }
@@ -148,6 +143,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         logger.info("[WebSocket] Disconnected gracefully")
         AuditService.log("WEBSOCKET_DISCONNECTED", data: [:])
     }
+
+    // MARK: - Tracking
 
     /// Subscribes to real-time mempool transactions for a specific Bitcoin address.
     func trackAddress(_ address: String) {
@@ -204,39 +201,19 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         send(payload)
     }
 
-    private func syncTracking() {
-        let addresses = Array(trackedAddresses)
-        if !addresses.isEmpty {
-            if let data = try? JSONSerialization.data(withJSONObject: ["track-addresses": addresses]),
-               let text = String(data: data, encoding: .utf8) {
-                send(text)
-            }
-        } else {
-            send("{ \"track-addresses\": [] }")
-        }
-
-        let txids = Array(trackedTxids)
-        if !txids.isEmpty {
-            if let data = try? JSONSerialization.data(withJSONObject: ["track-txs": txids]),
-               let text = String(data: data, encoding: .utf8) {
-                send(text)
-            }
-        } else {
-            send("{ \"track-txs\": [] }")
-        }
-    }
+    // MARK: - Send
 
     func send(_ text: String) {
         guard isConnected, let webSocketTask else {
             logger.debug("[WebSocket] Outbound message buffered while offline: \(text)")
             pendingOutboundMessages.append(text)
-            // Cap pending queue at 50 entries — drop oldest if exceeded
             if pendingOutboundMessages.count > 50 {
                 pendingOutboundMessages.removeFirst()
             }
             return
         }
-        webSocketTask.send(.string(text)) { error in
+        webSocketTask.send(.string(text)) { [weak self] error in
+            guard let self else { return }
             if let error {
                 self.logger.error("[WebSocket] Send error: \(error.localizedDescription)")
                 AuditService.log("WEBSOCKET_SEND_ERROR", data: ["error": error.localizedDescription])
@@ -253,6 +230,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
             send(msg)
         }
     }
+
+    // MARK: - Receive
 
     private func receiveMessages() {
         webSocketTask?.receive { [weak self] result in
@@ -277,7 +256,6 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
                     self.logger.warning("WebSocket connection dropped: \(error.localizedDescription)")
                     self.isConnected = false
                     self.webSocketTask = nil
-                    // Auto-reconnect off MainActor to avoid freezing UI
                     if !self.isManualDisconnect {
                         self.reconnectTask?.cancel()
                         self.reconnectTask = Task.detached { [weak self] in
@@ -297,6 +275,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    // MARK: - Dedup
+
     private func isRecentlyProcessed(_ txid: String) -> Bool {
         guard let lastSeen = processedTxids[txid] else { return false }
         return Date().timeIntervalSince(lastSeen) < processedTxidTTL
@@ -304,15 +284,25 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
 
     private func recordProcessedTx(_ txid: String) {
         processedTxids[txid] = Date()
-        processedTxidPurgeCounter += 1
-        if processedTxidPurgeCounter >= 50 {
-            let cutoff = Date().timeIntervalSince1970 - processedTxidTTL
-            processedTxids = processedTxids.filter { _, date in
-                date.timeIntervalSince1970 > cutoff
-            }
-            processedTxidPurgeCounter = 0
-        }
+        maybePurgeProcessedTxs()
     }
+
+    /// Purge expired entries at most every 5 minutes.
+    /// A time-based purge prevents unbounded growth for low-activity wallets
+    /// that never hit the old 50-entry counter threshold.
+    private func maybePurgeProcessedTxs() {
+        let now = Date()
+        if now.timeIntervalSince(lastPurgeTime) < 300 {
+            return
+        }
+        let cutoff = now.timeIntervalSince1970 - processedTxidTTL
+        processedTxids = processedTxids.filter { _, date in
+            date.timeIntervalSince1970 > cutoff
+        }
+        lastPurgeTime = now
+    }
+
+    // MARK: - Message Handling
 
     func handleMessage(_ text: String) {
         guard let data = text.data(using: .utf8) else { return }
@@ -323,40 +313,25 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
             return
         }
 
-        // 1. Process all transaction payloads (unconfirmed and confirmed)
-        var allTxs: [MempoolWSTransaction] = []
-        allTxs.append(contentsOf: msg.addressTransactions ?? [])
-        allTxs.append(contentsOf: msg.blockTransactions ?? [])
+        // 1. Process all transaction payloads (mempool, confirmed, removed)
+        let allTxs = aggregateTransactions(from: msg)
 
-        if let multi = msg.multiAddressTransactions {
-            for (_, txGroup) in multi {
-                allTxs.append(contentsOf: txGroup.mempool ?? [])
-                allTxs.append(contentsOf: txGroup.confirmed ?? [])
-            }
-        }
-
-        if let tracked = msg.trackedTxs {
-            for (_, tx) in tracked {
-                allTxs.append(tx)
-            }
-        }
         for tx in allTxs {
             let txid = tx.txid
             guard ResilientEsploraClient.isValidTxid(txid) else { continue }
             if isRecentlyProcessed(txid) { continue }
             recordProcessedTx(txid)
 
-            let targetMatch = findMatchingTarget(msg: msg, tx: tx)
-            if let targetKey = targetMatch.0 {
-                let isTxid = targetMatch.1
-                var amountSats: Int64 = 0
-                if let vouts = tx.vout {
-                    for vout in vouts {
-                        if vout.scriptpubkeyAddress == targetKey, let val = vout.value {
-                            amountSats += val
-                        }
-                    }
-                }
+            let match = matcher.match(
+                trackedAddresses: trackedAddresses,
+                trackedTxids: trackedTxids,
+                msg: msg,
+                tx: tx
+            )
+            if let targetKey = match.target {
+                let isTxid = match.isTxid
+                let amountSats = sumAmount(for: tx, target: targetKey)
+
                 logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
                 AuditService.log(
                     "WEBSOCKET_MATCH_DETECTED",
@@ -366,7 +341,10 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
             }
         }
 
-        // 2. Check for block header payload
+        // 2. Handle removed transactions (RBF replacements)
+        handleRemovedTransactions(msg)
+
+        // 3. Check for block header payload
         if let block = msg.block {
             let height = block.height
             logger.info("Real-time block header received via WebSocket: \(height)")
@@ -375,46 +353,79 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
-    func findMatchingTarget(msg: MempoolWSMessage, tx: MempoolWSTransaction) -> (String?, Bool) {
-        // Direct address in response JSON
-        if let respAddr = msg.address, trackedAddresses.contains(respAddr) {
-            return (respAddr, false)
-        }
-        // Match output scriptpubkey_address
-        if let vouts = tx.vout {
-            for vout in vouts {
-                if let addr = vout.scriptpubkeyAddress, trackedAddresses.contains(addr) {
-                    return (addr, false)
-                }
-            }
-        }
-        // Match input txid (outspend of tracked funding txid)
-        if let vins = tx.vin {
-            for vin in vins {
-                if let inputTxid = vin.txid, trackedTxids.contains(inputTxid) {
-                    return (inputTxid, true)
-                }
-            }
-        }
-        // Match tracked txids directly
-        if let respTxid = msg.txid, trackedTxids.contains(respTxid) {
-            return (respTxid, true)
-        }
-        // Match bulk tracked-txs dictionary keys
-        if let _ = msg.trackedTxs?[tx.txid], trackedTxids.contains(tx.txid) {
-            return (tx.txid, true)
-        }
-        // Match bulk multi-address-transactions dictionary keys
+    private func aggregateTransactions(from msg: MempoolWSMessage) -> [MempoolWSTransaction] {
+        var allTxs: [MempoolWSTransaction] = []
+        allTxs.append(contentsOf: msg.addressTransactions ?? [])
+        allTxs.append(contentsOf: msg.blockTransactions ?? [])
+
         if let multi = msg.multiAddressTransactions {
-            for (addr, txGroup) in multi {
-                guard trackedAddresses.contains(addr) else { continue }
-                if (txGroup.mempool?.contains(where: { $0.txid == tx.txid }) == true) ||
-                    (txGroup.confirmed?.contains(where: { $0.txid == tx.txid }) == true) {
-                    return (addr, false)
-                }
+            for (_, txGroup) in multi {
+                allTxs.append(contentsOf: txGroup.mempool ?? [])
+                allTxs.append(contentsOf: txGroup.confirmed ?? [])
+                allTxs.append(contentsOf: txGroup.removed ?? [])
             }
         }
 
-        return (nil, false)
+        if let tracked = msg.trackedTxs {
+            for (_, tx) in tracked {
+                allTxs.append(tx)
+            }
+        }
+        return allTxs
+    }
+
+    /// RBF-replaced transactions land in the `removed` array.
+    /// Fire the callback with amount = 0 so callers can retract a pending payment.
+    private func handleRemovedTransactions(_ msg: MempoolWSMessage) {
+        if let multi = msg.multiAddressTransactions {
+            for (addr, txGroup) in multi {
+                guard trackedAddresses.contains(addr) else { continue }
+                for tx in txGroup.removed ?? [] {
+                    let txid = tx.txid
+                    guard ResilientEsploraClient.isValidTxid(txid) else { continue }
+                    if isRecentlyProcessed(txid) { continue }
+                    recordProcessedTx(txid)
+                    logger.info("RBF replacement detected for \(addr): \(txid)")
+                    AuditService.log("WEBSOCKET_TX_REMOVED", data: ["target": addr, "txid": txid])
+                    onTransactionDetected?(addr, false, txid, 0)
+                }
+            }
+        }
+    }
+
+    private func sumAmount(for tx: MempoolWSTransaction, target: String) -> Int64 {
+        var amountSats: Int64 = 0
+        if let vouts = tx.vout {
+            for vout in vouts {
+                if vout.scriptpubkeyAddress == target, let val = vout.value {
+                    amountSats += val
+                }
+            }
+        }
+        return amountSats
+    }
+
+    // MARK: - Tracking Sync
+
+    private func syncTracking() {
+        let addresses = Array(trackedAddresses)
+        if !addresses.isEmpty {
+            if let data = try? JSONSerialization.data(withJSONObject: ["track-addresses": addresses]),
+               let text = String(data: data, encoding: .utf8) {
+                send(text)
+            }
+        } else {
+            send("{ \"track-addresses\": [] }")
+        }
+
+        let txids = Array(trackedTxids)
+        if !txids.isEmpty {
+            if let data = try? JSONSerialization.data(withJSONObject: ["track-txs": txids]),
+               let text = String(data: data, encoding: .utf8) {
+                send(text)
+            }
+        } else {
+            send("{ \"track-txs\": [] }")
+        }
     }
 }

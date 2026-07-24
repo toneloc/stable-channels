@@ -75,7 +75,7 @@ class AppState {
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
-    let mempoolWebSocketService = MempoolWebSocketService()
+    let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
 
     // MARK: - State
 

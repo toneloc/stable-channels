@@ -11,7 +11,7 @@ final class TxidResolutionService {
 
     // Owned by AppState.
     weak var databaseService: DatabaseService?
-    weak var mempoolWebSocketService: MempoolWebSocketService?
+    weak var mempoolWebSocketService: (any MempoolWebSocketProtocol)?
 
     private var closeTxidResolver: CloseTxidResolver?
     private var onchainTxidResolver: OnchainTxidResolver?
