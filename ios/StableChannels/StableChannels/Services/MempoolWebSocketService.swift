@@ -51,7 +51,7 @@ struct MempoolWSMessage: Decodable {
 /// Manages a native Swift `URLSessionWebSocketTask` connection to Mempool.space
 /// for real-time sub-second incoming payment alerts, txid resolution, and block tip updates.
 @MainActor
-final class MempoolWebSocketService {
+final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
     private(set) var isConnected: Bool = false
     private let wsEndpointURL: URL
     private let logger = Logger(subsystem: "com.stablechannels", category: "websocket")
@@ -66,22 +66,26 @@ final class MempoolWebSocketService {
     private let processedTxidTTL: TimeInterval = 900 // 15 minutes
     private var processedTxidPurgeCounter: Int = 0
     private var isManualDisconnect: Bool = false
+    private var reconnectTask: Task<Void, Never>?
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
-    var onTransactionDetected: ((_ addressOrTxid: String, _ txid: String, _ amountSats: Int64) -> Void)?
+    var onTransactionDetected: ((_ target: String, _ isTxid: Bool, _ txid: String, _ amountSats: Int64) -> Void)?
 
     /// Fired when a new block header is mined.
     var onBlockHeader: ((_ height: UInt32) -> Void)?
 
     init(endpointURL: URL = URL(string: "wss://mempool.space/api/v1/ws")!) {
         self.wsEndpointURL = endpointURL
+        super.init()
     }
 
     /// Establishes the WebSocket connection and starts the message listener loop.
     func connect() {
         guard !isConnected else { return }
 
-        // Cancel any existing task before creating a new one
+        // Cancel any existing task and reconnect loop before creating a new one
+        reconnectTask?.cancel()
+        reconnectTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isManualDisconnect = false
@@ -89,49 +93,47 @@ final class MempoolWebSocketService {
         // Invalidate old session to prevent resource leaks
         urlSession?.invalidateAndCancel()
         let config = URLSessionConfiguration.default
-        let session = URLSession(configuration: config)
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         self.urlSession = session
 
         webSocketTask = session.webSocketTask(with: wsEndpointURL)
         webSocketTask?.resume()
-        isConnected = true
 
-        logger.info("[WebSocket] Connected to Mempool WebSocket at \(self.wsEndpointURL.absoluteString)")
-        AuditService.log("WEBSOCKET_CONNECTED", data: ["url": wsEndpointURL.absoluteString])
+        logger.info("[WebSocket] Initiated connection to \(self.wsEndpointURL.absoluteString)")
+        // Note: isConnected is set to true in urlSession(_:didOpenWithProtocol:)
+    }
 
-        // Re-subscribe to any previously tracked addresses and txids
-        for address in trackedAddresses {
-            sendTrackAddress(address)
+    nonisolated func urlSession(
+        _: URLSession,
+        webSocketTask _: URLSessionWebSocketTask,
+        didOpenWithProtocol _: String?
+    ) {
+        Task { @MainActor in
+            guard !self.isManualDisconnect else { return }
+            self.isConnected = true
+            self.logger.info("[WebSocket] Connected to Mempool WebSocket successfully")
+            AuditService.log("WEBSOCKET_CONNECTED", data: ["url": self.wsEndpointURL.absoluteString])
+
+            // Re-subscribe to any previously tracked addresses and txids
+            self.syncTracking()
+
+            // Subscribe to real-time block header updates
+            self.trackBlocks()
+
+            // Flush any pending outbound messages buffered while disconnected
+            self.flushPendingMessages()
+
+            // Start async listening loop
+            self.receiveMessages()
         }
-        for txid in trackedTxids {
-            sendTrackTx(txid)
-        }
-
-        // Subscribe to real-time block header updates
-        trackBlocks()
-
-        // Flush any pending outbound messages buffered while disconnected
-        flushPendingMessages()
-
-        // Start async listening loop
-        receiveMessages()
     }
 
     /// Disconnects the WebSocket gracefully and invalidates the session.
     func disconnect() {
         isManualDisconnect = true
-        if isConnected {
-            for address in trackedAddresses {
-                send("""
-                { "untrack-address": "\(address)" }
-                """)
-            }
-            for txid in trackedTxids {
-                send("""
-                { "untrack-tx": "\(txid)" }
-                """)
-            }
-        }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         urlSession?.invalidateAndCancel()
@@ -147,8 +149,9 @@ final class MempoolWebSocketService {
         trackedAddresses.insert(address)
         logger.info("[WebSocket] Registered address to watch: \(address)")
         AuditService.log("WEBSOCKET_TRACK_ADDRESS", data: ["address": address])
+
         if isConnected {
-            sendTrackAddress(address)
+            syncTracking()
         } else {
             connect()
         }
@@ -159,9 +162,7 @@ final class MempoolWebSocketService {
         trackedAddresses.remove(address)
         logger.info("[WebSocket] Untracked address: \(address)")
         if isConnected {
-            send("""
-            { "untrack-address": "\(address)" }
-            """)
+            syncTracking()
         }
     }
 
@@ -171,8 +172,9 @@ final class MempoolWebSocketService {
         trackedTxids.insert(txid)
         logger.info("[WebSocket] Registered txid to watch: \(txid)")
         AuditService.log("WEBSOCKET_TRACK_TX", data: ["txid": txid])
+
         if isConnected {
-            sendTrackTx(txid)
+            syncTracking()
         } else {
             connect()
         }
@@ -183,9 +185,7 @@ final class MempoolWebSocketService {
         trackedTxids.remove(txid)
         logger.info("[WebSocket] Untracked txid: \(txid)")
         if isConnected {
-            send("""
-            { "untrack-tx": "\(txid)" }
-            """)
+            syncTracking()
         }
     }
 
@@ -198,18 +198,26 @@ final class MempoolWebSocketService {
         send(payload)
     }
 
-    private func sendTrackAddress(_ address: String) {
-        let payload = """
-        { "track-address": "\(address)" }
-        """
-        send(payload)
-    }
+    private func syncTracking() {
+        let addresses = Array(trackedAddresses)
+        if !addresses.isEmpty {
+            if let data = try? JSONSerialization.data(withJSONObject: ["track-addresses": addresses]),
+               let text = String(data: data, encoding: .utf8) {
+                send(text)
+            }
+        } else {
+            send("{ \"track-addresses\": [] }")
+        }
 
-    private func sendTrackTx(_ txid: String) {
-        let payload = """
-        { "track-tx": "\(txid)" }
-        """
-        send(payload)
+        let txids = Array(trackedTxids)
+        if !txids.isEmpty {
+            if let data = try? JSONSerialization.data(withJSONObject: ["track-txs": txids]),
+               let text = String(data: data, encoding: .utf8) {
+                send(text)
+            }
+        } else {
+            send("{ \"track-txs\": [] }")
+        }
     }
 
     func send(_ text: String) {
@@ -265,10 +273,16 @@ final class MempoolWebSocketService {
                     self.webSocketTask = nil
                     // Auto-reconnect off MainActor to avoid freezing UI
                     if !self.isManualDisconnect {
-                        Task.detached { [weak self] in
-                            try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            await MainActor.run {
-                                self?.connect()
+                        self.reconnectTask?.cancel()
+                        self.reconnectTask = Task.detached { [weak self] in
+                            do {
+                                try await Task.sleep(nanoseconds: 3_000_000_000)
+                                await MainActor.run {
+                                    guard let self, !self.isManualDisconnect else { return }
+                                    self.connect()
+                                }
+                            } catch {
+                                // Task was cancelled
                             }
                         }
                     }
@@ -311,8 +325,9 @@ final class MempoolWebSocketService {
             if isRecentlyProcessed(txid) { return }
             recordProcessedTx(txid)
 
-            let targetKey = findMatchingTarget(msg: msg, firstTx: firstTx)
-            if let targetKey {
+            let targetMatch = findMatchingTarget(msg: msg, firstTx: firstTx)
+            if let targetKey = targetMatch.0 {
+                let isTxid = targetMatch.1
                 var amountSats: Int64 = 0
                 if let vouts = firstTx.vout {
                     for vout in vouts {
@@ -324,9 +339,9 @@ final class MempoolWebSocketService {
                 logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
                 AuditService.log(
                     "WEBSOCKET_MATCH_DETECTED",
-                    data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)"]
+                    data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)", "is_txid": "\(isTxid)"]
                 )
-                onTransactionDetected?(targetKey, txid, amountSats)
+                onTransactionDetected?(targetKey, isTxid, txid, amountSats)
             }
         }
 
@@ -339,16 +354,16 @@ final class MempoolWebSocketService {
         }
     }
 
-    func findMatchingTarget(msg: MempoolWSMessage, firstTx: MempoolWSTransaction) -> String? {
+    func findMatchingTarget(msg: MempoolWSMessage, firstTx: MempoolWSTransaction) -> (String?, Bool) {
         // Direct address in response JSON
         if let respAddr = msg.address, trackedAddresses.contains(respAddr) {
-            return respAddr
+            return (respAddr, false)
         }
         // Match output scriptpubkey_address
         if let vouts = firstTx.vout {
             for vout in vouts {
                 if let addr = vout.scriptpubkeyAddress, trackedAddresses.contains(addr) {
-                    return addr
+                    return (addr, false)
                 }
             }
         }
@@ -356,17 +371,17 @@ final class MempoolWebSocketService {
         if let vins = firstTx.vin {
             for vin in vins {
                 if let addr = vin.prevout?.scriptpubkeyAddress, trackedAddresses.contains(addr) {
-                    return addr
+                    return (addr, false)
                 }
                 if let inputTxid = vin.txid, trackedTxids.contains(inputTxid) {
-                    return inputTxid
+                    return (inputTxid, true)
                 }
             }
         }
         // Match tracked txids directly
         if let respTxid = msg.txid, trackedTxids.contains(respTxid) {
-            return respTxid
+            return (respTxid, true)
         }
-        return nil
+        return (nil, false)
     }
 }

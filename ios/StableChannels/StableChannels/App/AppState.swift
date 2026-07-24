@@ -223,10 +223,11 @@ class AppState {
                 await self?.blockHeightService.refresh()
             }
         }
-        mempoolWebSocketService.onTransactionDetected = { [weak self] addressOrTxid, txid, amountSats in
+        mempoolWebSocketService.onTransactionDetected = { [weak self] target, isTxid, txid, amountSats in
             Task { @MainActor in
                 self?.handleWebSocketTransactionDetected(
-                    addressOrTxid: addressOrTxid,
+                    target: target,
+                    isTxid: isTxid,
                     txid: txid,
                     amountSats: amountSats
                 )
@@ -2214,6 +2215,14 @@ class AppState {
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
+            if let address = transactionLinkService.onchainReceiveAddress,
+               !address.isEmpty,
+               databaseService?.hasRecentOnchainReceive(address: address, amountSats: Int64(depositSats)) == true {
+                // WebSocket already caught this and recorded it. We just update the balance.
+                prevOnchainSats = currentOnchain
+                return
+            }
+
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
 
@@ -2259,8 +2268,19 @@ class AppState {
         prevOnchainSats = currentOnchain
     }
 
-    private func handleWebSocketTransactionDetected(addressOrTxid: String, txid: String, amountSats: Int64) {
+    func handleWebSocketTransactionDetected(target: String, isTxid: Bool, txid: String, amountSats: Int64) {
         guard let db = databaseService else { return }
+
+        if isTxid {
+            // A tracked funding txid was outspent: this is a channel close!
+            // Route it directly to the resolver (target == funding txid)
+            txidResolutionService.mempoolWebSocketService?.untrackTx(target)
+            // Kick the close resolver to poll Esplora immediately now that we know it's mined/mempool'd
+            Task { @MainActor in
+                await confirmationPollingService?.pollOnce()
+            }
+            return
+        }
 
         // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
         if amountSats >= 1000 {
@@ -2279,7 +2299,7 @@ class AppState {
                     counterparty: nil,
                     status: "pending",
                     txid: txid,
-                    address: addressOrTxid
+                    address: target
                 )
                 if recorded {
                     AuditService.log(
