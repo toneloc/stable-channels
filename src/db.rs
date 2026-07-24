@@ -23,6 +23,20 @@ pub struct PaymentPersistence {
     pub clamped: bool,
 }
 
+/// Result of consuming a failed outbound stability settlement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StabilityRollback {
+    pub user_channel_id: String,
+    pub backing_sats_before: u64,
+    pub backing_sats_after: u64,
+    pub native_sats_before: u64,
+    pub expected_usd: f64,
+    pub last_stability_payment_before: i64,
+    /// False means the settlement was marked failed, but a newer allocation had already replaced
+    /// the optimistic state, so the channel row was intentionally left untouched.
+    pub applied: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StabilityPaymentRollback {
     pub user_channel_id: Option<String>,
@@ -330,6 +344,33 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN user_channel_id TEXT",
             [],
         ); // Ignore error if column already exists
+        // Outbound stability sends optimistically move backing to equilibrium. Persist the exact
+        // transition so a later asynchronous PaymentFailed can undo it without guessing or
+        // overwriting a newer trade/sync allocation.
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN backing_sats_before INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN backing_sats_after INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN native_sats_before INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN expected_usd REAL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN last_stability_payment_before INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
+            [],
+        );
 
         // Forwarded-payment dedup: tracks fingerprints of forwards already audited (live or backfilled)
         conn.execute(
@@ -1773,6 +1814,130 @@ impl Database {
         Ok(())
     }
 
+    /// Record the reversible allocation transition for an outbound stability payment.
+    /// Returns false only if the payment id was already present.
+    pub fn record_stability_settlement_with_rollback(
+        &self,
+        payment_id: &str,
+        user_channel_id: &str,
+        backing_sats_before: u64,
+        backing_sats_after: u64,
+        native_sats_before: u64,
+        expected_usd: f64,
+        last_stability_payment_before: i64,
+    ) -> SqliteResult<bool> {
+        if backing_sats_before > i64::MAX as u64
+            || backing_sats_after > i64::MAX as u64
+            || native_sats_before > i64::MAX as u64
+            || !expected_usd.is_finite()
+            || expected_usd < 0.0
+        {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO settlement_payments
+                (payment_id, kind, user_channel_id, backing_sats_before,
+                 backing_sats_after, native_sats_before, expected_usd,
+                 last_stability_payment_before)
+             VALUES (?1, 'stability', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                payment_id,
+                user_channel_id,
+                backing_sats_before as i64,
+                backing_sats_after as i64,
+                native_sats_before as i64,
+                expected_usd,
+                last_stability_payment_before,
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// Mark a settlement successful so a duplicate/conflicting failure event can never roll it
+    /// back. Returns true when this call consumed the pending outcome.
+    pub fn mark_settlement_succeeded(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE settlement_payments SET outcome = 'succeeded'
+             WHERE payment_id = ?1 AND outcome = 'pending'",
+            params![payment_id],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Consume a failed outbound stability settlement and conditionally restore its allocation.
+    /// The channel update compares the optimistic backing, native sats, and expected USD snapshot:
+    /// if a newer trade, sync, or settlement changed the allocation, that newer state wins. The
+    /// outcome is still consumed so a replay cannot accidentally roll back a future allocation.
+    pub fn rollback_failed_stability_settlement(
+        &self,
+        payment_id: &str,
+    ) -> SqliteResult<Option<StabilityRollback>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row = tx
+            .query_row(
+                "SELECT user_channel_id, backing_sats_before, backing_sats_after,
+                        native_sats_before, expected_usd, last_stability_payment_before, outcome
+                 FROM settlement_payments
+                 WHERE payment_id = ?1 AND kind = 'stability'",
+                params![payment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((Some(user_channel_id), Some(before), Some(after), Some(native_before), Some(expected_usd), last_before, outcome)) = row else {
+            return Ok(None);
+        };
+        if outcome != "pending"
+            || before < 0
+            || after < 0
+            || native_before < 0
+            || !expected_usd.is_finite()
+            || expected_usd < 0.0
+        {
+            return Ok(None);
+        }
+
+        let consumed = tx.execute(
+            "UPDATE settlement_payments SET outcome = 'failed'
+             WHERE payment_id = ?1 AND outcome = 'pending'",
+            params![payment_id],
+        )?;
+        if consumed != 1 {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let applied = tx.execute(
+            "UPDATE channels
+             SET stable_sats = ?1, native_sats = ?2, updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?3 AND stable_sats = ?4
+                   AND native_sats = ?2 AND expected_usd = ?5",
+            params![before, native_before, user_channel_id, after, expected_usd],
+        )? == 1;
+        tx.commit()?;
+
+        Ok(Some(StabilityRollback {
+            user_channel_id,
+            backing_sats_before: before as u64,
+            backing_sats_after: after as u64,
+            native_sats_before: native_before as u64,
+            expected_usd,
+            last_stability_payment_before: last_before.unwrap_or(0),
+            applied,
+        }))
+    }
+
     /// Record a forward's fingerprint. Returns true if newly inserted (not seen before).
     pub fn record_forwarded_seen(&self, fingerprint: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
@@ -1921,6 +2086,81 @@ mod tests {
         // plain record_settlement leaves user_channel_id as NULL (returns None)
         db.record_settlement("pmt2", "sync").unwrap();
         assert_eq!(db.get_settlement_channel("pmt2").unwrap(), None);
+    }
+
+    #[test]
+    fn failed_stability_settlement_rolls_back_only_its_optimistic_state() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel", "user-channel", 50.0, 50_000, 50_000, None)
+            .unwrap();
+        assert!(db
+            .record_stability_settlement_with_rollback(
+                "payment", "user-channel", 50_000, 62_500, 50_000, 50.0, 17,
+            )
+            .unwrap());
+        db.save_channel("channel", "user-channel", 50.0, 62_500, 50_000, None)
+            .unwrap();
+
+        let rollback = db
+            .rollback_failed_stability_settlement("payment")
+            .unwrap()
+            .unwrap();
+        assert!(rollback.applied);
+        assert_eq!(rollback.backing_sats_before, 50_000);
+        assert_eq!(rollback.backing_sats_after, 62_500);
+        assert_eq!(rollback.last_stability_payment_before, 17);
+        let channel = db.load_channel("user-channel").unwrap().unwrap();
+        assert_eq!(channel.backing_sats, 50_000);
+        assert_eq!(channel.native_sats, 50_000);
+        assert!(db
+            .rollback_failed_stability_settlement("payment")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn failed_stability_settlement_does_not_overwrite_newer_allocation() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel", "user-channel", 50.0, 50_000, 50_000, None)
+            .unwrap();
+        db.record_stability_settlement_with_rollback(
+            "payment", "user-channel", 50_000, 62_500, 50_000, 50.0, 0,
+        )
+        .unwrap();
+        db.save_channel("channel", "user-channel", 55.0, 70_000, 30_000, None)
+            .unwrap();
+
+        let rollback = db
+            .rollback_failed_stability_settlement("payment")
+            .unwrap()
+            .unwrap();
+        assert!(!rollback.applied);
+        let channel = db.load_channel("user-channel").unwrap().unwrap();
+        assert_eq!(channel.backing_sats, 70_000);
+        assert_eq!(channel.native_sats, 30_000);
+    }
+
+    #[test]
+    fn successful_stability_settlement_cannot_be_rolled_back() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel", "user-channel", 50.0, 62_500, 50_000, None)
+            .unwrap();
+        db.record_stability_settlement_with_rollback(
+            "payment", "user-channel", 50_000, 62_500, 50_000, 50.0, 0,
+        )
+        .unwrap();
+        assert!(db.mark_settlement_succeeded("payment").unwrap());
+        assert!(db
+            .rollback_failed_stability_settlement("payment")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            db.load_channel("user-channel")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            62_500
+        );
     }
 
     #[test]

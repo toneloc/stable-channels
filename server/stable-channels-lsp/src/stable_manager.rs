@@ -69,7 +69,10 @@ fn expected_trade_fee_msat(
 
 fn trade_fee_tolerance_msat(expected_msat: u64, has_signed_quote: bool) -> u64 {
     if has_signed_quote {
-        return 0;
+        // The wallet floors its USD fee to whole sats before sending. Reconstructing a sell's
+        // gross amount from the signed net target can land on the adjacent sat due to that lost
+        // fraction, so admit exactly one sat while still rejecting material underpayment.
+        return 1000;
     }
 
     // Transitional legacy wallets did not sign their quote. Admit the same maximum price skew as
@@ -188,6 +191,77 @@ pub struct EditOutcome {
 impl StableChannelManager {
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Consume an asynchronous failure for an outbound stability payment. The database performs
+    /// the authoritative compare-and-swap; the in-memory allocation is restored only when it is
+    /// still the exact optimistic state written by that payment.
+    pub fn handle_failed_stability_payment(
+        &mut self,
+        payment_id: &str,
+    ) -> Option<stable_channels::db::StabilityRollback> {
+        let rollback = match self.db.rollback_failed_stability_settlement(payment_id) {
+            Ok(value) => value?,
+            Err(error) => {
+                tracing::error!(
+                    "[stable] failed-payment rollback lookup failed for {}: {}",
+                    payment_id,
+                    error
+                );
+                stable_channels::audit::audit_event(
+                    "DB_WRITE_FAILED",
+                    serde_json::json!({
+                        "op": "rollback_failed_stability_settlement",
+                        "payment_id": payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return None;
+            }
+        };
+
+        if rollback.applied {
+            let rollback_user_channel_id = parse_user_channel_id(&rollback.user_channel_id);
+            if let Some(sc) = self
+                .stable_channels
+                .iter_mut()
+                .find(|sc| rollback_user_channel_id == Some(sc.user_channel_id))
+            {
+                if sc.backing_sats == rollback.backing_sats_after
+                    && sc.native_sats == rollback.native_sats_before
+                    && sc.expected_usd.0 == rollback.expected_usd
+                {
+                    sc.backing_sats = rollback.backing_sats_before;
+                    sc.native_sats = rollback.native_sats_before;
+                    sc.native_channel_btc = Bitcoin::from_sats(sc.native_sats);
+                    sc.last_stability_payment = rollback.last_stability_payment_before;
+                }
+            }
+            self.stability_throttle
+                .remove(&rollback_user_channel_id.unwrap_or_default());
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_ROLLED_BACK",
+                serde_json::json!({
+                    "payment_id": payment_id,
+                    "user_channel_id": rollback.user_channel_id,
+                    "backing_sats_before": rollback.backing_sats_before,
+                    "backing_sats_after": rollback.backing_sats_after,
+                    "restored_native_sats": rollback.native_sats_before,
+                }),
+            );
+        } else {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_ROLLBACK_SKIPPED",
+                serde_json::json!({
+                    "payment_id": payment_id,
+                    "user_channel_id": rollback.user_channel_id,
+                    "expected_optimistic_backing_sats": rollback.backing_sats_after,
+                    "reason": "allocation changed after payment was sent",
+                }),
+            );
+        }
+
+        Some(rollback)
     }
 
     pub fn new(db: Arc<Database>, data_dir: PathBuf) -> Self {
@@ -1018,28 +1092,45 @@ impl StableChannelManager {
                     let user_channel_id_clone = c.user_channel_id.clone();
                     let expected_usd_for_db = sc.expected_usd.0;
                     let note_for_db = sc.note.clone();
+                    let backing_before = sc.backing_sats;
+                    let backing_after =
+                        ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+                    let native_before = sc.native_sats;
+                    let last_stability_payment_before = sc.last_stability_payment;
                     match ldk.spontaneous_send(send_req).await {
                         Ok(resp) => {
                             if !resp.payment_id.is_empty() {
-                                if let Err(e) = self.db.record_settlement_with_channel(
+                                match self.db.record_stability_settlement_with_rollback(
                                     &resp.payment_id,
-                                    "stability",
                                     &user_channel_id_clone,
+                                    backing_before,
+                                    backing_after,
+                                    native_before,
+                                    expected_usd_for_db,
+                                    last_stability_payment_before,
                                 ) {
-                                    tracing::error!(
-                                        "[stable] record_settlement (stability) failed: {}",
-                                        e
-                                    );
-                                    stable_channels::audit::audit_event(
-                                        "DB_WRITE_FAILED",
-                                        serde_json::json!({ "op": "record_settlement", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
-                                    );
+                                    Ok(true) => {},
+                                    Ok(false) => {
+                                        stable_channels::audit::audit_event(
+                                            "DB_WRITE_FAILED",
+                                            serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": "duplicate payment id or invalid rollback metadata" }),
+                                        );
+                                    },
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "[stable] record_settlement (stability) failed: {}",
+                                            e
+                                        );
+                                        stable_channels::audit::audit_event(
+                                            "DB_WRITE_FAILED",
+                                            serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
+                                        );
+                                    },
                                 }
                             }
                             sc.last_stability_payment = now;
                             // Reset backing_sats to equilibrium so the next tick doesn't re-pay the same drift forever. Native is recomputed on the next balance refresh.
-                            sc.backing_sats =
-                                ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+                            sc.backing_sats = backing_after;
                             let backing = sc.backing_sats;
                             let native = sc.native_sats;
                             if let Err(e) = self.db.save_channel(
@@ -2910,6 +3001,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_outbound_stability_payment_restores_backing_and_cooldown() {
+        let mut mgr = make_manager();
+        let initial = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        let drift = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+
+        mgr.run_tick(&drift as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+        assert!(mgr.stable_channels[0].last_stability_payment > 0);
+
+        let rollback = mgr
+            .handle_failed_stability_payment("fake-payment-id")
+            .expect("failure should find reversible stability metadata");
+        assert!(rollback.applied);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
+        assert_eq!(mgr.stable_channels[0].native_sats, 0);
+        assert_eq!(mgr.stable_channels[0].last_stability_payment, 0);
+        assert_eq!(
+            mgr.db
+                .load_channel(USER_CHANNEL_ID_HEX)
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            50_000
+        );
+        assert!(mgr
+            .handle_failed_stability_payment("fake-payment-id")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn run_tick_skips_high_risk_channel() {
         let mut mgr = make_manager();
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, 0, 50_000, 100_000.0);
@@ -3275,6 +3422,18 @@ mod tests {
             expected_trade_fee_msat(50.0, 50.0, 100_000.0),
             Some(1)
         );
+        assert_eq!(trade_fee_tolerance_msat(114_000, true), 1_000);
+
+        // At this boundary the wallet's original gross fee floors to 113 sats, while recovering
+        // the gross sell amount from its signed net target produces 114 sats.
+        let gross_sell_usd = 7.41;
+        let fee_usd = gross_sell_usd * stable_channels::constants::STABLE_CHANNEL_TRADE_FEE_RATE;
+        let signed_net_target = gross_sell_usd - fee_usd;
+        let wallet_fee_msat = ((fee_usd / 65_000.0 * 100_000_000.0) as u64) * 1000;
+        let reconstructed = expected_trade_fee_msat(0.0, signed_net_target, 65_000.0).unwrap();
+        assert_eq!(wallet_fee_msat, 113_000);
+        assert_eq!(reconstructed, 114_000);
+        assert!(wallet_fee_msat.abs_diff(reconstructed) <= trade_fee_tolerance_msat(reconstructed, true));
     }
 
     #[tokio::test]

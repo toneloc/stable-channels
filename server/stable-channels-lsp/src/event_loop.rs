@@ -179,6 +179,18 @@ async fn dispatch(
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
+            if let Some(payment_id) = payment_id.as_deref() {
+                if let Err(error) = state.db.mark_settlement_succeeded(payment_id) {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({
+                            "op": "mark_settlement_succeeded",
+                            "payment_id": payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                }
+            }
             let user_channel_id = payment_id.as_deref()
                 .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten());
             stable_channels::audit::audit_event(
@@ -197,8 +209,16 @@ async fn dispatch(
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
-            let user_channel_id = payment_id.as_deref()
-                .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten());
+            let rollback = payment_id
+                .as_deref()
+                .and_then(|payment_id| mgr.handle_failed_stability_payment(payment_id));
+            let user_channel_id = rollback
+                .as_ref()
+                .map(|rollback| rollback.user_channel_id.clone())
+                .or_else(|| {
+                    payment_id.as_deref()
+                        .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten())
+                });
             stable_channels::audit::audit_event(
                 "PAYMENT_FAILED",
                 serde_json::json!({
@@ -207,6 +227,7 @@ async fn dispatch(
                     "fee_paid_msat": fee_paid_msat,
                     "direction": direction,
                     "user_channel_id": user_channel_id,
+                    "stability_rollback_applied": rollback.map(|rollback| rollback.applied),
                 }),
             );
         },

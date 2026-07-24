@@ -3,7 +3,7 @@ use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
     STABILITY_THRESHOLD_USD,
 };
-use crate::price_feeds::{get_cached_price, get_cached_price_no_fetch};
+use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
 use serde_json::json;
@@ -117,6 +117,57 @@ pub fn repair_overbacked_allocation(
         }),
     );
     Some(repair)
+}
+
+/// Return whether an outbound Lightning payment is still unresolved.
+///
+/// LDK temporarily removes an in-flight HTLC from `outbound_capacity_msat`. Treating that lower
+/// capacity as a settled spend would permanently reduce the stable claim if the payment later
+/// fails. On-chain payments are excluded because they remain pending until confirmation without
+/// affecting a channel's Lightning capacity.
+fn is_pending_outbound_lightning(
+    direction: ldk_node::payment::PaymentDirection,
+    status: ldk_node::payment::PaymentStatus,
+    is_onchain: bool,
+) -> bool {
+    direction == ldk_node::payment::PaymentDirection::Outbound
+        && status == ldk_node::payment::PaymentStatus::Pending
+        && !is_onchain
+}
+
+fn has_pending_outbound_lightning_payment(node: &Node) -> bool {
+    node.list_payments().iter().any(|payment| {
+        is_pending_outbound_lightning(
+            payment.direction,
+            payment.status,
+            matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }),
+        )
+    })
+}
+
+/// Repair an over-backed allocation only when the observed capacity cannot be explained by an
+/// unresolved outbound HTLC.
+pub fn repair_overbacked_allocation_if_safe(
+    node: &Node,
+    sc: &mut StableChannel,
+    price: f64,
+) -> Option<OverbackedRepair> {
+    if sc.backing_sats > sc.stable_receiver_btc.sats
+        && has_pending_outbound_lightning_payment(node)
+    {
+        audit_event(
+            "OVERBACKED_REPAIR_SKIPPED_PENDING_HTLC",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "live_receiver_sats": sc.stable_receiver_btc.sats,
+                "backing_sats": sc.backing_sats,
+                "reason": "outbound Lightning payment is still pending",
+            }),
+        );
+        return None;
+    }
+
+    repair_overbacked_allocation(sc, price)
 }
 
 /// Reconcile an outgoing forwarded payment on the LSP side.
@@ -381,7 +432,7 @@ pub fn update_balances<'update_balance_lifetime>(
     sc: &'update_balance_lifetime mut StableChannel,
 ) -> (bool, &'update_balance_lifetime mut StableChannel) {
     // Cache-only so no caller (incl. the UI thread) blocks on the network; the background loop owns refreshes.
-    let cached = get_cached_price_no_fetch();
+    let cached = get_fresh_cached_price_no_fetch();
     if cached > 0.0 {
         sc.latest_price = cached;
     }
@@ -540,7 +591,15 @@ pub fn check_stability(
         current_price,
         sc.stable_receiver_btc.sats,
     );
-    if repair_overbacked_allocation(sc, current_price).is_some() {
+    if sc.backing_sats > sc.stable_receiver_btc.sats
+        && has_pending_outbound_lightning_payment(node)
+    {
+        // Emit the common safety audit and stop the whole stability decision. Continuing with the
+        // temporarily reduced capacity could initiate another payment from a false drift signal.
+        let _ = repair_overbacked_allocation_if_safe(node, sc, current_price);
+        return None;
+    }
+    if repair_overbacked_allocation_if_safe(node, sc, current_price).is_some() {
         return None;
     }
     sc.native_sats = sc
@@ -712,6 +771,32 @@ pub fn check_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_pending_outbound_lightning_blocks_capacity_repair() {
+        use ldk_node::payment::{PaymentDirection, PaymentStatus};
+
+        assert!(is_pending_outbound_lightning(
+            PaymentDirection::Outbound,
+            PaymentStatus::Pending,
+            false,
+        ));
+        assert!(!is_pending_outbound_lightning(
+            PaymentDirection::Outbound,
+            PaymentStatus::Succeeded,
+            false,
+        ));
+        assert!(!is_pending_outbound_lightning(
+            PaymentDirection::Inbound,
+            PaymentStatus::Pending,
+            false,
+        ));
+        assert!(!is_pending_outbound_lightning(
+            PaymentDirection::Outbound,
+            PaymentStatus::Pending,
+            true,
+        ));
+    }
 
     #[test]
     fn test_get_current_price_returns_non_negative() {

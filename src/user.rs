@@ -822,29 +822,24 @@ impl UserApp {
             let mut prev_onchain_sats: u64 = node_arc.list_balances().total_onchain_balance_sats;
 
             loop {
-                // Fetch price (network call) OUTSIDE of lock
-                // Bounded timeouts so a geo-blocked/hanging price feed can't freeze this loop.
-                let price_agent = ureq::AgentBuilder::new()
-                    .timeout_connect(Duration::from_secs(5))
-                    .timeout(Duration::from_secs(10))
-                    .build();
-                let price = stable_channels::price_feeds::get_latest_price(&price_agent)
+                // Refresh the shared price state outside the channel lock. This preserves the
+                // last display value through transient failures while honoring accounting
+                // quarantine for validated large-move conflicts.
+                let price = stable_channels::price_feeds::refresh_cached_price()
                     .ok()
                     .filter(|price| *price > 0.0);
 
                 // Automatic stability payments require a freshly validated consensus price.
                 // The last trusted cached price remains available to the UI during an outage.
                 if let Some(price) = price {
-                    // Publish so the UI thread's non-blocking get_cached_price_no_fetch reads stay fresh.
-                    stable_channels::price_feeds::set_cached_price(price);
                     let mut payment_sent = false;
 
                     // Brief lock to update values
                     if let Ok(mut sc) = sc_arc.lock() {
                         if !node_arc.list_channels().is_empty() {
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
-                            if stable_channels::stable::repair_overbacked_allocation(
-                                &mut sc, price,
+                            if stable_channels::stable::repair_overbacked_allocation_if_safe(
+                                &node_arc, &mut sc, price,
                             )
                             .is_some()
                             {
@@ -2131,7 +2126,7 @@ impl UserApp {
                 }
                 stable::update_balances(&self.node, &mut sc);
                 let price = sc.latest_price;
-                stable::repair_overbacked_allocation(&mut sc, price).map(|_| {
+                stable::repair_overbacked_allocation_if_safe(&self.node, &mut sc, price).map(|_| {
                     (
                         sc.channel_id.to_string(),
                         format!("{}", sc.user_channel_id),
@@ -5265,11 +5260,7 @@ impl UserApp {
                         // Force a fresh price fetch in the background, then
                         // refresh balances from LDK + recompute USD values.
                         std::thread::spawn(|| {
-                            let agent = ureq::AgentBuilder::new()
-                                .timeout_connect(Duration::from_secs(5))
-                                .timeout(Duration::from_secs(10))
-                                .build();
-                            let _ = stable_channels::price_feeds::get_latest_price(&agent);
+                            let _ = stable_channels::price_feeds::refresh_cached_price();
                         });
                         self.update_balances();
                         self.show_toast("Refreshing…", "~");
