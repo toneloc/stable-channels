@@ -34,6 +34,12 @@ struct MempoolWSTransaction: Decodable {
     let vin: [MempoolWSVin]?
 }
 
+struct MempoolWSAddressTransactions: Decodable {
+    let mempool: [MempoolWSTransaction]?
+    let confirmed: [MempoolWSTransaction]?
+    let removed: [MempoolWSTransaction]?
+}
+
 struct MempoolWSMessage: Decodable {
     let block: MempoolWSBlock?
     let addressTransactions: [MempoolWSTransaction]?
@@ -41,12 +47,19 @@ struct MempoolWSMessage: Decodable {
     let address: String?
     let txid: String?
 
+    // Bulk tracking payloads
+    let multiAddressTransactions: [String: MempoolWSAddressTransactions]?
+    let trackedTxs: [String: MempoolWSTransaction]?
+
     enum CodingKeys: String, CodingKey {
         case block
         case addressTransactions = "address-transactions"
         case blockTransactions = "block-transactions"
         case address
         case txid
+
+        case multiAddressTransactions = "multi-address-transactions"
+        case trackedTxs = "tracked-txs"
     }
 }
 
@@ -320,7 +333,22 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         }
 
         // 1. Process all transaction payloads (unconfirmed and confirmed)
-        let allTxs = (msg.addressTransactions ?? []) + (msg.blockTransactions ?? [])
+        var allTxs: [MempoolWSTransaction] = []
+        allTxs.append(contentsOf: msg.addressTransactions ?? [])
+        allTxs.append(contentsOf: msg.blockTransactions ?? [])
+
+        if let multi = msg.multiAddressTransactions {
+            for (_, txGroup) in multi {
+                allTxs.append(contentsOf: txGroup.mempool ?? [])
+                allTxs.append(contentsOf: txGroup.confirmed ?? [])
+            }
+        }
+
+        if let tracked = msg.trackedTxs {
+            for (_, tx) in tracked {
+                allTxs.append(tx)
+            }
+        }
         for tx in allTxs {
             let txid = tx.txid
             guard ResilientEsploraClient.isValidTxid(txid) else { continue }

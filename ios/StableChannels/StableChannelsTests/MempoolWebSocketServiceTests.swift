@@ -218,7 +218,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             addressTransactions: nil,
             blockTransactions: nil,
             address: addr,
-            txid: nil
+            txid: nil,
+            multiAddressTransactions: nil,
+            trackedTxs: nil
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
@@ -242,7 +244,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             addressTransactions: [tx],
             blockTransactions: nil,
             address: nil,
-            txid: nil
+            txid: nil,
+            multiAddressTransactions: nil,
+            trackedTxs: nil
         )
 
         let result = service.findMatchingTarget(msg: msg, tx: tx)
@@ -262,7 +266,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             addressTransactions: [tx],
             blockTransactions: nil,
             address: nil,
-            txid: nil
+            txid: nil,
+            multiAddressTransactions: nil,
+            trackedTxs: nil
         )
 
         let result = service.findMatchingTarget(msg: msg, tx: tx)
@@ -279,7 +285,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             addressTransactions: nil,
             blockTransactions: nil,
             address: nil,
-            txid: trackedTxid
+            txid: trackedTxid,
+            multiAddressTransactions: nil,
+            trackedTxs: nil
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
@@ -294,7 +302,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             addressTransactions: nil,
             blockTransactions: nil,
             address: "bc1qnoone",
-            txid: makeValidTxid()
+            txid: makeValidTxid(),
+            multiAddressTransactions: nil,
+            trackedTxs: nil
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
@@ -318,7 +328,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             addressTransactions: [tx],
             blockTransactions: nil,
             address: directAddr,
-            txid: nil
+            txid: nil,
+            multiAddressTransactions: nil,
+            trackedTxs: nil
         )
 
         let result = service.findMatchingTarget(msg: msg, tx: tx)
@@ -450,18 +462,35 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let txid = makeValidTxid()
         service.trackTx(txid)
 
-        let json = makeAddressTransactionJSON(
-            msgTxid: txid
-        )
+        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef\", \"vin\": [{ \"txid\": \"\(txid)\", \"prevout\": { \"scriptpubkey_address\": \"bc1qvin\" } }] } } }"
 
         var capturedTxid: String?
-        service.onTransactionDetected = { _, _, receivedTxid, _ in
-            capturedTxid = receivedTxid
+        service.onTransactionDetected = { _, _, resolvedTxid, _ in
+            capturedTxid = resolvedTxid
         }
 
         service.handleMessage(json)
 
-        XCTAssertEqual(capturedTxid, txid, "Tracked txid should be matched in incoming message")
+        XCTAssertNotNil(capturedTxid, "Tracked txid should be matched in tracked-txs message")
+    }
+
+    func testTrackAddressesBulkPayload() {
+        let addr = "bc1qbulktest"
+        service.trackAddress(addr)
+
+        let json = "{ \"multi-address-transactions\": { \"\(addr)\": { \"mempool\": [{ \"txid\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 1000 }] }], \"confirmed\": [], \"removed\": [] } } }"
+
+        var capturedAmount: Int64?
+        service.onTransactionDetected = { target, isTxid, txid, amount in
+            XCTAssertEqual(target, addr)
+            XCTAssertFalse(isTxid)
+            XCTAssertEqual(txid, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            capturedAmount = amount
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertEqual(capturedAmount, 1000, "Should correctly decode multi-address-transactions and aggregate amount")
     }
 
     func testTrackAddressTriggersConnectWhenDisconnected() {
