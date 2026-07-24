@@ -2215,7 +2215,7 @@ class AppState {
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
-            if databaseService?.hasRecentPendingOnchainReceive() == true {
+            if databaseService?.hasRecentPendingOnchainReceive(matching: Int64(depositSats)) == true {
                 // WebSocket already caught this and recorded it as pending. We just update the balance.
                 prevOnchainSats = currentOnchain
                 return
