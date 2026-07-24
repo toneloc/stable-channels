@@ -32,12 +32,6 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             vinDict["prevout"] = ["scriptpubkey_address": prevAddr]
         }
         if let prevTxid = vinTxid {
-            if vinDict["prevout"] == nil {
-                vinDict["prevout"] = [:]
-            }
-            var prevout = vinDict["prevout"] as? [String: Any] ?? [:]
-            prevout["txid"] = prevTxid
-            vinDict["prevout"] = prevout
             vinDict["txid"] = prevTxid
         }
 
@@ -258,7 +252,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let fundingTxid = makeValidTxid()
         service.trackTx(fundingTxid)
 
-        let vin = MempoolWSVin(txid: fundingTxid, prevout: nil)
+        let vin = MempoolWSVin(txid: fundingTxid)
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: [vin])
 
         let msg = MempoolWSMessage(
@@ -462,7 +456,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let txid = makeValidTxid()
         service.trackTx(txid)
 
-        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef\", \"vin\": [{ \"txid\": \"\(txid)\", \"prevout\": { \"scriptpubkey_address\": \"bc1qvin\" } }] } } }"
+        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef\", \"vin\": [{ \"txid\": \"\(txid)\" }] } } }"
 
         var capturedTxid: String?
         service.onTransactionDetected = { _, _, resolvedTxid, _ in

@@ -15,17 +15,8 @@ struct MempoolWSVout: Decodable {
     }
 }
 
-struct MempoolWSPrevout: Decodable {
-    let scriptpubkeyAddress: String?
-
-    enum CodingKeys: String, CodingKey {
-        case scriptpubkeyAddress = "scriptpubkey_address"
-    }
-}
-
 struct MempoolWSVin: Decodable {
     let txid: String?
-    let prevout: MempoolWSPrevout?
 }
 
 struct MempoolWSTransaction: Decodable {
