@@ -409,6 +409,21 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         if let respTxid = msg.txid, trackedTxids.contains(respTxid) {
             return (respTxid, true)
         }
+        // Match bulk tracked-txs dictionary keys
+        if let _ = msg.trackedTxs?[tx.txid], trackedTxids.contains(tx.txid) {
+            return (tx.txid, true)
+        }
+        // Match bulk multi-address-transactions dictionary keys
+        if let multi = msg.multiAddressTransactions {
+            for (addr, txGroup) in multi {
+                guard trackedAddresses.contains(addr) else { continue }
+                if (txGroup.mempool?.contains(where: { $0.txid == tx.txid }) == true) ||
+                    (txGroup.confirmed?.contains(where: { $0.txid == tx.txid }) == true) {
+                    return (addr, false)
+                }
+            }
+        }
+
         return (nil, false)
     }
 }
