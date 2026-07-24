@@ -75,6 +75,7 @@ class AppState {
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
+    let mempoolWebSocketService = MempoolWebSocketService()
 
     // MARK: - State
 
@@ -188,6 +189,7 @@ class AppState {
         nodeService.databaseService = databaseService
 
         txidResolutionService.databaseService = databaseService
+        txidResolutionService.mempoolWebSocketService = mempoolWebSocketService
         txidResolutionService.configureResolvers(urls: Constants.esploraChainURLs)
 
         txidResolutionService.didResolveTxid = { [weak self] event in
@@ -214,6 +216,21 @@ class AppState {
         blockHeightService.onHeightUpdated = { [weak pollingService] _ in
             Task { @MainActor in
                 await pollingService?.pollOnce()
+            }
+        }
+        mempoolWebSocketService.onBlockHeader = { [weak self] _ in
+            Task { @MainActor in
+                await self?.blockHeightService.refresh()
+            }
+        }
+        mempoolWebSocketService.onTransactionDetected = { [weak self] target, isTxid, txid, amountSats in
+            Task { @MainActor in
+                self?.handleWebSocketTransactionDetected(
+                    target: target,
+                    isTxid: isTxid,
+                    txid: txid,
+                    amountSats: amountSats
+                )
             }
         }
 
@@ -325,6 +342,10 @@ class AppState {
             updateStableBalances()
             startStabilityTimer()
             blockHeightService.start()
+            mempoolWebSocketService.connect()
+            if let addr = transactionLinkService.onchainReceiveAddress, !addr.isEmpty {
+                mempoolWebSocketService.trackAddress(addr)
+            }
             Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
@@ -378,6 +399,7 @@ class AppState {
     private func dropDatabaseServices() {
         blockHeightService.stop()
         blockHeightService.onHeightUpdated = nil
+        mempoolWebSocketService.disconnect()
         confirmationPollingService = nil
         nodeService.databaseService = nil
         nodeService.clearSavedMnemonic()
@@ -556,6 +578,7 @@ class AppState {
                         .string(forKey: "funding_txid")
                     resumePendingSpliceConfirmation()
                     blockHeightService.start()
+                    mempoolWebSocketService.connect()
                     Task { await confirmationPollingService?.pollOnce() }
                 }
                 startStabilityTimer()
@@ -590,6 +613,7 @@ class AppState {
                 await MainActor.run {
                     phase = .wallet
                     blockHeightService.start()
+                    mempoolWebSocketService.connect()
                     Task { await confirmationPollingService?.pollOnce() }
                     refreshBalances()
                     updateStableBalances()
@@ -736,6 +760,7 @@ class AppState {
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
         monitoredSpliceTxid = nil
+        mempoolWebSocketService.disconnect()
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -766,6 +791,7 @@ class AppState {
             print("[App] Node still running (grace period), reconnecting")
             ensureLSPConnected()
             refreshBalances()
+            mempoolWebSocketService.connect()
             updateStableBalances()
             resumePendingSpliceConfirmation()
             return
@@ -785,6 +811,7 @@ class AppState {
             )
             refreshBalances()
             blockHeightService.start()
+            mempoolWebSocketService.connect()
             Task { await confirmationPollingService?.pollOnce() }
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
@@ -2188,6 +2215,14 @@ class AppState {
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
+            if let address = transactionLinkService.onchainReceiveAddress,
+               !address.isEmpty,
+               databaseService?.hasRecentOnchainReceive(address: address, amountSats: Int64(depositSats)) == true {
+                // WebSocket already caught this and recorded it. We just update the balance.
+                prevOnchainSats = currentOnchain
+                return
+            }
+
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
             let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
 
@@ -2231,6 +2266,55 @@ class AppState {
             ])
         }
         prevOnchainSats = currentOnchain
+    }
+
+    func handleWebSocketTransactionDetected(target: String, isTxid: Bool, txid: String, amountSats: Int64) {
+        guard let db = databaseService else { return }
+
+        if isTxid {
+            // A tracked funding txid was outspent: this is a channel close!
+            // Route it directly to the resolver (target == funding txid)
+            txidResolutionService.mempoolWebSocketService?.untrackTx(target)
+            // Kick the close resolver to poll Esplora immediately now that we know it's mined/mempool'd
+            Task { @MainActor in
+                await confirmationPollingService?.pollOnce()
+            }
+            return
+        }
+
+        // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
+        if amountSats >= 1000 {
+            let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+            let amountUSD: Double? = price > 0 ? Double(amountSats) / 100_000_000.0 * price : nil
+            let paymentId = "onchain_receive_\(txid)"
+
+            do {
+                let recorded = try db.recordPayment(
+                    paymentId: paymentId,
+                    paymentType: "onchain",
+                    direction: "received",
+                    amountMsat: UInt64(amountSats * 1000),
+                    amountUSD: amountUSD,
+                    btcPrice: price > 0 ? price : nil,
+                    counterparty: nil,
+                    status: "pending",
+                    txid: txid,
+                    address: target
+                )
+                if recorded {
+                    AuditService.log(
+                        "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                        data: ["txid": txid, "sats": "\(amountSats)"]
+                    )
+                    paymentFlash.toggle()
+                }
+            } catch {
+                AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
+            }
+        }
+
+        // 2. Also run detectOnchainDeposit fallback
+        detectOnchainDeposit()
     }
 
     // MARK: - Sweep to Channel

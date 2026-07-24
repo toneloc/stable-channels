@@ -11,6 +11,7 @@ final class TxidResolutionService {
 
     // Owned by AppState.
     weak var databaseService: DatabaseService?
+    weak var mempoolWebSocketService: MempoolWebSocketService?
 
     private var closeTxidResolver: CloseTxidResolver?
     private var onchainTxidResolver: OnchainTxidResolver?
@@ -63,13 +64,24 @@ final class TxidResolutionService {
             AuditService.log("RESOLVER_NOT_CONFIGURED", data: ["type": "close", "opId": opId])
             return
         }
+        var fundingTxid: String?
+        if let db = databaseService,
+           let op = db.fetchPendingOperation(opId: opId) {
+            fundingTxid = op.fundingOutpointTxid
+        }
+        if let fundingTxid {
+            mempoolWebSocketService?.trackTx(fundingTxid)
+        }
         closeLauncher.launch(opId: opId, delaySeconds: delaySeconds) { [weak self] in
             guard let self, let db = self.databaseService else { return }
             await self.closeTxidResolver?.resolve(opId: opId, databaseService: db)
+
+            if let fundingTxid { mempoolWebSocketService?.untrackTx(fundingTxid) }
         }
     }
 
     func startOnchainTxidResolver(resolutionId: Int64, address: String, delaySeconds: UInt64 = 0) {
+        mempoolWebSocketService?.trackAddress(address)
         guard onchainTxidResolver != nil else {
             AuditService.log("RESOLVER_NOT_CONFIGURED", data: ["type": "onchain", "resolutionId": "\(resolutionId)"])
             return

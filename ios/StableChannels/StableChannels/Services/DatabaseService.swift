@@ -351,6 +351,36 @@ class DatabaseService {
         }
     }
 
+    // MARK: - Onchain Reconcilation Helpers
+
+    /// Checks if we've already recorded a pending onchain receive for the given address and approximate amount
+    /// recently.
+    /// This prevents the LDK balance-polling fallback from inserting a duplicate `onchain_deposit_<UUID>` row
+    /// right after the WebSocket inserted `onchain_receive_<txid>`.
+    func hasRecentOnchainReceive(address: String, amountSats: Int64) -> Bool {
+        do {
+            // Check for pending onchain receives in the last 15 minutes (900s)
+            let cutoff = Date().timeIntervalSince1970 - 900
+            let sql = """
+                SELECT id FROM payments 
+                WHERE payment_type = 'onchain' 
+                  AND direction = 'received' 
+                  AND address = ? 
+                  AND created_at >= ?
+                  AND abs(amount_msat - ?) <= 1000
+                LIMIT 1
+            """
+            let rows = try query(sql, params: [
+                .text(address),
+                .integer(Int64(cutoff)),
+                .integer(amountSats * 1000)
+            ])
+            return !rows.isEmpty
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - Payment Operations
 
     func recordPayment(
@@ -365,12 +395,20 @@ class DatabaseService {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Bool {
-        // Dedup: skip if a payment with this payment_id already exists
+        // Dedup: skip if a payment with this payment_id OR txid already exists
         if let pid = paymentId, !pid.isEmpty {
-            let existing = try query(
-                "SELECT id FROM payments WHERE payment_id = ?",
-                params: [.text(pid)]
-            )
+            let existing: [[Any?]]
+            if let t = txid, !t.isEmpty {
+                existing = try query(
+                    "SELECT id FROM payments WHERE payment_id = ? OR (txid = ? AND payment_type = 'onchain' AND direction = 'received')",
+                    params: [.text(pid), .text(t)]
+                )
+            } else {
+                existing = try query(
+                    "SELECT id FROM payments WHERE payment_id = ?",
+                    params: [.text(pid)]
+                )
+            }
             if !existing.isEmpty {
                 return false
             }
