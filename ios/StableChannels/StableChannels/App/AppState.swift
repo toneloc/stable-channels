@@ -2215,10 +2215,8 @@ class AppState {
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
-            if let address = transactionLinkService.onchainReceiveAddress,
-               !address.isEmpty,
-               databaseService?.hasRecentOnchainReceive(address: address, amountSats: Int64(depositSats)) == true {
-                // WebSocket already caught this and recorded it. We just update the balance.
+            if databaseService?.hasRecentPendingOnchainReceive() == true {
+                // WebSocket already caught this and recorded it as pending. We just update the balance.
                 prevOnchainSats = currentOnchain
                 return
             }
@@ -2272,15 +2270,19 @@ class AppState {
         guard let db = databaseService else { return }
 
         if isTxid {
+            guard isChannelClosing else { return }
+
             // A tracked funding txid was outspent: this is a channel close!
-            // Route it directly to the resolver (target == funding txid)
             txidResolutionService.mempoolWebSocketService?.untrackTx(target)
-            // Kick the close resolver to poll Esplora immediately now that we know it's mined/mempool'd
-            Task { @MainActor in
-                await confirmationPollingService?.pollOnce()
+
+            // Instantly resolve the close payment row
+            if let op = db.fetchPendingOperationByFundingTxid(target) {
+                handleCloseTxidResolved(opId: op.opId, closingTxid: txid)
             }
             return
         }
+
+        guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
 
         // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
         if amountSats >= 1000 {
@@ -2312,9 +2314,6 @@ class AppState {
                 AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
             }
         }
-
-        // 2. Also run detectOnchainDeposit fallback
-        detectOnchainDeposit()
     }
 
     // MARK: - Sweep to Channel

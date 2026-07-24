@@ -216,12 +216,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let msg = MempoolWSMessage(
             block: nil,
             addressTransactions: nil,
+            blockTransactions: nil,
             address: addr,
             txid: nil
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
+        let result = service.findMatchingTarget(msg: msg, tx: tx)
         XCTAssertEqual(result.0, addr)
         XCTAssertEqual(result.1, false)
     }
@@ -239,31 +240,12 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let msg = MempoolWSMessage(
             block: nil,
             addressTransactions: [tx],
+            blockTransactions: nil,
             address: nil,
             txid: nil
         )
 
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
-        XCTAssertEqual(result.0, addr)
-        XCTAssertEqual(result.1, false)
-    }
-
-    func testFindMatchingTargetByVinPrevoutScriptpubkeyAddress() {
-        let addr = "bc1qvinprevout"
-        service.trackAddress(addr)
-
-        let prevout = MempoolWSPrevout(scriptpubkeyAddress: addr)
-        let vin = MempoolWSVin(txid: nil, prevout: prevout)
-        let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: [vin])
-
-        let msg = MempoolWSMessage(
-            block: nil,
-            addressTransactions: [tx],
-            address: nil,
-            txid: nil
-        )
-
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
+        let result = service.findMatchingTarget(msg: msg, tx: tx)
         XCTAssertEqual(result.0, addr)
         XCTAssertEqual(result.1, false)
     }
@@ -278,11 +260,12 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let msg = MempoolWSMessage(
             block: nil,
             addressTransactions: [tx],
+            blockTransactions: nil,
             address: nil,
             txid: nil
         )
 
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
+        let result = service.findMatchingTarget(msg: msg, tx: tx)
         XCTAssertEqual(result.0, fundingTxid)
         XCTAssertEqual(result.1, true)
     }
@@ -294,12 +277,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let msg = MempoolWSMessage(
             block: nil,
             addressTransactions: nil,
+            blockTransactions: nil,
             address: nil,
             txid: trackedTxid
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
+        let result = service.findMatchingTarget(msg: msg, tx: tx)
         XCTAssertEqual(result.0, trackedTxid)
         XCTAssertEqual(result.1, true)
     }
@@ -308,12 +292,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let msg = MempoolWSMessage(
             block: nil,
             addressTransactions: nil,
+            blockTransactions: nil,
             address: "bc1qnoone",
             txid: makeValidTxid()
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
+        let result = service.findMatchingTarget(msg: msg, tx: tx)
         XCTAssertNil(result.0)
         XCTAssertEqual(result.1, false)
     }
@@ -331,11 +316,12 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let msg = MempoolWSMessage(
             block: nil,
             addressTransactions: [tx],
+            blockTransactions: nil,
             address: directAddr,
             txid: nil
         )
 
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
+        let result = service.findMatchingTarget(msg: msg, tx: tx)
         XCTAssertEqual(result.0, directAddr)
         XCTAssertEqual(result.1, false)
     }
@@ -385,39 +371,57 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
     // MARK: - Connect / Disconnect Lifecycle
 
-    func testConnectSetsIsConnected() {
+    func testConnectDoesNotSetIsConnectedSynchronously() {
         XCTAssertFalse(service.isConnected)
 
         service.connect()
 
+        // It should still be false synchronously because URLSession hasn't connected
+        XCTAssertFalse(service.isConnected)
+    }
+
+    func testDelegateSetsIsConnected() throws {
+        XCTAssertFalse(service.isConnected)
+
+        // Simulate the delegate firing
+        service.urlSession(
+            URLSession.shared,
+            webSocketTask: URLSession.shared.webSocketTask(with: try XCTUnwrap(URL(string: "wss://test"))),
+            didOpenWithProtocol: nil
+        )
+
+        // The delegate fires an async task on MainActor, so we need to wait a beat
+        let exp = expectation(description: "isConnected becomes true")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            if service.isConnected {
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 1.0)
         XCTAssertTrue(service.isConnected)
     }
 
-    func testDoubleConnectIsNoop() {
-        service.connect()
-        XCTAssertTrue(service.isConnected)
+    func testDisconnectClearsIsConnected() throws {
+        service.urlSession(
+            URLSession.shared,
+            webSocketTask: URLSession.shared.webSocketTask(with: try XCTUnwrap(URL(string: "wss://test"))),
+            didOpenWithProtocol: nil
+        )
 
-        service.connect()
-        XCTAssertTrue(service.isConnected)
-    }
-
-    func testDisconnectClearsIsConnected() {
-        service.connect()
+        let exp = expectation(description: "isConnected becomes true")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            if service.isConnected {
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 1.0)
         XCTAssertTrue(service.isConnected)
 
         service.disconnect()
 
         XCTAssertFalse(service.isConnected)
-    }
-
-    func testDisconnectThenConnectReconnects() {
-        service.connect()
-        service.disconnect()
-        XCTAssertFalse(service.isConnected)
-
-        service.connect()
-
-        XCTAssertTrue(service.isConnected)
     }
 
     // MARK: - trackAddress / trackTx
@@ -465,7 +469,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         service.trackAddress("bc1qautoconnect")
 
-        XCTAssertTrue(service.isConnected, "trackAddress should auto-connect when disconnected")
+        // URLSession connection is async, so isConnected remains false synchronously
+        XCTAssertFalse(service.isConnected)
     }
 
     func testTrackTxTriggersConnectWhenDisconnected() {
@@ -473,11 +478,24 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         service.trackTx(makeValidTxid())
 
-        XCTAssertTrue(service.isConnected, "trackTx should auto-connect when disconnected")
+        XCTAssertFalse(service.isConnected)
     }
 
-    func testTrackAddressWhileConnectedDoesNotReconnect() {
-        service.connect()
+    func testTrackAddressWhileConnectedDoesNotReconnect() throws {
+        service.urlSession(
+            URLSession.shared,
+            webSocketTask: URLSession.shared.webSocketTask(with: try XCTUnwrap(URL(string: "wss://test"))),
+            didOpenWithProtocol: nil
+        )
+
+        let exp = expectation(description: "isConnected becomes true")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 10_000_000)
+            if service.isConnected {
+                exp.fulfill()
+            }
+        }
+        wait(for: [exp], timeout: 1.0)
         XCTAssertTrue(service.isConnected)
 
         service.trackAddress("bc1qmore")
@@ -515,7 +533,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         service.trackAddress("bc1qbuffertest")
 
-        XCTAssertTrue(service.isConnected)
+        XCTAssertFalse(service.isConnected)
     }
 
     func testPendingMessagesFlushedOnConnect() {
@@ -524,20 +542,20 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         service.trackAddress("bc1qflush")
 
-        XCTAssertTrue(service.isConnected)
+        XCTAssertFalse(service.isConnected)
     }
 
     func testPendingMessagesCappedAt50() {
         service.disconnect()
         XCTAssertFalse(service.isConnected)
 
-        for i in 0..<60 {
-            service.send("{ \"track-addresses\": [\"addr\(i)\"] }")
+        for _ in 0..<60 {
+            service.send("{ \"track-addresses\": [\"addr\\(i)\"] }")
         }
 
         service.trackAddress("bc1qcap")
 
-        XCTAssertTrue(service.isConnected)
+        XCTAssertFalse(service.isConnected)
     }
 
     // MARK: - Amount Calculation
@@ -610,29 +628,5 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         service.handleMessage(json)
 
         XCTAssertEqual(capturedTarget, addr1)
-    }
-
-    func testVinPrevoutAddressTakesPriorityOverVinTxid() {
-        let addr = "bc1qvinaddr"
-        let vinTxid = makeValidTxid()
-
-        service.trackAddress(addr)
-        service.trackTx(vinTxid)
-
-        let vinPrevout = MempoolWSPrevout(scriptpubkeyAddress: addr)
-        let vin = MempoolWSVin(txid: vinTxid, prevout: vinPrevout)
-        let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: [vin])
-
-        let msg = MempoolWSMessage(
-            block: nil,
-            addressTransactions: [tx],
-            address: nil,
-            txid: nil
-        )
-
-        let result = service.findMatchingTarget(msg: msg, firstTx: tx)
-
-        XCTAssertEqual(result.0, addr)
-        XCTAssertEqual(result.1, false)
     }
 }

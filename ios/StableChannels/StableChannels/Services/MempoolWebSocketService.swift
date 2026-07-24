@@ -37,12 +37,14 @@ struct MempoolWSTransaction: Decodable {
 struct MempoolWSMessage: Decodable {
     let block: MempoolWSBlock?
     let addressTransactions: [MempoolWSTransaction]?
+    let blockTransactions: [MempoolWSTransaction]?
     let address: String?
     let txid: String?
 
     enum CodingKeys: String, CodingKey {
         case block
         case addressTransactions = "address-transactions"
+        case blockTransactions = "block-transactions"
         case address
         case txid
     }
@@ -317,19 +319,19 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
             return
         }
 
-        // 1. Check for address-transactions payload
-        if let addressTxs = msg.addressTransactions,
-           let firstTx = addressTxs.first,
-           ResilientEsploraClient.isValidTxid(firstTx.txid) {
-            let txid = firstTx.txid
-            if isRecentlyProcessed(txid) { return }
+        // 1. Process all transaction payloads (unconfirmed and confirmed)
+        let allTxs = (msg.addressTransactions ?? []) + (msg.blockTransactions ?? [])
+        for tx in allTxs {
+            let txid = tx.txid
+            guard ResilientEsploraClient.isValidTxid(txid) else { continue }
+            if isRecentlyProcessed(txid) { continue }
             recordProcessedTx(txid)
 
-            let targetMatch = findMatchingTarget(msg: msg, firstTx: firstTx)
+            let targetMatch = findMatchingTarget(msg: msg, tx: tx)
             if let targetKey = targetMatch.0 {
                 let isTxid = targetMatch.1
                 var amountSats: Int64 = 0
-                if let vouts = firstTx.vout {
+                if let vouts = tx.vout {
                     for vout in vouts {
                         if vout.scriptpubkeyAddress == targetKey, let val = vout.value {
                             amountSats += val
@@ -354,25 +356,22 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
-    func findMatchingTarget(msg: MempoolWSMessage, firstTx: MempoolWSTransaction) -> (String?, Bool) {
+    func findMatchingTarget(msg: MempoolWSMessage, tx: MempoolWSTransaction) -> (String?, Bool) {
         // Direct address in response JSON
         if let respAddr = msg.address, trackedAddresses.contains(respAddr) {
             return (respAddr, false)
         }
         // Match output scriptpubkey_address
-        if let vouts = firstTx.vout {
+        if let vouts = tx.vout {
             for vout in vouts {
                 if let addr = vout.scriptpubkeyAddress, trackedAddresses.contains(addr) {
                     return (addr, false)
                 }
             }
         }
-        // Match input prevout scriptpubkey_address
-        if let vins = firstTx.vin {
+        // Match input txid (outspend of tracked funding txid)
+        if let vins = tx.vin {
             for vin in vins {
-                if let addr = vin.prevout?.scriptpubkeyAddress, trackedAddresses.contains(addr) {
-                    return (addr, false)
-                }
                 if let inputTxid = vin.txid, trackedTxids.contains(inputTxid) {
                     return (inputTxid, true)
                 }

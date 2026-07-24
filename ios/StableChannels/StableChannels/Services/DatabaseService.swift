@@ -353,28 +353,21 @@ class DatabaseService {
 
     // MARK: - Onchain Reconcilation Helpers
 
-    /// Checks if we've already recorded a pending onchain receive for the given address and approximate amount
-    /// recently.
+    /// Checks if we've already recorded *any* pending onchain receive recently.
     /// This prevents the LDK balance-polling fallback from inserting a duplicate `onchain_deposit_<UUID>` row
     /// right after the WebSocket inserted `onchain_receive_<txid>`.
-    func hasRecentOnchainReceive(address: String, amountSats: Int64) -> Bool {
+    func hasRecentPendingOnchainReceive(minAgeSeconds: TimeInterval = 900) -> Bool {
         do {
-            // Check for pending onchain receives in the last 15 minutes (900s)
-            let cutoff = Date().timeIntervalSince1970 - 900
+            let cutoff = Date().timeIntervalSince1970 - minAgeSeconds
             let sql = """
                 SELECT id FROM payments 
                 WHERE payment_type = 'onchain' 
                   AND direction = 'received' 
-                  AND address = ? 
+                  AND status = 'pending'
                   AND created_at >= ?
-                  AND abs(amount_msat - ?) <= 1000
                 LIMIT 1
             """
-            let rows = try query(sql, params: [
-                .text(address),
-                .integer(Int64(cutoff)),
-                .integer(amountSats * 1000)
-            ])
+            let rows = try query(sql, params: [.integer(Int64(cutoff))])
             return !rows.isEmpty
         } catch {
             return false
@@ -395,20 +388,12 @@ class DatabaseService {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Bool {
-        // Dedup: skip if a payment with this payment_id OR txid already exists
+        // Dedup: skip if a payment with this payment_id already exists
         if let pid = paymentId, !pid.isEmpty {
-            let existing: [[Any?]]
-            if let t = txid, !t.isEmpty {
-                existing = try query(
-                    "SELECT id FROM payments WHERE payment_id = ? OR (txid = ? AND payment_type = 'onchain' AND direction = 'received')",
-                    params: [.text(pid), .text(t)]
-                )
-            } else {
-                existing = try query(
-                    "SELECT id FROM payments WHERE payment_id = ?",
-                    params: [.text(pid)]
-                )
-            }
+            let existing = try query(
+                "SELECT id FROM payments WHERE payment_id = ?",
+                params: [.text(pid)]
+            )
             if !existing.isEmpty {
                 return false
             }
@@ -957,6 +942,27 @@ class DatabaseService {
                 LIMIT 1
                 """,
                 params: [.text(opId)]
+            )
+            return rows.first.map { Self.parsePendingOperation($0) }
+        } catch {
+            return nil
+        }
+    }
+
+    /// Fetch a single pending_operations row by its funding outpoint txid.
+    /// Used by the WebSocket handler to instantly map a tracked outspend back to its opId.
+    func fetchPendingOperationByFundingTxid(_ txid: String) -> PendingOperation? {
+        do {
+            let rows = try query(
+                """
+                SELECT op_id, op_type, funding_outpoint_txid, funding_outpoint_vout,
+                       closing_txid, balance_sats, balance_usd, btc_price, counterparty,
+                       status, created_at, resolved_at
+                FROM pending_operations
+                WHERE funding_outpoint_txid = ? AND status = 'pending'
+                LIMIT 1
+                """,
+                params: [.text(txid)]
             )
             return rows.first.map { Self.parsePendingOperation($0) }
         } catch {
