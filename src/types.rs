@@ -195,11 +195,11 @@ pub struct StableChannel {
     /// Native BTC exposure (the portion of the channel that floats with BTC price)
     #[serde(default)]
     pub native_channel_btc: Bitcoin,
-    /// Sats backing the stable portion (derived: receiver_sats - native_sats)
+    /// Sats allocated to the stable portion. Changes on trades, stability settlements, or
+    /// reconciliation; a price quote alone never moves sats between allocations.
     #[serde(default)]
     pub backing_sats: u64,
-    /// Sats NOT backing the stable position (only changes on trades).
-    /// backing_sats is derived as receiver_sats - native_sats on every stability check.
+    /// Sats allocated to native BTC after the latest settled accounting update.
     #[serde(default)]
     pub native_sats: u64,
     /// Unix timestamp (seconds) of the last stability payment sent on this channel

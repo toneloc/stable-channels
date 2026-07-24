@@ -11,12 +11,14 @@ use egui::{Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
 use image::{GrayImage, Luma};
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
-use qrcode::{Color, QrCode};
+use qrcode::QrCode;
 use serde_json::json;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{Read as IoRead, Write};
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -150,6 +152,7 @@ pub struct PendingTrade {
     pub btc_price: f64,
     pub fee_usd: f64,
     pub btc_amount: f64,
+    pub btc_sats: u64,
     pub net_amount_usd: f64,
 }
 
@@ -159,7 +162,7 @@ pub struct PendingTrade {
 #[derive(Clone, Debug)]
 struct PendingTradePayment {
     new_expected_usd: f64,
-    price: f64,
+    backing_sats: Option<u64>,
     trade_db_id: i64,
     action: String,
 }
@@ -172,11 +175,64 @@ struct PendingPayment {
     amount_usd: Option<f64>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct IncomingSync {
+    channel_id: String,
+    expected_usd: f64,
+    backing_sats: u64,
+    sync_version: u64,
+}
+
+struct BackupSnapshotDir {
+    path: PathBuf,
+}
+
+impl BackupSnapshotDir {
+    fn create() -> Result<Self, String> {
+        let parent = std::env::temp_dir();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        for attempt in 0..100u32 {
+            let path = parent.join(format!(
+                "stable-channels-backup-{}-{}-{}",
+                std::process::id(),
+                timestamp,
+                attempt
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            builder.mode(0o700);
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("Failed to create private backup workspace: {}", e)),
+            }
+        }
+
+        Err("Failed to allocate a private backup workspace".to_string())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for BackupSnapshotDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingSplice {
     pub direction: String, // "in" or "out"
     pub amount_sats: u64,
     pub address: Option<String>, // For splice_out
+    pub onchain_sats_at_start: u64,
+    pub channel_value_sats_at_start: u64,
 }
 
 #[derive(Clone)]
@@ -203,6 +259,43 @@ impl Toast {
 
     fn progress(&self) -> f32 {
         (self.created_at.elapsed().as_secs_f32() / self.duration_secs).min(1.0)
+    }
+}
+
+/// A splice-out deduction awaiting its off-thread esplora funding-output lookup.
+struct PendingSpliceDeduction {
+    old_value_sats: u64,
+    receiver_sats_at_start: u64,
+    backing_sats_at_start: u64,
+    txid: String,
+    vout: u32,
+    channel_ready_seen: bool,
+    rx: Option<std::sync::mpsc::Receiver<Option<u64>>>,
+    resolved_new_value: Option<Option<u64>>,
+    retry_after: Option<std::time::Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpliceReconcileAction {
+    AlreadyReconciled,
+    NoOutgoingDeduction,
+    DeferToFundingLookup,
+    ReconcileNow,
+}
+
+fn splice_reconcile_action(
+    direction: Option<&str>,
+    already_reconciled: bool,
+    funding_lookup_pending: bool,
+) -> SpliceReconcileAction {
+    if already_reconciled {
+        SpliceReconcileAction::AlreadyReconciled
+    } else if direction == Some("in") {
+        SpliceReconcileAction::NoOutgoingDeduction
+    } else if funding_lookup_pending {
+        SpliceReconcileAction::DeferToFundingLookup
+    } else {
+        SpliceReconcileAction::ReconcileNow
     }
 }
 
@@ -314,6 +407,12 @@ pub struct UserApp {
 
     // Non-blocking daily price update
     daily_prices_receiver: Option<std::sync::mpsc::Receiver<bool>>,
+    // ZIP creation runs off-thread; completion is polled from the UI loop.
+    backup_receiver: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    // Startup historical/intraday Kraken backfill — off-thread so it never blocks the first frame.
+    historical_backfill_receiver: Option<std::sync::mpsc::Receiver<bool>>,
+    // In-flight splice-out esplora lookup; the deduction is applied when it lands.
+    pending_splice_deduction: Option<PendingSpliceDeduction>,
 
     // Bar chart display toggle: false = default (Stable=USD, BTC=BTC), true = swapped
     bar_chart_show_btc: bool,
@@ -451,6 +550,17 @@ impl UserApp {
         // Determine mnemonic for wallet
         let seed_phrase_path = data_dir.join("seed_phrase");
         let keys_seed_path = data_dir.join("keys_seed");
+        for secret_path in [&seed_phrase_path, &keys_seed_path] {
+            if secret_path.exists() {
+                restrict_secret_file_permissions(secret_path).map_err(|e| {
+                    format!(
+                        "Failed to secure wallet secret {}: {}",
+                        secret_path.display(),
+                        e
+                    )
+                })?;
+            }
+        }
         let mut mnemonic_words: Option<String> = None;
         let mut node_entropy: Option<ldk_node::entropy::NodeEntropy> = None;
 
@@ -478,7 +588,7 @@ impl UserApp {
             }
             let mnemonic = ldk_node::entropy::generate_entropy_mnemonic(None);
             let words = mnemonic.to_string();
-            std::fs::write(&seed_phrase_path, &words).expect("Failed to save seed phrase");
+            write_secret_file(&seed_phrase_path, &words).expect("Failed to save seed phrase");
             let entropy = ldk_node::entropy::NodeEntropy::from_bip39_mnemonic(mnemonic, None);
             node_entropy = Some(entropy);
             mnemonic_words = Some(words);
@@ -644,6 +754,9 @@ impl UserApp {
             pending_trade_payments: HashMap::new(),
             pending_payments: HashMap::new(),
             daily_prices_receiver: None,
+            backup_receiver: None,
+            historical_backfill_receiver: None,
+            pending_splice_deduction: None,
             bar_chart_show_btc: false,
             bar_chart_anim: 0.0,
             bar_slider_drag_offset: 0.0,
@@ -663,36 +776,16 @@ impl UserApp {
             trade_success: None,
         };
 
-        // Seed historical price data if needed
-        app.seed_historical_prices();
+        // Backfill historical + intraday prices from Kraken on a background thread so a
+        // slow/hung feed can't block startup before the first frame.
+        app.start_historical_backfill();
 
-        // Backfill intraday data from Kraken for the 1D chart
-        app.backfill_intraday_prices();
-
-        // Load initial chart data
+        // Load whatever is already in the DB immediately (non-blocking); the chart
+        // refreshes when the backfill thread completes.
         app.load_chart_data();
 
         {
             let mut sc = app.stable_channel.lock().unwrap();
-            if let Some(payment_info) = stable::check_stability(&app.node, &mut sc, btc_price) {
-                // Record sent stability payment as pending (confirmed on PaymentSuccessful)
-                let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
-                    * payment_info.btc_price;
-                let _ = app.db.record_payment(
-                    Some(&payment_info.payment_id),
-                    "stability",
-                    "sent",
-                    payment_info.amount_msat,
-                    Some(amount_usd),
-                    Some(payment_info.btc_price),
-                    Some(&payment_info.counterparty),
-                    "pending",
-                    None,
-                    None,
-                );
-                // Persist updated backing_sats
-                app.save_channel_settings();
-            }
             update_balances(&app.node, &mut sc);
         }
 
@@ -714,6 +807,7 @@ impl UserApp {
         let db = self.db.clone();
         let splice_flag = Arc::clone(&self.auto_splice_in_progress);
         let splice_onchain_start = Arc::clone(&self.auto_splice_onchain_at_start);
+        let pending_splice = Arc::clone(&self.pending_splice);
 
         std::thread::spawn(move || {
             fn current_unix_time() -> i64 {
@@ -734,53 +828,77 @@ impl UserApp {
                     .timeout_connect(Duration::from_secs(5))
                     .timeout(Duration::from_secs(10))
                     .build();
-                let price = match stable_channels::price_feeds::get_latest_price(&price_agent)
-                {
-                    Ok(p) if p > 0.0 => p,
-                    _ => stable_channels::price_feeds::get_cached_price(),
-                };
+                let price = stable_channels::price_feeds::get_latest_price(&price_agent)
+                    .ok()
+                    .filter(|price| *price > 0.0);
 
-                // Only proceed if we have a valid price
-                if price > 0.0 {
+                // Automatic stability payments require a freshly validated consensus price.
+                // The last trusted cached price remains available to the UI during an outage.
+                if let Some(price) = price {
+                    // Publish so the UI thread's non-blocking get_cached_price_no_fetch reads stay fresh.
+                    stable_channels::price_feeds::set_cached_price(price);
                     let mut payment_sent = false;
 
                     // Brief lock to update values
                     if let Ok(mut sc) = sc_arc.lock() {
                         if !node_arc.list_channels().is_empty() {
-                            if let Some(payment_info) =
-                                stable_channels::stable::check_stability(&node_arc, &mut sc, price)
+                            stable_channels::stable::update_balances(&node_arc, &mut sc);
+                            if stable_channels::stable::repair_overbacked_allocation(
+                                &mut sc, price,
+                            )
+                            .is_some()
                             {
+                                if let Err(e) = db.save_channel(
+                                    &sc.channel_id.to_string(),
+                                    &format!("{}", sc.user_channel_id),
+                                    sc.expected_usd.0,
+                                    sc.backing_sats,
+                                    sc.native_sats,
+                                    sc.note.as_deref(),
+                                ) {
+                                    audit_event(
+                                        "OVERBACKED_REPAIR_PERSIST_FAILED",
+                                        json!({
+                                            "user_channel_id": format!("{}", sc.user_channel_id),
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                }
+                            }
+
+                            if let Some(payment_info) = stable_channels::stable::check_stability(
+                                &node_arc, &mut sc, price,
+                            ) {
                                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
                                 let amount_usd =
                                     (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
                                         * payment_info.btc_price;
-                                let _ = db.record_payment(
-                                    Some(&payment_info.payment_id),
-                                    "stability",
-                                    "sent",
+                                if let Err(e) = db.record_pending_stability_payment(
+                                    &payment_info.payment_id,
                                     payment_info.amount_msat,
                                     Some(amount_usd),
-                                    Some(payment_info.btc_price),
-                                    Some(&payment_info.counterparty),
-                                    "pending",
-                                    None,
-                                    None,
-                                );
-                                payment_sent = true;
-
-                                // Persist updated backing_sats to DB
-                                let ch_id = sc.channel_id.to_string();
-                                let uch_id = format!("{}", sc.user_channel_id);
-                                if sc.expected_usd.0 > 0.0 {
-                                    let _ = db.save_channel(
-                                        &ch_id,
-                                        &uch_id,
-                                        sc.expected_usd.0,
-                                        sc.backing_sats,
-                                        sc.native_sats,
-                                        sc.note.as_deref(),
+                                    payment_info.btc_price,
+                                    &payment_info.counterparty,
+                                    &sc.channel_id.to_string(),
+                                    &format!("{}", sc.user_channel_id),
+                                    sc.expected_usd.0,
+                                    payment_info.backing_sats_before,
+                                    payment_info.backing_sats_after,
+                                    sc.native_sats,
+                                    sc.note.as_deref(),
+                                ) {
+                                    audit_event(
+                                        "STABILITY_PAYMENT_PERSIST_FAILED",
+                                        json!({
+                                            "payment_id": payment_info.payment_id,
+                                            "user_channel_id": format!("{}", sc.user_channel_id),
+                                            "backing_sats_before": payment_info.backing_sats_before,
+                                            "backing_sats_after": payment_info.backing_sats_after,
+                                            "error": e.to_string(),
+                                        }),
                                     );
                                 }
+                                payment_sent = true;
                             }
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
                         }
@@ -795,77 +913,75 @@ impl UserApp {
                     if payment_sent {
                         std::thread::sleep(Duration::from_secs(2));
                     }
+                }
 
-                    // Detect new onchain deposits
-                    {
-                        let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
-                        let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
-                        if current_onchain > prev_onchain_sats && !is_splicing {
-                            let deposit_sats = current_onchain - prev_onchain_sats;
-                            let amount_usd = if price > 0.0 {
-                                Some(deposit_sats as f64 / 100_000_000.0 * price)
-                            } else {
-                                None
-                            };
-                            // Try to find the txid from LDK's payment list
-                            let deposit_txid: Option<String> =
-                                node_arc.list_payments().iter().rev().find_map(|p| {
-                                    if p.direction == PaymentDirection::Inbound {
-                                        if let PaymentKind::Onchain { ref txid, .. } = p.kind {
-                                            return Some(txid.to_string());
-                                        }
+                // Housekeeping must continue during a price-feed outage. Only the optional USD
+                // metadata depends on price; balance observations and splice completion do not.
+                {
+                    let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
+                    let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
+                    if current_onchain > prev_onchain_sats && !is_splicing {
+                        let deposit_sats = current_onchain - prev_onchain_sats;
+                        let amount_usd =
+                            price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
+                        // Try to find the txid from LDK's payment list
+                        let deposit_txid: Option<String> =
+                            node_arc.list_payments().iter().rev().find_map(|p| {
+                                if p.direction == PaymentDirection::Inbound {
+                                    if let PaymentKind::Onchain { ref txid, .. } = p.kind {
+                                        return Some(txid.to_string());
                                     }
-                                    None
-                                });
-                            let _ = db.record_payment(
-                                None,
-                                "onchain",
-                                "received",
-                                deposit_sats * 1000,
-                                amount_usd,
-                                if price > 0.0 { Some(price) } else { None },
-                                None,
-                                "completed",
-                                deposit_txid.as_deref(),
-                                None,
-                            );
-                            audit_event(
-                                "ONCHAIN_DEPOSIT_DETECTED",
-                                json!({
-                                    "amount_sats": deposit_sats,
-                                    "prev_onchain": prev_onchain_sats,
-                                    "new_onchain": current_onchain,
-                                }),
-                            );
-                        }
-                        prev_onchain_sats = current_onchain;
+                                }
+                                None
+                            });
+                        let _ = db.record_payment(
+                            None,
+                            "onchain",
+                            "received",
+                            deposit_sats * 1000,
+                            amount_usd,
+                            price,
+                            None,
+                            "completed",
+                            deposit_txid.as_deref(),
+                            None,
+                        );
+                        audit_event(
+                            "ONCHAIN_DEPOSIT_DETECTED",
+                            json!({
+                                "amount_sats": deposit_sats,
+                                "prev_onchain": prev_onchain_sats,
+                                "new_onchain": current_onchain,
+                            }),
+                        );
                     }
+                    prev_onchain_sats = current_onchain;
+                }
 
-                    // Auto-splice: if onchain balance exists and channel is ready,
-                    // splice it into the channel automatically.
-                    // The splice_flag stays true until the onchain balance drops
-                    // (confirming the splice tx landed), preventing duplicate splices.
-                    if splice_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        // Check if the onchain balance dropped since we started the splice
-                        let prev = splice_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
-                        let current = node_arc.list_balances().total_onchain_balance_sats;
-                        if prev > 0 && current < prev {
-                            splice_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                            splice_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
-                            audit_event(
-                                "AUTO_SPLICE_CONFIRMED",
-                                json!({
-                                    "prev_onchain": prev,
-                                    "new_onchain": current,
-                                }),
-                            );
+                // The splice flag stays set until BDK observes the on-chain spend.
+                if splice_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    let prev = splice_onchain_start.load(std::sync::atomic::Ordering::Relaxed);
+                    let current = node_arc.list_balances().total_onchain_balance_sats;
+                    if prev > 0 && current < prev {
+                        splice_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                        splice_onchain_start.store(0, std::sync::atomic::Ordering::Relaxed);
+                        if let Ok(mut pending) = pending_splice.lock() {
+                            if pending
+                                .as_ref()
+                                .map(|splice| splice.direction == "in")
+                                .unwrap_or(false)
+                            {
+                                *pending = None;
+                            }
                         }
+                        audit_event(
+                            "AUTO_SPLICE_CONFIRMED",
+                            json!({
+                                "prev_onchain": prev,
+                                "new_onchain": current,
+                            }),
+                        );
                     }
-
-                    // Auto-splice trigger removed for iOS parity (2026-05-19): onchain →
-                    // channel splice is now user-initiated via the Swap button in the home
-                    // tab. The clear-flag-on-balance-drop path above remains so user-initiated
-                    // splices still get their in-progress flag cleared when confirmed.
                 }
 
                 std::thread::sleep(Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
@@ -927,50 +1043,22 @@ impl UserApp {
                         "type": "variable_amount"
                     }),
                 );
-                let code = QrCode::new(&self.invoice_result).unwrap();
-                let bits = code.to_colors();
-                let width = code.width();
-                let scale = 4;
-                let border = scale * 2; // 2 modules of border
-                let img_size = (width * scale) as u32;
-                let bordered_size = img_size + (border * 2) as u32;
-
-                // Create image with border (white background)
-                let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255]));
-
-                // Draw QR code in the center
-                for y in 0..width {
-                    for x in 0..width {
-                        let color = if bits[y * width + x] == Color::Dark {
-                            0
-                        } else {
-                            255
-                        };
-                        for dy in 0..scale {
-                            for dx in 0..scale {
-                                imgbuf.put_pixel(
-                                    (x * scale + dx) as u32 + border as u32,
-                                    (y * scale + dy) as u32 + border as u32,
-                                    Luma([color]),
-                                );
-                            }
-                        }
-                    }
+                self.qr_texture = Self::generate_qr_texture(&self.invoice_result, ctx, "qr_code");
+                if self.qr_texture.is_some() {
+                    self.status_message =
+                        "Invoice generated. Pay it to create a JIT channel.".to_string();
+                } else {
+                    audit_event(
+                        "QR_GENERATION_FAILED",
+                        json!({
+                            "context": "jit_onboarding",
+                            "payload_len": self.invoice_result.len()
+                        }),
+                    );
+                    self.status_message =
+                        "Invoice generated, but its QR code could not be rendered.".to_string();
+                    self.show_toast("QR code unavailable", "!");
                 }
-                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
-                let mut rgba = Vec::with_capacity(w * h * 4);
-                for p in imgbuf.pixels() {
-                    let lum = p[0];
-                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
-                }
-                let tex = ctx.load_texture(
-                    "qr_code",
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                    TextureOptions::LINEAR,
-                );
-                self.qr_texture = Some(tex);
-                self.status_message =
-                    "Invoice generated. Pay it to create a JIT channel.".to_string();
                 self.waiting_for_payment = true;
             }
             Err(e) => {
@@ -1062,49 +1150,24 @@ impl UserApp {
                     }),
                 );
 
-                // Generate QR code
-                let code = QrCode::new(&self.lightning_receive_invoice).unwrap();
-                let bits = code.to_colors();
-                let width = code.width();
-                let scale = 4;
-                let border = scale * 2;
-                let img_size = (width * scale) as u32;
-                let bordered_size = img_size + (border * 2) as u32;
-
-                let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255]));
-
-                for y in 0..width {
-                    for x in 0..width {
-                        let color = if bits[y * width + x] == Color::Dark {
-                            0
-                        } else {
-                            255
-                        };
-                        for dy in 0..scale {
-                            for dx in 0..scale {
-                                imgbuf.put_pixel(
-                                    (x * scale + dx) as u32 + border as u32,
-                                    (y * scale + dy) as u32 + border as u32,
-                                    Luma([color]),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
-                let mut rgba = Vec::with_capacity(w * h * 4);
-                for p in imgbuf.pixels() {
-                    let lum = p[0];
-                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
-                }
-
-                let tex = ctx.load_texture(
+                self.lightning_receive_qr = Self::generate_qr_texture(
+                    &self.lightning_receive_invoice,
+                    ctx,
                     "lightning_receive_qr",
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                    TextureOptions::LINEAR,
                 );
-                self.lightning_receive_qr = Some(tex);
+                if self.lightning_receive_qr.is_some() {
+                    self.lightning_receive_error.clear();
+                } else {
+                    self.lightning_receive_error =
+                        "Invoice ready, but its QR code could not be rendered.".to_string();
+                    audit_event(
+                        "QR_GENERATION_FAILED",
+                        json!({
+                            "context": "lightning_receive",
+                            "payload_len": self.lightning_receive_invoice.len()
+                        }),
+                    );
+                }
                 self.show_lightning_receive = true;
             }
             Err(e) => {
@@ -1147,43 +1210,24 @@ impl UserApp {
         match result {
             Ok(invoice) => {
                 self.lightning_receive_invoice = invoice.to_string();
-                let code = QrCode::new(&self.lightning_receive_invoice).unwrap();
-                let bits = code.to_colors();
-                let width = code.width();
-                let scale = 4;
-                let border = scale * 2;
-                let bordered_size = (width * scale) as u32 + (border * 2) as u32;
-                let mut imgbuf = GrayImage::from_pixel(bordered_size, bordered_size, Luma([255u8]));
-                for y in 0..width {
-                    for x in 0..width {
-                        let color = if bits[y * width + x] == Color::Dark {
-                            0
-                        } else {
-                            255
-                        };
-                        for dy in 0..scale {
-                            for dx in 0..scale {
-                                imgbuf.put_pixel(
-                                    (x * scale + dx) as u32 + border as u32,
-                                    (y * scale + dy) as u32 + border as u32,
-                                    Luma([color]),
-                                );
-                            }
-                        }
-                    }
-                }
-                let (w, h) = (imgbuf.width() as usize, imgbuf.height() as usize);
-                let mut rgba = Vec::with_capacity(w * h * 4);
-                for p in imgbuf.pixels() {
-                    let lum = p[0];
-                    rgba.extend_from_slice(&[lum, lum, lum, 255]);
-                }
-                let tex = ctx.load_texture(
+                self.lightning_receive_qr = Self::generate_qr_texture(
+                    &self.lightning_receive_invoice,
+                    ctx,
                     "lightning_receive_qr",
-                    egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                    TextureOptions::LINEAR,
                 );
-                self.lightning_receive_qr = Some(tex);
+                if self.lightning_receive_qr.is_some() {
+                    self.lightning_receive_error.clear();
+                } else {
+                    self.lightning_receive_error =
+                        "Invoice ready, but its QR code could not be rendered.".to_string();
+                    audit_event(
+                        "QR_GENERATION_FAILED",
+                        json!({
+                            "context": "jit_receive",
+                            "payload_len": self.lightning_receive_invoice.len()
+                        }),
+                    );
+                }
                 self.show_lightning_receive = true;
             }
             Err(e) => {
@@ -1233,20 +1277,7 @@ impl UserApp {
             return false;
         }
 
-        // Auto-fix double-paste
-        let input = {
-            let len = input.len();
-            if len > 60 && len.is_multiple_of(2) {
-                let (first, second) = input.split_at(len / 2);
-                if first == second {
-                    first.to_string()
-                } else {
-                    input
-                }
-            } else {
-                input
-            }
-        };
+        let input = collapse_double_paste(input);
 
         let lower = input.to_lowercase();
 
@@ -1267,32 +1298,27 @@ impl UserApp {
                             "No Lightning channel open. Fund your wallet first.".to_string();
                         return false;
                     }
-                    let result = if invoice.amount_milli_satoshis().is_none() {
-                        // Variable-amount invoice — use amount from input
-                        match self.send_amount.trim().parse::<f64>() {
-                            Ok(btc) if btc > 0.0 => {
-                                let msat = (btc * 100_000_000_000.0) as u64;
-                                self.node
-                                    .bolt11_payment()
-                                    .send_using_amount(&invoice, msat, None)
-                            }
-                            _ => {
+                    let invoice_amount_msat = invoice.amount_milli_satoshis();
+                    let amount_msat = if let Some(amount_msat) = invoice_amount_msat {
+                        amount_msat
+                    } else {
+                        match btc_amount_to_msat(&self.send_amount) {
+                            Some(amount_msat) => amount_msat,
+                            None => {
                                 self.send_error = "Enter an amount in BTC".to_string();
                                 return false;
                             }
                         }
-                    } else {
+                    };
+                    let result = if invoice_amount_msat.is_some() {
                         self.node.bolt11_payment().send(&invoice, None)
+                    } else {
+                        self.node
+                            .bolt11_payment()
+                            .send_using_amount(&invoice, amount_msat, None)
                     };
                     match result {
                         Ok(payment_id) => {
-                            // Determine amount_msat for the pending record
-                            let amount_msat = if let Some(amt) = invoice.amount_milli_satoshis() {
-                                amt
-                            } else {
-                                (self.send_amount.trim().parse::<f64>().unwrap_or(0.0)
-                                    * 100_000_000_000.0) as u64
-                            };
                             let (amount_usd, btc_price_opt) = {
                                 let sc = self.stable_channel.lock().unwrap();
                                 let price = sc.latest_price;
@@ -1354,9 +1380,9 @@ impl UserApp {
             }
             match Offer::from_str(&input) {
                 Ok(offer) => {
-                    let amount_msat = match self.send_amount.trim().parse::<f64>() {
-                        Ok(btc) if btc > 0.0 => (btc * 100_000_000_000.0) as u64,
-                        _ => {
+                    let amount_msat = match btc_amount_to_msat(&self.send_amount) {
+                        Some(amount_msat) => amount_msat,
+                        None => {
                             self.send_error = "Enter an amount in BTC".to_string();
                             return false;
                         }
@@ -1469,8 +1495,10 @@ impl UserApp {
                                     // Block auto-splice while this splice is in flight
                                     self.auto_splice_in_progress
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
+                                    let onchain_sats_at_start =
+                                        self.node.list_balances().total_onchain_balance_sats;
                                     self.auto_splice_onchain_at_start.store(
-                                        self.node.list_balances().total_onchain_balance_sats,
+                                        onchain_sats_at_start,
                                         std::sync::atomic::Ordering::Relaxed,
                                     );
 
@@ -1478,6 +1506,8 @@ impl UserApp {
                                         direction: "out".to_string(),
                                         amount_sats,
                                         address: Some(input.clone()),
+                                        onchain_sats_at_start,
+                                        channel_value_sats_at_start: ch.channel_value_sats,
                                     });
                                     // Record pending withdrawal in payment history immediately
                                     let amount_msat = amount_sats * 1000;
@@ -1628,10 +1658,29 @@ impl UserApp {
         }
 
         let balances = self.node.list_balances();
+        let current_channel_value_sats = self
+            .node
+            .list_channels()
+            .iter()
+            .find(|channel| channel.is_channel_ready)
+            .map(|channel| channel.channel_value_sats)
+            .unwrap_or(0);
+        let pending_splice = self
+            .pending_splice
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let splice_overlap_sats = splice_in_overlap_sats(
+            pending_splice.as_ref(),
+            current_channel_value_sats,
+            balances.total_onchain_balance_sats,
+        );
 
         // Detect incoming payment: total sats went up → trigger balance flash
-        let total_sats_now =
-            balances.total_lightning_balance_sats + balances.total_onchain_balance_sats;
+        let total_sats_now = balances
+            .total_lightning_balance_sats
+            .saturating_add(balances.total_onchain_balance_sats)
+            .saturating_sub(splice_overlap_sats);
         if self.last_known_total_sats > 0 && total_sats_now > self.last_known_total_sats {
             self.payment_flash_at = Some(std::time::Instant::now());
         }
@@ -1643,8 +1692,8 @@ impl UserApp {
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
 
-        self.total_balance_btc = self.lightning_balance_btc + self.onchain_balance_btc;
-        self.total_balance_usd = self.lightning_balance_usd + self.onchain_balance_usd;
+        self.total_balance_btc = total_sats_now as f64 / 100_000_000.0;
+        self.total_balance_usd = self.total_balance_btc * self.btc_price;
 
         // Clear syncing state once we have valid price AND stable_channel has been updated
         if self.is_syncing && current_price > 0.0 {
@@ -1765,6 +1814,8 @@ impl UserApp {
                     direction: "in".to_string(),
                     amount_sats: splice_amount,
                     address: None,
+                    onchain_sats_at_start: balances.total_onchain_balance_sats,
+                    channel_value_sats_at_start: ch.channel_value_sats,
                 });
                 let _ = self.db.record_payment(
                     None,
@@ -1864,31 +1915,67 @@ impl UserApp {
 
     /// Send a trade message to the LSP with the new stabilized USD amount.
     /// The fee is sent as the keysend payment amount.
-    /// Returns the PaymentId on success so the caller can track it.
+    /// Returns the PaymentId and signed backing allocation on success so the caller can track it.
     fn send_trade(
         &mut self,
         new_expected_usd: f64,
         fee_usd: f64,
         trade_action: &str,
-    ) -> Option<PaymentId> {
-        // Grab channel identifiers, counterparty, price from StableChannel
-        let (channel_id_str, user_channel_id_str, counterparty, price, old_expected_usd) = {
-            let sc = self.stable_channel.lock().unwrap();
+        trade_price: f64,
+    ) -> Option<(PaymentId, u64)> {
+        // The fee is a direct keysend amount. Calculate its whole-sat channel impact before
+        // signing the allocation so both peers derive against the same post-settlement balance.
+        let fee_sats = if trade_price > 0.0 && fee_usd > 0.0 {
+            (fee_usd / trade_price * SATS_IN_BTC as f64) as u64
+        } else {
+            0
+        };
+        let fee_msats = fee_sats.saturating_mul(1000);
+        let amt_msat = fee_msats.max(1);
+
+        // Refresh from this wallet's LDK node, then sign one exact allocation at the quote the
+        // user reviewed. The LSP independently validates this against its LDK view and price.
+        let (
+            channel_id_str,
+            user_channel_id_str,
+            counterparty,
+            old_expected_usd,
+            post_fee_receiver_sats,
+            backing_sats,
+        ) = {
+            let mut sc = self.stable_channel.lock().unwrap();
+            stable::update_balances(&self.node, &mut sc);
+            let post_fee_receiver_sats = sc.stable_receiver_btc.sats.saturating_sub(fee_sats);
+            let backing_sats = stable::trade_backing_sats(
+                post_fee_receiver_sats,
+                new_expected_usd,
+                trade_price,
+            );
             (
                 sc.channel_id.to_string(),
                 format!("{}", sc.user_channel_id),
                 sc.counterparty,
-                sc.latest_price,
                 sc.expected_usd.0,
+                post_fee_receiver_sats,
+                backing_sats,
             )
         };
 
-        // Build payload with channel_id (shared between both nodes) for LSP lookup
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // All allocation inputs are signed. A different price observed later cannot alter this
+        // already-reviewed trade.
         let payload = json!({
             "type": TRADE_MESSAGE_TYPE,
             "channel_id": channel_id_str,
             "user_channel_id": user_channel_id_str,
             "expected_usd": new_expected_usd,
+            "quote_price": trade_price,
+            "backing_sats": backing_sats,
+            "ts": ts,
         });
 
         // Serialize payload and sign it with the node's key
@@ -1909,16 +1996,6 @@ impl UserApp {
             type_num: STABLE_CHANNEL_TLV_TYPE,
             value: signed_str.as_bytes().to_vec(),
         };
-
-        // Calculate fee in msats (sent to LSP as keysend amount)
-        let fee_msats = if price > 0.0 && fee_usd > 0.0 {
-            let fee_btc = fee_usd / price;
-            let fee_sats = (fee_btc * 100_000_000.0) as u64;
-            fee_sats * 1000 // convert to msats
-        } else {
-            1 // minimum 1 msat if no fee
-        };
-        let amt_msat: u64 = fee_msats.max(1);
 
         match self.node.spontaneous_payment().send_with_custom_tlvs(
             amt_msat,
@@ -1942,11 +2019,15 @@ impl UserApp {
                         "new_expected_usd": new_expected_usd,
                         "fee_usd": fee_usd,
                         "fee_msats": amt_msat,
+                        "quote_price": trade_price,
+                        "post_fee_receiver_sats": post_fee_receiver_sats,
+                        "backing_sats": backing_sats,
+                        "ts": ts,
                         "status": "pending",
                     }),
                 );
 
-                Some(payment_id)
+                Some((payment_id, backing_sats))
             }
             Err(e) => {
                 self.status_message = format!("Failed to send order: {}", e);
@@ -2040,12 +2121,46 @@ impl UserApp {
 
         // Try to load from database by user_channel_id (stable across splices)
         if let Ok(Some(record)) = self.db.load_channel(&user_channel_id_str) {
-            let mut sc = self.stable_channel.lock().unwrap();
-            sc.expected_usd = USD::from_f64(record.expected_usd);
-            sc.backing_sats = record.backing_sats;
-            sc.native_sats = record.native_sats;
-            if record.note.is_some() {
-                sc.note = record.note;
+            let repaired_snapshot = {
+                let mut sc = self.stable_channel.lock().unwrap();
+                sc.expected_usd = USD::from_f64(record.expected_usd);
+                sc.backing_sats = record.backing_sats;
+                sc.native_sats = record.native_sats;
+                if record.note.is_some() {
+                    sc.note = record.note;
+                }
+                stable::update_balances(&self.node, &mut sc);
+                let price = sc.latest_price;
+                stable::repair_overbacked_allocation(&mut sc, price).map(|_| {
+                    (
+                        sc.channel_id.to_string(),
+                        format!("{}", sc.user_channel_id),
+                        sc.expected_usd.0,
+                        sc.backing_sats,
+                        sc.native_sats,
+                        sc.note.clone(),
+                    )
+                })
+            };
+            if let Some((channel_id, user_channel_id, expected, backing, native, note)) =
+                repaired_snapshot
+            {
+                if let Err(e) = self.db.save_channel(
+                    &channel_id,
+                    &user_channel_id,
+                    expected,
+                    backing,
+                    native,
+                    note.as_deref(),
+                ) {
+                    audit_event(
+                        "OVERBACKED_REPAIR_PERSIST_FAILED",
+                        json!({
+                            "user_channel_id": user_channel_id,
+                            "error": e.to_string(),
+                        }),
+                    );
+                }
             }
             return;
         }
@@ -2127,7 +2242,10 @@ impl UserApp {
         action: &str,
         amount_usd: f64,
         amount_btc: f64,
+        btc_price: f64,
         fee_usd: f64,
+        new_expected_usd: f64,
+        new_backing_sats: Option<u64>,
         payment_id: Option<&str>,
         status: &str,
     ) -> i64 {
@@ -2141,8 +2259,10 @@ impl UserApp {
             action,
             amount_usd,
             amount_btc,
-            self.btc_price,
+            btc_price,
             fee_usd,
+            new_expected_usd,
+            new_backing_sats,
             payment_id,
             status,
         ) {
@@ -2179,6 +2299,187 @@ impl UserApp {
         }
     }
 
+    fn handle_normal_payment_success(
+        &mut self,
+        payment_id: Option<PaymentId>,
+        payment_hash: &str,
+        fee_paid_msat: Option<u64>,
+        ack: &mut bool,
+    ) {
+        {
+            let mut sc = self.stable_channel.lock().unwrap();
+            update_balances(&self.node, &mut sc);
+        }
+        let price = self.stable_channel.lock().unwrap().latest_price;
+        let event_id = payment_id
+            .map(|pid| format!("{pid}"))
+            .unwrap_or_else(|| payment_hash.to_string());
+
+        match self.db.is_stability_payment(&event_id) {
+            Err(e) => {
+                *ack = false;
+                audit_event(
+                    "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
+                    json!({
+                        "payment_hash": payment_hash,
+                        "payment_id": event_id,
+                        "error": e.to_string(),
+                    }),
+                );
+                self.status_message =
+                    "Payment confirmed but accounting could not be saved; retrying".to_string();
+            }
+            Ok(is_stability_payment) => {
+                let needs_reconcile = !is_stability_payment;
+                if needs_reconcile && price <= 0.0 {
+                    *ack = false;
+                    audit_event(
+                        "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
+                        json!({
+                            "payment_hash": payment_hash,
+                            "payment_id": event_id,
+                        }),
+                    );
+                    return;
+                }
+
+                let pending =
+                    payment_id.and_then(|pid| self.pending_payments.get(&pid).cloned());
+                let payment_sent_message = pending
+                    .as_ref()
+                    .map(|p| {
+                        p.amount_usd
+                            .map(|usd| format!("Payment sent: {}", Self::format_price(usd)))
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "Payment sent: {}",
+                                    Self::format_msats_as_btc(p.amount_msat)
+                                )
+                            })
+                    })
+                    .unwrap_or_else(|| "Payment sent".to_string());
+                audit_event(
+                    "PAYMENT_SUCCESSFUL",
+                    json!({
+                        "payment_hash": payment_hash,
+                        "payment_id": event_id,
+                        "fee_paid_msat": fee_paid_msat,
+                    }),
+                );
+
+                if needs_reconcile {
+                    let persisted = {
+                        let mut sc = self.stable_channel.lock().unwrap();
+                        let before_reconcile = sc.clone();
+                        let old_expected_usd = sc.expected_usd.0;
+                        let usd_deducted = stable::reconcile_outgoing(&mut sc, price);
+                        sc.native_sats = sc
+                            .stable_receiver_btc
+                            .sats
+                            .saturating_sub(sc.backing_sats);
+                        stable::recompute_native(&mut sc);
+
+                        let result = self.db.persist_outgoing_reconciliation(
+                            &event_id,
+                            pending.as_ref().map(|p| p.payment_db_id),
+                            fee_paid_msat,
+                            &sc.channel_id.to_string(),
+                            &format!("{}", sc.user_channel_id),
+                            sc.expected_usd.0,
+                            sc.backing_sats,
+                            sc.native_sats,
+                            sc.note.as_deref(),
+                            Some(price),
+                        );
+                        match result {
+                            Ok(true) => Ok((
+                                true,
+                                usd_deducted,
+                                old_expected_usd,
+                                sc.expected_usd.0,
+                            )),
+                            Ok(false) => {
+                                *sc = before_reconcile;
+                                Ok((false, None, old_expected_usd, old_expected_usd))
+                            }
+                            Err(e) => {
+                                *sc = before_reconcile;
+                                Err(e)
+                            }
+                        }
+                    };
+
+                    match persisted {
+                        Ok((applied, usd_deducted, old_expected_usd, new_expected_usd)) => {
+                            if let Some(pid) = payment_id {
+                                self.pending_payments.remove(&pid);
+                            }
+                            if let Some(usd_deducted) = usd_deducted {
+                                audit_event(
+                                    "OUTGOING_STABLE_DEDUCTED",
+                                    json!({
+                                        "payment_hash": payment_hash,
+                                        "payment_id": event_id,
+                                        "usd_deducted": usd_deducted,
+                                        "old_expected_usd": old_expected_usd,
+                                        "new_expected_usd": new_expected_usd,
+                                        "btc_price": price,
+                                    }),
+                                );
+                            }
+                            audit_event(
+                                if applied {
+                                    "OUTGOING_RECONCILE_COMMITTED"
+                                } else {
+                                    "OUTGOING_RECONCILE_REPLAY"
+                                },
+                                json!({
+                                    "payment_hash": payment_hash,
+                                    "payment_id": event_id,
+                                }),
+                            );
+                        }
+                        Err(e) => {
+                            *ack = false;
+                            audit_event(
+                                "OUTGOING_RECONCILE_PERSIST_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash,
+                                    "payment_id": event_id,
+                                    "error": e.to_string(),
+                                }),
+                            );
+                            self.status_message =
+                                "Payment confirmed but accounting could not be saved; retrying"
+                                    .to_string();
+                        }
+                    }
+                } else if let Some(pending) = pending {
+                    let _ = self.db.update_payment_status(
+                        pending.payment_db_id,
+                        "completed",
+                        fee_paid_msat,
+                    );
+                    if let Some(pid) = payment_id {
+                        self.pending_payments.remove(&pid);
+                    }
+                } else {
+                    let _ = self.db.update_payment_status_by_pid(
+                        &event_id,
+                        "completed",
+                        fee_paid_msat,
+                    );
+                }
+
+                if *ack {
+                    self.update_balances();
+                    self.status_message = payment_sent_message.clone();
+                    self.show_toast(&payment_sent_message, "-");
+                }
+            }
+        }
+    }
+
     fn process_events(&mut self) {
         while let Some(event) = self.node.next_event() {
             let mut ack = true;
@@ -2207,6 +2508,33 @@ impl UserApp {
                             .complete_latest_splice(Some(txid_str.as_str()))
                             .map(|rows| rows > 0)
                             .unwrap_or(false);
+                    // If SpliceNegotiated's esplora deduction already reconciled this splice,
+                    // ChannelReady must not reconcile again (persisted, so it survives a restart).
+                    let splice_already_reconciled = txid_str != "unknown"
+                        && self
+                            .db
+                            .is_splice_stable_reconciled(&txid_str)
+                            .unwrap_or(false);
+                    let pending_splice_direction =
+                        self.pending_splice.lock().ok().and_then(|guard| {
+                            guard.as_ref().map(|splice| splice.direction.clone())
+                        });
+                    let splice_direction = pending_splice_direction.clone().or_else(|| {
+                        (txid_str != "unknown")
+                            .then(|| self.db.get_splice_direction(&txid_str).ok().flatten())
+                            .flatten()
+                    });
+                    let keep_splice_in_pending = splice_direction.as_deref() == Some("in");
+                    let funding_lookup_pending = self
+                        .pending_splice_deduction
+                        .as_ref()
+                        .map(|pending| pending.txid == txid_str)
+                        .unwrap_or(false);
+                    let reconcile_action = splice_reconcile_action(
+                        splice_direction.as_deref(),
+                        splice_already_reconciled,
+                        funding_lookup_pending,
+                    );
                     let is_splice;
                     {
                         let mut sc = self.stable_channel.lock().unwrap();
@@ -2231,39 +2559,151 @@ impl UserApp {
                                     .unwrap_or(false);
                             }
                         }
-                        is_splice = ours && (completed_splice || channel_id_changed);
+                        is_splice = ours
+                            && (completed_splice
+                                || channel_id_changed
+                                || splice_direction.is_some());
                         update_balances(&self.node, &mut sc);
 
                         // After splice confirms, reconcile: if splice-out exceeded
                         // native BTC, the overflow eats into the stable position.
                         if is_splice {
-                            let price = sc.latest_price;
-                            if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
-                                audit_event(
-                                    "SPLICE_OUT_STABLE_DEDUCTED",
-                                    json!({
-                                        "usd_deducted": usd_deducted,
-                                        "new_expected_usd": sc.expected_usd.0,
-                                        "btc_price": price,
-                                    }),
-                                );
+                            match reconcile_action {
+                                SpliceReconcileAction::AlreadyReconciled => {
+                                    audit_event(
+                                        "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                                        json!({ "txid": txid_str.clone() }),
+                                    );
+                                }
+                                SpliceReconcileAction::NoOutgoingDeduction => {
+                                    match self.db.persist_splice_reconciliation(
+                                        &txid_str,
+                                        &sc.channel_id.to_string(),
+                                        &format!("{}", sc.user_channel_id),
+                                        sc.expected_usd.0,
+                                        sc.backing_sats,
+                                        sc.native_sats,
+                                        sc.note.as_deref(),
+                                    ) {
+                                        Ok(_) => audit_event(
+                                            "SPLICE_IN_RECONCILED",
+                                            json!({ "txid": txid_str.clone() }),
+                                        ),
+                                        Err(e) => {
+                                            ack = false;
+                                            audit_event(
+                                                "DB_WRITE_FAILED",
+                                                json!({
+                                                    "op": "persist_splice_reconciliation",
+                                                    "txid": txid_str.clone(),
+                                                    "error": e.to_string(),
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }
+                                SpliceReconcileAction::DeferToFundingLookup => {
+                                    if let Some(pending) = self
+                                        .pending_splice_deduction
+                                        .as_mut()
+                                        .filter(|pending| pending.txid == txid_str)
+                                    {
+                                        pending.channel_ready_seen = true;
+                                    }
+                                    audit_event(
+                                        "SPLICE_OUT_RECONCILE_DEFERRED",
+                                        json!({ "txid": txid_str.clone() }),
+                                    );
+                                    // Do not acknowledge ChannelReady until the exact funding-output
+                                    // value and the accounting update are durable. LDK will replay the
+                                    // event after a crash instead of leaving a completed-but-unreconciled
+                                    // splice row with no startup work item.
+                                    ack = false;
+                                }
+                                SpliceReconcileAction::ReconcileNow => {
+                                    let price = sc.latest_price;
+                                    if !price.is_finite() || price <= 0.0 {
+                                        audit_event(
+                                            "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
+                                            json!({
+                                                "txid": txid_str.clone(),
+                                                "source": "channel_ready_fallback",
+                                            }),
+                                        );
+                                        break;
+                                    }
+                                    let mut reconciled = sc.clone();
+                                    let usd_deducted =
+                                        stable::reconcile_outgoing(&mut reconciled, price);
+                                    match self.db.persist_splice_reconciliation(
+                                        &txid_str,
+                                        &reconciled.channel_id.to_string(),
+                                        &format!("{}", reconciled.user_channel_id),
+                                        reconciled.expected_usd.0,
+                                        reconciled.backing_sats,
+                                        reconciled.native_sats,
+                                        reconciled.note.as_deref(),
+                                    ) {
+                                        Ok(true) => {
+                                            *sc = reconciled;
+                                            if let Some(usd_deducted) = usd_deducted {
+                                                audit_event(
+                                                    "SPLICE_OUT_STABLE_DEDUCTED",
+                                                    json!({
+                                                        "usd_deducted": usd_deducted,
+                                                        "new_expected_usd": sc.expected_usd.0,
+                                                        "btc_price": price,
+                                                        "source": "channel_ready_fallback",
+                                                    }),
+                                                );
+                                            }
+                                        }
+                                        Ok(false) => audit_event(
+                                            "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                                            json!({ "txid": txid_str.clone() }),
+                                        ),
+                                        Err(e) => {
+                                            ack = false;
+                                            audit_event(
+                                                "DB_WRITE_FAILED",
+                                                json!({
+                                                    "op": "persist_splice_reconciliation",
+                                                    "txid": txid_str.clone(),
+                                                    "error": e.to_string(),
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }
                             }
-                            // Splice complete: clear the auto-splice flag (bg-thread
-                            // clear only handles splice-in via balance drop;
-                            // splice-out needs this explicit clear).
-                            self.auto_splice_in_progress
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            self.auto_splice_onchain_at_start
-                                .store(0, std::sync::atomic::Ordering::Relaxed);
+                            // A zero-conf splice-in becomes channel-ready before BDK removes the
+                            // spent input. Keep its accounting marker until the on-chain balance
+                            // drops. Splice-out can be cleared immediately here.
+                            if ack && !keep_splice_in_pending {
+                                self.auto_splice_in_progress
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                                self.auto_splice_onchain_at_start
+                                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                                *self.pending_splice.lock().unwrap() = None;
+                            }
                         }
                     }
-                    self.save_channel_settings();
-                    self.update_balances(); // Update UI immediately
+                    if ack {
+                        if !is_splice
+                            || reconcile_action != SpliceReconcileAction::DeferToFundingLookup
+                        {
+                            self.save_channel_settings();
+                        }
+                        self.update_balances(); // Update UI immediately
+                    }
 
                     // Splice rows were already completed above (exact txid match,
                     // or the legacy latest-row fallback). Everything else with a
                     // known funding txid is a regular channel open.
-                    if !completed_splice && txid_str != "unknown" {
+                    if !completed_splice
+                        && splice_direction.is_none()
+                        && txid_str != "unknown"
+                    {
                         let _ = self
                             .db
                             .update_payment_confirmations(&txid_str, 1, "completed");
@@ -2377,27 +2817,149 @@ impl UserApp {
                                 );
                                 continue;
                             }
-                            if let Some(expected_usd) =
-                                payload.get("expected_usd").and_then(|v| v.as_f64())
-                            {
-                                let mut sc = self.stable_channel.lock().unwrap();
-                                let price = sc.latest_price;
-                                let old_expected = sc.expected_usd.0;
-                                stable::apply_trade(&mut sc, expected_usd, price);
-                                drop(sc);
-                                self.save_channel_settings();
-
+                            let Some(sync) = parse_incoming_sync(&payload) else {
                                 audit_event(
-                                    "SYNC_V1_APPLIED",
+                                    "SYNC_V1_PAYLOAD_INVALID",
+                                    json!({ "payment_hash": &payment_hash_str }),
+                                );
+                                break 'sync true;
+                            };
+
+                            let mut sc = self.stable_channel.lock().unwrap();
+                            let wallet_channel_id = sc.channel_id.to_string();
+                            if sync.channel_id != wallet_channel_id {
+                                audit_event(
+                                    "SYNC_V1_CHANNEL_MISMATCH",
                                     json!({
-                                        "old_expected_usd": old_expected,
-                                        "new_expected_usd": expected_usd,
-                                        "btc_price": price,
                                         "payment_hash": &payment_hash_str,
+                                        "payload_channel_id": sync.channel_id.clone(),
+                                        "wallet_channel_id": wallet_channel_id,
+                                        "sync_version": sync.sync_version,
                                     }),
                                 );
                                 break 'sync true;
                             }
+
+                            stable::update_balances(&self.node, &mut sc);
+                            let price = sc.latest_price;
+                            let old_expected = sc.expected_usd.0;
+                            let live_receiver_sats = sc.stable_receiver_btc.sats;
+                            let pending_trade = match self.db.get_pending_trade_by_allocation(
+                                sync.expected_usd,
+                                sync.backing_sats,
+                            ) {
+                                Ok(trade) => trade,
+                                Err(e) => {
+                                    audit_event(
+                                        "DB_READ_FAILED",
+                                        json!({
+                                            "op": "get_pending_trade_by_allocation",
+                                            "payment_hash": &payment_hash_str,
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                    ack = false;
+                                    break 'sync true;
+                                }
+                            };
+                            if let Err(reason) = validate_incoming_sync_allocation(
+                                &sync,
+                                live_receiver_sats,
+                                price,
+                                pending_trade.is_some(),
+                            ) {
+                                audit_event(
+                                    "SYNC_V1_ALLOCATION_REJECTED",
+                                    json!({
+                                        "payment_hash": &payment_hash_str,
+                                        "reason": reason,
+                                        "expected_usd": sync.expected_usd,
+                                        "backing_sats": sync.backing_sats,
+                                        "live_receiver_sats": live_receiver_sats,
+                                        "btc_price": price,
+                                        "sync_version": sync.sync_version,
+                                    }),
+                                );
+                                break 'sync true;
+                            }
+                            let native_sats = live_receiver_sats.saturating_sub(sync.backing_sats);
+                            let user_channel_id = format!("{}", sc.user_channel_id);
+                            match self.db.apply_sync_if_newer_and_complete_trade(
+                                &user_channel_id,
+                                sync.sync_version,
+                                sync.expected_usd,
+                                sync.backing_sats,
+                                native_sats,
+                                pending_trade.as_ref().map(|trade| trade.id),
+                            ) {
+                                Ok(true) => {
+                                    stable::apply_trade_allocation(
+                                        &mut sc,
+                                        sync.expected_usd,
+                                        sync.backing_sats,
+                                    );
+                                    audit_event(
+                                        "SYNC_V1_APPLIED",
+                                        json!({
+                                            "old_expected_usd": old_expected,
+                                            "new_expected_usd": sync.expected_usd,
+                                            "backing_sats": sync.backing_sats,
+                                            "sync_version": sync.sync_version,
+                                            "live_receiver_sats": live_receiver_sats,
+                                            "btc_price": price,
+                                            "payment_hash": &payment_hash_str,
+                                        }),
+                                    );
+                                    drop(sc);
+                                    if let Some(trade) = pending_trade {
+                                        self.pending_trade_payments
+                                            .retain(|_, pending| pending.trade_db_id != trade.id);
+                                        audit_event(
+                                            "TRADE_ACCEPTED_BY_LSP",
+                                            json!({
+                                                "trade_id": trade.id,
+                                                "action": trade.action,
+                                                "expected_usd": sync.expected_usd,
+                                                "backing_sats": sync.backing_sats,
+                                                "sync_version": sync.sync_version,
+                                            }),
+                                        );
+                                        let verb = if trade.action == "buy" {
+                                            "USD → BTC"
+                                        } else {
+                                            "BTC → USD"
+                                        };
+                                        self.show_toast(
+                                            &format!("{} order confirmed", verb),
+                                            "OK",
+                                        );
+                                    }
+                                }
+                                Ok(false) => {
+                                    audit_event(
+                                        "SYNC_V1_REPLAY_REJECTED",
+                                        json!({
+                                            "payment_hash": &payment_hash_str,
+                                            "user_channel_id": user_channel_id,
+                                            "sync_version": sync.sync_version,
+                                        }),
+                                    );
+                                }
+                                Err(e) => {
+                                    audit_event(
+                                        "DB_WRITE_FAILED",
+                                        json!({
+                                            "op": "apply_sync_if_newer",
+                                            "payment_hash": &payment_hash_str,
+                                            "user_channel_id": user_channel_id,
+                                            "sync_version": sync.sync_version,
+                                            "error": e.to_string(),
+                                        }),
+                                    );
+                                    ack = false;
+                                }
+                            }
+                            break 'sync true;
                         }
                         false
                     };
@@ -2571,127 +3133,84 @@ impl UserApp {
                 } => {
                     let payment_hash_str = format!("{payment_hash}");
 
-                    // Check if this is a pending trade payment
-                    let pending_trade =
-                        payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                    // Payment success proves that the fee reached the LSP, not that it accepted the
+                    // signed allocation. Keep the trade pending until its signed SYNC_V1 arrives.
+                    let mut pending_trade = payment_id
+                        .and_then(|pid| self.pending_trade_payments.get(&pid).cloned());
+                    if pending_trade.is_none() {
+                        if let Some(pid) = payment_id {
+                            if let Some(row) = self
+                                .db
+                                .get_pending_trade_by_payment_id(&format!("{pid}"))
+                                .ok()
+                                .flatten()
+                            {
+                                pending_trade = Some(PendingTradePayment {
+                                    new_expected_usd: row.new_expected_usd,
+                                    backing_sats: row.new_backing_sats,
+                                    trade_db_id: row.id,
+                                    action: row.action,
+                                });
+                            }
+                        }
+                    }
 
                     if let Some(trade) = pending_trade {
-                        // Trade payment confirmed — now apply the trade
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            stable::apply_trade(&mut sc, trade.new_expected_usd, trade.price);
-                        }
-                        self.save_channel_settings();
-                        let _ = self.db.update_trade_status(trade.trade_db_id, "completed");
-
                         audit_event(
-                            "TRADE_CONFIRMED",
+                            "TRADE_FEE_CONFIRMED_AWAITING_SYNC",
                             json!({
                                 "payment_hash": payment_hash_str,
+                                "trade_id": trade.trade_db_id,
                                 "action": trade.action,
                                 "new_expected_usd": trade.new_expected_usd,
+                                "backing_sats": trade.backing_sats,
                                 "fee_paid_msat": fee_paid_msat,
                             }),
                         );
-
                         self.update_balances();
-                        let verb =
-                            if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
-                        self.show_toast(&format!("{} order confirmed", verb), "OK");
-                    } else {
-                        // Normal (non-trade) outgoing payment
-                        let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
-                        let payment_sent_message = pending
-                            .as_ref()
-                            .map(|p| {
-                                p.amount_usd
-                                    .map(|usd| format!("Payment sent: {}", Self::format_price(usd)))
-                                    .unwrap_or_else(|| {
-                                        format!(
-                                            "Payment sent: {}",
-                                            Self::format_msats_as_btc(p.amount_msat)
-                                        )
-                                    })
-                            })
-                            .unwrap_or_else(|| "Payment sent".to_string());
-
-                        // Refresh channel balances from LDK
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            update_balances(&self.node, &mut sc);
-                        }
-
-                        let price = {
-                            let sc = self.stable_channel.lock().unwrap();
-                            sc.latest_price
-                        };
-
-                        audit_event(
-                            "PAYMENT_SUCCESSFUL",
-                            json!({
-                                "payment_hash": payment_hash_str,
-                                "fee_paid_msat": fee_paid_msat,
-                            }),
-                        );
-
-                        // Reconcile stable balance
-                        {
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            let old_expected = sc.expected_usd.0;
-                            if let Some(usd_deducted) = stable::reconcile_outgoing(&mut sc, price) {
+                        self.status_message =
+                            "Trade fee confirmed; waiting for LSP acceptance".to_string();
+                    } else if let Some(pid) = payment_id {
+                        match self.db.is_trade_payment(&format!("{pid}")) {
+                            Err(e) => {
+                                ack = false;
                                 audit_event(
-                                    "OUTGOING_STABLE_DEDUCTED",
+                                    "TRADE_PAYMENT_CLASSIFICATION_FAILED",
                                     json!({
                                         "payment_hash": payment_hash_str,
-                                        "usd_deducted": usd_deducted,
-                                        "old_expected_usd": old_expected,
-                                        "new_expected_usd": sc.expected_usd.0,
-                                        "btc_price": price,
+                                        "payment_id": format!("{pid}"),
+                                        "error": e.to_string(),
                                     }),
                                 );
                             }
-                        }
-
-                        if let Some(p) = pending {
-                            // Update existing pending record to completed + fee
-                            let _ = self.db.update_payment_status(
-                                p.payment_db_id,
-                                "completed",
-                                fee_paid_msat,
-                            );
-                        } else {
-                            // Try to confirm a pending stability payment by payment_hash
-                            let updated = self
-                                .db
-                                .update_payment_status_by_pid(
+                            Ok(true) => {
+                                // SYNC_V1 can arrive first and atomically complete the trade. Do not
+                                // run ordinary outgoing reconciliation when LDK later reports its fee.
+                                audit_event(
+                                    "TRADE_FEE_CONFIRMED_AFTER_SYNC",
+                                    json!({
+                                        "payment_hash": payment_hash_str,
+                                        "payment_id": format!("{pid}"),
+                                        "fee_paid_msat": fee_paid_msat,
+                                    }),
+                                );
+                            }
+                            Ok(false) => {
+                                self.handle_normal_payment_success(
+                                    payment_id,
                                     &payment_hash_str,
-                                    "completed",
                                     fee_paid_msat,
-                                )
-                                .unwrap_or(0);
-                            if updated == 0
-                                && !self.db.payment_exists(&payment_hash_str).unwrap_or(false)
-                            {
-                                // Completely unknown payment — record as completed
-                                let _ = self.db.record_payment(
-                                    Some(&payment_hash_str),
-                                    "lightning",
-                                    "sent",
-                                    0,
-                                    None,
-                                    if price > 0.0 { Some(price) } else { None },
-                                    None,
-                                    "completed",
-                                    None,
-                                    None,
+                                    &mut ack,
                                 );
                             }
                         }
-
-                        self.save_channel_settings();
-                        self.update_balances();
-                        self.status_message = payment_sent_message.clone();
-                        self.show_toast(&payment_sent_message, "-");
+                    } else {
+                        self.handle_normal_payment_success(
+                            payment_id,
+                            &payment_hash_str,
+                            fee_paid_msat,
+                            &mut ack,
+                        );
                     }
                 }
 
@@ -2700,47 +3219,147 @@ impl UserApp {
                     payment_hash,
                     reason,
                 } => {
-                    // Check if this is a pending trade payment
-                    let pending_trade =
-                        payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                    let mut handled_stability_failure = false;
+                    if let Some(pid) = payment_id {
+                        match self
+                            .db
+                            .fail_pending_stability_payment(&format!("{pid}"))
+                        {
+                            Ok(Some(rollback)) => {
+                                handled_stability_failure = true;
+                                let mut memory_restored = false;
+                                if rollback.restored {
+                                    if let (Some(uid), Some(before), Some(after)) = (
+                                        rollback.user_channel_id.as_deref(),
+                                        rollback.backing_sats_before,
+                                        rollback.backing_sats_after,
+                                    ) {
+                                        let mut sc = self.stable_channel.lock().unwrap();
+                                        if format!("{}", sc.user_channel_id) == uid
+                                            && sc.backing_sats == after
+                                        {
+                                            sc.backing_sats = before;
+                                            sc.native_sats = sc
+                                                .stable_receiver_btc
+                                                .sats
+                                                .saturating_sub(before);
+                                            stable::recompute_native(&mut sc);
+                                            sc.last_stability_payment = 0;
+                                            sc.payment_made = false;
+                                            memory_restored = true;
+                                        }
+                                    }
+                                }
 
-                    if let Some(trade) = pending_trade {
-                        // Trade payment failed — mark as failed, don't apply trade
-                        let _ = self.db.update_trade_status(trade.trade_db_id, "failed");
+                                audit_event(
+                                    "STABILITY_PAYMENT_FAILED_RECONCILED",
+                                    json!({
+                                        "payment_id": format!("{pid}"),
+                                        "payment_hash": payment_hash.map(|h| format!("{h}")),
+                                        "reason": format!("{:?}", reason),
+                                        "user_channel_id": rollback.user_channel_id,
+                                        "backing_sats_before": rollback.backing_sats_before,
+                                        "backing_sats_after": rollback.backing_sats_after,
+                                        "database_restored": rollback.restored,
+                                        "memory_restored": memory_restored,
+                                    }),
+                                );
+                                self.status_message = if rollback.restored {
+                                    "Stability payment failed; allocation restored".to_string()
+                                } else {
+                                    "Stability payment failed; newer allocation preserved"
+                                        .to_string()
+                                };
+                                self.show_toast("Stability payment failed", "X");
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                handled_stability_failure = true;
+                                ack = false;
+                                audit_event(
+                                    "STABILITY_PAYMENT_FAILURE_PERSIST_FAILED",
+                                    json!({
+                                        "payment_id": format!("{pid}"),
+                                        "error": e.to_string(),
+                                    }),
+                                );
+                            }
+                        }
+                    }
 
-                        audit_event(
-                            "TRADE_FAILED",
-                            json!({
-                                "payment_hash": payment_hash.map(|h| format!("{h}")),
-                                "action": trade.action,
-                                "new_expected_usd": trade.new_expected_usd,
-                                "reason": format!("{:?}", reason),
-                            }),
-                        );
-
-                        let verb =
-                            if trade.action == "buy" { "USD → BTC" } else { "BTC → USD" };
-                        self.status_message = format!("{} order failed: {:?}", verb, reason);
-                        self.show_toast(&format!("{} order failed", verb), "X");
-                    } else {
-                        // Check if this is a pending outgoing payment
-                        let pending = payment_id.and_then(|pid| self.pending_payments.remove(&pid));
-                        if let Some(p) = pending {
-                            let _ = self
-                                .db
-                                .update_payment_status(p.payment_db_id, "failed", None);
+                    if !handled_stability_failure {
+                        // Check if this is a pending trade payment
+                        let mut pending_trade =
+                            payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
+                        if pending_trade.is_none() {
+                            if let Some(pid) = payment_id {
+                                match self.db.get_pending_trade_by_payment_id(&format!("{pid}")) {
+                                    Ok(Some(row)) => {
+                                        pending_trade = Some(PendingTradePayment {
+                                            new_expected_usd: row.new_expected_usd,
+                                            backing_sats: row.new_backing_sats,
+                                            trade_db_id: row.id,
+                                            action: row.action,
+                                        });
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        ack = false;
+                                        audit_event(
+                                            "TRADE_PAYMENT_CLASSIFICATION_FAILED",
+                                            json!({
+                                                "payment_id": format!("{pid}"),
+                                                "context": "payment_failed",
+                                                "error": e.to_string(),
+                                            }),
+                                        );
+                                    }
+                                }
+                            }
                         }
 
-                        audit_event(
-                            "PAYMENT_FAILED",
-                            json!({
-                                "payment_hash": payment_hash.map(|h| format!("{h}")),
-                                "reason": format!("{:?}", reason),
-                            }),
-                        );
+                        if let Some(trade) = pending_trade {
+                            // Trade payment failed — mark as failed, don't apply trade
+                            let _ = self.db.update_trade_status(trade.trade_db_id, "failed");
 
-                        self.status_message = format!("Payment failed: {:?}", reason);
-                        self.show_toast("Payment failed", "X");
+                            audit_event(
+                                "TRADE_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash.map(|h| format!("{h}")),
+                                    "action": trade.action,
+                                    "new_expected_usd": trade.new_expected_usd,
+                                    "reason": format!("{:?}", reason),
+                                }),
+                            );
+
+                            let verb = if trade.action == "buy" {
+                                "USD → BTC"
+                            } else {
+                                "BTC → USD"
+                            };
+                            self.status_message = format!("{} order failed: {:?}", verb, reason);
+                            self.show_toast(&format!("{} order failed", verb), "X");
+                        } else if ack {
+                            // Check if this is a pending outgoing payment
+                            let pending =
+                                payment_id.and_then(|pid| self.pending_payments.remove(&pid));
+                            if let Some(p) = pending {
+                                let _ = self
+                                    .db
+                                    .update_payment_status(p.payment_db_id, "failed", None);
+                            }
+
+                            audit_event(
+                                "PAYMENT_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash.map(|h| format!("{h}")),
+                                    "reason": format!("{:?}", reason),
+                                }),
+                            );
+
+                            self.status_message = format!("Payment failed: {:?}", reason);
+                            self.show_toast("Payment failed", "X");
+                        }
                     }
                 }
 
@@ -2810,8 +3429,12 @@ impl UserApp {
 
                     // Record/update splice payment
                     let txid_str = new_funding_txo.txid.to_string();
-                    if let Some(splice) = self.pending_splice.lock().unwrap().take() {
-                        if splice.direction == "in" {
+                    let pending_direction =
+                        self.pending_splice.lock().ok().and_then(|guard| {
+                            guard.as_ref().map(|splice| splice.direction.clone())
+                        });
+                    if let Some(direction) = pending_direction.as_deref() {
+                        if direction == "in" {
                             // Auto-splice (splice_in) was already recorded in background thread
                             // — just update it with the txid now that we know it
                             let _ = self.db.set_pending_splice_txid(&txid_str);
@@ -2836,6 +3459,8 @@ impl UserApp {
                         }
                     }
 
+                    let live_splice_out = pending_direction.as_deref() == Some("out");
+
                     // Deduct stable balance if splice-out exceeded native BTC.
                     // Uses the same capacity-delta approach as the LSP (via bitcoind)
                     // so both sides compute identical expected_usd.
@@ -2849,52 +3474,33 @@ impl UserApp {
                         .find(|c| c.user_channel_id.0 == user_channel_id.0)
                         .map(|c| c.channel_value_sats);
 
-                    if let Some(old_value) = old_channel_value_sats {
-                        match Self::lookup_funding_output_sats_esplora(&txid_str, vout) {
-                            Some(new_value) => {
-                                audit_event(
-                                    "SPLICE_PENDING_LOOKUP",
-                                    json!({
-                                        "old_channel_sats": old_value,
-                                        "new_channel_sats": new_value,
-                                        "delta_sats": (new_value as i64) - (old_value as i64),
-                                    }),
-                                );
-
-                                if new_value < old_value {
-                                    let splice_out_sats = old_value - new_value;
-                                    let mut sc = self.stable_channel.lock().unwrap();
-                                    let price = sc.latest_price;
-                                    if let Some(usd_deducted) =
-                                        stable::deduct_outgoing(&mut sc, splice_out_sats, price)
-                                    {
-                                        audit_event(
-                                            "SPLICE_OUT_STABLE_DEDUCTED",
-                                            json!({
-                                                "splice_out_sats": splice_out_sats,
-                                                "usd_deducted": usd_deducted,
-                                                "new_expected_usd": sc.expected_usd.0,
-                                                "btc_price": price,
-                                            }),
-                                        );
-                                    }
-                                    drop(sc);
-                                    self.save_channel_settings();
-                                }
-                            }
-                            None => {
-                                println!(
-                                    "[SplicePending] Could not look up funding output {}:{}",
-                                    txid_str, vout
-                                );
-                                audit_event(
-                                    "SPLICE_PENDING_LOOKUP_FAILED",
-                                    json!({
-                                        "txid": txid_str,
-                                        "vout": vout,
-                                    }),
-                                );
-                            }
+                    if live_splice_out {
+                        if let Some(old_value) = old_channel_value_sats {
+                            let (receiver_sats_at_start, backing_sats_at_start) = {
+                                let sc = self.stable_channel.lock().unwrap();
+                                (sc.stable_receiver_btc.sats, sc.backing_sats)
+                            };
+                            // Run the esplora lookup off the UI thread; the deduction is applied in
+                            // poll_pending_splice_deduction() when the result lands (never blocks).
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let txid_for_lookup = txid_str.clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(Self::lookup_funding_output_sats_esplora(
+                                    &txid_for_lookup,
+                                    vout,
+                                ));
+                            });
+                            self.pending_splice_deduction = Some(PendingSpliceDeduction {
+                                old_value_sats: old_value,
+                                receiver_sats_at_start,
+                                backing_sats_at_start,
+                                txid: txid_str.clone(),
+                                vout,
+                                channel_ready_seen: false,
+                                rx: Some(rx),
+                                resolved_new_value: None,
+                                retry_after: None,
+                            });
                         }
                     }
 
@@ -2941,6 +3547,173 @@ impl UserApp {
                 // LDK returns the same queue-front event until it is acknowledged.
                 // Exit this processing pass so a transient DB failure cannot spin forever.
                 break;
+            }
+        }
+    }
+
+    /// Apply a deferred splice-out deduction once its background esplora lookup lands.
+    /// Non-blocking: returns immediately while the lookup is still in flight.
+    fn poll_pending_splice_deduction(&mut self) {
+        let (new_value_opt, newly_resolved) = match self.pending_splice_deduction.as_mut() {
+            Some(pending) => {
+                if pending
+                    .retry_after
+                    .is_some_and(|retry_after| std::time::Instant::now() < retry_after)
+                {
+                    return;
+                }
+                pending.retry_after = None;
+
+                if let Some(new_value) = pending.resolved_new_value {
+                    (new_value, false)
+                } else {
+                    let new_value = match pending.rx.as_ref() {
+                        Some(recv) => match recv.try_recv() {
+                            Ok(value) => value,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+                        },
+                        None => {
+                            audit_event(
+                                "SPLICE_OUT_LOOKUP_STATE_INVALID",
+                                json!({ "txid": pending.txid.clone() }),
+                            );
+                            None
+                        }
+                    };
+                    pending.resolved_new_value = Some(new_value);
+                    pending.rx = None;
+                    (new_value, true)
+                }
+            }
+            None => return,
+        };
+        let mut pending = self.pending_splice_deduction.take().unwrap();
+        if self
+            .db
+            .is_splice_stable_reconciled(&pending.txid)
+            .unwrap_or(false)
+        {
+            audit_event(
+                "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                json!({ "txid": pending.txid.clone(), "source": "funding_lookup" }),
+            );
+            return;
+        }
+
+        let exact_splice_out_sats = match new_value_opt {
+            Some(new_value) => {
+                if newly_resolved {
+                    audit_event(
+                        "SPLICE_PENDING_LOOKUP",
+                        json!({
+                            "old_channel_sats": pending.old_value_sats,
+                            "new_channel_sats": new_value,
+                            "delta_sats": (new_value as i64) - (pending.old_value_sats as i64),
+                        }),
+                    );
+                }
+                (new_value < pending.old_value_sats).then_some(pending.old_value_sats - new_value)
+            }
+            None => {
+                if newly_resolved {
+                    println!(
+                        "[SplicePending] Could not look up funding output {}:{}",
+                        pending.txid, pending.vout
+                    );
+                    audit_event(
+                        "SPLICE_PENDING_LOOKUP_FAILED",
+                        json!({
+                            "txid": pending.txid.clone(),
+                            "vout": pending.vout,
+                        }),
+                    );
+                }
+                None
+            }
+        };
+
+        // If ChannelReady has not arrived yet, a failed or inconsistent lookup can simply leave
+        // reconciliation to that event's balance-based fallback.
+        if exact_splice_out_sats.is_none() && !pending.channel_ready_seen {
+            return;
+        }
+
+        let mut sc = self.stable_channel.lock().unwrap();
+        update_balances(&self.node, &mut sc);
+        let price = sc.latest_price;
+        if !price.is_finite() || price <= 0.0 {
+            drop(sc);
+            pending.retry_after = Some(
+                std::time::Instant::now() + Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS),
+            );
+            self.pending_splice_deduction = Some(pending);
+            audit_event(
+                "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
+                json!({ "source": "funding_lookup" }),
+            );
+            return;
+        }
+        let mut reconciled = sc.clone();
+        let (usd_deducted, source) = if let Some(splice_out_sats) = exact_splice_out_sats {
+            (
+                stable::deduct_outgoing_from_snapshot(
+                    &mut reconciled,
+                    pending.receiver_sats_at_start,
+                    pending.backing_sats_at_start,
+                    splice_out_sats,
+                    price,
+                ),
+                "funding_lookup",
+            )
+        } else {
+            (
+                stable::reconcile_outgoing(&mut reconciled, price),
+                "channel_ready_lookup_fallback",
+            )
+        };
+
+        match self.db.persist_splice_reconciliation(
+            &pending.txid,
+            &reconciled.channel_id.to_string(),
+            &format!("{}", reconciled.user_channel_id),
+            reconciled.expected_usd.0,
+            reconciled.backing_sats,
+            reconciled.native_sats,
+            reconciled.note.as_deref(),
+        ) {
+            Ok(true) => {
+                *sc = reconciled;
+                audit_event(
+                    "SPLICE_OUT_STABLE_RECONCILED",
+                    json!({
+                        "txid": pending.txid.clone(),
+                        "splice_out_sats": exact_splice_out_sats,
+                        "usd_deducted": usd_deducted,
+                        "new_expected_usd": sc.expected_usd.0,
+                        "new_backing_sats": sc.backing_sats,
+                        "btc_price": price,
+                        "source": source,
+                    }),
+                );
+            }
+            Ok(false) => audit_event(
+                "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED",
+                json!({ "txid": pending.txid.clone(), "source": source }),
+            ),
+            Err(e) => {
+                audit_event(
+                    "DB_WRITE_FAILED",
+                    json!({
+                        "op": "persist_splice_reconciliation",
+                        "txid": pending.txid.clone(),
+                        "error": e.to_string(),
+                        "will_retry": true,
+                    }),
+                );
+                drop(sc);
+                pending.retry_after = Some(std::time::Instant::now() + Duration::from_secs(1));
+                self.pending_splice_deduction = Some(pending);
             }
         }
     }
@@ -3240,9 +4013,16 @@ impl UserApp {
 
     /// Format a price with comma separators and 2 decimal places (e.g., 100000.50 -> "$100,000.50")
     fn format_price(price: f64) -> String {
-        let price_int = price as i64;
-        let decimal_part = ((price - price_int as f64) * 100.0).round() as i64;
-        let formatted = price_int
+        if !price.is_finite() {
+            return "$0.00".to_string();
+        }
+
+        let total_cents = (price * 100.0).round() as i64;
+        let sign = if total_cents < 0 { "-" } else { "" };
+        let absolute_cents = total_cents.unsigned_abs();
+        let dollars = absolute_cents / 100;
+        let cents = absolute_cents % 100;
+        let formatted = dollars
             .to_string()
             .as_bytes()
             .rchunks(3)
@@ -3250,7 +4030,7 @@ impl UserApp {
             .map(|chunk| std::str::from_utf8(chunk).unwrap())
             .collect::<Vec<_>>()
             .join(",");
-        format!("${}.{:02}", formatted, decimal_part.abs())
+        format!("{sign}${formatted}.{cents:02}")
     }
 
     fn format_chart_price(price: f64) -> String {
@@ -3267,141 +4047,70 @@ impl UserApp {
     }
 
     /// Seed historical price data into the database if not already present
-    fn seed_historical_prices(&mut self) {
-        // Check if we already have historical data going back to 2013
-        let needs_seed = match self.db.get_oldest_daily_price_date() {
-            Ok(Some(oldest)) => {
-                // Re-seed if oldest data is not from 2013
-                !oldest.starts_with("2013")
-            }
-            Ok(None) => true, // No data at all
-            Err(_) => true,   // Error, try to seed
-        };
-
-        if !needs_seed {
-            if let Ok(count) = self.db.get_daily_price_count() {
-                println!(
-                    "[Chart] Historical prices already seeded ({} records back to 2013)",
-                    count
-                );
-            }
-            // Still check if we need to fetch recent Kraken data
-            self.maybe_fetch_recent_data();
+    /// Kick off the 2013-present seed + recent Kraken daily/intraday backfill on a
+    /// background thread, so a slow/hung feed can never block startup or the UI thread.
+    /// The chart refreshes when it completes (polled in `update`).
+    fn start_historical_backfill(&mut self) {
+        if self.historical_backfill_receiver.is_some() {
             return;
         }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.historical_backfill_receiver = Some(rx);
+        let db = self.db.clone();
 
-        println!("[Chart] Seeding historical price data (2013-present)...");
-        let seed_data = get_seed_prices();
-        let data: Vec<(String, f64, f64, f64, f64, Option<f64>)> = seed_data
-            .into_iter()
-            .map(|(date, o, h, l, c, v)| (date.to_string(), o, h, l, c, v))
-            .collect();
+        std::thread::spawn(move || {
+            let agent = stable_channels::price_feeds::bounded_agent();
 
-        match self.db.bulk_insert_daily_prices(&data) {
-            Ok(count) => println!("[Chart] Seeded {} historical price records", count),
-            Err(e) => eprintln!("[Chart] Failed to seed historical prices: {}", e),
-        }
-
-        // Immediately fetch recent Kraken data to fill in gaps
-        self.fetch_kraken_daily_data();
-    }
-
-    /// Check if we need to fetch recent Kraken data and do so if needed
-    fn maybe_fetch_recent_data(&mut self) {
-        // Check if latest data is older than 3 days
-        let needs_update = match self.db.get_latest_daily_price_date() {
-            Ok(Some(latest)) => {
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                if let (Ok(latest_date), Ok(today_date)) = (
-                    chrono::NaiveDate::parse_from_str(&latest, "%Y-%m-%d"),
-                    chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d"),
-                ) {
-                    let days_old = (today_date - latest_date).num_days();
-                    println!("[Chart] Latest data is {} days old ({})", days_old, latest);
-                    days_old > 3
-                } else {
-                    true
-                }
-            }
-            _ => true,
-        };
-
-        if needs_update {
-            println!("[Chart] Data is stale, fetching from Kraken...");
-            self.fetch_kraken_daily_data();
-        }
-    }
-
-    /// Fetch daily OHLC data from Kraken API (up to 720 days)
-    fn fetch_kraken_daily_data(&mut self) {
-        println!("[Chart] Fetching Kraken OHLC data...");
-        let agent = stable_channels::price_feeds::bounded_agent();
-
-        // Fetch without 'since' to get the most recent 720 days
-        match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
-            Ok(prices) => {
-                let count = prices.len();
-                for (date, open, high, low, close, volume) in prices {
-                    let _ = self.db.record_daily_price(
-                        &date,
-                        open,
-                        high,
-                        low,
-                        close,
-                        volume,
-                        Some("kraken"),
-                    );
-                }
-                println!("[Chart] Fetched {} daily prices from Kraken", count);
-            }
-            Err(e) => {
-                eprintln!("[Chart] Failed to fetch Kraken OHLC data: {}", e);
-            }
-        }
-    }
-
-    /// Backfill intraday price data from Kraken (15-min candles) if we have gaps
-    fn backfill_intraday_prices(&self) {
-        // Check how many points we have in the last 24 hours
-        let existing = self.db.get_price_history(24).unwrap_or_default();
-        if existing.len() >= 80 {
-            println!(
-                "[Chart] Intraday data sufficient ({} points), skipping backfill",
-                existing.len()
-            );
-            return;
-        }
-
-        println!(
-            "[Chart] Backfilling intraday prices from Kraken (have {} points)...",
-            existing.len()
-        );
-        let agent = stable_channels::price_feeds::bounded_agent();
-        match stable_channels::price_feeds::fetch_kraken_intraday(&agent) {
-            Ok(prices) => {
-                // Build a set of existing timestamps (rounded to nearest minute) to avoid dupes
-                let existing_ts: std::collections::HashSet<i64> = existing
-                    .iter()
-                    .map(|p| p.timestamp / 60 * 60) // round to minute
+            // Seed the full 2013-present daily history once (local insert) if missing.
+            let needs_seed = match db.get_oldest_daily_price_date() {
+                Ok(Some(oldest)) => !oldest.starts_with("2013"),
+                _ => true,
+            };
+            if needs_seed {
+                let data: Vec<(String, f64, f64, f64, f64, Option<f64>)> = get_seed_prices()
+                    .into_iter()
+                    .map(|(date, o, h, l, c, v)| (date.to_string(), o, h, l, c, v))
                     .collect();
-
-                let mut inserted = 0;
-                for (ts, price) in &prices {
-                    let rounded = ts / 60 * 60;
-                    if !existing_ts.contains(&rounded) {
-                        let _ = self.db.record_price_at(*price, *ts, Some("kraken"));
-                        inserted += 1;
-                    }
+                if let Err(e) = db.bulk_insert_daily_prices(&data) {
+                    eprintln!("[Chart] Failed to seed historical prices: {}", e);
                 }
-                println!(
-                    "[Chart] Backfilled {} intraday price points from Kraken",
-                    inserted
-                );
             }
-            Err(e) => {
-                eprintln!("[Chart] Failed to backfill intraday prices: {}", e);
+
+            // Refresh recent daily OHLC from Kraken when seeding or when data is stale.
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let daily_stale =
+                db.get_latest_daily_price_date().ok().flatten().as_deref() != Some(today.as_str());
+            if needs_seed || daily_stale {
+                match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
+                    Ok(prices) => {
+                        for (date, open, high, low, close, volume) in prices {
+                            let _ = db
+                                .record_daily_price(&date, open, high, low, close, volume, Some("kraken"));
+                        }
+                    }
+                    Err(e) => eprintln!("[Chart] Failed to fetch Kraken OHLC data: {}", e),
+                }
             }
-        }
+
+            // Backfill intraday (15-min) points for the 1D chart if sparse.
+            let existing = db.get_price_history(24).unwrap_or_default();
+            if existing.len() < 80 {
+                match stable_channels::price_feeds::fetch_kraken_intraday(&agent) {
+                    Ok(prices) => {
+                        let existing_ts: std::collections::HashSet<i64> =
+                            existing.iter().map(|p| p.timestamp / 60 * 60).collect();
+                        for (ts, price) in &prices {
+                            if !existing_ts.contains(&(ts / 60 * 60)) {
+                                let _ = db.record_price_at(*price, *ts, Some("kraken"));
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[Chart] Failed to backfill intraday prices: {}", e),
+                }
+            }
+
+            let _ = tx.send(true);
+        });
     }
 
     /// Load chart data based on current period selection
@@ -4437,7 +5146,12 @@ impl UserApp {
     fn show_home_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Check if we have an active, ready channel (not just pending)
-            let has_active_channel = self.node.list_channels().iter().any(|c| c.is_channel_ready);
+            let channels = self.node.list_channels();
+            let active_channel = channels.iter().find(|channel| channel.is_channel_ready);
+            let has_active_channel = active_channel.is_some();
+            let current_channel_value_sats = active_channel
+                .map(|channel| channel.channel_value_sats)
+                .unwrap_or(0);
 
             // Get fresh balances
             let balances = self.node.list_balances();
@@ -4469,44 +5183,57 @@ impl UserApp {
             let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
 
             // Get balance info
-            let (btc_price, last_update, expected_usd) = {
+            let (btc_price, last_update, expected_usd, backing_sats) = {
                 let sc = self.stable_channel.lock().unwrap();
-                (sc.latest_price, sc.timestamp, sc.expected_usd.0)
+                (
+                    sc.latest_price,
+                    sc.timestamp,
+                    sc.expected_usd.0,
+                    sc.backing_sats,
+                )
             };
 
-            // If no active channel, stability is gone - show $0 stabilized
-            // Claimable lightning balances are NOT added to total because they overlap
-            // with pending_sweep or onchain once the sweep tx is broadcast/confirmed.
+            // The green bucket is the user's fixed USD claim. Collateral's live market value can
+            // temporarily drift while a stability payment is pending, but that must not make the
+            // displayed peg move with BTC. The top total remains the real-time sat valuation.
             let stabilized_usd = if has_active_channel {
-                expected_usd
+                expected_usd.max(0.0)
             } else {
                 0.0
             };
             // Total balance calculation:
-            // - Splice-in pending: lightning already reflects the post-splice
-            //   capacity but onchain hasn't dropped yet — adding both would
-            //   double-count the splice amount until BDK sees the spent UTXO.
-            //   Show lightning only during this window. Matches iOS
-            //   `if isSweeping { return lightningBalanceSats }` at
-            //   AppState.swift:95.
-            // - Active channel (no pending splice-in): lightning + onchain.
+            // - Before splice-in promotion, Lightning and on-chain are independent.
+            // - After promotion but before BDK removes the spent input, subtract the
+            //   recorded pre-splice on-chain balance exactly once.
+            // - Outside that overlap window, add Lightning and on-chain normally.
             // - No channel: pending_sweep + onchain (lightning_balances
             //   overlaps with pending_sweep/onchain after close).
-            let pending_splice_in = self
+            let pending_splice = self
                 .pending_splice
                 .lock()
                 .ok()
-                .and_then(|guard| guard.as_ref().map(|s| s.direction == "in"))
-                .unwrap_or(false);
-            let total_sats = if pending_splice_in {
-                balances.total_lightning_balance_sats
-            } else if has_active_channel {
-                balances.total_lightning_balance_sats + total_onchain_sats
+                .and_then(|guard| guard.clone());
+            let splice_overlap_sats = splice_in_overlap_sats(
+                pending_splice.as_ref(),
+                current_channel_value_sats,
+                total_onchain_sats,
+            );
+            let total_sats = if has_active_channel {
+                balances
+                    .total_lightning_balance_sats
+                    .saturating_add(total_onchain_sats)
+                    .saturating_sub(splice_overlap_sats)
             } else {
                 pending_sweep_sats + total_onchain_sats
             };
             let total_btc = total_sats as f64 / 100_000_000.0;
             let total_usd = total_btc * btc_price;
+            let (stable_sats, native_sats, native_usd) = channel_balance_split(
+                balances.total_lightning_balance_sats,
+                backing_sats,
+                expected_usd,
+                btc_price,
+            );
 
             // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
             ui.horizontal(|ui| {
@@ -4656,11 +5383,6 @@ impl UserApp {
             let btc_color = Color32::from_rgb(255, 149, 0);
 
             if has_active_channel && total_usd > 0.01 {
-                let (_, native_usd) = channel_native_split(
-                    balances.total_lightning_balance_sats,
-                    stabilized_usd,
-                    btc_price,
-                );
                 let bar_total_usd = stabilized_usd + native_usd;
                 let synth_ratio = if bar_total_usd > 0.0 {
                     (stabilized_usd / bar_total_usd).clamp(0.0, 1.0) as f32
@@ -4888,11 +5610,7 @@ impl UserApp {
                                 );
                             });
                             let stable_text = if self.bar_chart_show_btc {
-                                let synth_btc = if btc_price > 0.0 {
-                                    stabilized_usd / btc_price
-                                } else {
-                                    0.0
-                                };
+                                let synth_btc = stable_sats as f64 / 100_000_000.0;
                                 format!("{} BTC", Self::format_btc_spaced(synth_btc))
                             } else {
                                 Self::format_price(stabilized_usd)
@@ -4909,11 +5627,7 @@ impl UserApp {
                                 ui.label(RichText::new("BTC").size(13.0).color(btc_color).strong());
                             });
                             let native_text = if self.bar_chart_show_btc {
-                                let native_btc = if btc_price > 0.0 {
-                                    native_usd / btc_price
-                                } else {
-                                    0.0
-                                };
+                                let native_btc = native_sats as f64 / 100_000_000.0;
                                 format!("{} BTC", Self::format_btc_spaced(native_btc))
                             } else {
                                 Self::format_price(native_usd)
@@ -4938,14 +5652,16 @@ impl UserApp {
             // confirmed funds, unconfirmed deposits, and pending channel-close
             // sweeps. Folds in what used to be a separate "Bitcoin (pending)"
             // section. Matches iOS savingsSection 4-state layout.
-            let has_any_onchain_activity = total_onchain_sats > 0 || pending_sweep_sats > 0;
+            let splicing = self
+                .auto_splice_in_progress
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let accounted_onchain_sats = total_onchain_sats.saturating_sub(splice_overlap_sats);
+            let has_any_onchain_activity =
+                accounted_onchain_sats > 0 || pending_sweep_sats > 0 || splicing;
             if has_any_onchain_activity {
                 let has_ready_channel =
                     self.node.list_channels().iter().any(|c| c.is_channel_ready);
-                let splicing = self
-                    .auto_splice_in_progress
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let total_visible_sats = total_onchain_sats + pending_sweep_sats;
+                let total_visible_sats = accounted_onchain_sats + pending_sweep_sats;
                 let total_visible_btc = total_visible_sats as f64 / 100_000_000.0;
 
                 ui.add_space(8.0);
@@ -6074,14 +6790,21 @@ impl UserApp {
                 ui.label(RichText::new("Save a full backup of your wallet data.").size(12.0).color(theme::MUTED));
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let backup_btn = egui::Button::new(RichText::new("Download Backup").size(12.0).color(Color32::WHITE))
-                        .fill(blue)
-                        .corner_radius(theme::RADIUS_PILL);
-                    if ui.add(backup_btn).clicked() {
-                        match self.create_backup() {
-                            Ok(_) => self.show_toast("Backup saved!", "OK"),
-                            Err(e) => { self.show_toast("Backup failed", "!"); self.status_message = format!("Backup failed: {}", e); }
-                        }
+                    let backup_in_progress = self.backup_receiver.is_some();
+                    let backup_label = if backup_in_progress {
+                        "Creating Backup..."
+                    } else {
+                        "Download Backup"
+                    };
+                    let backup_btn = egui::Button::new(
+                        RichText::new(backup_label)
+                            .size(12.0)
+                            .color(Color32::WHITE),
+                    )
+                    .fill(blue)
+                    .corner_radius(theme::RADIUS_PILL);
+                    if ui.add_enabled(!backup_in_progress, backup_btn).clicked() {
+                        self.start_backup();
                     }
                 });
                 ui.add_space(4.0);
@@ -7625,6 +8348,13 @@ impl UserApp {
                         let img = egui::Image::from_texture(qr).max_size(egui::vec2(180.0, 180.0));
                         ui.add(img);
                     }
+                    if !self.lightning_receive_error.is_empty() {
+                        ui.label(
+                            RichText::new(&self.lightning_receive_error)
+                                .size(12.0)
+                                .color(theme::DANGER_HOVER),
+                        );
+                    }
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(
@@ -7949,10 +8679,11 @@ impl UserApp {
         ui.add_space(5.0);
 
         // Show available USD balance (the stabilized amount)
-        let available_usd = {
+        let available_usd_cents = {
             let sc = self.stable_channel.lock().unwrap();
-            sc.expected_usd.0
+            floor_usd_cents(sc.expected_usd.0)
         };
+        let available_usd = available_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!("Available: {}", Self::format_price(available_usd)))
                 .size(14.0)
@@ -7984,8 +8715,9 @@ impl UserApp {
                 });
 
             // BTC equivalent below input
-            if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
-                if amount > 0.0 {
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                if amount_cents > 0 {
+                    let amount = amount_cents as f64 / 100.0;
                     let btc_price = get_cached_price_no_fetch();
                     if btc_price > 0.0 {
                         let btc = amount / btc_price;
@@ -8012,12 +8744,8 @@ impl UserApp {
         ui.add_space(20.0);
 
         // Next button — enabled when amount is a positive number
-        let has_amount = self
-            .trade_amount_input
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| v > 0.0)
+        let has_amount = parse_trade_usd_cents(&self.trade_amount_input)
+            .map(|v| v > 0)
             .unwrap_or(false);
         let btn_color = if has_amount {
             theme::PRIMARY
@@ -8043,9 +8771,10 @@ impl UserApp {
         });
 
         if should_process {
-            if let Ok(amount) = self.trade_amount_input.parse::<f64>() {
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                let amount = amount_cents as f64 / 100.0;
                 // Validate user has enough USD
-                if amount > available_usd {
+                if amount_cents > available_usd_cents {
                     self.trade_error = format!(
                         "Insufficient balance. You have {} available.",
                         Self::format_price(available_usd)
@@ -8053,9 +8782,14 @@ impl UserApp {
                 } else {
                     // Calculate trade details (use non-blocking cached price)
                     let btc_price = get_cached_price_no_fetch();
+                    if btc_price < 1.0 || !btc_price.is_finite() {
+                        self.trade_error = "Invalid price".to_string();
+                        return;
+                    }
                     let fee_usd = Self::stable_trade_fee(amount);
                     let net_amount = amount - fee_usd;
                     let btc_amount = net_amount / btc_price;
+                    let btc_sats = (btc_amount * SATS_IN_BTC as f64).floor() as u64;
 
                     self.pending_trade = Some(PendingTrade {
                         action: TradeAction::BuyBtc,
@@ -8063,6 +8797,7 @@ impl UserApp {
                         btc_price,
                         fee_usd,
                         btc_amount,
+                        btc_sats,
                         net_amount_usd: net_amount,
                     });
                     self.show_confirm_trade = true;
@@ -8230,7 +8965,7 @@ impl UserApp {
             }
         });
         if should_confirm {
-            self.execute_buy(amount_usd);
+            self.execute_buy(amount_usd, btc_price);
             if self.trade_error.is_empty() {
                 self.trade_success = Some(TradeAction::BuyBtc);
                 self.pending_trade = None;
@@ -8289,18 +9024,24 @@ impl UserApp {
         );
         ui.add_space(5.0);
 
-        // Show available BTC balance (in USD terms) = total - stabilized
+        // Show the native allocation valued in USD. A price quote changes its value, not which
+        // sats belong to it.
         let btc_price = get_cached_price_no_fetch();
-        let available_btc_usd = {
+        let native_sats = {
             let sc = self.stable_channel.lock().unwrap();
-            let total_usd = if sc.is_stable_receiver {
-                sc.stable_receiver_usd.0
-            } else {
-                sc.stable_provider_usd.0
-            };
-            // BTC portion is total minus the stabilized USD amount
-            (total_usd - sc.expected_usd.0).max(0.0)
+            let (_, native_sats, _) = channel_balance_split(
+                sc.stable_receiver_btc.sats,
+                sc.backing_sats,
+                sc.expected_usd.0,
+                btc_price,
+            );
+            native_sats
         };
+        // A hard spending limit must never be formatted upward. Otherwise an exact displayed
+        // maximum can exceed the underlying sats by a fraction of a cent.
+        let available_btc_usd_cents =
+            floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * btc_price);
+        let available_btc_usd = available_btc_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!(
                 "Available: {}",
@@ -8335,9 +9076,9 @@ impl UserApp {
                 });
 
             // BTC equivalent below input
-            if let Ok(amount) = self.trade_amount_input.trim().parse::<f64>() {
-                if amount > 0.0 && btc_price > 0.0 {
-                    let btc = amount / btc_price;
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                if amount_cents > 0 && btc_price > 0.0 {
+                    let btc = amount_cents as f64 / 100.0 / btc_price;
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!("\u{2248} {:.8} BTC", btc))
@@ -8360,12 +9101,8 @@ impl UserApp {
         ui.add_space(20.0);
 
         // Next button — enabled when amount is a positive number
-        let has_amount = self
-            .trade_amount_input
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| v > 0.0)
+        let has_amount = parse_trade_usd_cents(&self.trade_amount_input)
+            .map(|v| v > 0)
             .unwrap_or(false);
         let btn_color = if has_amount {
             theme::PRIMARY
@@ -8391,18 +9128,26 @@ impl UserApp {
         });
 
         if should_process {
-            if let Ok(amount) = self.trade_amount_input.parse::<f64>() {
+            if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
+                let amount = amount_cents as f64 / 100.0;
                 // Validate user has enough BTC to sell
-                if amount > available_btc_usd {
+                if amount_cents > available_btc_usd_cents {
                     self.trade_error = format!(
                         "Insufficient BTC. You have {} available.",
                         Self::format_price(available_btc_usd)
                     );
+                } else if btc_price < 1.0 || !btc_price.is_finite() {
+                    self.trade_error = "Invalid price".to_string();
                 } else {
                     // Calculate trade details
                     let fee_usd = Self::stable_trade_fee(amount);
                     let net_amount = amount - fee_usd;
-                    let btc_amount = amount / btc_price; // BTC being sold
+                    let btc_sats = sats_for_usd_cents(amount_cents, btc_price).unwrap_or(0);
+                    if btc_sats == 0 || btc_sats > native_sats {
+                        self.trade_error = "Amount exceeds the available BTC sats".to_string();
+                        return;
+                    }
+                    let btc_amount = btc_sats as f64 / SATS_IN_BTC as f64;
 
                     self.pending_trade = Some(PendingTrade {
                         action: TradeAction::SellBtc,
@@ -8410,6 +9155,7 @@ impl UserApp {
                         btc_price,
                         fee_usd,
                         btc_amount,
+                        btc_sats,
                         net_amount_usd: net_amount,
                     });
                     self.show_confirm_trade = true;
@@ -8462,6 +9208,7 @@ impl UserApp {
         let btc_price = trade.btc_price;
         let fee_usd = trade.fee_usd;
         let btc_amount = trade.btc_amount;
+        let btc_sats = trade.btc_sats;
         let net_amount = trade.net_amount_usd;
 
         // Header
@@ -8577,7 +9324,7 @@ impl UserApp {
             }
         });
         if should_confirm {
-            self.execute_sell(amount_usd);
+            self.execute_sell(amount_usd, btc_price, btc_sats);
             if self.trade_error.is_empty() {
                 self.trade_success = Some(TradeAction::SellBtc);
                 self.pending_trade = None;
@@ -8802,7 +9549,8 @@ impl UserApp {
                     ] {
                         std::fs::remove_file(data_dir.join(name)).ok();
                     }
-                    if let Err(e) = std::fs::write(data_dir.join("seed_phrase"), &mnemonic_str) {
+                    if let Err(e) = write_secret_file(&data_dir.join("seed_phrase"), &mnemonic_str)
+                    {
                         self.restore_error = format!("Failed to save seed: {}", e);
                         return;
                     }
@@ -8838,25 +9586,30 @@ impl UserApp {
         });
     }
 
-    fn execute_buy(&mut self, amount_usd: f64) {
+    fn execute_buy(&mut self, amount_usd: f64, btc_price: f64) {
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
-        let (current_expected_usd, btc_price) = {
+        let current_expected_usd = {
             let sc = self.stable_channel.lock().unwrap();
-            (sc.expected_usd.0, sc.latest_price)
+            sc.expected_usd.0
         };
 
-        if btc_price < 1.0 {
+        if btc_price < 1.0 || !btc_price.is_finite() {
             self.trade_error = "Invalid price".to_string();
             return;
         }
 
         // Buying BTC means reducing the stabilized USD amount
         // Subtract full amount (fee comes out of the trade)
-        let new_expected_usd = (current_expected_usd - amount_usd).max(0.0);
+        let remaining_usd = (current_expected_usd - amount_usd).max(0.0);
+        let new_expected_usd = if remaining_usd < 0.01 {
+            0.0
+        } else {
+            remaining_usd
+        };
 
-        if amount_usd > current_expected_usd {
+        if floor_usd_cents(amount_usd) > floor_usd_cents(current_expected_usd) {
             self.trade_error = "Amount exceeds available USD".to_string();
             return;
         }
@@ -8866,13 +9619,18 @@ impl UserApp {
         } else {
             0.0
         };
-        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "buy") {
+        if let Some((payment_id, backing_sats)) =
+            self.send_trade(new_expected_usd, fee_usd, "buy", btc_price)
+        {
             let payment_id_str = format!("{payment_id}");
             let trade_db_id = self.record_trade(
                 "buy",
                 amount_usd,
                 btc_amount,
+                btc_price,
                 fee_usd,
+                new_expected_usd,
+                Some(backing_sats),
                 Some(&payment_id_str),
                 "pending",
             );
@@ -8880,7 +9638,7 @@ impl UserApp {
                 payment_id,
                 PendingTradePayment {
                     new_expected_usd,
-                    price: btc_price,
+                    backing_sats: Some(backing_sats),
                     trade_db_id,
                     action: "buy".to_string(),
                 },
@@ -8893,32 +9651,30 @@ impl UserApp {
         self.trade_error.clear();
     }
 
-    fn execute_sell(&mut self, amount_usd: f64) {
+    fn execute_sell(&mut self, amount_usd: f64, btc_price: f64, btc_sats: u64) {
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
-        let (current_expected_usd, total_usd, btc_price) = {
+        let (current_expected_usd, native_sats) = {
             let sc = self.stable_channel.lock().unwrap();
-            let total = if sc.is_stable_receiver {
-                sc.stable_receiver_usd.0
-            } else {
-                sc.stable_provider_usd.0
-            };
-            (sc.expected_usd.0, total, sc.latest_price)
+            let (_, native_sats, _) = channel_balance_split(
+                sc.stable_receiver_btc.sats,
+                sc.backing_sats,
+                sc.expected_usd.0,
+                btc_price,
+            );
+            (sc.expected_usd.0, native_sats)
         };
 
-        if btc_price < 1.0 {
+        if btc_price < 1.0 || !btc_price.is_finite() {
             self.trade_error = "Invalid price".to_string();
             return;
         }
 
-        // Can't sell more BTC than you have
-        let available_btc_usd = (total_usd - current_expected_usd).max(0.0);
-        if amount_usd > available_btc_usd {
-            self.trade_error = format!(
-                "Amount exceeds BTC holdings (${:.2} available)",
-                available_btc_usd
-            );
+        // Revalidate the accepted sat amount, not its moving USD value. Price movement between
+        // the amount and confirmation screens does not change how many native sats are owned.
+        if btc_sats == 0 || btc_sats > native_sats {
+            self.trade_error = format!("BTC balance changed ({} sats available)", native_sats);
             return;
         }
 
@@ -8926,14 +9682,19 @@ impl UserApp {
         // Add net amount (after fee) to stable
         let new_expected_usd = current_expected_usd + net_amount;
 
-        let btc_amount = net_amount / btc_price;
-        if let Some(payment_id) = self.send_trade(new_expected_usd, fee_usd, "sell") {
+        let btc_amount = btc_sats as f64 / SATS_IN_BTC as f64;
+        if let Some((payment_id, backing_sats)) =
+            self.send_trade(new_expected_usd, fee_usd, "sell", btc_price)
+        {
             let payment_id_str = format!("{payment_id}");
             let trade_db_id = self.record_trade(
                 "sell",
                 amount_usd,
                 btc_amount,
+                btc_price,
                 fee_usd,
+                new_expected_usd,
+                Some(backing_sats),
                 Some(&payment_id_str),
                 "pending",
             );
@@ -8941,7 +9702,7 @@ impl UserApp {
                 payment_id,
                 PendingTradePayment {
                     new_expected_usd,
-                    price: btc_price,
+                    backing_sats: Some(backing_sats),
                     trade_db_id,
                     action: "sell".to_string(),
                 },
@@ -8984,32 +9745,81 @@ impl UserApp {
             });
     }
 
-    /// Create a backup zip of the data directory and save to Downloads
-    fn create_backup(&mut self) -> Result<String, String> {
+    fn start_backup(&mut self) {
+        if self.backup_receiver.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.backup_receiver = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::create_backup());
+        });
+    }
+
+    /// Create a backup zip of the data directory and save to Downloads.
+    /// This performs blocking I/O and must only be called from a worker thread.
+    fn create_backup() -> Result<String, String> {
         let data_dir = get_user_data_dir();
 
-        // Get downloads directory
         let downloads_dir =
             dirs::download_dir().ok_or_else(|| "Could not find Downloads folder".to_string())?;
 
-        // Create timestamped filename
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        Self::create_backup_archive(&data_dir, &downloads_dir)
+    }
+
+    fn create_backup_archive(data_dir: &Path, output_dir: &Path) -> Result<String, String> {
+        std::fs::create_dir_all(output_dir)
+            .map_err(|e| format!("Failed to create backup directory: {}", e))?;
+        let snapshot_dir = BackupSnapshotDir::create()?;
+
+        // Build under a non-zip name and publish only after every snapshot verifies.
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S_%3f");
         let backup_filename = format!("stable_channels_backup_{}.zip", timestamp);
-        let backup_path = downloads_dir.join(&backup_filename);
+        let backup_path = output_dir.join(&backup_filename);
+        let partial_path = output_dir.join(format!(
+            ".{}.{}.partial",
+            backup_filename,
+            std::process::id()
+        ));
 
-        // Create the zip file
-        let file = File::create(&backup_path)
-            .map_err(|e| format!("Failed to create backup file: {}", e))?;
-        let mut zip = zip::ZipWriter::new(file);
+        let archive_result = (|| -> Result<(), String> {
+            let mut file_options = OpenOptions::new();
+            file_options.write(true).create_new(true);
+            #[cfg(unix)]
+            file_options.mode(0o600);
+            let file = file_options
+                .open(&partial_path)
+                .map_err(|e| format!("Failed to create backup file: {}", e))?;
+            let mut zip = zip::ZipWriter::new(file);
 
-        let options =
-            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let options = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
 
-        // Walk through data directory and add files
-        Self::add_dir_to_zip(&mut zip, &data_dir, &data_dir, &options)?;
+            // SQLite databases are snapshotted into a private temporary directory.
+            // Their live WAL/journal files must never be copied independently.
+            let mut snapshot_index = 0u64;
+            Self::add_dir_to_zip(
+                &mut zip,
+                data_dir,
+                data_dir,
+                snapshot_dir.path(),
+                &mut snapshot_index,
+                &options,
+            )?;
 
-        zip.finish()
-            .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+            zip.finish()
+                .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+            Ok(())
+        })();
+
+        if let Err(e) = archive_result {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&partial_path, &backup_path) {
+            let _ = std::fs::remove_file(&partial_path);
+            return Err(format!("Failed to publish backup file: {}", e));
+        }
 
         Ok(backup_path.to_string_lossy().to_string())
     }
@@ -9018,6 +9828,8 @@ impl UserApp {
         zip: &mut zip::ZipWriter<File>,
         dir: &Path,
         base: &Path,
+        snapshot_dir: &Path,
+        snapshot_index: &mut u64,
         options: &zip::write::FileOptions,
     ) -> Result<(), String> {
         if !dir.exists() {
@@ -9041,19 +9853,29 @@ impl UserApp {
                 zip.add_directory(&name, *options)
                     .map_err(|e| format!("Failed to add directory: {}", e))?;
                 // Recursively add contents
-                Self::add_dir_to_zip(zip, &path, base, options)?;
+                Self::add_dir_to_zip(zip, &path, base, snapshot_dir, snapshot_index, options)?;
+            } else if is_sqlite_sidecar(&path) {
+                continue;
             } else {
+                let snapshot_path;
+                let archive_source = if is_sqlite_database(&path) {
+                    snapshot_path =
+                        snapshot_dir.join(format!("database-snapshot-{}.sqlite", *snapshot_index));
+                    *snapshot_index += 1;
+                    snapshot_sqlite_database(&path, &snapshot_path)?;
+                    snapshot_path.as_path()
+                } else {
+                    path.as_path()
+                };
+
                 // Add file
                 zip.start_file(&name, *options)
                     .map_err(|e| format!("Failed to start file: {}", e))?;
 
-                let mut file =
-                    File::open(&path).map_err(|e| format!("Failed to open file: {}", e))?;
-                let mut buffer = Vec::new();
-                file.read_to_end(&mut buffer)
-                    .map_err(|e| format!("Failed to read file: {}", e))?;
-                zip.write_all(&buffer)
-                    .map_err(|e| format!("Failed to write file: {}", e))?;
+                let mut file = File::open(archive_source)
+                    .map_err(|e| format!("Failed to open {} for backup: {}", path.display(), e))?;
+                std::io::copy(&mut file, zip)
+                    .map_err(|e| format!("Failed to archive {}: {}", path.display(), e))?;
             }
         }
 
@@ -9071,6 +9893,27 @@ impl App for UserApp {
         ctx.set_visuals(visuals);
 
         self.process_events();
+
+        // Poll backup worker without blocking rendering.
+        if let Some(rx) = self.backup_receiver.take() {
+            match rx.try_recv() {
+                Ok(Ok(path)) => {
+                    self.status_message = format!("Backup saved to {}", path);
+                    self.show_toast("Backup saved!", "OK");
+                }
+                Ok(Err(e)) => {
+                    self.status_message = format!("Backup failed: {}", e);
+                    self.show_toast("Backup failed", "!");
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.backup_receiver = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status_message = "Backup worker stopped unexpectedly".to_string();
+                    self.show_toast("Backup failed", "!");
+                }
+            }
+        }
 
         // Poll background fee rate fetch
         if let Some(ref rx) = self.fee_rate_receiver {
@@ -9104,6 +9947,23 @@ impl App for UserApp {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {} // Still fetching
             }
         }
+
+        // Poll background historical/intraday backfill; refresh the chart when it lands.
+        if let Some(ref rx) = self.historical_backfill_receiver {
+            match rx.try_recv() {
+                Ok(_) => {
+                    self.load_chart_data();
+                    self.historical_backfill_receiver = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.historical_backfill_receiver = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // Apply a deferred splice-out deduction once its esplora lookup completes.
+        self.poll_pending_splice_deduction();
 
         self.show_onboarding = false;
 
@@ -9392,53 +10252,671 @@ pub fn run() {
     }
 }
 
-/// Mobile-parity channel split: native = channel sats above the peg target (saturating, never negative), valued at price. Mirrors iOS HomeView.
-fn channel_native_split(lightning_sats: u64, target_usd: f64, price: f64) -> (u64, f64) {
-    if price <= 0.0 {
-        return (0, 0.0);
+/// Parse a user-entered USD trade amount into its exact cent representation. Trades are quoted
+/// and validated in cents, so values with more than two decimal places are intentionally rejected.
+fn parse_trade_usd_cents(input: &str) -> Option<u64> {
+    let cleaned: String = input
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '$' && *c != ',' && *c != '_')
+        .collect();
+    if cleaned.is_empty() {
+        return None;
     }
-    let stable_sats = (target_usd / price * 100_000_000.0) as u64;
+
+    let mut parts = cleaned.split('.');
+    let whole = parts.next()?;
+    let fraction = parts.next().unwrap_or("");
+    if parts.next().is_some()
+        || fraction.len() > 2
+        || (!whole.is_empty() && !whole.bytes().all(|b| b.is_ascii_digit()))
+        || (!fraction.is_empty() && !fraction.bytes().all(|b| b.is_ascii_digit()))
+        || (whole.is_empty() && fraction.is_empty())
+    {
+        return None;
+    }
+
+    let whole_cents = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().ok()?.checked_mul(100)?
+    };
+    let fraction_cents = match fraction.len() {
+        0 => 0,
+        1 => fraction.parse::<u64>().ok()?.checked_mul(10)?,
+        2 => fraction.parse::<u64>().ok()?,
+        _ => return None,
+    };
+    whole_cents.checked_add(fraction_cents)
+}
+
+/// Return only whole spendable cents. A hard maximum must be rounded down, never up like a
+/// presentation-only currency value.
+fn floor_usd_cents(usd: f64) -> u64 {
+    if !usd.is_finite() || usd <= 0.0 {
+        return 0;
+    }
+    let cents = usd * 100.0;
+    if cents >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        (cents + 1e-9).floor() as u64
+    }
+}
+
+/// Sats required to cover an exact cent-denominated USD amount at a fixed quote. Round up so the
+/// order can never claim more USD than the selected sats are worth.
+fn sats_for_usd_cents(cents: u64, price: f64) -> Option<u64> {
+    if cents == 0 || !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let sats = cents as f64 / 100.0 / price * SATS_IN_BTC as f64;
+    if !sats.is_finite() || sats > u64::MAX as f64 {
+        None
+    } else {
+        Some(sats.ceil() as u64)
+    }
+}
+
+/// Split the live channel using its persisted sat allocation. Price values the native bucket but
+/// never moves sats between buckets; stable + native therefore always equals the live balance.
+fn channel_balance_split(
+    lightning_sats: u64,
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+) -> (u64, u64, f64) {
+    let normalized_backing =
+        stable::normalize_backing_sats(lightning_sats, backing_sats, expected_usd, price);
+    let stable_sats = normalized_backing.min(lightning_sats);
     let native_sats = lightning_sats.saturating_sub(stable_sats);
-    let native_usd = native_sats as f64 / 100_000_000.0 * price;
-    (native_sats, native_usd)
+    let native_usd = if price > 0.0 {
+        native_sats as f64 / 100_000_000.0 * price
+    } else {
+        0.0
+    };
+    (stable_sats, native_sats, native_usd)
+}
+
+/// During a zero-conf splice-in, LDK can expose the increased channel value before its on-chain
+/// wallet has removed the spent input. Subtract only that known overlap, and only after channel
+/// promotion; before promotion both balances are still independent and must both be counted.
+fn splice_in_overlap_sats(
+    pending: Option<&PendingSplice>,
+    current_channel_value_sats: u64,
+    current_onchain_sats: u64,
+) -> u64 {
+    let Some(pending) = pending.filter(|pending| pending.direction == "in") else {
+        return 0;
+    };
+    if current_channel_value_sats > pending.channel_value_sats_at_start
+        && current_onchain_sats >= pending.onchain_sats_at_start
+    {
+        pending.onchain_sats_at_start
+    } else {
+        0
+    }
+}
+
+fn collapse_double_paste(input: String) -> String {
+    let len = input.len();
+    let midpoint = len / 2;
+    if len > 60 && len.is_multiple_of(2) && input.is_char_boundary(midpoint) {
+        let (first, second) = input.split_at(midpoint);
+        if first == second {
+            return first.to_string();
+        }
+    }
+    input
+}
+
+fn is_sqlite_database(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "db" | "sqlite" | "sqlite3"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn is_sqlite_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            let name = name.to_ascii_lowercase();
+            name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal")
+        })
+        .unwrap_or(false)
+}
+
+fn snapshot_sqlite_database(source: &Path, destination: &Path) -> Result<(), String> {
+    let source_conn =
+        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(|e| format!("Failed to open SQLite database {}: {}", source.display(), e))?;
+    source_conn
+        .busy_timeout(Duration::from_secs(15))
+        .map_err(|e| format!("Failed to configure SQLite backup timeout: {}", e))?;
+
+    let destination_string = destination.to_string_lossy().into_owned();
+    source_conn
+        .execute("VACUUM INTO ?1", rusqlite::params![destination_string])
+        .map_err(|e| {
+            format!(
+                "Failed to create consistent snapshot of {}: {}",
+                source.display(),
+                e
+            )
+        })?;
+
+    let snapshot_conn = rusqlite::Connection::open_with_flags(
+        destination,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("Failed to open SQLite snapshot for verification: {}", e))?;
+    let integrity: String = snapshot_conn
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(|e| format!("Failed to verify SQLite snapshot: {}", e))?;
+    if integrity != "ok" {
+        return Err(format!(
+            "SQLite snapshot of {} failed integrity check: {}",
+            source.display(),
+            integrity
+        ));
+    }
+
+    Ok(())
+}
+
+fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
+    if payload.get("type").and_then(|value| value.as_str()) != Some(SYNC_MESSAGE_TYPE) {
+        return None;
+    }
+    let channel_id = payload.get("channel_id")?.as_str()?;
+    if channel_id.len() != 64 || !channel_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel_id = channel_id.to_ascii_lowercase();
+    let expected_usd = payload.get("expected_usd")?.as_f64()?;
+    let backing_sats = payload.get("backing_sats")?.as_u64()?;
+    let sync_version = payload.get("sync_version")?.as_u64()?;
+    if !expected_usd.is_finite()
+        || expected_usd < 0.0
+        || sync_version == 0
+        || sync_version > i64::MAX as u64
+        || backing_sats > i64::MAX as u64
+    {
+        return None;
+    }
+    Some(IncomingSync {
+        channel_id,
+        expected_usd,
+        backing_sats,
+        sync_version,
+    })
+}
+
+fn validate_incoming_sync_allocation(
+    sync: &IncomingSync,
+    live_receiver_sats: u64,
+    current_price: f64,
+    matches_pending_trade: bool,
+) -> Result<(), &'static str> {
+    if sync.backing_sats > live_receiver_sats {
+        return Err("backing exceeds live receiver balance");
+    }
+    if sync.expected_usd < 0.01 {
+        return if sync.backing_sats == 0 {
+            Ok(())
+        } else {
+            Err("zero peg has nonzero backing")
+        };
+    }
+    if sync.backing_sats == 0 {
+        return Err("nonzero peg has no backing");
+    }
+
+    // A pending trade was priced, bounded, and signed by this wallet before it was sent. Other
+    // syncs are recovery/reconciliation messages, so independently reject allocations whose
+    // implied booking price is implausibly far from the wallet's current trusted price.
+    if matches_pending_trade {
+        return Ok(());
+    }
+    if !current_price.is_finite() || current_price <= 0.0 {
+        return Err("no trusted wallet price available");
+    }
+    let implied_booking_price =
+        sync.expected_usd / sync.backing_sats as f64 * SATS_IN_BTC as f64;
+    if !implied_booking_price.is_finite()
+        || implied_booking_price < current_price / 10.0
+        || implied_booking_price > current_price * 10.0
+    {
+        return Err("allocation implies an implausible booking price");
+    }
+    Ok(())
+}
+
+fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
+}
+
+fn restrict_secret_file_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn btc_amount_to_msat(input: &str) -> Option<u64> {
+    let btc = input.trim().parse::<f64>().ok()?;
+    if !btc.is_finite() || btc <= 0.0 || btc > 21_000_000.0 {
+        return None;
+    }
+
+    let amount_msat = (btc * SATS_IN_BTC as f64 * 1000.0).round();
+    if !amount_msat.is_finite() || amount_msat < 1.0 || amount_msat > u64::MAX as f64 {
+        return None;
+    }
+    Some(amount_msat as u64)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::channel_native_split;
+    use super::{
+        btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
+        parse_incoming_sync, parse_trade_usd_cents, restrict_secret_file_permissions,
+        sats_for_usd_cents, splice_in_overlap_sats, splice_reconcile_action,
+        validate_incoming_sync_allocation, write_secret_file, IncomingSync, PendingSplice,
+        SpliceReconcileAction, UserApp,
+    };
 
     #[test]
-    fn native_split_under_peg_is_zero() {
-        let (sats, usd) = channel_native_split(95_000, 100.0, 100_000.0);
-        assert_eq!(sats, 0);
-        assert!((usd - 0.0).abs() < 1e-9);
+    fn trade_usd_input_is_exactly_cent_denominated() {
+        assert_eq!(parse_trade_usd_cents("10.61"), Some(1_061));
+        assert_eq!(parse_trade_usd_cents("$1,000.5"), Some(100_050));
+        assert_eq!(parse_trade_usd_cents(".09"), Some(9));
+        assert_eq!(parse_trade_usd_cents("10.611"), None);
+        assert_eq!(parse_trade_usd_cents("-1.00"), None);
     }
 
     #[test]
-    fn native_split_over_peg() {
-        let (sats, usd) = channel_native_split(150_000, 100.0, 100_000.0);
-        assert_eq!(sats, 50_000);
+    fn spendable_usd_limit_is_floored_not_rounded() {
+        assert_eq!(floor_usd_cents(10.6099), 1_060);
+        assert_eq!(floor_usd_cents(10.61), 1_061);
+        assert_eq!(floor_usd_cents(f64::NAN), 0);
+    }
+
+    #[test]
+    fn displayed_native_limit_always_fits_available_sats() {
+        let native_sats = 15_978;
+        let price = 66_395.1;
+        let available_usd = native_sats as f64 / 100_000_000.0 * price;
+        let available_cents = floor_usd_cents(available_usd);
+        let required_sats = sats_for_usd_cents(available_cents, price).unwrap();
+
+        assert_eq!(available_cents, 1_060);
+        assert!(required_sats <= native_sats);
+    }
+
+    #[test]
+    fn balance_split_uses_backing_not_current_price() {
+        let at_trade_price = channel_balance_split(150_000, 100_000, 100.0, 100_000.0);
+        let after_price_move = channel_balance_split(150_000, 100_000, 100.0, 120_000.0);
+        assert_eq!(at_trade_price.0, 100_000);
+        assert_eq!(at_trade_price.1, 50_000);
+        assert_eq!(after_price_move.0, 100_000);
+        assert_eq!(after_price_move.1, 50_000);
+        assert!(after_price_move.2 > at_trade_price.2);
+    }
+
+    #[test]
+    fn balance_split_over_peg() {
+        let (stable, native, usd) = channel_balance_split(150_000, 100_000, 100.0, 100_000.0);
+        assert_eq!(stable, 100_000);
+        assert_eq!(native, 50_000);
         assert!((usd - 50.0).abs() < 1e-6);
     }
 
     #[test]
-    fn native_split_exactly_pegged() {
-        let (sats, usd) = channel_native_split(100_000, 100.0, 100_000.0);
-        assert_eq!(sats, 0);
+    fn balance_split_exactly_pegged() {
+        let (stable, native, usd) = channel_balance_split(100_000, 100_000, 100.0, 100_000.0);
+        assert_eq!(stable, 100_000);
+        assert_eq!(native, 0);
         assert!((usd - 0.0).abs() < 1e-9);
     }
 
     #[test]
-    fn native_split_zero_price() {
-        let (sats, usd) = channel_native_split(150_000, 100.0, 0.0);
-        assert_eq!(sats, 0);
+    fn balance_split_zero_price_preserves_sats() {
+        let (stable, native, usd) = channel_balance_split(150_000, 100_000, 100.0, 0.0);
+        assert_eq!(stable, 100_000);
+        assert_eq!(native, 50_000);
         assert_eq!(usd, 0.0);
     }
 
     #[test]
-    fn native_split_zero_lightning() {
-        let (sats, usd) = channel_native_split(0, 100.0, 100_000.0);
-        assert_eq!(sats, 0);
+    fn balance_split_backing_above_live_clamps_to_live() {
+        let (stable, native, usd) = channel_balance_split(95_000, 100_000, 100.0, 100_000.0);
+        assert_eq!(stable, 95_000);
+        assert_eq!(native, 0);
         assert_eq!(usd, 0.0);
+    }
+
+    #[test]
+    fn balance_split_absorbs_sub_cent_trade_dust() {
+        let (stable, native, usd) = channel_balance_split(57_444, 57_441, 38.055, 66_250.21);
+        assert_eq!(stable, 57_444);
+        assert_eq!(native, 0);
+        assert_eq!(usd, 0.0);
+    }
+
+    #[test]
+    fn incoming_sync_allocation_is_bounded_by_wallet_state() {
+        let sync = IncomingSync {
+            channel_id: "00".repeat(32),
+            expected_usd: 60.0,
+            backing_sats: 60_000,
+            sync_version: 1,
+        };
+        assert!(validate_incoming_sync_allocation(&sync, 100_000, 100_000.0, false).is_ok());
+
+        let overdrawn = IncomingSync {
+            backing_sats: 100_001,
+            ..sync.clone()
+        };
+        assert!(validate_incoming_sync_allocation(
+            &overdrawn,
+            100_000,
+            100_000.0,
+            true
+        )
+        .is_err());
+
+        let implausible = IncomingSync {
+            expected_usd: 10_000.0,
+            ..sync.clone()
+        };
+        assert!(validate_incoming_sync_allocation(
+            &implausible,
+            100_000,
+            100_000.0,
+            false
+        )
+        .is_err());
+        assert!(validate_incoming_sync_allocation(
+            &implausible,
+            100_000,
+            100_000.0,
+            true
+        )
+        .is_ok());
+
+        let inconsistent_zero = IncomingSync {
+            expected_usd: 0.0,
+            backing_sats: 1,
+            ..sync
+        };
+        assert!(validate_incoming_sync_allocation(
+            &inconsistent_zero,
+            100_000,
+            100_000.0,
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn splice_in_overlap_is_counted_exactly_once_after_channel_promotion() {
+        let pending = PendingSplice {
+            direction: "in".to_string(),
+            amount_sats: 60_598,
+            address: None,
+            onchain_sats_at_start: 60_598,
+            channel_value_sats_at_start: 102_345,
+        };
+
+        // Negotiation has started, but the channel still has its old value.
+        assert_eq!(splice_in_overlap_sats(Some(&pending), 102_345, 60_598), 0);
+
+        // LDK promoted the splice while BDK still reports the spent on-chain input.
+        let overlap = splice_in_overlap_sats(Some(&pending), 162_719, 60_598);
+        assert_eq!(overlap, 60_598);
+        assert_eq!(62_400u64 + 60_598 - overlap, 62_400);
+        assert_eq!(60_598u64.saturating_sub(overlap), 0);
+
+        // Once BDK observes the spend, there is no overlap left to subtract.
+        assert_eq!(splice_in_overlap_sats(Some(&pending), 162_719, 0), 0);
+    }
+
+    #[test]
+    fn splice_out_never_suppresses_onchain_balance() {
+        let pending = PendingSplice {
+            direction: "out".to_string(),
+            amount_sats: 20_000,
+            address: Some("tb1qexample".to_string()),
+            onchain_sats_at_start: 10_000,
+            channel_value_sats_at_start: 100_000,
+        };
+        assert_eq!(splice_in_overlap_sats(Some(&pending), 80_000, 30_000), 0);
+    }
+
+    #[test]
+    fn splice_reconciliation_has_one_authoritative_path() {
+        assert_eq!(
+            splice_reconcile_action(Some("out"), false, true),
+            SpliceReconcileAction::DeferToFundingLookup
+        );
+        assert_eq!(
+            splice_reconcile_action(Some("out"), false, false),
+            SpliceReconcileAction::ReconcileNow
+        );
+        assert_eq!(
+            splice_reconcile_action(Some("in"), false, true),
+            SpliceReconcileAction::NoOutgoingDeduction
+        );
+        assert_eq!(
+            splice_reconcile_action(Some("out"), true, true),
+            SpliceReconcileAction::AlreadyReconciled
+        );
+    }
+
+    #[test]
+    fn double_paste_is_collapsed() {
+        let invoice = "lnbc".repeat(20);
+        assert_eq!(
+            collapse_double_paste(format!("{invoice}{invoice}")),
+            invoice
+        );
+    }
+
+    #[test]
+    fn double_paste_check_handles_utf8_midpoint() {
+        let input = format!("{}\u{20ac}{}", "a".repeat(30), "a".repeat(31));
+        assert_eq!(input.len(), 64);
+        assert!(!input.is_char_boundary(input.len() / 2));
+        assert_eq!(collapse_double_paste(input.clone()), input);
+    }
+
+    #[test]
+    fn oversized_qr_payload_is_rejected_without_panicking() {
+        let ctx = eframe::egui::Context::default();
+        assert!(UserApp::generate_qr_texture(&"x".repeat(10_000), &ctx, "test_qr").is_none());
+    }
+
+    #[test]
+    fn variable_invoice_amount_uses_btc_units_once() {
+        assert_eq!(btc_amount_to_msat("0.0001"), Some(10_000_000));
+        assert_eq!(btc_amount_to_msat("1"), Some(100_000_000_000));
+        assert_eq!(btc_amount_to_msat("NaN"), None);
+        assert_eq!(btc_amount_to_msat("inf"), None);
+        assert_eq!(btc_amount_to_msat("0"), None);
+    }
+
+    #[test]
+    fn price_formatting_carries_rounded_cents() {
+        assert_eq!(UserApp::format_price(99.999), "$100.00");
+        assert_eq!(UserApp::format_price(1_234.5), "$1,234.50");
+        assert_eq!(UserApp::format_price(-0.005), "-$0.01");
+        assert_eq!(UserApp::format_price(f64::NAN), "$0.00");
+    }
+
+    #[test]
+    fn sync_payload_requires_shared_channel_and_monotonic_version() {
+        let channel_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let payload = serde_json::json!({
+            "type": "SYNC_V1",
+            "channel_id": channel_id,
+            "user_channel_id": "different-node-local-id-is-ignored",
+            "expected_usd": 25.0,
+            "backing_sats": 31_250,
+            "sync_version": 4,
+        });
+        assert_eq!(
+            parse_incoming_sync(&payload),
+            Some(IncomingSync {
+                channel_id: channel_id.to_string(),
+                expected_usd: 25.0,
+                backing_sats: 31_250,
+                sync_version: 4,
+            })
+        );
+
+        let mut missing_version = payload.clone();
+        missing_version
+            .as_object_mut()
+            .unwrap()
+            .remove("sync_version");
+        assert_eq!(parse_incoming_sync(&missing_version), None);
+
+        let mut zero_version = payload;
+        zero_version["sync_version"] = serde_json::json!(0);
+        assert_eq!(parse_incoming_sync(&zero_version), None);
+
+        let oversized_balance = serde_json::json!({
+            "type": "SYNC_V1",
+            "channel_id": channel_id,
+            "expected_usd": 25.0,
+            "backing_sats": u64::MAX,
+            "sync_version": 5,
+        });
+        assert_eq!(parse_incoming_sync(&oversized_balance), None);
+
+        let malformed_channel = serde_json::json!({
+            "type": "SYNC_V1",
+            "channel_id": "not-a-channel",
+            "expected_usd": 25.0,
+            "backing_sats": 31_250,
+            "sync_version": 5,
+        });
+        assert_eq!(parse_incoming_sync(&malformed_channel), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seed_file_is_written_and_repaired_as_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seed_phrase");
+        write_secret_file(&path, "test seed").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        restrict_secret_file_permissions(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn backup_archive_can_be_created_off_thread() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("wallet.dat"), b"wallet state").unwrap();
+
+        let source_path = source.path().to_path_buf();
+        let output_path = output.path().to_path_buf();
+        let archive =
+            std::thread::spawn(move || UserApp::create_backup_archive(&source_path, &output_path))
+                .join()
+                .unwrap()
+                .unwrap();
+        assert!(std::path::Path::new(&archive).exists());
+    }
+
+    #[test]
+    fn backup_snapshots_live_sqlite_and_excludes_sidecars() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let database_path = source.path().join("ldk_node_data.sqlite");
+        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .execute("CREATE TABLE wallet_state (value INTEGER NOT NULL)", [])
+            .unwrap();
+        connection
+            .execute("INSERT INTO wallet_state VALUES (1)", [])
+            .unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute("INSERT INTO wallet_state VALUES (2)", [])
+            .unwrap();
+        std::fs::write(source.path().join("orphan.db-journal"), b"stale journal").unwrap();
+
+        let source_path = source.path().to_path_buf();
+        let output_path = output.path().to_path_buf();
+        let backup_worker =
+            std::thread::spawn(move || UserApp::create_backup_archive(&source_path, &output_path));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(transaction);
+
+        let archive_path = backup_worker.join().unwrap().unwrap();
+        let archive_file = std::fs::File::open(archive_path).unwrap();
+        let mut archive = zip::ZipArchive::new(archive_file).unwrap();
+        assert!(archive.by_name("ldk_node_data.sqlite-wal").is_err());
+        assert!(archive.by_name("ldk_node_data.sqlite-shm").is_err());
+        assert!(archive.by_name("orphan.db-journal").is_err());
+
+        let extracted_path = output.path().join("snapshot.sqlite");
+        {
+            let mut archived_database = archive.by_name("ldk_node_data.sqlite").unwrap();
+            let mut extracted = std::fs::File::create(&extracted_path).unwrap();
+            std::io::copy(&mut archived_database, &mut extracted).unwrap();
+        }
+        let snapshot = rusqlite::Connection::open(extracted_path).unwrap();
+        let row_count: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM wallet_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "uncommitted writes must not enter a backup");
+    }
+
+    #[test]
+    fn failed_database_snapshot_leaves_no_backup_file() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("corrupt.db"), b"not sqlite").unwrap();
+
+        assert!(UserApp::create_backup_archive(source.path(), output.path()).is_err());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
     }
 }

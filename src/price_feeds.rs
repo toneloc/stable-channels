@@ -4,9 +4,17 @@ use crate::constants::{
 use retry::{delay::Fixed, retry};
 use serde_json::Value;
 use std::error::Error;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ureq::Agent;
+
+const MIN_PLAUSIBLE_BTC_USD_PRICE: f64 = 1_000.0;
+const MAX_PLAUSIBLE_BTC_USD_PRICE: f64 = 10_000_000.0;
+const MIN_AGREEING_PRICE_FEEDS: usize = 2;
+const MAX_FEED_DEVIATION_RATIO: f64 = 0.05;
+const MAX_MEDIAN_MOVE_RATIO: f64 = 0.10;
+const MAX_TRUSTED_PRICE_AGE_SECS: u64 = 60;
 
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
@@ -16,6 +24,7 @@ lazy_static::lazy_static! {
             .checked_sub(Duration::from_secs(10))
             .unwrap_or_else(Instant::now),
         updating: false,
+        quarantined: false,
     }));
 }
 
@@ -23,6 +32,81 @@ pub struct PriceCache {
     price: f64,
     last_update: Instant,
     updating: bool,
+    quarantined: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PriceRefreshErrorKind {
+    Transient,
+    LargeMove,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PriceRefreshError {
+    kind: PriceRefreshErrorKind,
+    message: String,
+}
+
+impl PriceRefreshError {
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            kind: PriceRefreshErrorKind::Transient,
+            message: message.into(),
+        }
+    }
+
+    fn large_move(message: impl Into<String>) -> Self {
+        Self {
+            kind: PriceRefreshErrorKind::LargeMove,
+            message: message.into(),
+        }
+    }
+
+    fn quarantines_price(&self) -> bool {
+        self.kind == PriceRefreshErrorKind::LargeMove
+    }
+}
+
+impl fmt::Display for PriceRefreshError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for PriceRefreshError {}
+
+impl PriceCache {
+    fn begin_refresh(&mut self) -> Result<(), String> {
+        if self.updating {
+            return Err("price refresh already in progress".to_string());
+        }
+
+        // A recent successful consensus remains valid while the next refresh is in flight.
+        // Invalidating it here made every five-second network fetch briefly expose price=0.
+        self.updating = true;
+        Ok(())
+    }
+
+    fn finish_refresh(&mut self, result: &Result<f64, PriceRefreshError>) {
+        self.updating = false;
+        match result {
+            Ok(price) => {
+                self.price = *price;
+                self.last_update = Instant::now();
+                self.quarantined = false;
+            }
+            Err(error) if error.quarantines_price() => {
+                // Multiple feeds agreeing on a >10% move is evidence that the old anchor may no
+                // longer be safe for accounting. Keep it only as raw display history until a new
+                // consensus is admitted after the anchor expires.
+                self.quarantined = true;
+            }
+            Err(_) => {
+                // A transport failure or temporary lack of consensus says nothing new about the
+                // last successful price. Its age limit will expire it naturally.
+            }
+        }
+    }
 }
 
 // Re-export from constants module
@@ -35,6 +119,14 @@ pub fn get_cached_price_no_fetch() -> f64 {
     cache.price
 }
 
+/// Return the cached value only while it is recent enough for accounting and protocol decisions.
+/// A stale value remains available through `get_cached_price_no_fetch` for display continuity.
+pub fn get_fresh_cached_price_no_fetch() -> f64 {
+    let cache = PRICE_CACHE.lock().unwrap();
+    accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined)
+        .unwrap_or(0.0)
+}
+
 /// Set the cached price directly — for regtest/integration testing.
 /// Bypasses all network price fetching.
 pub fn set_cached_price(price: f64) {
@@ -42,9 +134,32 @@ pub fn set_cached_price(price: f64) {
     cache.price = price;
     cache.last_update = Instant::now();
     cache.updating = false;
+    cache.quarantined = false;
 }
 
-// Get cached price or fetch a new one if needed
+/// Force one network refresh. Unlike `get_cached_price`, this never returns an old value as a
+/// successful refresh, so background publishers only publish newly validated consensus. A recent
+/// successful price remains readable during the fetch and after transient failures; a confirmed
+/// large-move conflict quarantines it for accounting until a new consensus is accepted.
+pub fn refresh_cached_price() -> Result<f64, String> {
+    {
+        let mut cache = PRICE_CACHE.lock().unwrap();
+        cache.begin_refresh()?;
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .build();
+    let result = get_latest_price_classified(&agent);
+
+    let mut cache = PRICE_CACHE.lock().unwrap();
+    cache.finish_refresh(&result);
+    result.map_err(|error| error.to_string())
+}
+
+// Get cached price or fetch a new one if needed. On refresh failure this compatibility API returns
+// the last known value; callers that require freshness must use `refresh_cached_price`.
 pub fn get_cached_price() -> f64 {
     let should_update = {
         let cache = PRICE_CACHE.lock().unwrap();
@@ -53,24 +168,8 @@ pub fn get_cached_price() -> f64 {
     };
 
     if should_update {
-        let mut cache = PRICE_CACHE.lock().unwrap();
-        cache.updating = true;
-        drop(cache);
-
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout(Duration::from_secs(15))
-            .build();
-        if let Ok(new_price) = get_latest_price(&agent) {
-            let mut cache = PRICE_CACHE.lock().unwrap();
-            cache.price = new_price;
-            cache.last_update = Instant::now();
-            cache.updating = false;
+        if let Ok(new_price) = refresh_cached_price() {
             return new_price;
-        } else {
-            let mut cache = PRICE_CACHE.lock().unwrap();
-            cache.updating = false;
-            return cache.price;
         }
     }
 
@@ -88,6 +187,94 @@ pub fn bounded_agent() -> Agent {
         .timeout_connect(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
         .build()
+}
+
+fn is_plausible_price(price: f64) -> bool {
+    price.is_finite()
+        && (MIN_PLAUSIBLE_BTC_USD_PRICE..=MAX_PLAUSIBLE_BTC_USD_PRICE).contains(&price)
+}
+
+fn parse_price_value(value: &Value) -> Option<f64> {
+    let price = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))?;
+    is_plausible_price(price).then_some(price)
+}
+
+fn calculate_median_price(prices: &[(String, f64)]) -> Option<f64> {
+    let mut price_values: Vec<f64> = prices
+        .iter()
+        .map(|(_, price)| *price)
+        .filter(|price| is_plausible_price(*price))
+        .collect();
+    price_values.sort_by(f64::total_cmp);
+
+    let midpoint = price_values.len() / 2;
+    let median = if price_values.len().is_multiple_of(2) {
+        let lower = *price_values.get(midpoint.checked_sub(1)?)?;
+        let upper = *price_values.get(midpoint)?;
+        lower + (upper - lower) / 2.0
+    } else {
+        *price_values.get(midpoint)?
+    };
+    is_plausible_price(median).then_some(median)
+}
+
+fn relative_deviation(value: f64, reference: f64) -> f64 {
+    if !is_plausible_price(value) || !is_plausible_price(reference) {
+        return f64::INFINITY;
+    }
+    (value - reference).abs() / reference
+}
+
+fn trusted_price_reference(price: f64, age: Duration) -> Option<f64> {
+    (is_plausible_price(price) && age <= Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS))
+        .then_some(price)
+}
+
+fn accounting_price_reference(price: f64, age: Duration, quarantined: bool) -> Option<f64> {
+    (!quarantined)
+        .then(|| trusted_price_reference(price, age))
+        .flatten()
+}
+
+fn validate_price_consensus(
+    prices: &[(String, f64)],
+    last_trusted_price: Option<f64>,
+) -> Result<f64, PriceRefreshError> {
+    let initial_median = calculate_median_price(prices)
+        .ok_or_else(|| PriceRefreshError::transient("No plausible BTC/USD prices were returned"))?;
+    let agreeing_prices: Vec<(String, f64)> = prices
+        .iter()
+        .filter(|(_, price)| {
+            is_plausible_price(*price)
+                && relative_deviation(*price, initial_median) <= MAX_FEED_DEVIATION_RATIO
+        })
+        .cloned()
+        .collect();
+
+    if agreeing_prices.len() < MIN_AGREEING_PRICE_FEEDS {
+        return Err(PriceRefreshError::transient(format!(
+            "Price consensus requires at least {MIN_AGREEING_PRICE_FEEDS} agreeing feeds; got {}",
+            agreeing_prices.len()
+        )));
+    }
+
+    let median = calculate_median_price(&agreeing_prices).ok_or_else(|| {
+        PriceRefreshError::transient("Agreeing feeds did not produce a valid median")
+    })?;
+    if let Some(last_price) = last_trusted_price.filter(|price| is_plausible_price(*price)) {
+        let deviation = relative_deviation(median, last_price);
+        if deviation > MAX_MEDIAN_MOVE_RATIO {
+            return Err(PriceRefreshError::large_move(format!(
+                "BTC/USD median moved {:.2}% from the last trusted price, above the {:.2}% limit",
+                deviation * 100.0,
+                MAX_MEDIAN_MOVE_RATIO * 100.0
+            )));
+        }
+    }
+
+    Ok(median)
 }
 
 pub fn fetch_prices(
@@ -150,20 +337,11 @@ pub fn fetch_prices(
             }
         }
 
-        if let Some(price) = data.as_f64() {
+        if let Some(price) = parse_price_value(data) {
             prices.push((price_feed.name.clone(), price));
-        } else if let Some(price_str) = data.as_str() {
-            if let Ok(price) = price_str.parse::<f64>() {
-                prices.push((price_feed.name.clone(), price));
-            } else {
-                eprintln!(
-                    "Invalid price format for {}: {}",
-                    price_feed.name, price_str
-                );
-            }
         } else {
             eprintln!(
-                "Price data not found or invalid format for {}",
+                "Price data for {} is missing, malformed, or outside the plausibility band",
                 price_feed.name
             );
         }
@@ -176,24 +354,30 @@ pub fn fetch_prices(
     Ok(prices)
 }
 
-pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
+fn get_latest_price_classified(agent: &Agent) -> Result<f64, PriceRefreshError> {
     let price_feeds = set_price_feeds();
-    let prices = fetch_prices(agent, &price_feeds)?;
+    let prices = fetch_prices(agent, &price_feeds)
+        .map_err(|error| PriceRefreshError::transient(error.to_string()))?;
 
     for (feed_name, price) in &prices {
         println!("{:<25} ${:>1.2}", feed_name, price);
     }
 
-    let mut price_values: Vec<f64> = prices.iter().map(|(_, price)| *price).collect();
-    price_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median_price = if price_values.len().is_multiple_of(2) {
-        (price_values[price_values.len() / 2 - 1] + price_values[price_values.len() / 2]) / 2.0
-    } else {
-        price_values[price_values.len() / 2]
+    let last_trusted_price = {
+        let cache = PRICE_CACHE.lock().unwrap();
+        trusted_price_reference(cache.price, cache.last_update.elapsed())
     };
+    let median_price = validate_price_consensus(&prices, last_trusted_price).map_err(|error| {
+        eprintln!("Rejected BTC/USD price update: {error}");
+        error
+    })?;
 
     println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
     Ok(median_price)
+}
+
+pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
+    get_latest_price_classified(agent).map_err(|error| -> Box<dyn Error> { Box::new(error) })
 }
 
 /// Fetch daily OHLC data from Kraken
@@ -353,6 +537,169 @@ mod tests {
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD");
         assert_eq!(url, "https://example.com/usd/USD");
+    }
+
+    #[test]
+    fn test_price_parser_rejects_non_finite_and_non_positive_values() {
+        for value in [
+            Value::String("NaN".to_string()),
+            Value::String("inf".to_string()),
+            Value::String("-inf".to_string()),
+            Value::String("0".to_string()),
+            Value::String("-1".to_string()),
+            Value::String("999.99".to_string()),
+            Value::String("10000000.01".to_string()),
+            Value::Null,
+        ] {
+            assert_eq!(parse_price_value(&value), None);
+        }
+
+        assert_eq!(
+            parse_price_value(&Value::String("50000.5".to_string())),
+            Some(50000.5)
+        );
+    }
+
+    #[test]
+    fn test_median_filters_invalid_prices_without_panicking() {
+        let prices = vec![
+            ("nan".to_string(), f64::NAN),
+            ("infinity".to_string(), f64::INFINITY),
+            ("zero".to_string(), 0.0),
+            ("negative".to_string(), -1.0),
+            ("low".to_string(), 40_000.0),
+            ("high".to_string(), 60_000.0),
+        ];
+        assert_eq!(calculate_median_price(&prices), Some(50_000.0));
+
+        let invalid = vec![("nan".to_string(), f64::NAN)];
+        assert_eq!(calculate_median_price(&invalid), None);
+    }
+
+    #[test]
+    fn test_price_consensus_requires_two_agreeing_feeds() {
+        let single = vec![("only".to_string(), 60_000.0)];
+        assert!(validate_price_consensus(&single, None).is_err());
+
+        let split = vec![
+            ("low".to_string(), 40_000.0),
+            ("high".to_string(), 80_000.0),
+        ];
+        assert!(validate_price_consensus(&split, None).is_err());
+    }
+
+    #[test]
+    fn test_price_consensus_ignores_outlier() {
+        let prices = vec![
+            ("a".to_string(), 65_900.0),
+            ("b".to_string(), 66_000.0),
+            ("outlier".to_string(), 1_000_000.0),
+        ];
+        assert_eq!(validate_price_consensus(&prices, None), Ok(65_950.0));
+    }
+
+    #[test]
+    fn test_price_consensus_rejects_large_move_from_last_trusted_price() {
+        let prices = vec![("a".to_string(), 65_900.0), ("b".to_string(), 66_000.0)];
+        let error = validate_price_consensus(&prices, Some(50_000.0)).unwrap_err();
+        assert_eq!(error.kind, PriceRefreshErrorKind::LargeMove);
+        assert_eq!(
+            validate_price_consensus(&prices, Some(65_000.0)),
+            Ok(65_950.0)
+        );
+    }
+
+    #[test]
+    fn large_move_anchor_expires_instead_of_wedging_forever() {
+        let prices = vec![("a".to_string(), 65_900.0), ("b".to_string(), 66_000.0)];
+        let recent =
+            trusted_price_reference(50_000.0, Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS));
+        assert_eq!(recent, Some(50_000.0));
+        assert!(validate_price_consensus(&prices, recent).is_err());
+
+        let expired = trusted_price_reference(
+            50_000.0,
+            Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS + 1),
+        );
+        assert_eq!(expired, None);
+        assert_eq!(validate_price_consensus(&prices, expired), Ok(65_950.0));
+    }
+
+    #[test]
+    fn refresh_in_progress_keeps_recent_consensus_available() {
+        let mut cache = PriceCache {
+            price: 65_000.0,
+            last_update: Instant::now(),
+            updating: false,
+            quarantined: false,
+        };
+
+        cache.begin_refresh().unwrap();
+
+        assert!(cache.updating);
+        assert_eq!(
+            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
+            Some(65_000.0)
+        );
+    }
+
+    #[test]
+    fn transient_refresh_failure_keeps_recent_consensus_until_expiry() {
+        let mut cache = PriceCache {
+            price: 65_000.0,
+            last_update: Instant::now(),
+            updating: true,
+            quarantined: false,
+        };
+        let failure: Result<f64, PriceRefreshError> = Err(PriceRefreshError::transient(
+            "feeds temporarily unavailable",
+        ));
+
+        cache.finish_refresh(&failure);
+
+        assert!(!cache.updating);
+        assert!(!cache.quarantined);
+        assert_eq!(
+            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
+            Some(65_000.0)
+        );
+        assert_eq!(
+            accounting_price_reference(
+                cache.price,
+                Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS + 1),
+                cache.quarantined,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn large_move_failure_quarantines_old_consensus_until_success() {
+        let mut cache = PriceCache {
+            price: 50_000.0,
+            last_update: Instant::now(),
+            updating: true,
+            quarantined: false,
+        };
+        let rejection: Result<f64, PriceRefreshError> = Err(PriceRefreshError::large_move(
+            "validated move exceeds limit",
+        ));
+
+        cache.finish_refresh(&rejection);
+
+        assert!(cache.quarantined);
+        assert_eq!(
+            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
+            None
+        );
+
+        cache.begin_refresh().unwrap();
+        cache.finish_refresh(&Ok(65_000.0));
+        assert!(!cache.quarantined);
+        assert_eq!(
+            accounting_price_reference(cache.price, cache.last_update.elapsed(), cache.quarantined,),
+            Some(65_000.0)
+        );
     }
 
     // Integration test (requires network)

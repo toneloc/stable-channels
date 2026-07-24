@@ -23,6 +23,15 @@ pub struct PaymentPersistence {
     pub clamped: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StabilityPaymentRollback {
+    pub user_channel_id: Option<String>,
+    pub backing_sats_before: Option<u64>,
+    pub backing_sats_after: Option<u64>,
+    /// True only when the channel still held this payment's optimistic allocation and was restored.
+    pub restored: bool,
+}
+
 /// Returns true if `err` is the distinct missing-channel-row condition from
 /// `record_payment_and_maybe_update_backing` — i.e. a backing update was
 /// requested but no `channels` row exists for the user_channel_id. Callers
@@ -54,6 +63,15 @@ pub fn forward_fingerprint(
         outbound_amount_msat.unwrap_or(0),
         total_fee_msat.unwrap_or(0)
     )
+}
+
+/// A still-pending trade recoverable after a restart (the in-memory pending-trade map is empty on launch).
+pub struct PendingTradeRow {
+    pub id: i64,
+    pub new_expected_usd: f64,
+    pub btc_price: f64,
+    pub new_backing_sats: Option<u64>,
+    pub action: String,
 }
 
 impl Database {
@@ -113,6 +131,8 @@ impl Database {
                 amount_btc REAL NOT NULL DEFAULT 0.0,
                 btc_price REAL NOT NULL,
                 fee_usd REAL NOT NULL DEFAULT 0.0,
+                new_expected_usd REAL NOT NULL DEFAULT 0.0,
+                new_backing_sats INTEGER,
                 payment_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
@@ -125,6 +145,17 @@ impl Database {
             "ALTER TABLE trades ADD COLUMN amount_btc REAL NOT NULL DEFAULT 0.0",
             [],
         ); // Ignore error if column already exists
+
+        // Migration: persist new_expected_usd so a trade settling after a restart can be
+        // finalized from its pending row (the in-memory pending-trade map is empty on launch).
+        let _ = conn.execute(
+            "ALTER TABLE trades ADD COLUMN new_expected_usd REAL NOT NULL DEFAULT 0.0",
+            [],
+        );
+
+        // Exact allocation signed in TRADE_V1. NULL identifies trades written by older wallets,
+        // which still need the legacy price-derived recovery path.
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN new_backing_sats INTEGER", []);
 
         // Migration: Add stable_sats column to channels table if missing
         // stable_sats tracks the BTC backing the stable portion (excludes native BTC)
@@ -141,6 +172,13 @@ impl Database {
             "ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0",
             [],
         ); // Ignore error if column already exists
+
+        // Monotonic version for signed SYNC_V1 state. The LSP increments this before sending;
+        // the wallet persists the last accepted value with the allocation it protects.
+        let _ = conn.execute(
+            "ALTER TABLE channels ADD COLUMN sync_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
 
         // Migration: Add closed_at column. NULL = active, unix timestamp = soft-closed.
         // We never hard-delete channel rows from reconcile / handle_channel_closed —
@@ -178,6 +216,9 @@ impl Database {
                 btc_price REAL,
                 counterparty TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
+                user_channel_id TEXT,
+                backing_sats_before INTEGER,
+                backing_sats_after INTEGER,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )",
             [],
@@ -195,11 +236,30 @@ impl Database {
             [],
         ); // Ignore error if column already exists
 
+        // Metadata needed to conditionally roll back an optimistic stability allocation when LDK
+        // later reports PaymentFailed. NULL values identify legacy payment rows.
+        let _ = conn.execute("ALTER TABLE payments ADD COLUMN user_channel_id TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN backing_sats_before INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN backing_sats_after INTEGER",
+            [],
+        );
+
         // Migration: Add on-chain fields to payments table
         let _ = conn.execute("ALTER TABLE payments ADD COLUMN txid TEXT", []);
         let _ = conn.execute("ALTER TABLE payments ADD COLUMN address TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE payments ADD COLUMN confirmations INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+
+        // Durable reconciliation marker. Splices use it to prevent a second deduction at
+        // ChannelReady; outgoing Lightning payments use it to make PaymentSuccessful replay-safe.
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN stable_reconciled INTEGER NOT NULL DEFAULT 0",
             [],
         );
 
@@ -373,6 +433,124 @@ impl Database {
         Ok(updated > 0)
     }
 
+    /// Atomically reserve the next outbound SYNC_V1 version for a channel.
+    pub fn next_sync_version(&self, user_channel_id: &str) -> SqliteResult<u64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE channels
+             SET sync_version = sync_version + 1
+             WHERE user_channel_id = ?1 AND sync_version < 9223372036854775807",
+            params![user_channel_id],
+        )?;
+        if updated == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let version: i64 = tx.query_row(
+            "SELECT sync_version FROM channels WHERE user_channel_id = ?1",
+            params![user_channel_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(version as u64)
+    }
+
+    /// Apply a signed inbound SYNC_V1 allocation only when its version is newer.
+    /// The version and allocation share one SQLite statement, so a crash cannot
+    /// persist one without the other. Returns false for stale/replayed versions.
+    pub fn apply_sync_if_newer(
+        &self,
+        user_channel_id: &str,
+        sync_version: u64,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+    ) -> SqliteResult<bool> {
+        self.apply_sync_if_newer_and_complete_trade(
+            user_channel_id,
+            sync_version,
+            expected_usd,
+            backing_sats,
+            native_sats,
+            None,
+        )
+    }
+
+    /// Apply a signed sync and, when it acknowledges a wallet-authored trade, complete that trade
+    /// in the same transaction. This closes the crash window between accepting the allocation and
+    /// marking its fee payment as a trade rather than an ordinary outgoing payment.
+    pub fn apply_sync_if_newer_and_complete_trade(
+        &self,
+        user_channel_id: &str,
+        sync_version: u64,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        trade_id: Option<i64>,
+    ) -> SqliteResult<bool> {
+        if sync_version == 0
+            || sync_version > i64::MAX as u64
+            || !expected_usd.is_finite()
+            || expected_usd < 0.0
+            || backing_sats > i64::MAX as u64
+            || native_sats > i64::MAX as u64
+        {
+            return Ok(false);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE channels
+             SET expected_usd = ?1, stable_sats = ?2, native_sats = ?3,
+                 sync_version = ?4, updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?5 AND sync_version < ?4",
+            params![
+                expected_usd,
+                backing_sats as i64,
+                native_sats as i64,
+                sync_version as i64,
+                user_channel_id,
+            ],
+        )?;
+        if updated == 0 {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM channels WHERE user_channel_id = ?1
+                 )",
+                params![user_channel_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            tx.commit()?;
+            return Ok(false);
+        }
+        if let Some(trade_id) = trade_id {
+            let completed = tx.execute(
+                "UPDATE trades SET status = 'completed' WHERE id = ?1 AND status = 'pending'",
+                params![trade_id],
+            )?;
+            if completed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn get_sync_version(&self, user_channel_id: &str) -> SqliteResult<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        let version = conn
+            .query_row(
+                "SELECT sync_version FROM channels WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(version.map(|value| value.max(0) as u64))
+    }
+
     /// Hard-delete a channel row. Reserved for explicit admin purge; reconcile
     /// and channel-close paths should call `mark_channel_closed` instead so the
     /// row survives for forensics.
@@ -510,19 +688,89 @@ impl Database {
         amount_btc: f64,
         btc_price: f64,
         fee_usd: f64,
+        new_expected_usd: f64,
+        new_backing_sats: Option<u64>,
         payment_id: Option<&str>,
         status: &str,
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO trades (channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
-                                 payment_id, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                 new_expected_usd, new_backing_sats, payment_id, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status
+                channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, new_expected_usd,
+                new_backing_sats, payment_id, status
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Look up a still-pending trade by its payment_id, for restart recovery. Only returns rows
+    /// that have either an exact allocation or a non-zero legacy target.
+    pub fn get_pending_trade_by_payment_id(
+        &self,
+        payment_id: &str,
+    ) -> SqliteResult<Option<PendingTradeRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, new_expected_usd, btc_price, new_backing_sats, action FROM trades
+             WHERE payment_id = ?1 AND status = 'pending'
+               AND (new_backing_sats IS NOT NULL OR new_expected_usd > 0.0)
+             ORDER BY id DESC LIMIT 1",
+            params![payment_id],
+            |row| {
+                Ok(PendingTradeRow {
+                    id: row.get(0)?,
+                    new_expected_usd: row.get(1)?,
+                    btc_price: row.get(2)?,
+                    new_backing_sats: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
+                    action: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Match a signed allocation acknowledgment to a trade authored by this wallet. The LSP can
+    /// deliver SYNC_V1 before or after LDK reports the trade-fee payment as successful, so the
+    /// allocation itself is the stable correlation key.
+    pub fn get_pending_trade_by_allocation(
+        &self,
+        new_expected_usd: f64,
+        new_backing_sats: u64,
+    ) -> SqliteResult<Option<PendingTradeRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, new_expected_usd, btc_price, new_backing_sats, action FROM trades
+             WHERE status = 'pending'
+               AND new_backing_sats = ?1
+               AND ABS(new_expected_usd - ?2) <= 0.000000001
+             ORDER BY id DESC LIMIT 1",
+            params![new_backing_sats, new_expected_usd],
+            |row| {
+                Ok(PendingTradeRow {
+                    id: row.get(0)?,
+                    new_expected_usd: row.get(1)?,
+                    btc_price: row.get(2)?,
+                    new_backing_sats: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
+                    action: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Whether this payment id belongs to any trade, including one already completed by an
+    /// earlier SYNC_V1. This prevents an out-of-order PaymentSuccessful event from being
+    /// reconciled as an ordinary wallet send.
+    pub fn is_trade_payment(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM trades WHERE payment_id = ?1)",
+            params![payment_id],
+            |row| row.get(0),
+        )
     }
 
     /// Update trade status
@@ -780,6 +1028,131 @@ impl Database {
         Ok(exists)
     }
 
+    /// Whether a payment (by payment_id) is a recorded stability (peg-maintenance) payment.
+    pub fn is_stability_payment(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM payments WHERE payment_id = ?1 AND payment_type = 'stability' LIMIT 1",
+        )?;
+        let exists = stmt.exists(params![payment_id])?;
+        Ok(exists)
+    }
+
+    /// Atomically persist an outgoing payment's completed status and post-settlement channel state.
+    ///
+    /// `event_id` is the LDK `PaymentId` when available (falling back to its payment hash for old
+    /// events). `stable_reconciled` is the durable idempotency marker: a replay after commit returns
+    /// `Ok(false)` without applying the supplied state again. Any error rolls back the marker,
+    /// payment completion, and channel update together so the LDK event can be retried safely.
+    pub fn persist_outgoing_reconciliation(
+        &self,
+        event_id: &str,
+        payment_db_id: Option<i64>,
+        fee_msat: Option<u64>,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        note: Option<&str>,
+        btc_price: Option<f64>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<bool> = (|| {
+            let payment_row = if let Some(id) = payment_db_id {
+                conn.query_row(
+                    "SELECT id, stable_reconciled FROM payments WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?
+            } else {
+                conn.query_row(
+                    "SELECT id, stable_reconciled FROM payments
+                     WHERE payment_id = ?1 ORDER BY id DESC LIMIT 1",
+                    params![event_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?
+            };
+
+            if matches!(payment_row, Some((_, true))) {
+                return Ok(false);
+            }
+
+            let updated = conn.execute(
+                "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                     note = ?4, user_channel_id = ?5, native_sats = ?6,
+                                     closed_at = NULL, updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?5",
+                params![
+                    channel_id,
+                    expected_usd,
+                    backing_sats as i64,
+                    note,
+                    user_channel_id,
+                    native_sats as i64,
+                ],
+            )?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO channels
+                        (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, note)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                        user_channel_id = ?2, expected_usd = ?3, stable_sats = ?4,
+                        native_sats = ?5, note = ?6, closed_at = NULL,
+                        updated_at = strftime('%s', 'now')",
+                    params![
+                        channel_id,
+                        user_channel_id,
+                        expected_usd,
+                        backing_sats as i64,
+                        native_sats as i64,
+                        note,
+                    ],
+                )?;
+            }
+
+            let fee_msat = fee_msat.map(|fee| fee as i64);
+            if let Some((id, _)) = payment_row {
+                conn.execute(
+                    "UPDATE payments SET payment_id = COALESCE(payment_id, ?1),
+                                         status = 'completed',
+                                         fee_msat = COALESCE(?2, fee_msat),
+                                         stable_reconciled = 1
+                     WHERE id = ?3",
+                    params![event_id, fee_msat, id],
+                )?;
+            } else {
+                conn.execute(
+                    "INSERT INTO payments
+                        (payment_id, payment_type, direction, amount_msat, btc_price, status,
+                         fee_msat, stable_reconciled)
+                     VALUES (?1, 'lightning', 'sent', 0, ?2, 'completed', ?3, 1)",
+                    params![event_id, btc_price, fee_msat.unwrap_or(0)],
+                )?;
+            }
+
+            Ok(true)
+        })();
+
+        match result {
+            Ok(applied) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(applied),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Record a payment
     /// payment_type: "stability", "lightning", "splice_in", "splice_out", or "manual"
     pub fn record_payment(
@@ -802,6 +1175,169 @@ impl Database {
             params![payment_id, payment_type, direction, amount_msat as i64, amount_usd, btc_price, counterparty, status, txid, address],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Persist a sent stability payment and its optimistic channel allocation in one transaction.
+    /// The before/after values make a later PaymentFailed rollback both durable across restart and
+    /// conditional, so it cannot overwrite a newer trade, sync, or reconciliation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_pending_stability_payment(
+        &self,
+        payment_id: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: f64,
+        counterparty: &str,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats_before: u64,
+        backing_sats_after: u64,
+        native_sats: u64,
+        note: Option<&str>,
+    ) -> SqliteResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<i64> = (|| {
+            let before = i64::try_from(backing_sats_before)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            let after = i64::try_from(backing_sats_after)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            let native = i64::try_from(native_sats)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+            let amount = i64::try_from(amount_msat)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
+
+            conn.execute(
+                "INSERT INTO payments
+                    (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+                     counterparty, status, user_channel_id, backing_sats_before,
+                     backing_sats_after)
+                 VALUES (?1, 'stability', 'sent', ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)",
+                params![
+                    payment_id,
+                    amount,
+                    amount_usd,
+                    btc_price,
+                    counterparty,
+                    user_channel_id,
+                    before,
+                    after,
+                ],
+            )?;
+            let payment_db_id = conn.last_insert_rowid();
+
+            let updated = conn.execute(
+                "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                     note = ?4, user_channel_id = ?5, native_sats = ?6,
+                                     closed_at = NULL, updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?5",
+                params![channel_id, expected_usd, after, note, user_channel_id, native],
+            )?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO channels
+                        (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, note)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                        user_channel_id = ?2, expected_usd = ?3, stable_sats = ?4,
+                        native_sats = ?5, note = ?6, closed_at = NULL,
+                        updated_at = strftime('%s', 'now')",
+                    params![channel_id, user_channel_id, expected_usd, after, native, note],
+                )?;
+            }
+
+            Ok(payment_db_id)
+        })();
+        match result {
+            Ok(id) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(id),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Mark a pending stability payment failed and restore its prior backing only if no newer
+    /// accounting transition has replaced the optimistic after-state.
+    pub fn fail_pending_stability_payment(
+        &self,
+        payment_id: &str,
+    ) -> SqliteResult<Option<StabilityPaymentRollback>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<Option<StabilityPaymentRollback>> = (|| {
+            let row: Option<(i64, Option<String>, Option<i64>, Option<i64>)> = conn
+                .query_row(
+                    "SELECT id, user_channel_id, backing_sats_before, backing_sats_after
+                     FROM payments
+                     WHERE payment_id = ?1 AND payment_type = 'stability'
+                       AND direction = 'sent' AND status = 'pending'
+                     ORDER BY id DESC LIMIT 1",
+                    params![payment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((payment_db_id, user_channel_id, before_i64, after_i64)) = row else {
+                return Ok(None);
+            };
+
+            conn.execute(
+                "UPDATE payments SET status = 'failed' WHERE id = ?1 AND status = 'pending'",
+                params![payment_db_id],
+            )?;
+
+            let backing_sats_before = before_i64.and_then(|value| u64::try_from(value).ok());
+            let backing_sats_after = after_i64.and_then(|value| u64::try_from(value).ok());
+            let restored = match (
+                user_channel_id.as_deref(),
+                backing_sats_before,
+                backing_sats_after,
+            ) {
+                (Some(uid), Some(before), Some(after)) => {
+                    let before = i64::try_from(before).ok();
+                    let after = i64::try_from(after).ok();
+                    match (before, after) {
+                        (Some(before), Some(after)) => {
+                            conn.execute(
+                                "UPDATE channels SET stable_sats = ?1,
+                                                     updated_at = strftime('%s', 'now')
+                                 WHERE user_channel_id = ?2 AND stable_sats = ?3",
+                                params![before, uid, after],
+                            )? > 0
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+
+            Ok(Some(StabilityPaymentRollback {
+                user_channel_id,
+                backing_sats_before,
+                backing_sats_after,
+                restored,
+            }))
+        })();
+        match result {
+            Ok(rollback) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(rollback),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
@@ -996,6 +1532,105 @@ impl Database {
             [],
         )?;
         Ok(rows)
+    }
+
+    /// Whether the splice with this funding txid was already stable-reconciled.
+    pub fn is_splice_stable_reconciled(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM payments
+             WHERE payment_type IN ('splice_in','splice_out') AND txid = ?1 AND stable_reconciled = 1",
+            params![txid],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Return the recorded splice direction ("in" or "out") for a funding transaction.
+    pub fn get_splice_direction(&self, txid: &str) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT CASE payment_type
+                        WHEN 'splice_in' THEN 'in'
+                        WHEN 'splice_out' THEN 'out'
+                    END
+             FROM payments
+             WHERE txid = ?1 AND payment_type IN ('splice_in','splice_out')
+             ORDER BY id DESC LIMIT 1",
+            params![txid],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    /// Atomically persist post-splice allocation state and its durable idempotency marker.
+    /// Returns false when this funding transaction was already reconciled.
+    pub fn persist_splice_reconciliation(
+        &self,
+        txid: &str,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        note: Option<&str>,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: SqliteResult<bool> = (|| {
+            let payment = conn
+                .query_row(
+                    "SELECT id, stable_reconciled FROM payments
+                     WHERE txid = ?1 AND payment_type IN ('splice_in','splice_out')
+                     ORDER BY id DESC LIMIT 1",
+                    params![txid],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
+                )
+                .optional()?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+            if payment.1 {
+                return Ok(false);
+            }
+
+            let updated = conn.execute(
+                "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                     note = ?4, user_channel_id = ?5, native_sats = ?6,
+                                     closed_at = NULL, updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?5",
+                params![
+                    channel_id,
+                    expected_usd,
+                    backing_sats as i64,
+                    note,
+                    user_channel_id,
+                    native_sats as i64,
+                ],
+            )?;
+            if updated == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+
+            conn.execute(
+                "UPDATE payments SET status = 'completed', stable_reconciled = 1 WHERE id = ?1",
+                params![payment.0],
+            )?;
+            Ok(true)
+        })();
+
+        match result {
+            Ok(applied) => match conn.execute_batch("COMMIT") {
+                Ok(()) => Ok(applied),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     /// Update confirmations and status for a payment by txid
@@ -1289,6 +1924,96 @@ mod tests {
     }
 
     #[test]
+    fn splice_reconciliation_direction_and_state_commit_once() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel(
+            "channel-before",
+            "user-channel",
+            31.4424,
+            47_615,
+            44_407,
+            None,
+        )
+        .unwrap();
+        db.record_payment(
+            None,
+            "splice_out",
+            "sent",
+            90_094_000,
+            Some(59.34),
+            Some(65_872.5),
+            None,
+            "pending",
+            None,
+            Some("tb1qexample"),
+        )
+        .unwrap();
+        assert_eq!(db.set_pending_splice_out_txid("splice-txid").unwrap(), 1);
+        assert_eq!(
+            db.get_splice_direction("splice-txid").unwrap().as_deref(),
+            Some("out")
+        );
+
+        assert!(db
+            .persist_splice_reconciliation(
+                "splice-txid",
+                "channel-after",
+                "user-channel",
+                1.224708075,
+                1_742,
+                0,
+                None,
+            )
+            .unwrap());
+        assert!(!db
+            .persist_splice_reconciliation(
+                "splice-txid",
+                "channel-after",
+                "user-channel",
+                0.0,
+                0,
+                1_742,
+                None,
+            )
+            .unwrap());
+
+        let channel = db.load_channel("user-channel").unwrap().unwrap();
+        assert!((channel.expected_usd - 1.224708075).abs() < 1e-9);
+        assert_eq!(channel.backing_sats, 1_742);
+        assert_eq!(channel.native_sats, 0);
+        assert!(db.is_splice_stable_reconciled("splice-txid").unwrap());
+
+        db.record_payment(
+            None,
+            "splice_out",
+            "sent",
+            1_000,
+            None,
+            None,
+            None,
+            "pending",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.set_pending_splice_out_txid("rollback-txid").unwrap(), 1);
+        assert!(db
+            .persist_splice_reconciliation(
+                "rollback-txid",
+                "missing-channel",
+                "missing-user-channel",
+                0.0,
+                0,
+                0,
+                None,
+            )
+            .is_err());
+        assert!(!db
+            .is_splice_stable_reconciled("rollback-txid")
+            .unwrap());
+    }
+
+    #[test]
     fn forwarded_seen_dedups_and_fingerprint_is_stable() {
         let db = Database::open_in_memory().unwrap();
         let fp = forward_fingerprint("aa", "bb", Some(1000), Some(7));
@@ -1320,6 +2045,53 @@ mod tests {
         assert_eq!(loaded.backing_sats, 100_000);
         assert_eq!(loaded.native_sats, 50_000);
         assert_eq!(loaded.note, Some("test note".to_string()));
+    }
+
+    #[test]
+    fn sync_versions_are_monotonic_and_persisted() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+
+        assert_eq!(db.next_sync_version("user-channel-1").unwrap(), 1);
+        assert_eq!(db.next_sync_version("user-channel-1").unwrap(), 2);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+        assert!(db.next_sync_version("missing").is_err());
+    }
+
+    #[test]
+    fn inbound_sync_replay_cannot_overwrite_newer_state() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+
+        assert!(db
+            .apply_sync_if_newer("user-channel-1", 2, 20.0, 20_000, 4_000)
+            .unwrap());
+        assert!(!db
+            .apply_sync_if_newer("user-channel-1", 2, 12.0, 12_000, 1_000)
+            .unwrap());
+        assert!(!db
+            .apply_sync_if_newer("user-channel-1", 1, 11.0, 11_000, 2_000)
+            .unwrap());
+        assert!(!db
+            .apply_sync_if_newer("user-channel-1", 3, 30.0, u64::MAX, 0)
+            .unwrap());
+
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 20.0);
+        assert_eq!(channel.backing_sats, 20_000);
+        assert_eq!(channel.native_sats, 4_000);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+    }
+
+    #[test]
+    fn inbound_sync_for_missing_channel_is_an_error() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(matches!(
+            db.apply_sync_if_newer("missing", 1, 10.0, 10_000, 5_000),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
     }
 
     #[test]
@@ -1431,6 +2203,88 @@ mod tests {
     }
 
     #[test]
+    fn failed_stability_payment_restores_its_optimistic_backing() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 100.0, 120_000, 20_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "stability-1",
+            20_000_000,
+            Some(20.0),
+            100_000.0,
+            "counterparty",
+            "channel-1",
+            "user-channel-1",
+            100.0,
+            120_000,
+            100_000,
+            20_000,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            100_000
+        );
+
+        let rollback = db
+            .fail_pending_stability_payment("stability-1")
+            .unwrap()
+            .unwrap();
+        assert!(rollback.restored);
+        assert_eq!(rollback.backing_sats_before, Some(120_000));
+        assert_eq!(rollback.backing_sats_after, Some(100_000));
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            120_000
+        );
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "failed");
+        assert!(db
+            .fail_pending_stability_payment("stability-1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn late_stability_failure_does_not_overwrite_newer_allocation() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 100.0, 120_000, 20_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "stability-1",
+            20_000_000,
+            Some(20.0),
+            100_000.0,
+            "counterparty",
+            "channel-1",
+            "user-channel-1",
+            100.0,
+            120_000,
+            100_000,
+            20_000,
+            None,
+        )
+        .unwrap();
+        db.save_channel("channel-1", "user-channel-1", 80.0, 80_000, 40_000, None)
+            .unwrap();
+
+        let rollback = db
+            .fail_pending_stability_payment("stability-1")
+            .unwrap()
+            .unwrap();
+        assert!(!rollback.restored);
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 80.0);
+        assert_eq!(channel.backing_sats, 80_000);
+    }
+
+    #[test]
     fn test_payment_backing_missing_channel_row_is_distinct_error() {
         let db = Database::open_in_memory().unwrap();
 
@@ -1451,6 +2305,127 @@ mod tests {
         // Transaction rolled back — the payment row must not exist either,
         // so a retry after recreating the channel row succeeds.
         assert!(!db.payment_exists("payment-orphan").unwrap());
+    }
+
+    #[test]
+    fn outgoing_reconciliation_commits_once_across_event_replay() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 50.0, 50_000, 10_000, None)
+            .unwrap();
+        let payment_db_id = db
+            .record_payment(
+                Some("payment-1"),
+                "lightning",
+                "sent",
+                20_000_000,
+                Some(20.0),
+                Some(100_000.0),
+                None,
+                "pending",
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(db
+            .persist_outgoing_reconciliation(
+                "payment-1",
+                Some(payment_db_id),
+                Some(12_000),
+                "channel-1",
+                "user-channel-1",
+                40.0,
+                40_000,
+                0,
+                None,
+                Some(100_000.0),
+            )
+            .unwrap());
+
+        // Simulate restart replay: the in-memory row id is gone and the caller proposes a
+        // different state. The durable marker must keep the first committed state unchanged.
+        assert!(!db
+            .persist_outgoing_reconciliation(
+                "payment-1",
+                None,
+                Some(12_000),
+                "channel-1",
+                "user-channel-1",
+                1.0,
+                1,
+                1,
+                None,
+                Some(100_000.0),
+            )
+            .unwrap());
+
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert!((channel.expected_usd - 40.0).abs() < 1e-9);
+        assert_eq!(channel.backing_sats, 40_000);
+        assert_eq!(channel.native_sats, 0);
+        let payments = db.get_recent_payments(1).unwrap();
+        assert_eq!(payments[0].status, "completed");
+        assert_eq!(payments[0].fee_msat, 12_000);
+    }
+
+    #[test]
+    fn outgoing_reconciliation_failure_rolls_back_marker_payment_and_channel() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 50.0, 50_000, 10_000, None)
+            .unwrap();
+        let payment_db_id = db
+            .record_payment(
+                Some("payment-rollback"),
+                "lightning",
+                "sent",
+                20_000_000,
+                Some(20.0),
+                Some(100_000.0),
+                None,
+                "pending",
+                None,
+                None,
+            )
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_outgoing_channel_save
+                 BEFORE UPDATE ON channels
+                 BEGIN SELECT RAISE(ABORT, 'forced channel save failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db
+            .persist_outgoing_reconciliation(
+                "payment-rollback",
+                Some(payment_db_id),
+                Some(12_000),
+                "channel-1",
+                "user-channel-1",
+                40.0,
+                40_000,
+                0,
+                None,
+                Some(100_000.0),
+            )
+            .is_err());
+
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert!((channel.expected_usd - 50.0).abs() < 1e-9);
+        assert_eq!(channel.backing_sats, 50_000);
+        assert_eq!(channel.native_sats, 10_000);
+        let conn = db.conn.lock().unwrap();
+        let (status, reconciled): (String, i64) = conn
+            .query_row(
+                "SELECT status, stable_reconciled FROM payments WHERE id = ?1",
+                params![payment_db_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(reconciled, 0);
     }
 
     #[test]
@@ -1579,6 +2554,8 @@ mod tests {
             0.00025,
             100000.0,
             0.25,
+            75.0,
+            Some(75_000),
             Some("pay123"),
             "completed",
         )
@@ -1591,6 +2568,8 @@ mod tests {
             0.000099,
             101000.0,
             0.10,
+            60.0,
+            Some(59_405),
             Some("pay456"),
             "completed",
         )
@@ -1600,6 +2579,108 @@ mod tests {
         assert_eq!(trades.len(), 2);
         assert_eq!(trades[0].action, "sell"); // Most recent first
         assert_eq!(trades[1].action, "buy");
+    }
+
+    #[test]
+    fn pending_full_buy_recovers_exact_zero_allocation() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_trade(
+            "ch1",
+            "buy",
+            25.0,
+            0.00025,
+            100_000.0,
+            0.25,
+            0.0,
+            Some(0),
+            Some("pending-full-buy"),
+            "pending",
+        )
+        .unwrap();
+
+        let pending = db
+            .get_pending_trade_by_payment_id("pending-full-buy")
+            .unwrap()
+            .expect("new exact-allocation trades must recover even when the target is zero");
+        assert_eq!(pending.new_expected_usd, 0.0);
+        assert_eq!(pending.new_backing_sats, Some(0));
+    }
+
+    #[test]
+    fn pending_trade_matches_signed_allocation_and_payment_id_remains_classified() {
+        let db = Database::open_in_memory().unwrap();
+        let trade_id = db
+            .record_trade(
+                "ch1",
+                "sell",
+                10.0,
+                0.0001,
+                100_000.0,
+                0.10,
+                60.0,
+                Some(60_000),
+                Some("trade-payment"),
+                "pending",
+            )
+            .unwrap();
+
+        let matched = db
+            .get_pending_trade_by_allocation(60.0, 60_000)
+            .unwrap()
+            .expect("exact wallet-authored allocation must match");
+        assert_eq!(matched.id, trade_id);
+        assert!(db
+            .get_pending_trade_by_allocation(60.01, 60_000)
+            .unwrap()
+            .is_none());
+        assert!(db.is_trade_payment("trade-payment").unwrap());
+
+        db.update_trade_status(trade_id, "completed").unwrap();
+        assert!(db.is_trade_payment("trade-payment").unwrap());
+        assert!(db
+            .get_pending_trade_by_allocation(60.0, 60_000)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn inbound_sync_atomically_completes_matching_trade() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        let trade_id = db
+            .record_trade(
+                "user-channel-1",
+                "sell",
+                10.0,
+                0.0001,
+                100_000.0,
+                0.10,
+                20.0,
+                Some(20_000),
+                Some("trade-payment"),
+                "pending",
+            )
+            .unwrap();
+
+        assert!(db
+            .apply_sync_if_newer_and_complete_trade(
+                "user-channel-1",
+                1,
+                20.0,
+                20_000,
+                4_000,
+                Some(trade_id),
+            )
+            .unwrap());
+        assert!(db
+            .get_pending_trade_by_payment_id("trade-payment")
+            .unwrap()
+            .is_none());
+        assert!(db.is_trade_payment("trade-payment").unwrap());
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 20.0);
+        assert_eq!(channel.backing_sats, 20_000);
     }
 
     #[test]

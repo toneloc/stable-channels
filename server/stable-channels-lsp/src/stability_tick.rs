@@ -19,7 +19,7 @@ async fn run(state: AppState) {
     info!("[stability_tick] running every {}s", interval_secs);
     loop {
         ticker.tick().await;
-        let btc_price = stable_channels::price_feeds::get_cached_price_no_fetch();
+        let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
         if btc_price <= 0.0 {
             warn!("[stability_tick] price cache cold; skipping");
             continue;
