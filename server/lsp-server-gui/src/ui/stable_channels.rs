@@ -6,6 +6,16 @@ use crate::app::LspServerApp;
 use crate::ui::layout::{card, page_scrolled, FORM_WIDTH};
 use crate::ui::widgets;
 
+const HELP_CHANNEL_ID: &str = "The Lightning channel tied to this stable-channel record.";
+const HELP_USER_CHANNEL_ID: &str =
+    "Application-level channel identifier associated with this stable-channel record.";
+const HELP_COUNTERPARTY: &str = "The peer node public key for the stable-channel counterparty.";
+const HELP_STABLE_USD: &str = "The USD target value this stable channel is intended to maintain.";
+const HELP_BACKING: &str = "Bitcoin backing currently associated with the stable-channel target.";
+const HELP_ROLE: &str = "Whether this side is acting as the stable-value receiver or provider.";
+const HELP_NOTE: &str =
+    "Operator note stored with the stable-channel record. Do not use this for secrets.";
+
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 	ui.heading("Stable Channels");
 	ui.add_space(5.0);
@@ -15,7 +25,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 		if let Some(price_resp) = &app.state.price {
 			if price_resp.price > 0.0 {
 				ui.label(
-					RichText::new(format!("BTC/USD: ${:.2}", price_resp.price)).strong().size(16.0),
+                    RichText::new(format!("BTC/USD: ${:.2}", price_resp.price))
+                        .strong()
+                        .size(16.0),
 				);
 			} else {
 				ui.label("BTC/USD: fetching...");
@@ -79,19 +91,66 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						.column(Column::remainder().at_least(64.0).clip(true)) // Note
 						.column(Column::auto()) // Edit
 						.header(22.0, |mut header| {
-							for t in ["Channel ID", "User Channel ID", "Counterparty", "Stable $", "Backing", "Role", "Note", ""] {
-								header.col(|ui| { ui.strong(t); });
-							}
+                            header.col(|ui| {
+                                widgets::table_header_with_info(ui, "Channel ID", HELP_CHANNEL_ID);
+                            });
+                            header.col(|ui| {
+                                widgets::table_header_with_info(
+                                    ui,
+                                    "User Channel ID",
+                                    HELP_USER_CHANNEL_ID,
+                                );
+                            });
+                            header.col(|ui| {
+                                widgets::table_header_with_info(
+                                    ui,
+                                    "Counterparty",
+                                    HELP_COUNTERPARTY,
+                                );
+                            });
+                            header.col(|ui| {
+                                widgets::table_header_with_info(ui, "Stable $", HELP_STABLE_USD);
+                            });
+                            header.col(|ui| {
+                                widgets::table_header_with_info(ui, "Backing", HELP_BACKING);
+                            });
+                            header.col(|ui| {
+                                widgets::table_header_with_info(ui, "Role", HELP_ROLE);
+                            });
+                            header.col(|ui| {
+                                widgets::table_header_with_info(ui, "Note", HELP_NOTE);
+                            });
+                            header.col(|ui| {
+                                ui.strong("");
+                            });
 						})
 						.body(|mut body| {
 							for row in rows {
 								body.row(26.0, |mut r| {
 									// Channel ID — monospace truncated + copy-to-clipboard
-									r.col(|ui| { widgets::id_with_copy(ui, &row.channel_id, &mut app.state.status_message); });
+                                    r.col(|ui| {
+                                        widgets::id_with_copy(
+                                            ui,
+                                            &row.channel_id,
+                                            &mut app.state.status_message,
+                                        );
+                                    });
 									// User Channel ID — monospace truncated + copy-to-clipboard
-									r.col(|ui| { widgets::id_with_copy(ui, &row.user_channel_id, &mut app.state.status_message); });
+                                    r.col(|ui| {
+                                        widgets::id_with_copy(
+                                            ui,
+                                            &row.user_channel_id,
+                                            &mut app.state.status_message,
+                                        );
+                                    });
 									// Counterparty — truncated + copy
-									r.col(|ui| { widgets::id_with_copy(ui, &row.counterparty, &mut app.state.status_message); });
+                                    r.col(|ui| {
+                                        widgets::id_with_copy(
+                                            ui,
+                                            &row.counterparty,
+                                            &mut app.state.status_message,
+                                        );
+                                    });
 									// Expected USD — green, always dollars (USD target)
 									r.col(|ui| {
 										ui.label(
@@ -101,7 +160,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 										);
 									});
 									// Backing sats — unit-aware via app.fmt_sats
-									r.col(|ui| { ui.label(app.fmt_sats(row.backing_sats)); });
+                                    r.col(|ui| {
+                                        ui.label(app.fmt_sats(row.backing_sats));
+                                    });
 									// Role — status pill
 									r.col(|ui| {
 										let (role_text, role_color) = if row.is_stable_receiver {
@@ -112,10 +173,20 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 										widgets::status_pill(ui, role_text, role_color);
 									});
 									// Note
-									r.col(|ui| { ui.label(if row.note.is_empty() { "---" } else { &row.note }); });
+                                    r.col(|ui| {
+                                        ui.label(if row.note.is_empty() {
+                                            "---"
+                                        } else {
+                                            &row.note
+                                        });
+                                    });
 									// Prefill the edit form from this row
 									r.col(|ui| {
-										if ui.button("Edit").on_hover_text("Edit this channel's stable target").clicked() {
+                                        if ui
+                                            .button("Edit")
+                                            .on_hover_text("Edit this channel's stable target")
+                                            .clicked()
+                                        {
 											let form = &mut app.state.forms.edit_stable_channel;
 											form.channel_id = row.channel_id.clone();
 											form.expected_usd = format!("{:.2}", row.expected_usd);
@@ -126,13 +197,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 							}
 						});
 				});
-			},
+            }
 			Some(_) => {
 				ui.label("No stable channels.");
-			},
+            }
 			None => {
 				ui.label("Not loaded yet. Click Refresh.");
-			},
+            }
 		}
 
 		ui.add_space(15.0);
@@ -147,23 +218,30 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 			card(ui, "Edit Stable Channel", |ui| {
 				let form = &mut app.state.forms.edit_stable_channel;
 				ui.horizontal(|ui| {
-					ui.label("Channel ID:");
+                    widgets::label_with_info(ui, "Channel ID:", HELP_CHANNEL_ID);
 					ui.add(egui::TextEdit::singleline(&mut form.channel_id).desired_width(420.0));
 				});
 				ui.horizontal(|ui| {
-					ui.label("Target USD:");
+                    widgets::label_with_info(ui, "Target USD:", HELP_STABLE_USD);
 					ui.add(egui::TextEdit::singleline(&mut form.expected_usd).desired_width(120.0));
 					ui.label(RichText::new("0 = stop stabilizing").weak());
 				});
 				ui.horizontal(|ui| {
-					ui.label("Note:");
+                    widgets::label_with_info(ui, "Note:", HELP_NOTE);
 					ui.add(egui::TextEdit::singleline(&mut form.note).desired_width(300.0));
 				});
 
 				ui.add_space(5.0);
 				let is_loading = app.state.tasks.edit_stable_channel.is_some();
 				ui.add_enabled_ui(!is_loading, |ui| {
-					if ui.button(if is_loading { "Submitting..." } else { "Submit" }).clicked() {
+                    if ui
+                        .button(if is_loading {
+                            "Submitting..."
+                        } else {
+                            "Submit"
+                        })
+                        .clicked()
+                    {
 						app.edit_stable_channel();
 					}
 				});

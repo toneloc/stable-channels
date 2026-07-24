@@ -5,6 +5,9 @@ use crate::app::LspServerApp;
 use crate::ui::layout::page_scrolled;
 use crate::ui::widgets;
 
+const HELP_TOTAL_FEE: &str = "Fees earned by this node for forwarding payments.";
+const HELP_AMOUNT_FORWARDED: &str = "Total value forwarded through this node.";
+
 // Per-row snapshot extracted from state.forwarded_payments so the state borrow
 // is released before app.fmt_msat runs in the grid body.
 struct ForwardRow {
@@ -45,7 +48,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 					let amt = fp.outbound_amount_forwarded_msat.unwrap_or(0);
 					total_fee += fee;
 					total_forwarded += amt;
-					ForwardRow { fee_msat: fee, amount_msat: amt }
+                    ForwardRow {
+                        fee_msat: fee,
+                        amount_msat: amt,
+                    }
 				})
 				.collect();
 			(rows, total_fee, total_forwarded)
@@ -69,10 +75,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						ui.label(format!("{} forwards", rows.len()));
 						ui.separator();
 						ui.label(
-							egui::RichText::new(format!(
-								"Revenue: {}",
-								app.fmt_msat(total_fee)
-							))
+                            egui::RichText::new(format!("Revenue: {}", app.fmt_msat(total_fee)))
 							.strong()
 							.color(egui::Color32::from_rgb(0xF7, 0x93, 0x1A)),
 						);
@@ -88,33 +91,52 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						.column(Column::remainder().clip(true))
 						.column(Column::remainder().clip(true))
 						.header(22.0, |mut h| {
-							h.col(|ui| { ui.strong("Total Fee"); });
-							h.col(|ui| { ui.strong("Amount Forwarded"); });
+                            h.col(|ui| {
+                                widgets::table_header_with_info(ui, "Total Fee", HELP_TOTAL_FEE);
+                            });
+                            h.col(|ui| {
+                                widgets::table_header_with_info(
+                                    ui,
+                                    "Amount Forwarded",
+                                    HELP_AMOUNT_FORWARDED,
+                                );
+                            });
 						})
 						.body(|mut body| {
 							for row in &rows {
 								body.row(24.0, |mut r| {
 									// Left-align both msat columns
 									r.col(|ui| {
-										ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
 											ui.monospace(app.fmt_msat(row.fee_msat));
-										});
+                                            },
+                                        );
 									});
 									r.col(|ui| {
-										ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
 											ui.monospace(app.fmt_msat(row.amount_msat));
-										});
+                                            },
+                                        );
 									});
 								});
 							}
 						});
 				});
 			}
-		},
+        }
 		None => {
 			if !loading {
-				widgets::empty_state(ui, "↪", "No forwarded payments yet", "Click Refresh to load");
+                widgets::empty_state(
+                    ui,
+                    "↪",
+                    "No forwarded payments yet",
+                    "Click Refresh to load",
+                );
+            }
 			}
-		},
 	}
 }
