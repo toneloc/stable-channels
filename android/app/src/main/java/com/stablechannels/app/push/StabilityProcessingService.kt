@@ -122,7 +122,15 @@ class StabilityProcessingService : Service() {
             .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-        startForeground(StableChannelsApp.STABILITY_NOTIFICATION_ID, notification)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            startForeground(
+                StableChannelsApp.STABILITY_NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(StableChannelsApp.STABILITY_NOTIFICATION_ID, notification)
+        }
 
         isRunning = true
 
