@@ -43,9 +43,11 @@ use ldk_server_grpc::endpoints::{
 use ldk_server_grpc::error::{ErrorCode, ErrorResponse};
 use sc_protos::stable::{
 	EditStableChannelRequest, EditStableChannelResponse, GetPriceRequest, GetPriceResponse,
-	ListSettlementPaymentsRequest, ListSettlementPaymentsResponse, ListStableChannelsRequest,
-	ListStableChannelsResponse, LogRequest, LogResponse, AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH,
-	GET_PRICE_PATH, LDK_LOG_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
+	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest,
+	ListSettlementPaymentsResponse, ListStableChannelsRequest, ListStableChannelsResponse,
+	LogRequest, LogResponse, AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH,
+	LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH,
+	LIST_STABLE_CHANNELS_PATH,
 };
 use prost::Message;
 use reqwest::header::CONTENT_TYPE;
@@ -496,6 +498,14 @@ impl LspRestClient {
 		&self, request: ListSettlementPaymentsRequest,
 	) -> Result<ListSettlementPaymentsResponse, LspRestError> {
 		let url = self.build_url(LIST_SETTLEMENT_PAYMENTS_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Query the authoritative SQLite channel ledger with exact reference matching.
+	pub async fn list_channel_ledger_events(
+		&self, request: ListChannelLedgerEventsRequest,
+	) -> Result<ListChannelLedgerEventsResponse, LspRestError> {
+		let url = self.build_url(LIST_CHANNEL_LEDGER_EVENTS_PATH);
 		self.post_request(&request, &url).await
 	}
 

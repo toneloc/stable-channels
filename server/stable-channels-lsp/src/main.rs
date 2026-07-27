@@ -25,7 +25,8 @@ use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::config as ldk_config;
 use sc_protos::stable::{
     AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
-    LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH, REGISTER_PUSH_PATH,
+    LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
+    REGISTER_PUSH_PATH,
 };
 use ldk_server_client::ldk_server_grpc::endpoints::{
     BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
@@ -36,7 +37,7 @@ use ldk_server_client::ldk_server_grpc::endpoints::{
     ONCHAIN_SEND_PATH, OPEN_CHANNEL_PATH, SIGN_MESSAGE_PATH, SPLICE_IN_PATH, SPLICE_OUT_PATH,
     SPONTANEOUS_SEND_PATH, UPDATE_CHANNEL_CONFIG_PATH, VERIFY_SIGNATURE_PATH,
 };
-use stable_channels::audit::set_audit_log_path;
+use stable_channels::audit::{set_audit_ledger, set_audit_log_path};
 use stable_channels::db::Database;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -101,6 +102,14 @@ async fn main() -> Result<()> {
     }
 
     let db = Database::open(&data_dir).map_err(|e| anyhow::anyhow!("DB open failed: {}", e))?;
+    let import = db
+        .import_legacy_audit_log(&cfg.audit_log_path())
+        .map_err(|e| anyhow::anyhow!("legacy audit import failed: {}", e))?;
+    info!(
+        "channel ledger legacy import: imported={}, skipped={}, already_imported={}",
+        import.imported, import.skipped, import.already_imported
+    );
+    set_audit_ledger(db.clone());
     let channel_count = db
         .load_all_channels()
         .map_err(|e| anyhow::anyhow!("load_all_channels failed: {}", e))?
@@ -225,6 +234,10 @@ async fn main() -> Result<()> {
         .route(
             &format!("/{}", AUDIT_LOG_PATH),
             post(handlers::audit_log::audit_log),
+        )
+        .route(
+            &format!("/{}", LIST_CHANNEL_LEDGER_EVENTS_PATH),
+            post(handlers::channel_ledger::list_channel_ledger_events),
         )
         .route(
             &format!("/{}", LDK_LOG_PATH),

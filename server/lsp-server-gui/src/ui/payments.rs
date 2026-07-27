@@ -213,57 +213,48 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
                                 widgets::table_header_with_info(ui, "Type", HELP_PAYMENT_TYPE);
                             });
 							h.col(|ui| {
-								ui.vertical_centered(|ui| {
-                                    ui.horizontal(|ui| {
-									if ui.button(sort_header("Amount", &sort, 0)).clicked() {
+								centered_header_with_info(ui, HELP_PAYMENT_AMOUNT, |ui| {
+									let response = ui.button(sort_header("Amount", &sort, 0));
+									if response.clicked() {
 										sort = (0, if sort.0 == 0 { !sort.1 } else { true });
 									}
-                                        widgets::info_icon(ui, HELP_PAYMENT_AMOUNT);
-                                    });
-                                });
+									response
+								});
                             });
                             h.col(|ui| {
-                                ui.vertical_centered(|ui| {
-                                    widgets::table_header_with_info(ui, "Fee", HELP_PAYMENT_FEE);
-								});
+								centered_header_with_info(ui, HELP_PAYMENT_FEE, |ui| ui.strong("Fee"));
 							});
 							h.col(|ui| {
-								ui.vertical_centered(|ui| {
-                                    ui.horizontal(|ui| {
-                                        let dir_hdr = match dir_filter {
-                                            0 => "Direction: In",
-                                            1 => "Direction: Out",
-                                            _ => "Direction",
-                                        };
-									if ui.button(dir_hdr).clicked() {
-                                            dir_filter = match dir_filter {
-                                                -1 => 0,
-                                                0 => 1,
-                                                _ => -1,
-                                            };
+								centered_header_with_info(ui, HELP_PAYMENT_DIRECTION, |ui| {
+									let dir_hdr = match dir_filter {
+										0 => "Direction: In",
+										1 => "Direction: Out",
+										_ => "Direction",
+									};
+									let response = ui.button(dir_hdr);
+									if response.clicked() {
+										dir_filter = match dir_filter {
+											-1 => 0,
+											0 => 1,
+											_ => -1,
+										};
 									}
-                                        widgets::info_icon(ui, HELP_PAYMENT_DIRECTION);
-                                    });
-                                });
+									response
+								});
                             });
                             h.col(|ui| {
-                                ui.vertical_centered(|ui| {
-                                    widgets::table_header_with_info(
-                                        ui,
-                                        "Status",
-                                        HELP_PAYMENT_STATUS,
-                                    );
+								centered_header_with_info(ui, HELP_PAYMENT_STATUS, |ui| {
+									ui.strong("Status")
 								});
 							});
 							h.col(|ui| {
-								ui.vertical_centered(|ui| {
-                                    ui.horizontal(|ui| {
-									if ui.button(sort_header("Timestamp", &sort, 1)).clicked() {
+								centered_header_with_info(ui, HELP_PAYMENT_TIMESTAMP, |ui| {
+									let response = ui.button(sort_header("Timestamp", &sort, 1));
+									if response.clicked() {
 										sort = (1, if sort.0 == 1 { !sort.1 } else { true });
 									}
-                                        widgets::info_icon(ui, HELP_PAYMENT_TIMESTAMP);
-                                    });
-                                });
+									response
+								});
                             });
                             h.col(|ui| {
                                 ui.vertical_centered(|ui| {
@@ -389,6 +380,24 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 		app.state.show_payment_details_dialog = true;
 		app.fetch_payment_details(payment_id);
 	}
+}
+
+/// Center the primary header control, then place its info icon beside it without shifting it.
+fn centered_header_with_info(
+	ui: &mut Ui, help: &str, add_label: impl FnOnce(&mut Ui) -> egui::Response,
+) {
+	let label = ui.vertical_centered(add_label).inner;
+	let icon_rect = egui::Rect::from_min_size(
+		egui::pos2(label.rect.right() + 4.0, label.rect.center().y - 7.0),
+		egui::vec2(14.0, 14.0),
+	);
+	let mut icon_ui = ui.new_child(
+		egui::UiBuilder::new()
+			.id_salt(("centered_header_info", help))
+			.max_rect(icon_rect)
+			.layout(egui::Layout::left_to_right(egui::Align::Center)),
+	);
+	widgets::info_icon(&mut icon_ui, help);
 }
 
 // Color/text mapping for the status pill (same colors as the old colored_label).
