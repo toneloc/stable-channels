@@ -33,8 +33,19 @@ struct MempoolWSAddressTransactions: Decodable {
     let removed: [MempoolWSTransaction]?
 }
 
+struct MempoolWSOutspend: Decodable {
+    let txid: String
+    let vin: Int
+}
+
+struct MempoolWSTxTrackingInfo: Decodable {
+    let utxoSpent: [String: MempoolWSOutspend]?
+    let confirmed: Bool?
+}
+
 struct MempoolWSMessage: Decodable {
     let block: MempoolWSBlock?
+    let blocks: [MempoolWSBlock]?
     let addressTransactions: [MempoolWSTransaction]?
     let blockTransactions: [MempoolWSTransaction]?
     let address: String?
@@ -42,10 +53,11 @@ struct MempoolWSMessage: Decodable {
 
     // Bulk tracking payloads
     let multiAddressTransactions: [String: MempoolWSAddressTransactions]?
-    let trackedTxs: [String: MempoolWSTransaction]?
+    let trackedTxs: [String: MempoolWSTxTrackingInfo]?
 
     enum CodingKeys: String, CodingKey {
         case block
+        case blocks
         case addressTransactions = "address-transactions"
         case blockTransactions = "block-transactions"
         case address
@@ -78,7 +90,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
     private var reconnectTask: Task<Void, Never>?
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
-    var onTransactionDetected: ((_ target: String, _ isTxid: Bool, _ txid: String, _ amountSats: Int64) -> Void)?
+    var onTransactionDetected: ((WebSocketEvent) -> Void)?
 
     /// Fired when a new block header is mined.
     var onBlockHeader: ((_ height: UInt32) -> Void)?
@@ -319,17 +331,22 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         for tx in allTxs {
             let txid = tx.txid
             guard ResilientEsploraClient.isValidTxid(txid) else { continue }
-            if isRecentlyProcessed(txid) { continue }
-            recordProcessedTx(txid)
 
-            let match = matcher.match(
+            let matches = matcher.matchAll(
                 trackedAddresses: trackedAddresses,
                 trackedTxids: trackedTxids,
                 msg: msg,
                 tx: tx
             )
-            if let targetKey = match.target {
+
+            for match in matches {
+                let targetKey = match.target
                 let isTxid = match.isTxid
+                let dedupKey = "\(txid)_\(targetKey)"
+
+                if isRecentlyProcessed(dedupKey) { continue }
+                recordProcessedTx(dedupKey)
+
                 let amountSats = sumAmount(for: tx, target: targetKey)
 
                 logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
@@ -337,7 +354,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                     "WEBSOCKET_MATCH_DETECTED",
                     data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)", "is_txid": "\(isTxid)"]
                 )
-                onTransactionDetected?(targetKey, isTxid, txid, amountSats)
+                onTransactionDetected?(.receive(target: targetKey, txid: txid, amountSats: amountSats))
             }
         }
 
@@ -345,11 +362,33 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         handleRemovedTransactions(msg)
 
         // 3. Check for block header payload
-        if let block = msg.block {
+        if let block = msg.block ?? msg.blocks?.last {
             let height = block.height
             logger.info("Real-time block header received via WebSocket: \(height)")
             AuditService.log("WEBSOCKET_BLOCK_TIP", data: ["height": "\(height)"])
             onBlockHeader?(height)
+        }
+
+        // 4. Handle outspends of tracked txids (channel closes)
+        if let tracked = msg.trackedTxs {
+            for (trackedTxid, trackingInfo) in tracked {
+                guard trackedTxids.contains(trackedTxid) else { continue }
+                if let outspends = trackingInfo.utxoSpent {
+                    for (_, outspend) in outspends {
+                        let spendingTxid = outspend.txid
+                        let dedupKey = "\(spendingTxid)_outspend_\(trackedTxid)"
+                        if isRecentlyProcessed(dedupKey) { continue }
+                        recordProcessedTx(dedupKey)
+
+                        logger.info("Outspend detected for tracked txid \(trackedTxid) by \(spendingTxid)")
+                        AuditService.log(
+                            "WEBSOCKET_TXID_OUTSPENT",
+                            data: ["tracked_txid": trackedTxid, "spending_txid": spendingTxid]
+                        )
+                        onTransactionDetected?(.trackedOutspend(trackedTxid: trackedTxid, spendingTxid: spendingTxid))
+                    }
+                }
+            }
         }
     }
 
@@ -362,15 +401,9 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
             for (_, txGroup) in multi {
                 allTxs.append(contentsOf: txGroup.mempool ?? [])
                 allTxs.append(contentsOf: txGroup.confirmed ?? [])
-                allTxs.append(contentsOf: txGroup.removed ?? [])
             }
         }
 
-        if let tracked = msg.trackedTxs {
-            for (_, tx) in tracked {
-                allTxs.append(tx)
-            }
-        }
         return allTxs
     }
 
@@ -383,11 +416,12 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                 for tx in txGroup.removed ?? [] {
                     let txid = tx.txid
                     guard ResilientEsploraClient.isValidTxid(txid) else { continue }
-                    if isRecentlyProcessed(txid) { continue }
-                    recordProcessedTx(txid)
+                    let dedupKey = "\(txid)_\(addr)"
+                    if isRecentlyProcessed(dedupKey) { continue }
+                    recordProcessedTx(dedupKey)
                     logger.info("RBF replacement detected for \(addr): \(txid)")
                     AuditService.log("WEBSOCKET_TX_REMOVED", data: ["target": addr, "txid": txid])
-                    onTransactionDetected?(addr, false, txid, 0)
+                    onTransactionDetected?(.removed(target: addr, txid: txid))
                 }
             }
         }

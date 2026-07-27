@@ -1,8 +1,14 @@
 import Foundation
 
+enum WebSocketEvent {
+    case receive(target: String, txid: String, amountSats: Int64)
+    case removed(target: String, txid: String)
+    case trackedOutspend(trackedTxid: String, spendingTxid: String)
+}
+
 protocol MempoolWebSocketProtocol: AnyObject {
     var isConnected: Bool { get }
-    var onTransactionDetected: ((_ target: String, _ isTxid: Bool, _ txid: String, _ amountSats: Int64) -> Void)? {
+    var onTransactionDetected: ((WebSocketEvent) -> Void)? {
         get set
     }
     var onBlockHeader: ((_ height: UInt32) -> Void)? { get set }

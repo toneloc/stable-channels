@@ -390,6 +390,26 @@ class DatabaseService {
 
     // MARK: - Payment Operations
 
+    func paymentExists(txid: String, excludePaymentId: String) -> Bool {
+        do {
+            let rows = try query(
+                "SELECT 1 FROM payments WHERE txid = ? AND payment_id != ? LIMIT 1",
+                params: [.text(txid), .text(excludePaymentId)]
+            )
+            return !rows.isEmpty
+        } catch {
+            return false
+        }
+    }
+
+    func deletePayment(paymentId: String) {
+        do {
+            try execute("DELETE FROM payments WHERE payment_id = ?", params: [.text(paymentId)])
+        } catch {
+            // Ignore
+        }
+    }
+
     func recordPayment(
         paymentId: String?,
         paymentType: String,
@@ -848,6 +868,13 @@ class DatabaseService {
                 params: [.text(status), .text(paymentId)]
             )
         }
+    }
+
+    func failPaymentByTxid(txid: String) throws {
+        try execute(
+            "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
+            params: [.text(txid)]
+        )
     }
 
     func isOutgoingStabilityPayment(paymentId: String) throws -> Bool {

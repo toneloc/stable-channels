@@ -98,7 +98,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         var capturedTxid: String?
         var capturedAmount: Int64?
 
-        service.onTransactionDetected = { _, _, receivedTxid, amountSats in
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, receivedTxid, amountSats) = event else { return }
             capturedTxid = receivedTxid
             capturedAmount = amountSats
         }
@@ -130,7 +131,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         var transactionFired = false
         var blockFired = false
 
-        service.onTransactionDetected = { _, _, _, _ in
+        service.onTransactionDetected = { _ in
             transactionFired = true
         }
         service.onBlockHeader = { _ in
@@ -150,7 +151,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         """
 
         var transactionFired = false
-        service.onTransactionDetected = { _, _, _, _ in
+        service.onTransactionDetected = { _ in
             transactionFired = true
         }
 
@@ -165,7 +166,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         """
 
         var transactionFired = false
-        service.onTransactionDetected = { _, _, _, _ in
+        service.onTransactionDetected = { _ in
             transactionFired = true
         }
 
@@ -181,7 +182,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         var capturedAmount: Int64?
         var capturedHeight: UInt32?
 
-        service.onTransactionDetected = { _, _, txid, amount in
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, txid, amount) = event else { return }
             capturedTxid = txid
             capturedAmount = amount
         }
@@ -206,6 +208,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         let msg = MempoolWSMessage(
             block: nil,
+            blocks: nil,
             addressTransactions: nil,
             blockTransactions: nil,
             address: addr,
@@ -215,14 +218,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
-        let result = matcher.match(
+        let results = matcher.matchAll(
             trackedAddresses: [addr],
             trackedTxids: [],
             msg: msg,
             tx: tx
         )
-        XCTAssertEqual(result.target, addr)
-        XCTAssertEqual(result.isTxid, false)
+        XCTAssertEqual(results.first?.target, addr)
     }
 
     func testFindMatchingTargetByVoutScriptpubkeyAddress() {
@@ -236,6 +238,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         let msg = MempoolWSMessage(
             block: nil,
+            blocks: nil,
             addressTransactions: [tx],
             blockTransactions: nil,
             address: nil,
@@ -244,14 +247,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             trackedTxs: nil
         )
 
-        let result = matcher.match(
+        let results = matcher.matchAll(
             trackedAddresses: [addr],
             trackedTxids: [],
             msg: msg,
             tx: tx
         )
-        XCTAssertEqual(result.target, addr)
-        XCTAssertEqual(result.isTxid, false)
+        XCTAssertEqual(results.first?.target, addr)
     }
 
     func testFindMatchingTargetByVinTxid() {
@@ -262,6 +264,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         let msg = MempoolWSMessage(
             block: nil,
+            blocks: nil,
             addressTransactions: [tx],
             blockTransactions: nil,
             address: nil,
@@ -270,14 +273,14 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             trackedTxs: nil
         )
 
-        let result = matcher.match(
+        let results = matcher.matchAll(
             trackedAddresses: [],
             trackedTxids: [fundingTxid],
             msg: msg,
             tx: tx
         )
-        XCTAssertEqual(result.target, fundingTxid)
-        XCTAssertEqual(result.isTxid, true)
+        XCTAssertEqual(results.first?.target, fundingTxid)
+        XCTAssertEqual(results.first?.isTxid, true)
     }
 
     func testFindMatchingTargetByResponseTxid() {
@@ -285,6 +288,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         let msg = MempoolWSMessage(
             block: nil,
+            blocks: nil,
             addressTransactions: nil,
             blockTransactions: nil,
             address: nil,
@@ -294,19 +298,20 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
-        let result = matcher.match(
+        let results = matcher.matchAll(
             trackedAddresses: [],
             trackedTxids: [trackedTxid],
             msg: msg,
             tx: tx
         )
-        XCTAssertEqual(result.target, trackedTxid)
-        XCTAssertEqual(result.isTxid, true)
+        XCTAssertEqual(results.first?.target, trackedTxid)
+        XCTAssertEqual(results.first?.isTxid, true)
     }
 
     func testFindMatchingTargetReturnsNilWhenNoMatch() {
         let msg = MempoolWSMessage(
             block: nil,
+            blocks: nil,
             addressTransactions: nil,
             blockTransactions: nil,
             address: "bc1qnoone",
@@ -316,14 +321,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         )
         let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
 
-        let result = matcher.match(
+        let results = matcher.matchAll(
             trackedAddresses: [],
             trackedTxids: [],
             msg: msg,
             tx: tx
         )
-        XCTAssertNil(result.target)
-        XCTAssertEqual(result.isTxid, false)
+        XCTAssertTrue(results.isEmpty)
     }
 
     func testFindMatchingTargetAddressTakesPriorityOverVout() {
@@ -335,6 +339,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         let msg = MempoolWSMessage(
             block: nil,
+            blocks: nil,
             addressTransactions: [tx],
             blockTransactions: nil,
             address: directAddr,
@@ -343,14 +348,13 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             trackedTxs: nil
         )
 
-        let result = matcher.match(
+        let results = matcher.matchAll(
             trackedAddresses: [directAddr, voutAddr],
             trackedTxids: [],
             msg: msg,
             tx: tx
         )
-        XCTAssertEqual(result.target, directAddr)
-        XCTAssertEqual(result.isTxid, false)
+        XCTAssertEqual(results.first?.target, directAddr)
     }
 
     // MARK: - Dedup Tests
@@ -363,7 +367,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         service.trackAddress("bc1qdedup")
 
         var fireCount = 0
-        service.onTransactionDetected = { _, _, _, _ in
+        service.onTransactionDetected = { _ in
             fireCount += 1
         }
 
@@ -384,7 +388,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         var fireCount = 0
         var capturedAmount: Int64?
-        service.onTransactionDetected = { _, _, _, amount in
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, _, amount) = event else { return }
             fireCount += 1
             capturedAmount = amount
         }
@@ -464,7 +469,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         )
 
         var capturedTxid: String?
-        service.onTransactionDetected = { _, _, txid, _ in
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, txid, _) = event else { return }
             capturedTxid = txid
         }
 
@@ -477,16 +483,18 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let txid = makeValidTxid()
         service.trackTx(txid)
 
-        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef\", \"vin\": [{ \"txid\": \"\(txid)\" }] } } }"
+        let spendingTxid = "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef"
+        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"\(txid)\", \"utxoSpent\": { \"0\": { \"txid\": \"\(spendingTxid)\", \"vin\": 0 } } } } }"
 
         var capturedTxid: String?
-        service.onTransactionDetected = { _, _, resolvedTxid, _ in
+        service.onTransactionDetected = { event in
+            guard case let .trackedOutspend(_, resolvedTxid) = event else { return }
             capturedTxid = resolvedTxid
         }
 
         service.handleMessage(json)
 
-        XCTAssertNotNil(capturedTxid, "Tracked txid should be matched in tracked-txs message")
+        XCTAssertEqual(capturedTxid, spendingTxid)
     }
 
     func testTrackAddressesBulkPayload() {
@@ -496,9 +504,9 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let json = "{ \"multi-address-transactions\": { \"\(addr)\": { \"mempool\": [{ \"txid\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 1000 }] }], \"confirmed\": [], \"removed\": [] } } }"
 
         var capturedAmount: Int64?
-        service.onTransactionDetected = { target, isTxid, txid, amount in
+        service.onTransactionDetected = { event in
+            guard case let .receive(target, txid, amount) = event else { return }
             XCTAssertEqual(target, addr)
-            XCTAssertFalse(isTxid)
             XCTAssertEqual(txid, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
             capturedAmount = amount
         }
@@ -558,7 +566,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         )
 
         var capturedTxid: String?
-        service.onTransactionDetected = { _, _, txid, _ in
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, txid, _) = event else { return }
             capturedTxid = txid
         }
 
@@ -616,7 +625,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         service.trackAddress("bc1qmultivout")
 
         var capturedAmount: Int64?
-        service.onTransactionDetected = { _, _, _, amount in
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, _, amount) = event else { return }
             capturedAmount = amount
         }
 
@@ -629,7 +639,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
     func testHandleMessageWithEmptyString() {
         var fired = false
-        service.onTransactionDetected = { _, _, _, _ in
+        service.onTransactionDetected = { _ in
             fired = true
         }
 
@@ -666,12 +676,87 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         )
 
         var capturedTarget: String?
-        service.onTransactionDetected = { target, _, _, _ in
+        service.onTransactionDetected = { event in
+            guard case let .receive(target, _, _) = event else { return }
             capturedTarget = target
         }
 
         service.handleMessage(json)
 
         XCTAssertEqual(capturedTarget, addr1)
+    }
+
+    // MARK: - New Tests for PR 197 Edge Cases
+
+    func testMultipleDepositsToSameAddress() {
+        let addr = "bc1qmultiple"
+        let txid1 = "1111111111111111111111111111111111111111111111111111111111111111"
+        let txid2 = "2222222222222222222222222222222222222222222222222222222222222222"
+        let json = "{ \"address-transactions\": [{ \"txid\": \"\(txid1)\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 1000 }] }, { \"txid\": \"\(txid2)\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 2000 }] }] }"
+
+        service.trackAddress(addr)
+
+        var amounts = [Int64]()
+        service.onTransactionDetected = { event in
+            if case let .receive(_, _, amount) = event {
+                amounts.append(amount)
+            }
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertEqual(amounts.sorted(), [1000, 2000])
+    }
+
+    func testRBFRemovalCallback() {
+        let addr = "bc1qrbf"
+        let txid = "3333333333333333333333333333333333333333333333333333333333333333"
+        let json = "{ \"multi-address-transactions\": { \"\(addr)\": { \"removed\": [{ \"txid\": \"\(txid)\" }] } } }"
+
+        service.trackAddress(addr)
+
+        var removedFired = false
+        service.onTransactionDetected = { event in
+            if case let .removed(target, removedTxid) = event {
+                XCTAssertEqual(target, addr)
+                XCTAssertEqual(removedTxid, txid)
+                removedFired = true
+            }
+        }
+
+        service.handleMessage(json)
+        XCTAssertTrue(removedFired)
+    }
+
+    func testOutspendPayloadDecoding() {
+        let txid = "4444444444444444444444444444444444444444444444444444444444444444"
+        let spendingTxid = "5555555555555555555555555555555555555555555555555555555555555555"
+        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"\(txid)\", \"utxoSpent\": { \"0\": { \"txid\": \"\(spendingTxid)\", \"vin\": 0 } } } } }"
+
+        service.trackTx(txid)
+
+        var outspendFired = false
+        service.onTransactionDetected = { event in
+            if case let .trackedOutspend(tracked, spender) = event {
+                XCTAssertEqual(tracked, txid)
+                XCTAssertEqual(spender, spendingTxid)
+                outspendFired = true
+            }
+        }
+
+        service.handleMessage(json)
+        XCTAssertTrue(outspendFired)
+    }
+
+    func testBlocksPayloadOrdering() {
+        let json = "{ \"blocks\": [{ \"id\": \"block1\", \"height\": 900100 }, { \"id\": \"block2\", \"height\": 900101 }] }"
+
+        var capturedHeight: UInt32?
+        service.onBlockHeader = { height in
+            capturedHeight = height
+        }
+
+        service.handleMessage(json)
+        XCTAssertEqual(capturedHeight, 900101)
     }
 }
