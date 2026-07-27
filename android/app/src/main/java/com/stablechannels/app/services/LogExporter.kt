@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.stablechannels.app.util.Constants
@@ -17,9 +18,8 @@ object LogExporter {
     private fun createZipFile(context: Context): File? {
         val dir = Constants.userDataDir(context)
         val logsToZip = listOf(
-            File(dir, "app_debug.log"),
-            File(dir, "app_debug.old.log"),
             File(dir, "audit_log.txt"),
+            File(dir, "ldk_node.log"),
             File(dir, "logs/ldk_node.log")
         ).filter { it.exists() && it.length() > 0 }
 
@@ -40,7 +40,7 @@ object LogExporter {
                 }
             }
         } catch (e: Exception) {
-            AppLogger.e("LogExporter", "Failed to zip logs", e)
+            Log.e("LogExporter", "Failed to zip logs", e)
             return null
         }
         return zipFile
@@ -55,7 +55,7 @@ object LogExporter {
                 zipFile
             )
         } catch (e: Exception) {
-            AppLogger.e("LogExporter", "Failed to get URI for zip file", e)
+            Log.e("LogExporter", "Failed to get URI for zip file", e)
             return
         }
 
@@ -84,7 +84,7 @@ object LogExporter {
             }
             Toast.makeText(context, "Saved to Downloads", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
-            AppLogger.e("LogExporter", "Failed to save logs to Downloads", e)
+            Log.e("LogExporter", "Failed to save logs to Downloads", e)
             Toast.makeText(context, "Failed to save logs", Toast.LENGTH_SHORT).show()
         }
     }
