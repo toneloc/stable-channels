@@ -18,7 +18,10 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceOutResponse, SpontaneousSendResponse, UpdateChannelConfigResponse,
 	VerifySignatureResponse,
 };
-use sc_rest_client::sc_protos::stable::{EditStableChannelResponse, GetPriceResponse, ListSettlementPaymentsResponse, ListStableChannelsResponse, LogResponse};
+use sc_rest_client::sc_protos::stable::{
+	EditStableChannelResponse, GetPriceResponse, ListChannelLedgerEventsResponse,
+	ListSettlementPaymentsResponse, ListStableChannelsResponse, LogResponse,
+};
 use sc_rest_client::ldk_server_grpc::types::PageToken;
 
 #[derive(Clone, PartialEq, Default)]
@@ -184,12 +187,11 @@ pub struct GraphGetNodeForm {
 #[derive(Clone)]
 pub struct LogForm {
 	pub max_lines: String,
-	pub filter: String,
 }
 
 impl Default for LogForm {
 	fn default() -> Self {
-		Self { max_lines: "200".to_string(), filter: String::new() }
+		Self { max_lines: "200".to_string() }
 	}
 }
 
@@ -257,6 +259,14 @@ pub struct EditStableChannelForm {
 }
 
 #[derive(Default, Clone)]
+pub struct ChannelLedgerForm {
+	pub identifier: String,
+	pub category: String,
+	pub status: String,
+	pub completeness: String,
+}
+
+#[derive(Default, Clone)]
 pub struct Forms {
 	pub open_channel: OpenChannelForm,
 	pub bolt11_receive: Bolt11ReceiveForm,
@@ -277,7 +287,7 @@ pub struct Forms {
 	pub graph_get_node: GraphGetNodeForm,
 	pub ldk_log: LogForm,
 	pub audit_log: LogForm,
-	pub channel_history: LogForm,
+	pub channel_history: ChannelLedgerForm,
 	#[allow(dead_code)]
 	pub chain_source: ChainSourceForm,
 }
@@ -353,7 +363,7 @@ pub struct AsyncTasks {
 	pub list_settlement_payments: Option<ChannelTaskHandle<ListSettlementPaymentsResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 	pub audit_log: Option<ChannelTaskHandle<LogResponse>>,
-	pub channel_history: Option<ChannelTaskHandle<LogResponse>>,
+	pub channel_history: Option<ChannelTaskHandle<ListChannelLedgerEventsResponse>>,
 }
 
 impl Default for AsyncTasks {
@@ -478,7 +488,9 @@ pub struct AppState {
 	pub settlement_kinds: Option<HashMap<String, SettlementKind>>,
 	pub ldk_log: Option<LogResponse>,
 	pub audit_log: Option<LogResponse>,
-	pub channel_history: Option<LogResponse>,
+	pub channel_history: Option<ListChannelLedgerEventsResponse>,
+	pub channel_history_cursor: Option<String>,
+	pub channel_history_appending: bool,
 
 	// Operation results
 	pub onchain_address: Option<String>,
@@ -583,6 +595,8 @@ impl Default for AppState {
 			ldk_log: None,
 			audit_log: None,
 			channel_history: None,
+			channel_history_cursor: None,
+			channel_history_appending: false,
 
 			onchain_address: None,
 			generated_invoice: None,

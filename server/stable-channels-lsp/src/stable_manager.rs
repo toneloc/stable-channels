@@ -9,8 +9,9 @@ use ldk_server_client::error::LdkServerError;
 use ldk_server_client::ldk_server_grpc::api::{
     GetBalancesRequest, GetBalancesResponse, ListChannelsRequest, ListChannelsResponse,
     ListForwardedPaymentsRequest, ListForwardedPaymentsResponse, ListPeersRequest,
-    ListPeersResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
-    SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
+    ListPeersResponse, ListPaymentsRequest, ListPaymentsResponse, SignMessageRequest,
+    SignMessageResponse, SpontaneousSendRequest, SpontaneousSendResponse, VerifySignatureRequest,
+    VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord};
@@ -118,6 +119,12 @@ pub trait LdkServerCalls: Send + Sync {
     ) -> Result<ListPeersResponse, LdkServerError> {
         Ok(ListPeersResponse::default())
     }
+    async fn list_payments(
+        &self,
+        _req: ListPaymentsRequest,
+    ) -> Result<ListPaymentsResponse, LdkServerError> {
+        Ok(ListPaymentsResponse::default())
+    }
 }
 
 #[async_trait]
@@ -163,6 +170,12 @@ impl LdkServerCalls for LdkServerClient {
         req: ListPeersRequest,
     ) -> Result<ListPeersResponse, LdkServerError> {
         LdkServerClient::list_peers(self, req).await
+    }
+    async fn list_payments(
+        &self,
+        req: ListPaymentsRequest,
+    ) -> Result<ListPaymentsResponse, LdkServerError> {
+        LdkServerClient::list_payments(self, req).await
     }
 }
 
@@ -2068,11 +2081,12 @@ mod tests {
     use ldk_server_client::error::LdkServerErrorCode;
     use ldk_server_client::ldk_server_grpc::api::{
         ListForwardedPaymentsRequest, ListForwardedPaymentsResponse, GetBalancesRequest,
-        GetBalancesResponse, ListPeersRequest, ListPeersResponse,
+        GetBalancesResponse, ListPaymentsRequest, ListPaymentsResponse, ListPeersRequest,
+        ListPeersResponse,
     };
     use ldk_server_client::ldk_server_grpc::types::{
         Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment, HtlcLocator,
-        PendingSweepBalance as GrpcPendingSweepBalance, Peer as GrpcPeer,
+        Payment as GrpcPayment, PendingSweepBalance as GrpcPendingSweepBalance, Peer as GrpcPeer,
     };
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
@@ -2089,6 +2103,7 @@ mod tests {
         pub forwarded: StdMutex<Vec<GrpcForwardedPayment>>,
         pub sweeps: StdMutex<Vec<GrpcPendingSweepBalance>>,
         pub peers: StdMutex<Vec<GrpcPeer>>,
+        pub payments: StdMutex<Vec<GrpcPayment>>,
     }
 
     impl FakeLdkServer {
@@ -2103,6 +2118,7 @@ mod tests {
                 forwarded: StdMutex::new(Vec::new()),
                 sweeps: StdMutex::new(Vec::new()),
                 peers: StdMutex::new(Vec::new()),
+                payments: StdMutex::new(Vec::new()),
             }
         }
         pub fn with_send_failure(mut self) -> Self {
@@ -2116,6 +2132,7 @@ mod tests {
         pub fn with_forwarded(self, f: Vec<GrpcForwardedPayment>) -> Self { *self.forwarded.lock().unwrap() = f; self }
         pub fn with_sweeps(self, s: Vec<GrpcPendingSweepBalance>) -> Self { *self.sweeps.lock().unwrap() = s; self }
         pub fn with_peers(self, p: Vec<GrpcPeer>) -> Self { *self.peers.lock().unwrap() = p; self }
+        pub fn with_payments(self, p: Vec<GrpcPayment>) -> Self { *self.payments.lock().unwrap() = p; self }
     }
 
     #[async_trait]
@@ -2171,6 +2188,10 @@ mod tests {
         async fn list_peers(&self, _req: ListPeersRequest)
             -> Result<ListPeersResponse, LdkServerError> {
             Ok(ListPeersResponse { peers: self.peers.lock().unwrap().clone() })
+        }
+        async fn list_payments(&self, _req: ListPaymentsRequest)
+            -> Result<ListPaymentsResponse, LdkServerError> {
+            Ok(ListPaymentsResponse { payments: self.payments.lock().unwrap().clone(), next_page_token: None })
         }
     }
 
@@ -3921,6 +3942,67 @@ mod tests {
         let fake = FakeLdkServer::new(vec![]).with_forwarded(vec![fwd("aa", "bb", 1000), fwd("cc", "dd", 2000)]);
         assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await, 2); // both unseen
         assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await, 0); // both now seen
+    }
+
+    #[tokio::test]
+    async fn reconnect_reconstructs_channel_payment_forward_peer_and_sweep() {
+        use ldk_server_client::ldk_server_grpc::types::{
+            pending_sweep_balance, PendingBroadcast,
+        };
+        use stable_channels::ledger::{LedgerQuery, LedgerCompleteness};
+
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            40_000_000,
+            true,
+        )])
+        .with_payments(vec![GrpcPayment {
+            id: "payment-no-channel".into(),
+            amount_msat: Some(21_000),
+            fee_paid_msat: Some(10),
+            direction: 1,
+            status: 1,
+            latest_update_timestamp: 123,
+            ..Default::default()
+        }])
+        .with_forwarded(vec![fwd("aa", "bb", 1_000)])
+        .with_peers(vec![GrpcPeer {
+            node_id: COUNTERPARTY_HEX.into(),
+            address: "127.0.0.1:9735".into(),
+            is_connected: true,
+            ..Default::default()
+        }])
+        .with_sweeps(vec![GrpcPendingSweepBalance {
+            balance_type: Some(pending_sweep_balance::BalanceType::PendingBroadcast(
+                PendingBroadcast { channel_id: Some(CHANNEL_ID_HEX.into()), amount_satoshis: 777 },
+            )),
+        }]);
+
+        let counts = crate::backfill::reconcile_event_history(&fake, &db).await;
+        assert_eq!(counts.channels, 1);
+        assert_eq!(counts.payments, 1);
+        assert_eq!(counts.forwards, 1);
+        assert_eq!(counts.peers, 1);
+        assert_eq!(counts.sweeps, 1);
+        assert_eq!(counts.failed_scopes, 0);
+
+        let page = db.list_ledger_events(&LedgerQuery {
+            completeness: Some("reconstructed".into()),
+            limit: 50,
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(page.events.len(), 5);
+        assert!(page.events.iter().all(|event| event.completeness == LedgerCompleteness::Reconstructed));
+        let payment = page.events.iter().find(|event| event.event_type == "PAYMENT_RECONSTRUCTED").unwrap();
+        assert_eq!(payment.detail["channel_association"], "unavailable_from_ldk");
+        assert!(!payment.refs.iter().any(|reference| reference.role.contains("channel")));
     }
 
     #[test]

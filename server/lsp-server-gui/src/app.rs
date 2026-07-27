@@ -17,7 +17,10 @@ use sc_rest_client::ldk_server_grpc::api::{
 	SpliceInRequest, SpliceOutRequest, SpontaneousSendRequest, UpdateChannelConfigRequest,
 	VerifySignatureRequest,
 };
-use sc_rest_client::sc_protos::stable::{EditStableChannelRequest, GetPriceRequest, ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest};
+use sc_rest_client::sc_protos::stable::{
+	EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
+	ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest,
+};
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
 };
@@ -333,16 +336,28 @@ impl LspServerApp {
 		}
 	}
 
-	/// Complete history for the filtered id, oldest-first (server `full` mode, ignores max_lines).
+	/// Query one newest-selected ledger page; each returned page is chronological.
 	pub fn fetch_channel_history(&mut self) {
 		if self.state.tasks.channel_history.is_some() {
 			return;
 		}
-		let filter = self.state.forms.channel_history.filter.clone();
+		let form = self.state.forms.channel_history.clone();
+		let cursor = if self.state.channel_history_appending {
+			self.state.channel_history_cursor.clone().unwrap_or_default()
+		} else {
+			String::new()
+		};
 		if let Some(client) = &self.state.client {
 			let client = client.clone();
 			self.state.tasks.channel_history = Some(self.spawn_task(async move {
-				client.audit_log(LogRequest { max_lines: 0, filter, full: true }).await.map_err(|e| e.to_string())
+				client.list_channel_ledger_events(ListChannelLedgerEventsRequest {
+					identifier: form.identifier.trim().to_owned(),
+					category: form.category,
+					status: form.status,
+					completeness: form.completeness,
+					cursor,
+					page_size: 50,
+				}).await.map_err(|e| e.to_string())
 			}));
 		}
 	}
@@ -1150,7 +1165,17 @@ impl LspServerApp {
 		});
 
 		poll_task!(self.state.tasks.channel_history => |v| {
-			self.state.channel_history = Some(v);
+			self.state.channel_history_cursor = v.next_cursor.clone();
+			if self.state.channel_history_appending {
+				let mut combined = v;
+				if let Some(current) = self.state.channel_history.take() {
+					combined.events.extend(current.events);
+				}
+				self.state.channel_history = Some(combined);
+			} else {
+				self.state.channel_history = Some(v);
+			}
+			self.state.channel_history_appending = false;
 		});
 
 		poll_task!(self.state.tasks.payment_details => |v| {

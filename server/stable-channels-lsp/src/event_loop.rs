@@ -10,6 +10,13 @@ use ldk_server_client::ldk_server_grpc::events::{ChannelState, EventEnvelope};
 use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
 
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 /// Build the audit `data` for a claimable (unclaimed inbound) payment; no user_channel_id exists yet.
 fn claimable_audit_data(
     payment_id: Option<&str>,
@@ -32,6 +39,7 @@ pub fn spawn(state: AppState) {
 
 async fn run(state: AppState) {
     let mut backoff = Duration::from_secs(1);
+    let mut gap_correlation_id: Option<String> = None;
     loop {
         let mut stream = match state.ldk_server.subscribe_events().await {
             Ok(s) => {
@@ -39,6 +47,23 @@ async fn run(state: AppState) {
                 s
             },
             Err(e) => {
+                if gap_correlation_id.is_none() {
+                    let correlation_id = format!("event-stream-gap-{}", now_millis());
+                    stable_channels::audit::audit_event(
+                        "EVENT_STREAM_GAP_STARTED",
+                        serde_json::json!({ "correlation_id": correlation_id }),
+                    );
+                    gap_correlation_id = Some(correlation_id);
+                }
+                let correlation_id = gap_correlation_id.as_deref();
+                stable_channels::audit::audit_event(
+                    "EVENT_STREAM_CONNECT_FAILED",
+                    serde_json::json!({
+                        "correlation_id": correlation_id,
+                        "error": e.to_string(),
+                        "retry_delay_ms": backoff.as_millis(),
+                    }),
+                );
                 warn!(
                     "[event_loop] subscribe_events failed: {}; retry in {:?}",
                     e, backoff
@@ -49,7 +74,18 @@ async fn run(state: AppState) {
             },
         };
         info!("[event_loop] subscribed");
+        stable_channels::audit::audit_event(
+            "EVENT_STREAM_CONNECTED",
+            serde_json::json!({ "correlation_id": gap_correlation_id.as_deref() }),
+        );
         {
+            stable_channels::audit::audit_event(
+                "RECONCILIATION_STARTED",
+                serde_json::json!({
+                    "correlation_id": gap_correlation_id.as_deref(),
+                    "scopes": ["channels", "payments", "forwards", "peers", "sweeps"],
+                }),
+            );
             let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
             if btc_price > 0.0 {
                 state
@@ -61,15 +97,39 @@ async fn run(state: AppState) {
             } else {
                 warn!("[event_loop] reconnect reconcile skipped: price cache cold");
             }
-            let n = crate::backfill::backfill_forwards(state.ldk_server.as_ref(), state.db.as_ref()).await;
-            if n > 0 {
-                info!("[event_loop] backfilled {} forward(s)", n);
+            let counts = crate::backfill::reconcile_event_history(
+                state.ldk_server.as_ref(),
+                state.db.as_ref(),
+            ).await;
+            stable_channels::audit::audit_event(
+                "RECONCILIATION_RESULT",
+                serde_json::json!({
+                    "correlation_id": gap_correlation_id.as_deref(),
+                    "counts": counts,
+                    "status": if counts.failed_scopes == 0 { "completed" } else { "partial" },
+                }),
+            );
+            if let Some(correlation_id) = gap_correlation_id.take() {
+                stable_channels::audit::audit_event(
+                    "EVENT_STREAM_GAP_CLOSED",
+                    serde_json::json!({ "correlation_id": correlation_id }),
+                );
             }
         }
         while let Some(item) = stream.next_message().await {
             dispatch(item, &state).await;
         }
         warn!("[event_loop] stream ended; reconnecting");
+        let correlation_id = format!("event-stream-gap-{}", now_millis());
+        stable_channels::audit::audit_event(
+            "EVENT_STREAM_DISCONNECTED",
+            serde_json::json!({ "correlation_id": correlation_id }),
+        );
+        stable_channels::audit::audit_event(
+            "EVENT_STREAM_GAP_STARTED",
+            serde_json::json!({ "correlation_id": correlation_id }),
+        );
+        gap_correlation_id = Some(correlation_id);
     }
 }
 
