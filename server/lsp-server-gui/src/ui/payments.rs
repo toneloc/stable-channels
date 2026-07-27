@@ -9,6 +9,30 @@ use crate::ui::layout::page_scrolled;
 use crate::ui::truncate_id;
 use crate::ui::widgets;
 
+const HELP_PAYMENT_ID: &str =
+	"The server-side identifier for this payment record. It is distinct from a payment hash or on-chain transaction id.";
+const HELP_PAYMENT_TYPE: &str = "The payment protocol or kind, such as on-chain, BOLT11, BOLT12 offer, BOLT12 refund, spontaneous, stability, or sync.";
+const HELP_PAYMENT_AMOUNT: &str =
+	"The payment amount recorded for this payment. Any fee paid by this node is shown separately when known.";
+const HELP_PAYMENT_FEE: &str =
+	"The routing or transaction fee paid by this node when known. Inbound payments usually have no fee paid by this node.";
+const HELP_PAYMENT_DIRECTION: &str =
+    "Inbound means received by this node. Outbound means sent by this node.";
+const HELP_PAYMENT_STATUS: &str =
+    "The payment lifecycle state, such as pending, succeeded, or failed.";
+const HELP_PAYMENT_TIMESTAMP: &str =
+    "The latest update time for this payment. Hover the value for the raw Unix timestamp.";
+const HELP_PAYMENT_HASH: &str =
+    "The hash locking a Lightning payment. The matching preimage proves settlement.";
+const HELP_PREIMAGE: &str =
+    "The secret value that satisfies the payment hash and proves the Lightning payment settled.";
+const HELP_SECRET: &str =
+	"Payment secret material used to bind or authorize the payment request and protect the recipient.";
+const HELP_OFFER_ID: &str = "Identifier for the BOLT12 offer involved in this payment.";
+const HELP_PAYER_NOTE: &str = "Optional note supplied by the payer in a BOLT12 flow.";
+const HELP_QUANTITY: &str = "Quantity requested from a BOLT12 offer when present.";
+const HELP_TXID: &str = "The Bitcoin transaction identifier for an on-chain payment.";
+
 // Per-row snapshot extracted from state.payments so the state borrow is released
 // before app.fmt_msat / status_pill run in the grid body (see channels.rs).
 struct PaymentRow {
@@ -108,7 +132,11 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 
 			ui.horizontal(|ui| {
 				ui.label("Filter:");
-				ui.add(egui::TextEdit::singleline(&mut filter).hint_text("id or hash").desired_width(240.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text("id or hash")
+                        .desired_width(240.0),
+                );
 				egui::ComboBox::from_id_salt(status_id)
 					.width(160.0)
 					.selected_text(status_label(status_filter))
@@ -138,7 +166,10 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 			view.sort_by(|&a, &b| {
 				let (ra, rb) = (&rows[a], &rows[b]);
 				let ord = match sort.0 {
-					0 => ra.amount_msat.unwrap_or(0).cmp(&rb.amount_msat.unwrap_or(0)),
+                    0 => ra
+                        .amount_msat
+                        .unwrap_or(0)
+                        .cmp(&rb.amount_msat.unwrap_or(0)),
 					_ => ra.timestamp.cmp(&rb.timestamp),
 				};
 				if sort.1 {
@@ -156,7 +187,10 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 					// Tighter gap between columns (default ~8.0); reserve it from the width so columns still fill exactly.
 						let gap = 3.0;
 						ui.spacing_mut().item_spacing.x = gap;
-						let cw = crate::ui::layout::weighted_widths(ui.available_width() - gap * 7.0, &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+                    let cw = crate::ui::layout::weighted_widths(
+                        ui.available_width() - gap * 7.0,
+                        &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                    );
 					TableBuilder::new(ui)
 						.striped(true)
 						.resizable(false)
@@ -172,33 +206,70 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 						.column(Column::exact(cw[6]).clip(true)) // Timestamp
 						.column(Column::exact(cw[7]).clip(true)) // Details
 						.header(24.0, |mut h| {
-							h.col(|ui| { ui.strong("Payment ID"); });
-							h.col(|ui| { ui.strong("Type"); });
+                            h.col(|ui| {
+                                widgets::table_header_with_info(ui, "Payment ID", HELP_PAYMENT_ID);
+                            });
+                            h.col(|ui| {
+                                widgets::table_header_with_info(ui, "Type", HELP_PAYMENT_TYPE);
+                            });
 							h.col(|ui| {
 								ui.vertical_centered(|ui| {
+                                    ui.horizontal(|ui| {
 									if ui.button(sort_header("Amount", &sort, 0)).clicked() {
 										sort = (0, if sort.0 == 0 { !sort.1 } else { true });
 									}
+                                        widgets::info_icon(ui, HELP_PAYMENT_AMOUNT);
+                                    });
+                                });
+                            });
+                            h.col(|ui| {
+                                ui.vertical_centered(|ui| {
+                                    widgets::table_header_with_info(ui, "Fee", HELP_PAYMENT_FEE);
 								});
 							});
-							h.col(|ui| { ui.vertical_centered(|ui| { ui.strong("Fee"); }); });
 							h.col(|ui| {
 								ui.vertical_centered(|ui| {
-									let dir_hdr = match dir_filter { 0 => "Direction: In", 1 => "Direction: Out", _ => "Direction" };
+                                    ui.horizontal(|ui| {
+                                        let dir_hdr = match dir_filter {
+                                            0 => "Direction: In",
+                                            1 => "Direction: Out",
+                                            _ => "Direction",
+                                        };
 									if ui.button(dir_hdr).clicked() {
-										dir_filter = match dir_filter { -1 => 0, 0 => 1, _ => -1 };
+                                            dir_filter = match dir_filter {
+                                                -1 => 0,
+                                                0 => 1,
+                                                _ => -1,
+                                            };
 									}
+                                        widgets::info_icon(ui, HELP_PAYMENT_DIRECTION);
+                                    });
+                                });
+                            });
+                            h.col(|ui| {
+                                ui.vertical_centered(|ui| {
+                                    widgets::table_header_with_info(
+                                        ui,
+                                        "Status",
+                                        HELP_PAYMENT_STATUS,
+                                    );
 								});
 							});
-							h.col(|ui| { ui.vertical_centered(|ui| { ui.strong("Status"); }); });
 							h.col(|ui| {
 								ui.vertical_centered(|ui| {
+                                    ui.horizontal(|ui| {
 									if ui.button(sort_header("Timestamp", &sort, 1)).clicked() {
 										sort = (1, if sort.0 == 1 { !sort.1 } else { true });
 									}
+                                        widgets::info_icon(ui, HELP_PAYMENT_TIMESTAMP);
+                                    });
+                                });
+                            });
+                            h.col(|ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.strong("");
 								});
 							});
-							h.col(|ui| { ui.vertical_centered(|ui| { ui.strong(""); }); });
 						})
 						.body(|mut body| {
 							for &i in &view {
@@ -216,26 +287,25 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 
 									// Type — settlement keysends override the generic label
 									r.col(|ui| {
-										ui.label(payment_type_label_str(&row.type_label, row.settlement_kind));
+                                        ui.label(payment_type_label_str(
+                                            &row.type_label,
+                                            row.settlement_kind,
+                                        ));
 									});
 
 									// Amount (unit-aware, centered)
 									r.col(|ui| {
-										ui.vertical_centered(|ui| {
-											match row.amount_msat {
+                                        ui.vertical_centered(|ui| match row.amount_msat {
 												Some(amount) => ui.monospace(app.fmt_msat(amount)),
 												None => ui.monospace("-"),
-											}
 										});
 									});
 
 									// Fee (unit-aware, centered)
 									r.col(|ui| {
-										ui.vertical_centered(|ui| {
-											match row.fee_paid_msat {
+                                        ui.vertical_centered(|ui| match row.fee_paid_msat {
 												Some(fee) => ui.monospace(app.fmt_msat(fee)),
 												None => ui.monospace("-"),
-											}
 										});
 									});
 
@@ -243,9 +313,21 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 									r.col(|ui| {
 										ui.vertical_centered(|ui| {
 											match row.direction {
-												0 => widgets::status_pill(ui, "⬇ In", egui::Color32::LIGHT_BLUE),
-												1 => widgets::status_pill(ui, "⬆ Out", egui::Color32::GOLD),
-												_ => widgets::status_pill(ui, "Unknown", egui::Color32::GRAY),
+                                                0 => widgets::status_pill(
+                                                    ui,
+                                                    "⬇ In",
+                                                    egui::Color32::LIGHT_BLUE,
+                                                ),
+                                                1 => widgets::status_pill(
+                                                    ui,
+                                                    "⬆ Out",
+                                                    egui::Color32::GOLD,
+                                                ),
+                                                _ => widgets::status_pill(
+                                                    ui,
+                                                    "Unknown",
+                                                    egui::Color32::GRAY,
+                                                ),
 											};
 										});
 									});
@@ -253,7 +335,8 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 									// Status pill (0 = Pending, 1 = Succeeded, 2 = Failed), centered
 									r.col(|ui| {
 										ui.vertical_centered(|ui| {
-											let (status_text, status_color) = status_style(row.status);
+                                            let (status_text, status_color) =
+                                                status_style(row.status);
 											widgets::status_pill(ui, status_text, status_color);
 										});
 									});
@@ -364,7 +447,10 @@ fn format_payment_kind(kind: &sc_rest_client::ldk_server_grpc::types::PaymentKin
 }
 
 /// Grid display wrapper: the kind label is precomputed into `type_label`; apply only the override.
-fn payment_type_label_str(type_label: &str, settlement: Option<crate::state::SettlementKind>) -> String {
+fn payment_type_label_str(
+    type_label: &str,
+    settlement: Option<crate::state::SettlementKind>,
+) -> String {
 	match settlement {
 		Some(crate::state::SettlementKind::Stability) => "Stability".to_string(),
 		Some(crate::state::SettlementKind::Sync) => "Sync".to_string(),
@@ -437,13 +523,19 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 				});
 			} else if let Some(response) = &app.state.payment_details {
 				if let Some(payment) = &response.payment {
-					egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(400.0)
+                        .show(ui, |ui| {
 						egui::Grid::new("payment_details_grid")
 							.num_columns(2)
 							.spacing([10.0, 5.0])
 							.show(ui, |ui| {
 								// Payment ID
-								ui.strong("Payment ID:");
+                                    widgets::strong_label_with_info(
+                                        ui,
+                                        "Payment ID:",
+                                        HELP_PAYMENT_ID,
+                                    );
 								ui.horizontal(|ui| {
 									ui.monospace(&payment.id);
 									if ui.small_button("Copy").clicked() {
@@ -453,7 +545,7 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 								ui.end_row();
 
 								// Type
-								ui.strong("Type:");
+                                    widgets::strong_label_with_info(ui, "Type:", HELP_PAYMENT_TYPE);
 								let payment_type = payment
 									.kind
 									.as_ref()
@@ -463,17 +555,29 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 								ui.end_row();
 
 								// Amount (unit-aware, pre-formatted above)
-								ui.strong("Amount:");
+                                    widgets::strong_label_with_info(
+                                        ui,
+                                        "Amount:",
+                                        HELP_PAYMENT_AMOUNT,
+                                    );
 								ui.label(&amount_str);
 								ui.end_row();
 
 								// Fee (unit-aware, pre-formatted above)
-								ui.strong("Fee Paid:");
+                                    widgets::strong_label_with_info(
+                                        ui,
+                                        "Fee Paid:",
+                                        HELP_PAYMENT_FEE,
+                                    );
 								ui.label(&fee_str);
 								ui.end_row();
 
 								// Direction
-								ui.strong("Direction:");
+                                    widgets::strong_label_with_info(
+                                        ui,
+                                        "Direction:",
+                                        HELP_PAYMENT_DIRECTION,
+                                    );
 								let direction = match payment.direction {
 									0 => "Inbound",
 									1 => "Outbound",
@@ -483,13 +587,21 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 								ui.end_row();
 
 								// Status pill (same colors as the table)
-								ui.strong("Status:");
+                                    widgets::strong_label_with_info(
+                                        ui,
+                                        "Status:",
+                                        HELP_PAYMENT_STATUS,
+                                    );
 								let (status_text, status_color) = status_style(payment.status);
 								widgets::status_pill(ui, status_text, status_color);
 								ui.end_row();
 
 								// Timestamp (relative text, exact epoch on hover)
-								ui.strong("Last Updated:");
+                                    widgets::strong_label_with_info(
+                                        ui,
+                                        "Last Updated:",
+                                        HELP_PAYMENT_TIMESTAMP,
+                                    );
 								ui.label(format_timestamp(payment.latest_update_timestamp))
 									.on_hover_text(format!(
 										"unix: {}",
@@ -522,7 +634,8 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 }
 
 fn render_payment_kind_details(
-	ui: &mut egui::Ui, kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind,
+    ui: &mut egui::Ui,
+    kind: &sc_rest_client::ldk_server_grpc::types::PaymentKind,
 ) {
 	use sc_rest_client::ldk_server_grpc::types::payment_kind::Kind;
 
@@ -532,7 +645,7 @@ fn render_payment_kind_details(
 
 	match &kind.kind {
 		Some(Kind::Onchain(onchain)) => {
-			ui.strong("Txid:");
+            widgets::strong_label_with_info(ui, "Txid:", HELP_TXID);
 			if !onchain.txid.is_empty() {
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(&onchain.txid, 8, 8));
@@ -544,9 +657,9 @@ fn render_payment_kind_details(
 				ui.label("-");
 			}
 			ui.end_row();
-		},
+        }
 		Some(Kind::Bolt11(bolt11)) => {
-			ui.strong("Payment Hash:");
+            widgets::strong_label_with_info(ui, "Payment Hash:", HELP_PAYMENT_HASH);
 			ui.horizontal(|ui| {
 				ui.monospace(truncate_id(&bolt11.hash, 8, 8));
 				if ui.small_button("Copy").clicked() {
@@ -556,7 +669,7 @@ fn render_payment_kind_details(
 			ui.end_row();
 
 			if let Some(preimage) = &bolt11.preimage {
-				ui.strong("Preimage:");
+                widgets::strong_label_with_info(ui, "Preimage:", HELP_PREIMAGE);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(preimage, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -568,7 +681,7 @@ fn render_payment_kind_details(
 
 			if let Some(secret) = &bolt11.secret {
 				let secret_hex = secret.to_lower_hex_string();
-				ui.strong("Secret:");
+                widgets::strong_label_with_info(ui, "Secret:", HELP_SECRET);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(&secret_hex, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -577,10 +690,10 @@ fn render_payment_kind_details(
 				});
 				ui.end_row();
 			}
-		},
+        }
 		Some(Kind::Bolt12Offer(offer)) => {
 			if let Some(hash) = &offer.hash {
-				ui.strong("Payment Hash:");
+                widgets::strong_label_with_info(ui, "Payment Hash:", HELP_PAYMENT_HASH);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(hash, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -591,7 +704,7 @@ fn render_payment_kind_details(
 			}
 
 			if let Some(preimage) = &offer.preimage {
-				ui.strong("Preimage:");
+                widgets::strong_label_with_info(ui, "Preimage:", HELP_PREIMAGE);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(preimage, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -603,7 +716,7 @@ fn render_payment_kind_details(
 
 			if let Some(secret) = &offer.secret {
 				let secret_hex = secret.to_lower_hex_string();
-				ui.strong("Secret:");
+                widgets::strong_label_with_info(ui, "Secret:", HELP_SECRET);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(&secret_hex, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -614,7 +727,7 @@ fn render_payment_kind_details(
 			}
 
 			if !offer.offer_id.is_empty() {
-				ui.strong("Offer ID:");
+                widgets::strong_label_with_info(ui, "Offer ID:", HELP_OFFER_ID);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(&offer.offer_id, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -625,20 +738,20 @@ fn render_payment_kind_details(
 			}
 
 			if let Some(payer_note) = &offer.payer_note {
-				ui.strong("Payer Note:");
+                widgets::strong_label_with_info(ui, "Payer Note:", HELP_PAYER_NOTE);
 				ui.label(payer_note);
 				ui.end_row();
 			}
 
 			if let Some(quantity) = offer.quantity {
-				ui.strong("Quantity:");
+                widgets::strong_label_with_info(ui, "Quantity:", HELP_QUANTITY);
 				ui.label(format!("{}", quantity));
 				ui.end_row();
 			}
-		},
+        }
 		Some(Kind::Bolt12Refund(refund)) => {
 			if let Some(hash) = &refund.hash {
-				ui.strong("Payment Hash:");
+                widgets::strong_label_with_info(ui, "Payment Hash:", HELP_PAYMENT_HASH);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(hash, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -649,7 +762,7 @@ fn render_payment_kind_details(
 			}
 
 			if let Some(preimage) = &refund.preimage {
-				ui.strong("Preimage:");
+                widgets::strong_label_with_info(ui, "Preimage:", HELP_PREIMAGE);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(preimage, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -661,7 +774,7 @@ fn render_payment_kind_details(
 
 			if let Some(secret) = &refund.secret {
 				let secret_hex = secret.to_lower_hex_string();
-				ui.strong("Secret:");
+                widgets::strong_label_with_info(ui, "Secret:", HELP_SECRET);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(&secret_hex, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -670,9 +783,9 @@ fn render_payment_kind_details(
 				});
 				ui.end_row();
 			}
-		},
+        }
 		Some(Kind::Spontaneous(spontaneous)) => {
-			ui.strong("Payment Hash:");
+            widgets::strong_label_with_info(ui, "Payment Hash:", HELP_PAYMENT_HASH);
 			ui.horizontal(|ui| {
 				ui.monospace(truncate_id(&spontaneous.hash, 8, 8));
 				if ui.small_button("Copy").clicked() {
@@ -682,7 +795,7 @@ fn render_payment_kind_details(
 			ui.end_row();
 
 			if let Some(preimage) = &spontaneous.preimage {
-				ui.strong("Preimage:");
+                widgets::strong_label_with_info(ui, "Preimage:", HELP_PREIMAGE);
 				ui.horizontal(|ui| {
 					ui.monospace(truncate_id(preimage, 8, 8));
 					if ui.small_button("Copy").clicked() {
@@ -691,8 +804,8 @@ fn render_payment_kind_details(
 				});
 				ui.end_row();
 			}
-		},
-		None => {},
+        }
+        None => {}
 	}
 }
 
@@ -703,8 +816,14 @@ mod tests {
 
 	#[test]
 	fn settlement_overrides_label() {
-		assert_eq!(payment_type_label_str("Spontaneous", Some(SettlementKind::Stability)), "Stability");
-		assert_eq!(payment_type_label_str("Spontaneous", Some(SettlementKind::Sync)), "Sync");
+        assert_eq!(
+            payment_type_label_str("Spontaneous", Some(SettlementKind::Stability)),
+            "Stability"
+        );
+        assert_eq!(
+            payment_type_label_str("Spontaneous", Some(SettlementKind::Sync)),
+            "Sync"
+        );
 	}
 
 	#[test]

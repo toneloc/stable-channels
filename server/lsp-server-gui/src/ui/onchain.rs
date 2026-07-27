@@ -5,8 +5,38 @@ use web_sys::js_sys;
 
 use crate::app::LspServerApp;
 use crate::state::OnchainTab;
-use crate::ui::layout::{card, kv_grid, page, page_scrolled, FORM_WIDTH};
+use crate::ui::layout::{card, kv_grid_custom_info, page, page_scrolled, FORM_WIDTH};
 use crate::ui::truncate_id;
+use crate::ui::widgets;
+
+const HELP_ADDRESS: &str =
+	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
+const HELP_AMOUNT: &str =
+    "The on-chain amount to send. Miner fees are separate unless Send All is selected.";
+const HELP_SEND_ALL: &str =
+    "Spend the wallet's available on-chain balance, subtracting the miner fee from the output.";
+const HELP_FEE_RATE: &str =
+    "Optional miner fee rate in sat/vB. Higher rates can confirm faster but cost more.";
+const HELP_LAST_TXID: &str =
+    "The transaction id for the most recently created or broadcast on-chain transaction.";
+const HELP_PAYMENT_ID: &str = "The local payment record associated with this on-chain transaction.";
+const HELP_TXID: &str =
+    "The Bitcoin transaction id. Use it to inspect the transaction in a block explorer or node.";
+const HELP_DIRECTION: &str =
+    "Whether this transaction sent funds out of the wallet or received funds into it.";
+const HELP_STATUS: &str = "The current confirmation or lifecycle state for this on-chain payment.";
+const HELP_TIME: &str = "The latest update time for this payment.";
+const HELP_ONCHAIN_TOTAL: &str = "The total balance tracked by the node's on-chain wallet.";
+const HELP_SPENDABLE: &str =
+	"Currently spendable on-chain funds. This excludes funds still waiting on confirmations or kept as reserve.";
+const HELP_ANCHOR_RESERVE: &str =
+	"Emergency on-chain reserve kept so the node can spend anchor outputs if one of its channels closes.";
+const HELP_PENDING_BROADCAST: &str =
+    "The sweep transaction has been prepared or queued but is not yet confirmed on-chain.";
+const HELP_BROADCAST_AWAITING_CONFIRMATION: &str =
+    "The sweep transaction was broadcast and is waiting for its first confirmation.";
+const HELP_AWAITING_THRESHOLD_CONFIRMATIONS: &str =
+	"The sweep transaction is confirmed but needs more confirmations before the balance is considered safe or spendable.";
 
 pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	ui.heading("On-chain Transactions");
@@ -17,13 +47,22 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 	}
 
 	ui.horizontal(|ui| {
-		if ui.selectable_label(app.state.onchain_tab == OnchainTab::Send, "Send").clicked() {
+        if ui
+            .selectable_label(app.state.onchain_tab == OnchainTab::Send, "Send")
+            .clicked()
+        {
 			app.state.onchain_tab = OnchainTab::Send;
 		}
-		if ui.selectable_label(app.state.onchain_tab == OnchainTab::Receive, "Receive").clicked() {
+        if ui
+            .selectable_label(app.state.onchain_tab == OnchainTab::Receive, "Receive")
+            .clicked()
+        {
 			app.state.onchain_tab = OnchainTab::Receive;
 		}
-		if ui.selectable_label(app.state.onchain_tab == OnchainTab::History, "History").clicked() {
+        if ui
+            .selectable_label(app.state.onchain_tab == OnchainTab::History, "History")
+            .clicked()
+        {
 			app.state.onchain_tab = OnchainTab::History;
 			// Fetch payments if not already loaded
 			if app.state.payments.is_none() {
@@ -55,13 +94,23 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 
 				let form = &mut app.state.forms.onchain_send;
 
-				egui::Grid::new("onchain_send_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-					ui.label("Address:");
+                egui::Grid::new("onchain_send_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 5.0])
+                    .show(ui, |ui| {
+                        widgets::label_with_info(ui, "Address:", HELP_ADDRESS);
 					ui.text_edit_singleline(&mut form.address);
 					ui.end_row();
 
-					ui.label(format!("Amount ({}):", unit_label));
-					ui.add_enabled(!form.send_all, egui::TextEdit::singleline(&mut form.amount_sats));
+                        widgets::label_with_info(
+                            ui,
+                            &format!("Amount ({}):", unit_label),
+                            HELP_AMOUNT,
+                        );
+                        ui.add_enabled(
+                            !form.send_all,
+                            egui::TextEdit::singleline(&mut form.amount_sats),
+                        );
 					ui.end_row();
 
 					// Muted preview of the parsed sats amount
@@ -73,11 +122,11 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 					}
 					ui.end_row();
 
-					ui.label("Send All:");
+                        widgets::label_with_info(ui, "Send All:", HELP_SEND_ALL);
 					ui.checkbox(&mut form.send_all, "Send entire balance");
 					ui.end_row();
 
-					ui.label("Fee Rate (sat/vB, optional):");
+                        widgets::label_with_info(ui, "Fee Rate (sat/vB, optional):", HELP_FEE_RATE);
 					ui.text_edit_singleline(&mut form.fee_rate_sat_per_vb);
 					ui.end_row();
 				});
@@ -94,8 +143,12 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 					} else if send_all {
 						// Confirm gate for send-all: require a second checkbox before enabling
 						let id = ui.id().with("send_all_confirm");
-						let mut ok = ui.memory_mut(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
-						ui.checkbox(&mut ok, "I understand this sends my entire on-chain balance");
+                        let mut ok =
+                            ui.memory_mut(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
+                        ui.checkbox(
+                            &mut ok,
+                            "I understand this sends my entire on-chain balance",
+                        );
 						ui.memory_mut(|m| m.data.insert_temp(id, ok));
 						let btn = egui::Button::new(
 							egui::RichText::new("Send All").color(egui::Color32::WHITE),
@@ -115,7 +168,7 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
 					ui.add_space(10.0);
 					ui.separator();
 					ui.horizontal(|ui| {
-						ui.label("Last TXID:");
+                        widgets::label_with_info(ui, "Last TXID:", HELP_LAST_TXID);
 						ui.monospace(crate::ui::truncate_id(txid, 12, 12));
 						if ui.small_button("Copy").clicked() {
 							ui.output_mut(|o| o.copied_text = txid.clone());
@@ -146,7 +199,7 @@ fn render_receive(ui: &mut Ui, app: &mut LspServerApp) {
 				if let Some(address) = &app.state.onchain_address {
 					ui.add_space(10.0);
 					ui.separator();
-					ui.label("Address:");
+                    widgets::label_with_info(ui, "Address:", HELP_ADDRESS);
 					ui.add(
 						egui::TextEdit::singleline(&mut address.as_str())
 							.desired_width(f32::INFINITY)
@@ -175,15 +228,39 @@ fn render_history(ui: &mut Ui, app: &mut LspServerApp) {
 
 			let total_str = app.fmt_sats(total);
 			let spendable_str = app.fmt_sats(spendable);
-			let anchor_str = if anchor > 0 { Some(app.fmt_sats(anchor)) } else { None };
+            let anchor_str = if anchor > 0 {
+                Some(app.fmt_sats(anchor))
+            } else {
+                None
+            };
 
 			card(ui, "Summary", |ui| {
-				let mut rows: Vec<(&str, &str)> =
-					vec![("Total Balance:", total_str.as_str()), ("Spendable:", spendable_str.as_str())];
+                let mut rows: crate::ui::layout::KvInfoRows = vec![
+                    (
+                        "Total Balance:",
+                        Some(HELP_ONCHAIN_TOTAL),
+                        Box::new(|ui: &mut Ui| {
+                            ui.label(total_str.as_str());
+                        }),
+                    ),
+                    (
+                        "Spendable:",
+                        Some(HELP_SPENDABLE),
+                        Box::new(|ui: &mut Ui| {
+                            ui.label(spendable_str.as_str());
+                        }),
+                    ),
+                ];
 				if let Some(ref a) = anchor_str {
-					rows.push(("Anchor Reserve:", a.as_str()));
+                    rows.push((
+                        "Anchor Reserve:",
+                        Some(HELP_ANCHOR_RESERVE),
+                        Box::new(move |ui: &mut Ui| {
+                            ui.label(a.as_str());
+                        }),
+                    ));
 				}
-				kv_grid(ui, "onchain_summary", &rows);
+                kv_grid_custom_info(ui, "onchain_summary", rows);
 			});
 
 			ui.add_space(10.0);
@@ -217,7 +294,7 @@ fn render_history(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.add_space(10.0);
 			ui.separator();
 			ui.horizontal(|ui| {
-				ui.label("Last Sent TXID:");
+                widgets::label_with_info(ui, "Last Sent TXID:", HELP_LAST_TXID);
 				ui.monospace(truncate_id(txid, 8, 8));
 				if ui.small_button("Copy").clicked() {
 					ui.output_mut(|o| o.copied_text = txid.clone());
@@ -239,32 +316,35 @@ fn render_pending_sweep(
 			let amt = app.fmt_sats(b.amount_satoshis);
 			ui.horizontal(|ui| {
 				ui.colored_label(egui::Color32::YELLOW, "Pending Broadcast");
+                widgets::info_icon(ui, HELP_PENDING_BROADCAST);
 				ui.label(format!("{} sats", amt));
 			});
-		},
+        }
 		BalanceType::BroadcastAwaitingConfirmation(b) => {
 			let amt = app.fmt_sats(b.amount_satoshis);
 			let txid = b.latest_spending_txid.clone();
 			ui.horizontal(|ui| {
 				ui.colored_label(egui::Color32::YELLOW, "Awaiting Confirmation");
+                widgets::info_icon(ui, HELP_BROADCAST_AWAITING_CONFIRMATION);
 				ui.label(format!("{} sats", amt));
 			});
 			ui.horizontal(|ui| {
-				ui.label("TXID:");
+                widgets::label_with_info(ui, "TXID:", HELP_TXID);
 				ui.monospace(truncate_id(&txid, 8, 8));
 				if ui.small_button("Copy").clicked() {
 					ui.output_mut(|o| o.copied_text = txid.clone());
 				}
 			});
-		},
+        }
 		BalanceType::AwaitingThresholdConfirmations(b) => {
 			let amt = app.fmt_sats(b.amount_satoshis);
 			let height = b.confirmation_height;
 			ui.horizontal(|ui| {
 				ui.colored_label(egui::Color32::GREEN, "Awaiting Threshold");
+                widgets::info_icon(ui, HELP_AWAITING_THRESHOLD_CONFIRMATIONS);
 				ui.label(format!("{} sats (height {})", amt, height));
 			});
-		},
+        }
 	}
 }
 
@@ -303,7 +383,10 @@ fn render_history_table(ui: &mut Ui, app: &mut LspServerApp) {
 			ui.label("No on-chain transactions found in payment history.");
 		} else {
 			page(ui, |ui| {
-				ui.label(format!("{} on-chain transaction(s)", onchain_payments.len()));
+                ui.label(format!(
+                    "{} on-chain transaction(s)",
+                    onchain_payments.len()
+                ));
 				ui.add_space(5.0);
 
 				TableBuilder::new(ui)
@@ -318,12 +401,24 @@ fn render_history_table(ui: &mut Ui, app: &mut LspServerApp) {
 					.column(Column::auto()) // Status
 					.column(Column::auto()) // Time
 					.header(22.0, |mut h| {
-						h.col(|ui| { ui.strong("Payment ID"); });
-						h.col(|ui| { ui.strong("TXID"); });
-						h.col(|ui| { ui.strong("Amount"); });
-						h.col(|ui| { ui.strong("Direction"); });
-						h.col(|ui| { ui.strong("Status"); });
-						h.col(|ui| { ui.strong("Time"); });
+                        h.col(|ui| {
+                            widgets::table_header_with_info(ui, "Payment ID", HELP_PAYMENT_ID);
+                        });
+                        h.col(|ui| {
+                            widgets::table_header_with_info(ui, "TXID", HELP_TXID);
+                        });
+                        h.col(|ui| {
+                            widgets::table_header_with_info(ui, "Amount", HELP_AMOUNT);
+                        });
+                        h.col(|ui| {
+                            widgets::table_header_with_info(ui, "Direction", HELP_DIRECTION);
+                        });
+                        h.col(|ui| {
+                            widgets::table_header_with_info(ui, "Status", HELP_STATUS);
+                        });
+                        h.col(|ui| {
+                            widgets::table_header_with_info(ui, "Time", HELP_TIME);
+                        });
 					})
 					.body(|mut body| {
 						for payment in onchain_payments {
@@ -345,7 +440,9 @@ fn render_history_table(ui: &mut Ui, app: &mut LspServerApp) {
 											ui.horizontal(|ui| {
 												ui.monospace(truncate_id(&onchain.txid, 5, 4));
 												if ui.small_button("Copy").clicked() {
-													ui.output_mut(|o| o.copied_text = onchain.txid.clone());
+                                                    ui.output_mut(|o| {
+                                                        o.copied_text = onchain.txid.clone()
+                                                    });
 												}
 											});
 										} else {

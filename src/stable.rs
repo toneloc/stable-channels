@@ -3,7 +3,7 @@ use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
     STABILITY_THRESHOLD_USD,
 };
-use crate::price_feeds::get_cached_price;
+use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
 use serde_json::json;
@@ -19,7 +19,7 @@ use ureq::Agent;
 /// When the user sends a payment, their channel balance decreases.
 /// If `backing_sats > actual_receiver_sats`, the payment ate into
 /// the stable portion. This function deducts the overflow from
-/// `expected_usd` and recalculates `backing_sats`.
+/// `expected_usd` and from the persisted sat allocation.
 ///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` otherwise.
 pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
@@ -38,9 +38,12 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
     let new_expected = (old_expected - usd_to_deduct).max(0.0);
 
     sc.expected_usd = USD::from_f64(new_expected);
-    let btc_amount = new_expected / price;
-    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+    // Native sats have already been exhausted when live balance drops below backing. Every
+    // remaining sat therefore stays in the stable allocation. Deriving backing from
+    // new_expected/current_price would silently reclassify sats whenever price moved since the
+    // last trade or stability settlement.
+    sc.backing_sats = user_sats;
+    sc.native_sats = 0;
     recompute_native(sc);
 
     // Set cooldown so stability check doesn't immediately re-fire
@@ -50,6 +53,121 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
         .as_secs() as i64;
 
     Some(usd_to_deduct)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverbackedRepair {
+    pub backing_sats_before: u64,
+    pub backing_sats_after: u64,
+    pub expected_usd_before: f64,
+    pub expected_usd_after: f64,
+    pub usd_deducted: f64,
+}
+
+/// Repair a persisted allocation whose stable backing exceeds the wallet's live channel balance.
+/// This is the durable-startup counterpart of outgoing-payment reconciliation: native sats are
+/// exhausted first, then the missing stable sats reduce the USD claim at the current trusted price.
+pub fn repair_overbacked_allocation(
+    sc: &mut StableChannel,
+    price: f64,
+) -> Option<OverbackedRepair> {
+    let live_receiver_sats = sc.stable_receiver_btc.sats;
+    if sc.backing_sats <= live_receiver_sats || !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+
+    let backing_sats_before = sc.backing_sats;
+    let expected_usd_before = sc.expected_usd.0.max(0.0);
+    let missing_backing_sats = backing_sats_before - live_receiver_sats;
+    let usd_deducted =
+        (missing_backing_sats as f64 / SATS_IN_BTC as f64 * price).min(expected_usd_before);
+    let expected_usd_after = (expected_usd_before - usd_deducted).max(0.0);
+
+    sc.expected_usd = USD::from_f64(expected_usd_after);
+    sc.backing_sats = if expected_usd_after < 0.01 {
+        0
+    } else {
+        live_receiver_sats
+    };
+    sc.native_sats = live_receiver_sats.saturating_sub(sc.backing_sats);
+    recompute_native(sc);
+    sc.last_stability_payment = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let repair = OverbackedRepair {
+        backing_sats_before,
+        backing_sats_after: sc.backing_sats,
+        expected_usd_before,
+        expected_usd_after,
+        usd_deducted,
+    };
+    audit_event(
+        "OVERBACKED_ALLOCATION_REPAIRED",
+        json!({
+            "user_channel_id": format!("{}", sc.user_channel_id),
+            "live_receiver_sats": live_receiver_sats,
+            "backing_sats_before": repair.backing_sats_before,
+            "backing_sats_after": repair.backing_sats_after,
+            "expected_usd_before": repair.expected_usd_before,
+            "expected_usd_after": repair.expected_usd_after,
+            "usd_deducted": repair.usd_deducted,
+            "btc_price": price,
+        }),
+    );
+    Some(repair)
+}
+
+/// Return whether an outbound Lightning payment is still unresolved.
+///
+/// LDK temporarily removes an in-flight HTLC from `outbound_capacity_msat`. Treating that lower
+/// capacity as a settled spend would permanently reduce the stable claim if the payment later
+/// fails. On-chain payments are excluded because they remain pending until confirmation without
+/// affecting a channel's Lightning capacity.
+fn is_pending_outbound_lightning(
+    direction: ldk_node::payment::PaymentDirection,
+    status: ldk_node::payment::PaymentStatus,
+    is_onchain: bool,
+) -> bool {
+    direction == ldk_node::payment::PaymentDirection::Outbound
+        && status == ldk_node::payment::PaymentStatus::Pending
+        && !is_onchain
+}
+
+fn has_pending_outbound_lightning_payment(node: &Node) -> bool {
+    node.list_payments().iter().any(|payment| {
+        is_pending_outbound_lightning(
+            payment.direction,
+            payment.status,
+            matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }),
+        )
+    })
+}
+
+/// Repair an over-backed allocation only when the observed capacity cannot be explained by an
+/// unresolved outbound HTLC.
+pub fn repair_overbacked_allocation_if_safe(
+    node: &Node,
+    sc: &mut StableChannel,
+    price: f64,
+) -> Option<OverbackedRepair> {
+    if sc.backing_sats > sc.stable_receiver_btc.sats
+        && has_pending_outbound_lightning_payment(node)
+    {
+        audit_event(
+            "OVERBACKED_REPAIR_SKIPPED_PENDING_HTLC",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "live_receiver_sats": sc.stable_receiver_btc.sats,
+                "backing_sats": sc.backing_sats,
+                "reason": "outbound Lightning payment is still pending",
+            }),
+        );
+        return None;
+    }
+
+    repair_overbacked_allocation(sc, price)
 }
 
 /// Reconcile an outgoing forwarded payment on the LSP side.
@@ -85,13 +203,12 @@ pub fn reconcile_forwarded(
     let new_expected = (old_expected - usd_to_deduct).max(0.0);
 
     sc.expected_usd = USD::from_f64(new_expected);
-    if price > 0.0 {
-        let btc_amount = new_expected / price;
-        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
-    }
     // After forwarding: user's actual remaining balance is user_sats - total_forwarded_sats
     let remaining_user_sats = user_sats.saturating_sub(total_forwarded_sats);
-    sc.native_sats = remaining_user_sats.saturating_sub(sc.backing_sats);
+    // An overflow means native was fully consumed, so all remaining sats are stable. Preserve
+    // that exact allocation instead of deriving a new one from a potentially newer BTC price.
+    sc.backing_sats = remaining_user_sats;
+    sc.native_sats = 0;
     recompute_native(sc);
 
     // Set cooldown so stability check doesn't immediately re-fire on a price micro-tick
@@ -123,22 +240,46 @@ pub fn reconcile_forwarded(
 ///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` if fully covered by native.
 pub fn deduct_outgoing(sc: &mut StableChannel, amount_sats: u64, price: f64) -> Option<f64> {
-    if sc.expected_usd.0 <= 0.01 || price <= 0.0 {
+    let receiver_sats_before = sc.stable_receiver_btc.sats;
+    let backing_sats_before = sc.backing_sats;
+    deduct_outgoing_from_snapshot(
+        sc,
+        receiver_sats_before,
+        backing_sats_before,
+        amount_sats,
+        price,
+    )
+}
+
+/// Deduct a known outgoing amount using the allocation immediately before the spend.
+/// This remains correct when the live channel balance has already advanced to its post-splice
+/// state by the time the asynchronous funding-output lookup completes.
+pub fn deduct_outgoing_from_snapshot(
+    sc: &mut StableChannel,
+    receiver_sats_before: u64,
+    backing_sats_before: u64,
+    amount_sats: u64,
+    price: f64,
+) -> Option<f64> {
+    if !price.is_finite() || price <= 0.0 {
         return None;
     }
 
-    let native_sats = sc.native_channel_btc.sats;
+    let native_sats = receiver_sats_before.saturating_sub(backing_sats_before);
     if amount_sats <= native_sats {
         return None; // Fully covered by native BTC
     }
 
     let overflow_sats = amount_sats - native_sats;
-    let usd_to_deduct = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
+    let usd_to_deduct = (overflow_sats as f64 / SATS_IN_BTC as f64 * price)
+        .min(sc.expected_usd.0.max(0.0));
     let new_expected = (sc.expected_usd.0 - usd_to_deduct).max(0.0);
 
     sc.expected_usd = USD::from_f64(new_expected);
-    let btc_amount = new_expected / price;
-    sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+    sc.backing_sats = backing_sats_before.saturating_sub(overflow_sats);
+    if new_expected == 0.0 {
+        sc.backing_sats = 0;
+    }
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
@@ -162,6 +303,72 @@ pub fn reconcile_incoming(sc: &mut StableChannel) {
     recompute_native(sc);
 }
 
+/// Stable/native allocation residue smaller than one cent is not useful to the user and cannot be
+/// entered precisely in the two-decimal trade UI. Absorb it into the stable side so a full
+/// BTC-to-USD trade produces an exact all-stable allocation.
+pub fn normalize_backing_sats(
+    receiver_sats: u64,
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+) -> u64 {
+    if receiver_sats == 0
+        || backing_sats > receiver_sats
+        || expected_usd <= 0.0
+        || !price.is_finite()
+        || price <= 0.0
+    {
+        return backing_sats;
+    }
+
+    let native_sats = receiver_sats - backing_sats;
+    let native_usd = native_sats as f64 / SATS_IN_BTC as f64 * price;
+    if native_usd < 0.01 {
+        receiver_sats
+    } else {
+        backing_sats
+    }
+}
+
+/// Derive the stable backing allocation for a trade at the signed quote price.
+///
+/// The result is clamped to the receiver's post-settlement balance. Sub-cent native residue is
+/// absorbed into the stable side so a full BTC-to-USD trade has no floating native remainder.
+pub fn trade_backing_sats(
+    receiver_sats: u64,
+    new_expected_usd: f64,
+    quote_price: f64,
+) -> u64 {
+    if receiver_sats == 0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd <= 0.0
+        || !quote_price.is_finite()
+        || quote_price <= 0.0
+    {
+        return 0;
+    }
+
+    let derived_backing = (new_expected_usd / quote_price * SATS_IN_BTC as f64) as u64;
+    normalize_backing_sats(
+        receiver_sats,
+        derived_backing.min(receiver_sats),
+        new_expected_usd,
+        quote_price,
+    )
+}
+
+/// Apply a previously agreed trade allocation without repricing it.
+///
+/// `backing_sats` is part of the signed trade intent. A peer may validate that intent against its
+/// own price and live LDK balance first, but once accepted it must not derive a different allocation
+/// from a later price snapshot.
+pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, backing_sats: u64) {
+    sc.expected_usd = USD::from_f64(new_expected_usd);
+    sc.backing_sats = backing_sats;
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+    recompute_native(sc);
+}
+
 /// Apply a trade — set new expected_usd and recalculate backing_sats + native_sats.
 ///
 /// Used after buy/sell trades and when the LSP processes a trade message.
@@ -171,8 +378,12 @@ pub fn reconcile_incoming(sc: &mut StableChannel) {
 pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
     sc.expected_usd = USD::from_f64(new_expected_usd);
     if price > 0.0 {
-        let btc_amount = new_expected_usd / price;
-        sc.backing_sats = (btc_amount * 100_000_000.0) as u64;
+        let receiver_sats = sc.stable_receiver_btc.sats;
+        sc.backing_sats = if receiver_sats > 0 {
+            trade_backing_sats(receiver_sats, new_expected_usd, price)
+        } else {
+            (new_expected_usd / price * SATS_IN_BTC as f64) as u64
+        };
     }
     // native_sats is everything NOT backing the stable position
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
@@ -192,6 +403,22 @@ pub fn get_current_price(agent: &Agent) -> f64 {
     crate::price_feeds::get_latest_price(agent).unwrap_or(0.0)
 }
 
+/// The sats effectively backing the stable position. If `backing_sats` was left unset (0) while a
+/// peg is active, derive it from the target so the stable value is the peg — never the full channel
+/// balance (which would count native BTC and fire a spurious PAY that drains it to the LSP).
+fn effective_backing_sats(
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+    receiver_sats: u64,
+) -> u64 {
+    if backing_sats > 0 || expected_usd < 0.01 || price <= 0.0 {
+        backing_sats
+    } else {
+        ((expected_usd / price * 100_000_000.0) as u64).min(receiver_sats)
+    }
+}
+
 pub fn channel_exists(node: &Node, user_channel_id: u128) -> bool {
     let channels = node.list_channels();
     channels
@@ -204,12 +431,10 @@ pub fn update_balances<'update_balance_lifetime>(
     node: &Node,
     sc: &'update_balance_lifetime mut StableChannel,
 ) -> (bool, &'update_balance_lifetime mut StableChannel) {
-    let cached = get_cached_price();
+    // Cache-only so no caller (incl. the UI thread) blocks on the network; the background loop owns refreshes.
+    let cached = get_fresh_cached_price_no_fetch();
     if cached > 0.0 {
         sc.latest_price = cached;
-    } else if sc.latest_price == 0.0 {
-        let agent = Agent::new();
-        sc.latest_price = get_current_price(&agent);
     }
 
     // --- Update On-chain ---
@@ -247,7 +472,7 @@ pub fn update_balances<'update_balance_lifetime>(
         let unspendable_punishment_sats = channel.unspendable_punishment_reserve.unwrap_or(0);
         let our_balance_sats =
             (channel.outbound_capacity_msat / 1000) + unspendable_punishment_sats;
-        let their_balance_sats = channel.channel_value_sats - our_balance_sats;
+        let their_balance_sats = channel.channel_value_sats.saturating_sub(our_balance_sats);
 
         if sc.is_stable_receiver {
             sc.stable_receiver_btc = Bitcoin::from_sats(our_balance_sats);
@@ -262,6 +487,7 @@ pub fn update_balances<'update_balance_lifetime>(
 
         // Native BTC is the portion not backing the stable position
         let native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+        sc.native_sats = native_sats;
         sc.native_channel_btc = Bitcoin::from_sats(native_sats);
 
         audit_event(
@@ -294,6 +520,8 @@ pub struct StabilityPaymentInfo {
     pub amount_msat: u64,
     pub counterparty: String,
     pub btc_price: f64,
+    pub backing_sats_before: u64,
+    pub backing_sats_after: u64,
 }
 
 /// Check and enforce stability for a channel.
@@ -308,22 +536,17 @@ pub fn check_stability(
     sc: &mut StableChannel,
     price: f64,
 ) -> Option<StabilityPaymentInfo> {
-    let current_price = if price > 0.0 {
-        price
-    } else {
-        let cached_price = get_cached_price();
-        if cached_price > 0.0 {
-            cached_price
-        } else {
-            audit_event(
-                "STABILITY_SKIP",
-                json!({
-                    "reason": "no valid price available"
-                }),
-            );
-            return None;
-        }
-    };
+    if !price.is_finite() || price <= 0.0 {
+        audit_event(
+            "STABILITY_SKIP",
+            json!({
+                "reason": "caller supplied no valid current price",
+                "price": price,
+            }),
+        );
+        return None;
+    }
+    let current_price = price;
 
     sc.latest_price = current_price;
     let (success, _) = update_balances(node, sc);
@@ -359,15 +582,39 @@ pub fn check_stability(
     // The target is expected_usd
     let target_usd = sc.expected_usd.0;
 
-    // Use backing_sats to calculate the current value of the stable portion only
-    // This excludes the native BTC position from stability calculations
+    // Repair an unset backing (0 with a live peg + price) by deriving it from the target, so the
+    // stable portion is valued at the peg — NOT the full channel balance, which would count native
+    // BTC and trigger a spurious PAY that drains it to the LSP.
+    sc.backing_sats = effective_backing_sats(
+        sc.backing_sats,
+        target_usd,
+        current_price,
+        sc.stable_receiver_btc.sats,
+    );
+    if sc.backing_sats > sc.stable_receiver_btc.sats
+        && has_pending_outbound_lightning_payment(node)
+    {
+        // Emit the common safety audit and stop the whole stability decision. Continuing with the
+        // temporarily reduced capacity could initiate another payment from a false drift signal.
+        let _ = repair_overbacked_allocation_if_safe(node, sc, current_price);
+        return None;
+    }
+    if repair_overbacked_allocation_if_safe(node, sc, current_price).is_some() {
+        return None;
+    }
+    sc.native_sats = sc
+        .stable_receiver_btc
+        .sats
+        .saturating_sub(sc.backing_sats);
+    recompute_native(sc);
+
+    // Value of the stable portion only (excludes native BTC).
     let stable_usd_value = if sc.backing_sats > 0 {
-        // backing_sats tracks the BTC backing the stable portion
         (sc.backing_sats as f64 / 100_000_000.0) * current_price
     } else {
-        // Fallback for channels without backing_sats set yet - use total balance
-        // but only if expected_usd is set (means user has a stable position)
-        sc.stable_receiver_usd.0
+        // Backing still unset (degenerate: no price / sub-cent peg) — value at the peg, never the
+        // full channel balance.
+        target_usd
     };
 
     // Calculate deviation: how much the stable portion has drifted from target
@@ -482,6 +729,7 @@ pub fn check_stability(
             // This accounts the payment against the stable pool, not native BTC.
             // Don't recompute native_sats here — receiver balance hasn't updated yet
             // (HTLC still in flight). Native will be recomputed on next balance refresh.
+            let previous_backing = sc.backing_sats;
             let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
             sc.backing_sats = new_backing;
 
@@ -502,6 +750,8 @@ pub fn check_stability(
                 amount_msat: amt,
                 counterparty: counterparty_str,
                 btc_price: sc.latest_price,
+                backing_sats_before: previous_backing,
+                backing_sats_after: new_backing,
             })
         }
         Err(e) => {
@@ -523,10 +773,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_pending_outbound_lightning_blocks_capacity_repair() {
+        use ldk_node::payment::{PaymentDirection, PaymentStatus};
+
+        assert!(is_pending_outbound_lightning(
+            PaymentDirection::Outbound,
+            PaymentStatus::Pending,
+            false,
+        ));
+        assert!(!is_pending_outbound_lightning(
+            PaymentDirection::Outbound,
+            PaymentStatus::Succeeded,
+            false,
+        ));
+        assert!(!is_pending_outbound_lightning(
+            PaymentDirection::Inbound,
+            PaymentStatus::Pending,
+            false,
+        ));
+        assert!(!is_pending_outbound_lightning(
+            PaymentDirection::Outbound,
+            PaymentStatus::Pending,
+            true,
+        ));
+    }
+
+    #[test]
     fn test_get_current_price_returns_non_negative() {
         let agent = Agent::new();
         let price = get_current_price(&agent);
         assert!(price >= 0.0);
+    }
+
+    #[test]
+    fn effective_backing_recomputes_when_unset() {
+        // Unset backing (0) with a live peg + price → derived from the peg, not left at 0
+        // (so the stable value can't balloon to the full channel balance and fire a bad PAY).
+        assert_eq!(
+            effective_backing_sats(0, 100.0, 50_000.0, 300_000),
+            200_000
+        );
+        // Already-set backing is returned unchanged.
+        assert_eq!(
+            effective_backing_sats(123_456, 100.0, 50_000.0, 300_000),
+            123_456
+        );
+        // A legacy peg cannot repair to more backing than the wallet actually owns.
+        assert_eq!(
+            effective_backing_sats(0, 100.0, 100_000.0, 95_000),
+            95_000
+        );
+        // No price / no peg → nothing to derive from; left as-is.
+        assert_eq!(effective_backing_sats(0, 100.0, 0.0, 300_000), 0);
+        assert_eq!(effective_backing_sats(0, 0.0, 50_000.0, 300_000), 0);
     }
 
     #[test]
@@ -634,9 +933,8 @@ mod tests {
             d
         );
         assert!((sc.expected_usd.0 - 900.0).abs() < 0.01);
-        // backing_sats should match new expected_usd
-        let expected_backing = (900.0 / 100_000.0 * 100_000_000.0) as u64;
-        assert_eq!(sc.backing_sats, expected_backing);
+        // All remaining sats stay in the stable allocation exactly.
+        assert_eq!(sc.backing_sats, 900_000);
     }
 
     #[test]
@@ -674,6 +972,32 @@ mod tests {
     }
 
     #[test]
+    fn overbacked_allocation_is_repaired_from_live_balance() {
+        let mut sc = test_sc(100.0, 100_000.0, 80_000);
+        sc.backing_sats = 100_000;
+        sc.native_sats = 0;
+
+        let repair = repair_overbacked_allocation(&mut sc, 100_000.0).unwrap();
+
+        assert_eq!(repair.backing_sats_before, 100_000);
+        assert_eq!(repair.backing_sats_after, 80_000);
+        assert!((repair.usd_deducted - 20.0).abs() < 1e-6);
+        assert!((sc.expected_usd.0 - 80.0).abs() < 1e-6);
+        assert_eq!(sc.backing_sats, 80_000);
+        assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn overbacked_repair_waits_for_a_valid_price() {
+        let mut sc = test_sc(100.0, 100_000.0, 80_000);
+        sc.backing_sats = 100_000;
+
+        assert!(repair_overbacked_allocation(&mut sc, 0.0).is_none());
+        assert_eq!(sc.expected_usd.0, 100.0);
+        assert_eq!(sc.backing_sats, 100_000);
+    }
+
+    #[test]
     fn outgoing_at_different_prices() {
         // Same sats overflow at higher price → larger USD deduction
         // $500 stable at $100k → backing 500k. Receiver has 400k. Overflow 100k.
@@ -687,6 +1011,52 @@ mod tests {
         // 100k sats at $100k = $100, at $200k = $200
         assert!((d1 - 100.0).abs() < 0.01);
         assert!((d2 - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn outgoing_after_price_move_preserves_remaining_stable_sats() {
+        // Allocated at $100k: $100 is 100k stable sats. Price falls to $80k before a 10k-sat
+        // stable overflow is reconciled. The quote changes the USD deduction, not the allocation.
+        let mut sc = test_sc(100.0, 100_000.0, 90_000);
+        let deducted = reconcile_outgoing(&mut sc, 80_000.0).unwrap();
+
+        assert!((deducted - 8.0).abs() < 1e-9);
+        assert!((sc.expected_usd.0 - 92.0).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 90_000);
+        assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn splice_out_snapshot_is_stable_after_live_balance_advances() {
+        // Production regression: ChannelReady exposed the post-splice 1,742 sats before the
+        // funding-output lookup returned. The deduction must still use the pre-splice allocation.
+        let price = 65_872.5;
+        let mut sc = test_sc(31.4424, price, 1_742);
+        sc.backing_sats = 47_615;
+        sc.native_sats = 0;
+
+        let deducted =
+            deduct_outgoing_from_snapshot(&mut sc, 92_022, 47_615, 90_280, price).unwrap();
+
+        assert!((deducted - 30.217691925).abs() < 1e-9);
+        assert!((sc.expected_usd.0 - 1.224708075).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 1_742);
+        assert_eq!(sc.native_sats, 0);
+        assert_eq!(sc.native_channel_btc.sats, 0);
+    }
+
+    #[test]
+    fn splice_out_releases_remaining_backing_when_expected_usd_reaches_zero() {
+        let mut sc = test_sc(0.005, 65_000.0, 250);
+        sc.backing_sats = 500;
+
+        let deducted =
+            deduct_outgoing_from_snapshot(&mut sc, 500, 500, 250, 65_000.0).unwrap();
+
+        assert!((deducted - 0.005).abs() < f64::EPSILON);
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+        assert_eq!(sc.native_sats, 250);
     }
 
     // ================================================================
@@ -722,6 +1092,19 @@ mod tests {
         let deducted = reconcile_forwarded(&mut sc, 500_000, 100_000, 100_000.0).unwrap();
         assert!((deducted - 100.0).abs() < 0.01);
         assert!((sc.expected_usd.0 - 400.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn forwarded_after_price_move_preserves_remaining_stable_sats() {
+        // 100k stable + 50k native were allocated at $100k. At an $80k execution quote, a 60k
+        // payment consumes all native and 10k stable, leaving exactly 90k stable sats.
+        let mut sc = test_sc(100.0, 100_000.0, 150_000);
+        let deducted = reconcile_forwarded(&mut sc, 150_000, 60_000, 80_000.0).unwrap();
+
+        assert!((deducted - 8.0).abs() < 1e-9);
+        assert!((sc.expected_usd.0 - 92.0).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 90_000);
+        assert_eq!(sc.native_sats, 0);
     }
 
     #[test]
@@ -843,6 +1226,61 @@ mod tests {
         apply_trade(&mut sc, 1000.0, 100_000.0);
         assert_eq!(sc.expected_usd.0, 1000.0);
         assert_eq!(sc.backing_sats, 1_000_000);
+    }
+
+    #[test]
+    fn trade_full_balance_absorbs_sub_cent_native_dust() {
+        let mut sc = test_sc(0.0, 66_250.21, 57_444);
+        apply_trade(&mut sc, 38.055025828575, 66_250.21);
+
+        assert_eq!(sc.backing_sats, 57_444);
+        assert_eq!(sc.native_sats, 0);
+        assert_eq!(sc.native_channel_btc.sats, 0);
+    }
+
+    #[test]
+    fn trade_keeps_meaningful_native_allocation() {
+        let mut sc = test_sc(0.0, 100_000.0, 100_000);
+        apply_trade(&mut sc, 99.0, 100_000.0);
+
+        assert_eq!(sc.backing_sats, 99_000);
+        assert_eq!(sc.native_sats, 1_000);
+        assert_eq!(sc.native_channel_btc.sats, 1_000);
+    }
+
+    #[test]
+    fn trade_backing_never_exceeds_live_balance() {
+        let mut sc = test_sc(0.0, 100_000.0, 95_000);
+        apply_trade(&mut sc, 100.0, 100_000.0);
+
+        assert_eq!(sc.backing_sats, 95_000);
+        assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn signed_trade_allocation_is_not_repriced_by_the_applying_peer() {
+        let receiver_sats = 50_000;
+        let quote_price = 100_000.0;
+        let backing_sats = trade_backing_sats(receiver_sats, 49.95, quote_price);
+        assert_eq!(backing_sats, 49_950);
+
+        let mut sc = test_sc(0.0, 100_500.0, receiver_sats);
+        apply_trade_allocation(&mut sc, 49.95, backing_sats);
+
+        assert_eq!(sc.expected_usd.0, 49.95);
+        assert_eq!(sc.backing_sats, 49_950);
+        assert_eq!(sc.native_sats, 50);
+    }
+
+    #[test]
+    fn signed_full_peg_allocation_absorbs_sub_cent_residue() {
+        let backing_sats = trade_backing_sats(57_444, 38.055025828575, 66_250.21);
+        assert_eq!(backing_sats, 57_444);
+
+        let mut sc = test_sc(0.0, 66_400.0, 57_444);
+        apply_trade_allocation(&mut sc, 38.055025828575, backing_sats);
+        assert_eq!(sc.backing_sats, 57_444);
+        assert_eq!(sc.native_sats, 0);
     }
 
     // ================================================================

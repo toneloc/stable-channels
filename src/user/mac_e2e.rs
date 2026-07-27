@@ -234,7 +234,8 @@ impl MacFlowRunner {
     fn flow_btc_to_usd(&mut self) -> Result<(), String> {
         let before = self.expected_usd();
         let pending_before = self.app.pending_trade_payments.len();
-        self.app.execute_sell(75.0);
+        let btc_sats = self.sats_for_usd(75.0);
+        self.app.execute_sell(75.0, self.price_usd, btc_sats);
         if self.app.pending_trade_payments.len() == pending_before {
             return Err(format!(
                 "sell order was not submitted: status='{}' error='{}'",
@@ -373,7 +374,7 @@ impl MacFlowRunner {
     fn flow_usd_to_btc(&mut self) -> Result<(), String> {
         let before = self.expected_usd();
         let pending_before = self.app.pending_trade_payments.len();
-        self.app.execute_buy(20.0);
+        self.app.execute_buy(20.0, self.price_usd);
         if self.app.pending_trade_payments.len() == pending_before {
             return Err(format!(
                 "buy order was not submitted: status='{}' error='{}'",
@@ -809,7 +810,8 @@ impl MacDemoController {
             MacDemoStep::SellStart => {
                 self.before_expected_usd = self.expected_usd(app);
                 let pending_before = app.pending_trade_payments.len();
-                app.execute_sell(75.0);
+                let btc_sats = self.sats_for_usd(75.0);
+                app.execute_sell(75.0, self.price_usd, btc_sats);
                 if app.pending_trade_payments.len() == pending_before {
                     self.fail(format!(
                         "sell order was not submitted: status='{}' error='{}'",
@@ -1122,7 +1124,7 @@ impl MacDemoController {
             MacDemoStep::BuyStart => {
                 self.before_expected_usd = self.expected_usd(app);
                 let pending_before = app.pending_trade_payments.len();
-                app.execute_buy(20.0);
+                app.execute_buy(20.0, self.price_usd);
                 if app.pending_trade_payments.len() == pending_before {
                     self.fail(format!(
                         "buy order was not submitted: status='{}' error='{}'",
