@@ -284,8 +284,8 @@ extension DatabaseService {
     func rollbackPaymentsConfirmedAfter(height: UInt32) throws {
         let sql = """
         UPDATE payments
-        SET status = 'pending', confirmations = 0
-        WHERE confirmations > 0 AND created_at > ?;
+        SET status = 'pending', confirmations = 0, tx_block_height = NULL
+        WHERE tx_block_height IS NOT NULL AND tx_block_height > ?;
         """
         try rawSQL.execute(sql, params: [.integer(Int64(height))])
     }
