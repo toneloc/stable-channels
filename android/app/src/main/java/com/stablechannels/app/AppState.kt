@@ -511,6 +511,14 @@ class AppState(private val context: Context) : ViewModel() {
                 onComplete("Close all channels before switching LSPs.")
                 return@launch
             }
+            // Capture the currently-working config so a bad new LSP can be rolled back to it —
+            // LDK validates the pubkey/address at node-build time, which happens *after* we've
+            // already persisted the new values, so a failure here must not leave the node
+            // permanently stopped on unusable config.
+            val hadCustomLsp = LspPreferencesManager.hasCustomLsp(context)
+            val previousPubkey = LspPreferencesManager.getLspPubkey(context)
+            val previousAddress = LspPreferencesManager.getLspAddress(context)
+
             val validationError = LspPreferencesManager.saveCustomLsp(context, pubkey, address)
             if (validationError != null) {
                 onComplete(validationError)
@@ -520,9 +528,19 @@ class AppState(private val context: Context) : ViewModel() {
                 performLspNodeRestart()
                 onComplete(null)
             } catch (e: Exception) {
-                Log.e("AppState", "Failed to restart node after LSP switch", e)
+                Log.e("AppState", "Failed to restart node after LSP switch — rolling back", e)
                 AuditService.log("LSP_SWITCH_FAILED", mapOf("error" to (e.message ?: "")))
-                onComplete("Failed to restart node: ${e.message}")
+                if (hadCustomLsp) {
+                    LspPreferencesManager.saveCustomLsp(context, previousPubkey, previousAddress)
+                } else {
+                    LspPreferencesManager.resetToDefault(context)
+                }
+                try {
+                    performLspNodeRestart()
+                } catch (rollbackError: Exception) {
+                    Log.e("AppState", "Rollback restart also failed", rollbackError)
+                }
+                onComplete("Invalid LSP — reverted to previous settings. (${e.message})")
             }
         }
     }
