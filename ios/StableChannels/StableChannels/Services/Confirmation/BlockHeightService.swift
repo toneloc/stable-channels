@@ -34,6 +34,12 @@ final class BlockHeightService {
         pollTask = nil
     }
 
+    func updateHeight(_ height: UInt32) {
+        guard height != currentHeight else { return }
+        currentHeight = height
+        onHeightUpdated?(height)
+    }
+
     func refresh() async {
         do {
             let height = try await provider.currentHeight()
