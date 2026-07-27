@@ -353,41 +353,6 @@ class DatabaseService {
 
     // MARK: - Onchain Reconcilation Helpers
 
-    /// Checks if we've already recorded a pending onchain receive recently that matches the LDK balance jump.
-    /// This prevents the LDK balance-polling fallback from inserting a duplicate `onchain_deposit_<UUID>` row
-    /// right after the WebSocket inserted `onchain_receive_<txid>`.
-    func hasRecentPendingOnchainReceive(matching amountSats: Int64, minAgeSeconds: TimeInterval = 900) -> Bool {
-        do {
-            let cutoff = Date().timeIntervalSince1970 - minAgeSeconds
-            let sql = """
-                SELECT amount_msat FROM payments 
-                WHERE payment_type = 'onchain' 
-                  AND direction = 'received' 
-                  AND status = 'pending'
-                  AND created_at >= ?
-            """
-            let rows = try query(sql, params: [.integer(Int64(cutoff))])
-            let pendingSats = rows.compactMap { $0[0] as? Int64 }.map { $0 / 1000 }
-
-            // 1. Check if any single pending receive matches the jump
-            for sats in pendingSats {
-                if abs(sats - amountSats) <= 1000 {
-                    return true
-                }
-            }
-
-            // 2. Check if the sum of all recent pending receives matches the jump (simultaneous deposits)
-            let totalSats = pendingSats.reduce(0, +)
-            if abs(totalSats - amountSats) <= 1000 {
-                return true
-            }
-
-            return false
-        } catch {
-            return false
-        }
-    }
-
     // MARK: - Payment Operations
 
     func paymentExists(txid: String, excludePaymentId: String) -> Bool {
