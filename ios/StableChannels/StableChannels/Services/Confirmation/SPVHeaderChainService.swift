@@ -139,8 +139,10 @@ final class SPVHeaderChainService {
                 timestamp: timestamp
             )
 
-            // Poll immediately — payments may have been rolled back to "pending"
-            // regardless of whether the canonical height changed.
+            // Poll immediately — payments may have been rolled back to "pending".
+            // Use setHeightSilently to advance the height counter without firing
+            // onHeightUpdated, which would trigger a second redundant pollOnce().
+            blockHeightService.setHeightSilently(incomingHeight)
             await confirmationPollingService.pollOnce()
         }
     }
@@ -151,26 +153,31 @@ final class SPVHeaderChainService {
         incomingPrevHash: String,
         timestamp: UInt32
     ) throws {
-        if let commonAncestorHeight = try databaseService.findCommonAncestorHeight(prevHash: incomingPrevHash) {
-            // Found the fork point — remove orphaned headers and revert payment statuses.
-            try databaseService.rollbackHeadersAbove(height: commonAncestorHeight)
-            try databaseService.rollbackPaymentsConfirmedAfter(height: commonAncestorHeight)
-            logger.info("[SPV] Reorg rolled back to common ancestor #\(commonAncestorHeight)")
-            AuditService.log("SPV_REORG_ROLLED_BACK", data: ["commonAncestor": "\(commonAncestorHeight)"])
-        } else {
-            // Fork point predates our rolling window — clear above the incoming block's floor.
-            let safeFloor = incomingHeight > 0 ? incomingHeight - 1 : 0
-            logger.warning("[SPV] Common ancestor not in window. Clearing headers above #\(safeFloor).")
-            try databaseService.rollbackHeadersAbove(height: safeFloor)
-        }
+        // Wrap header rollback + payment rollback + tip insert in one transaction.
+        // If any step fails, all three are rolled back together.
+        try databaseService.inTransaction {
+            if let commonAncestorHeight = try databaseService.findCommonAncestorHeight(prevHash: incomingPrevHash) {
+                // Found the fork point — remove orphaned headers and revert payment statuses.
+                try databaseService.rollbackHeadersAbove(height: commonAncestorHeight)
+                try databaseService.rollbackPaymentsConfirmedAfter(height: commonAncestorHeight)
+                logger.info("[SPV] Reorg rolled back to common ancestor #\(commonAncestorHeight)")
+                AuditService.log("SPV_REORG_ROLLED_BACK", data: ["commonAncestor": "\(commonAncestorHeight)"])
+            } else {
+                // Fork point predates our rolling window — clear above the incoming block's floor.
+                let safeFloor = incomingHeight > 0 ? incomingHeight - 1 : 0
+                logger.warning("[SPV] Common ancestor not in window. Clearing headers above #\(safeFloor).")
+                try databaseService.rollbackHeadersAbove(height: safeFloor)
+                try databaseService.rollbackPaymentsConfirmedAfter(height: safeFloor)
+            }
 
-        // Plant the new canonical tip on the clean chain.
-        try databaseService.insertHeader(
-            height: incomingHeight,
-            hash: incomingHash,
-            prevHash: incomingPrevHash,
-            timestamp: timestamp
-        )
+            // Plant the new canonical tip on the clean chain.
+            try databaseService.insertHeader(
+                height: incomingHeight,
+                hash: incomingHash,
+                prevHash: incomingPrevHash,
+                timestamp: timestamp
+            )
+        }
     }
 
     // MARK: - Height Update

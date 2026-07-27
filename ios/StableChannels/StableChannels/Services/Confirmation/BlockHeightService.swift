@@ -40,6 +40,14 @@ final class BlockHeightService {
         onHeightUpdated?(height)
     }
 
+    /// Updates `currentHeight` without firing `onHeightUpdated`.
+    /// Used by the reorg path, which calls `pollOnce()` directly and must not
+    /// trigger a second poll via the height-change callback.
+    func setHeightSilently(_ height: UInt32) {
+        guard height > currentHeight else { return }
+        currentHeight = height
+    }
+
     func refresh() async {
         do {
             let height = try await provider.currentHeight()
