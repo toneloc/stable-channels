@@ -759,4 +759,217 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         service.handleMessage(json)
         XCTAssertEqual(capturedHeight, 900101)
     }
+
+    // MARK: - RBF Edge Cases
+
+    func testRBFThenReplacementReceiveDoesNotDesync() {
+        let addr = "bc1qrfbtest"
+        service.trackAddress(addr)
+
+        let txidX = "1111111111111111111111111111111111111111111111111111111111111111"
+        let txidY = "2222222222222222222222222222222222222222222222222222222222222222"
+        let removedJSON = "{ \"multi-address-transactions\": { \"\(addr)\": { \"removed\": [{ \"txid\": \"\(txidX)\" }] } } }"
+        let receiveJSON = "{ \"address-transactions\": [{ \"txid\": \"\(txidY)\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 50000 }] }] }"
+
+        var events = [WebSocketEvent]()
+        service.onTransactionDetected = { event in
+            events.append(event)
+        }
+
+        service.handleMessage(removedJSON)
+        service.handleMessage(receiveJSON)
+
+        XCTAssertEqual(events.count, 2)
+        guard case .removed = events[0] else {
+            XCTFail("First event should be .removed"); return
+        }
+        guard case let .receive(_, firedTxid, _) = events[1] else {
+            XCTFail("Second event should be .receive"); return
+        }
+        XCTAssertEqual(firedTxid, txidY)
+    }
+
+    func testRemovedTxDedupAllowsReAdd() {
+        let addr = "bc1qdedup3"
+        service.trackAddress(addr)
+
+        let txidX = "3333333333333333333333333333333333333333333333333333333333333333"
+        let txidY = "4444444444444444444444444444444444444444444444444444444444444444"
+
+        let receiveX = "{ \"address-transactions\": [{ \"txid\": \"\(txidX)\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 1000 }] }] }"
+        let removedX = "{ \"multi-address-transactions\": { \"\(addr)\": { \"removed\": [{ \"txid\": \"\(txidX)\" }] } } }"
+        let receiveY = "{ \"address-transactions\": [{ \"txid\": \"\(txidY)\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 2000 }] }] }"
+        let removedY = "{ \"multi-address-transactions\": { \"\(addr)\": { \"removed\": [{ \"txid\": \"\(txidY)\" }] } } }"
+
+        var events = [WebSocketEvent]()
+        service.onTransactionDetected = { event in
+            events.append(event)
+        }
+
+        // First receive for X — should fire
+        service.handleMessage(receiveX)
+        XCTAssertEqual(events.count, 1)
+        guard case let .receive(_, firedTxid, _) = events[0] else {
+            XCTFail("Should be .receive"); return
+        }
+        XCTAssertEqual(firedTxid, txidX)
+
+        // Same receive for X — should be deduped
+        service.handleMessage(receiveX)
+        XCTAssertEqual(events.count, 1, "Duplicate receive should be deduped")
+
+        // Removed for X — different dedup key from receive, so it SHOULD fire
+        service.handleMessage(removedX)
+        XCTAssertEqual(events.count, 2, "Removal for a txid should fire even if it was previously received")
+
+        // New receive for Y — should fire
+        service.handleMessage(receiveY)
+        XCTAssertEqual(events.count, 3)
+        guard case let .receive(_, firedTxid, _) = events[2] else {
+            XCTFail("Should be .receive for new txid"); return
+        }
+        XCTAssertEqual(firedTxid, txidY)
+
+        // Removed for Y — should fire (different txid)
+        service.handleMessage(removedY)
+        XCTAssertEqual(events.count, 4)
+        guard case .removed = events[3] else {
+            XCTFail("Should be .removed"); return
+        }
+    }
+
+    func testProcessedTxidMemoryCapPreventsUnboundedGrowth() {
+        let maxEntries = 500
+        for i in 0..<(maxEntries + 50) {
+            let key = String(format: "%064d", i)
+            service.recordProcessedTx(key)
+        }
+        let dict = service.processedTxids
+        XCTAssertLessThanOrEqual(dict.count, maxEntries)
+    }
+
+    func testProcessedTxidEvictionRemovesOldest() {
+        let maxEntries = 500
+        let firstKey = "0000000000000000000000000000000000000000000000000000000000000000"
+        service.recordProcessedTx(firstKey)
+
+        for i in 1..<(maxEntries + 50) {
+            let key = String(format: "%064d", i)
+            service.recordProcessedTx(key)
+        }
+
+        let dict = service.processedTxids
+        XCTAssertNil(dict[firstKey], "Oldest entry should have been evicted when cap exceeded")
+    }
+
+    func testRemovedTransactionIgnoredInAggregate() {
+        let addr = "bc1qremovedonly"
+        service.trackAddress(addr)
+
+        let txid = "5555555555555555555555555555555555555555555555555555555555555555"
+        let json = "{ \"multi-address-transactions\": { \"\(addr)\": { \"mempool\": [], \"confirmed\": [], \"removed\": [{ \"txid\": \"\(txid)\" }] } } }"
+
+        var events = [WebSocketEvent]()
+        var receiveFired = false
+        service.onTransactionDetected = { event in
+            events.append(event)
+            if case .receive = event {
+                receiveFired = true
+            }
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertEqual(events.count, 1)
+        guard case .removed = events[0] else {
+            XCTFail("Event should be .removed only"); return
+        }
+        XCTAssertFalse(receiveFired, ".receive should not fire for removed-only tx")
+    }
+
+    func testTrackedTxidDirectMatchInAddressTransactions() {
+        let trackedTxid = "6666666666666666666666666666666666666666666666666666666666666666"
+
+        let msg = MempoolWSMessage(
+            block: nil,
+            blocks: nil,
+            addressTransactions: nil,
+            blockTransactions: nil,
+            address: nil,
+            txid: trackedTxid,
+            multiAddressTransactions: nil,
+            trackedTxs: nil
+        )
+        let tx = MempoolWSTransaction(txid: makeValidTxid(), vout: nil, vin: nil)
+
+        let results = matcher.matchAll(
+            trackedAddresses: [],
+            trackedTxids: [trackedTxid],
+            msg: msg,
+            tx: tx
+        )
+        XCTAssertFalse(results.isEmpty)
+        XCTAssertEqual(results.first?.target, trackedTxid)
+        XCTAssertEqual(results.first?.isTxid, true)
+    }
+
+    func testRBFRemovalDuringChannelClose() {
+        let addr = "bc1qrbfclose"
+        service.trackAddress(addr)
+
+        let txid = "7777777777777777777777777777777777777777777777777777777777777777"
+        let json = "{ \"multi-address-transactions\": { \"\(addr)\": { \"removed\": [{ \"txid\": \"\(txid)\" }] } } }"
+
+        var removedFired = false
+        service.onTransactionDetected = { event in
+            if case .removed = event {
+                removedFired = true
+            }
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertTrue(removedFired, "Service should fire .removed regardless of channel state")
+    }
+
+    func testMultipleOutspendsSameSpendingTxid() {
+        let fundingTxid1 = "8888888888888888888888888888888888888888888888888888888888888888"
+        let fundingTxid2 = "9999999999999999999999999999999999999999999999999999999999999999"
+        let spendingTxid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        service.trackTx(fundingTxid1)
+        service.trackTx(fundingTxid2)
+
+        let json = "{ \"tracked-txs\": { \"\(fundingTxid1)\": { \"txid\": \"\(fundingTxid1)\", \"utxoSpent\": { \"0\": { \"txid\": \"\(spendingTxid)\", \"vin\": 0 } } }, \"\(fundingTxid2)\": { \"txid\": \"\(fundingTxid2)\", \"utxoSpent\": { \"0\": { \"txid\": \"\(spendingTxid)\", \"vin\": 0 } } } } }"
+
+        var outspendTargets = [String]()
+        var outspendSpenders = [String]()
+        service.onTransactionDetected = { event in
+            if case let .trackedOutspend(tracked, spender) = event {
+                outspendTargets.append(tracked)
+                outspendSpenders.append(spender)
+            }
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertEqual(outspendTargets.count, 2)
+        XCTAssertTrue(outspendTargets.contains(fundingTxid1))
+        XCTAssertTrue(outspendTargets.contains(fundingTxid2))
+        XCTAssertEqual(outspendSpenders.count, 2)
+
+        // Send same message again — should be deduped by spendingTxid + trackedTxid
+        service.handleMessage(json)
+        XCTAssertEqual(outspendTargets.count, 2, "Duplicate outspends should be deduped")
+    }
+
+    func testConnectResetsReconnectAttempts() {
+        service.disconnect()
+
+        service.reconnectAttempts = 5
+
+        service.connect()
+
+        XCTAssertEqual(service.reconnectAttempts, 0)
+    }
 }

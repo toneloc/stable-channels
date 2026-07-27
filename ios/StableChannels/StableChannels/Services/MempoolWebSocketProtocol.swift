@@ -6,6 +6,7 @@ enum WebSocketEvent {
     case trackedOutspend(trackedTxid: String, spendingTxid: String)
 }
 
+@MainActor
 protocol MempoolWebSocketProtocol: AnyObject {
     var isConnected: Bool { get }
     var onTransactionDetected: ((WebSocketEvent) -> Void)? {

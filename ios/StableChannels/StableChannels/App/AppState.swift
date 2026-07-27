@@ -2279,6 +2279,10 @@ class AppState {
             guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
             do {
                 try db.failPaymentByTxid(txid: txid)
+                let currentOnchain = onchainBalanceSats
+                if currentOnchain < prevOnchainSats {
+                    prevOnchainSats = currentOnchain
+                }
                 AuditService.log("WEBSOCKET_RBF_FAILED_PAYMENT", data: ["txid": txid, "target": target])
             } catch {
                 AuditService.log("WEBSOCKET_RBF_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])

@@ -83,11 +83,15 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
     private var trackedAddresses: Set<String> = []
     private var trackedTxids: Set<String> = []
     private var pendingOutboundMessages: [String] = []
-    private var processedTxids: [String: Date] = [:]
+    private(set) var processedTxids: [String: Date] = [:]
     private let processedTxidTTL: TimeInterval = 900 // 15 minutes
+    let processedTxidMaxEntries = 500 // hard cap prevents unbounded growth
     private var lastPurgeTime: Date = .distantPast
     private var isManualDisconnect: Bool = false
     private var reconnectTask: Task<Void, Never>?
+    var reconnectAttempts: Int = 0
+    private let maxReconnectDelay: UInt64 = 60 // cap backoff at 60s
+    private var pingTimer: Timer?
 
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
     var onTransactionDetected: ((WebSocketEvent) -> Void)?
@@ -108,6 +112,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
 
         reconnectTask?.cancel()
         reconnectTask = nil
+        reconnectAttempts = 0
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isManualDisconnect = false
@@ -131,13 +136,26 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         Task { @MainActor in
             guard !self.isManualDisconnect else { return }
             self.isConnected = true
+            self.reconnectAttempts = 0
             self.logger.info("[WebSocket] Connected to Mempool WebSocket successfully")
             AuditService.log("WEBSOCKET_CONNECTED", data: ["url": self.wsEndpointURL.absoluteString])
 
             self.syncTracking()
-            self.trackBlocks()
+            self.subscribeToBlocks()
+            self.startPingTimer()
             self.flushPendingMessages()
             self.receiveMessages()
+        }
+    }
+
+    nonisolated func urlSession(
+        _: URLSession,
+        webSocketTask _: URLSessionWebSocketTask,
+        didCloseWithCode _: URLSessionWebSocketTask.CloseCode,
+        reason _: Data?
+    ) {
+        Task { @MainActor in
+            self.handleDisconnection()
         }
     }
 
@@ -151,6 +169,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         webSocketTask = nil
         urlSession?.invalidateAndCancel()
         urlSession = nil
+        stopPingTimer()
         isConnected = false
         logger.info("[WebSocket] Disconnected gracefully")
         AuditService.log("WEBSOCKET_DISCONNECTED", data: [:])
@@ -204,13 +223,41 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         }
     }
 
-    /// Subscribes to real-time block header announcements.
-    func trackBlocks() {
+    // MARK: - Subscription
+
+    /// Subscribe to block tip announcements and mempool-block projections.
+    private func subscribeToBlocks() {
         let payload = """
-        { "action": "want", "data": ["blocks"] }
+        { "action": "want", "data": ["blocks", "mempool-blocks"] }
         """
-        logger.info("[WebSocket] Requesting block tip stream")
+        logger.info("[WebSocket] Requesting block tip + mempool-blocks stream")
         send(payload)
+    }
+
+    // MARK: - Heartbeat
+
+    private func startPingTimer() {
+        stopPingTimer()
+        // Send a ping every 30 seconds to keep the connection alive and
+        // detect dead sockets before the next message would arrive.
+        pingTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let task = self.webSocketTask, self.isConnected else { return }
+                task.sendPing { [weak self] error in
+                    if let error {
+                        self?.logger.warning("[WebSocket] Ping failed: \(error.localizedDescription)")
+                        Task { @MainActor in
+                            self?.handleDisconnection()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func stopPingTimer() {
+        pingTimer?.invalidate()
+        pingTimer = nil
     }
 
     // MARK: - Send
@@ -266,42 +313,73 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                     }
                 case .failure(let error):
                     self.logger.warning("WebSocket connection dropped: \(error.localizedDescription)")
-                    self.isConnected = false
-                    self.webSocketTask = nil
-                    if !self.isManualDisconnect {
-                        self.reconnectTask?.cancel()
-                        self.reconnectTask = Task.detached { [weak self] in
-                            do {
-                                try await Task.sleep(nanoseconds: 3_000_000_000)
-                                await MainActor.run {
-                                    guard let self, !self.isManualDisconnect else { return }
-                                    self.connect()
-                                }
-                            } catch {
-                                // Task was cancelled
-                            }
-                        }
-                    }
+                    self.handleDisconnection()
                 }
+            }
+        }
+    }
+
+    // MARK: - Reconnection
+
+    /// Handle a disconnection: clean up state and attempt reconnect with
+    /// exponential backoff (1s → 2s → 4s → … → 60s cap).
+    private func handleDisconnection() {
+        guard isConnected || webSocketTask != nil else { return }
+
+        stopPingTimer()
+        isConnected = false
+        webSocketTask = nil
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
+
+        if isManualDisconnect { return }
+
+        let delay = min(UInt64(pow(2.0, Double(reconnectAttempts))), maxReconnectDelay)
+        reconnectAttempts += 1
+
+        logger.info("[WebSocket] Scheduling reconnect in \(delay)s (attempt \(self.reconnectAttempts))")
+        AuditService.log("WEBSOCKET_RECONNECT_SCHEDULED", data: [
+            "delay": "\(delay)",
+            "attempt": "\(self.reconnectAttempts)"
+        ])
+
+        reconnectTask?.cancel()
+        reconnectTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                guard let self, !self.isManualDisconnect else { return }
+                self.connect()
+            } catch {
+                // Task was cancelled
             }
         }
     }
 
     // MARK: - Dedup
 
-    private func isRecentlyProcessed(_ txid: String) -> Bool {
-        guard let lastSeen = processedTxids[txid] else { return false }
+    private func isRecentlyProcessed(_ key: String) -> Bool {
+        guard let lastSeen = processedTxids[key] else { return false }
         return Date().timeIntervalSince(lastSeen) < processedTxidTTL
     }
 
-    private func recordProcessedTx(_ txid: String) {
-        processedTxids[txid] = Date()
+    func recordProcessedTx(_ key: String) {
+        processedTxids[key] = Date()
+        enforceProcessedTxidCap()
         maybePurgeProcessedTxs()
     }
 
+    /// Enforce a hard entry cap. When exceeded, evict the oldest 20% of entries
+    /// to amortize the cost while bounding memory.
+    private func enforceProcessedTxidCap() {
+        guard processedTxids.count > processedTxidMaxEntries else { return }
+        let evictCount = processedTxidMaxEntries / 5 // remove ~20%
+        let sorted = processedTxids.sorted { $0.value < $1.value }
+        for (key, _) in sorted.prefix(evictCount) {
+            processedTxids.removeValue(forKey: key)
+        }
+    }
+
     /// Purge expired entries at most every 5 minutes.
-    /// A time-based purge prevents unbounded growth for low-activity wallets
-    /// that never hit the old 50-entry counter threshold.
     private func maybePurgeProcessedTxs() {
         let now = Date()
         if now.timeIntervalSince(lastPurgeTime) < 300 {
@@ -342,6 +420,9 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
             for match in matches {
                 let targetKey = match.target
                 let isTxid = match.isTxid
+                // Dedup key matches the .removed handler format so a txid
+                // hitting address A, then being RBF'd, is correctly matched
+                // as the same logical event.
                 let dedupKey = "\(txid)_\(targetKey)"
 
                 if isRecentlyProcessed(dedupKey) { continue }
@@ -361,7 +442,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         // 2. Handle removed transactions (RBF replacements)
         handleRemovedTransactions(msg)
 
-        // 3. Check for block header payload
+        // 3. Check for block header / mempool-block payload
         if let block = msg.block ?? msg.blocks?.last {
             let height = block.height
             logger.info("Real-time block header received via WebSocket: \(height)")
@@ -401,6 +482,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
             for (_, txGroup) in multi {
                 allTxs.append(contentsOf: txGroup.mempool ?? [])
                 allTxs.append(contentsOf: txGroup.confirmed ?? [])
+                // Removed transactions are handled separately via handleRemovedTransactions
+                // so they don't get double-processed here.
             }
         }
 
@@ -415,8 +498,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                 guard trackedAddresses.contains(addr) else { continue }
                 for tx in txGroup.removed ?? [] {
                     let txid = tx.txid
-                    guard ResilientEsploraClient.isValidTxid(txid) else { continue }
-                    let dedupKey = "\(txid)_\(addr)"
+                    // Use a unique dedup key for removed so it doesn't collide with the receive
+                    let dedupKey = "removed_\(txid)_\(addr)"
                     if isRecentlyProcessed(dedupKey) { continue }
                     recordProcessedTx(dedupKey)
                     logger.info("RBF replacement detected for \(addr): \(txid)")
