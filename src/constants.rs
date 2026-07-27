@@ -93,8 +93,7 @@ pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
 
 /// Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount.
 ///
-/// The LSP currently accepts the amount attached to the signed trade message;
-/// there is no separate server-side percentage fee config.
+/// Shared by wallet fee construction and the LSP's server-side amount validation.
 pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
 
 /// LDK channel-config defaults for outbound forwarding fees.
