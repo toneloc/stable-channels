@@ -2749,6 +2749,7 @@ impl UserApp {
                 Event::ChannelClosed {
                     channel_id,
                     user_channel_id,
+                    counterparty_node_id,
                     reason,
                     ..
                 } => {
@@ -2757,7 +2758,8 @@ impl UserApp {
                         json!({
                             "channel_id": format!("{channel_id}"),
                             "user_channel_id": format!("{}", user_channel_id.0),
-                            "reason": format!("{:?}", reason)
+                            "counterparty_node_id": counterparty_node_id.map(|pk| pk.to_string()),
+                            "reason": closure_reason_to_json(&reason)
                         }),
                     );
                     self.status_message = format!("Channel {channel_id} has been closed");
@@ -9019,20 +9021,6 @@ impl UserApp {
                         icon_badge(ui, "📤", support_color);
                         ui.add_space(8.0);
                         if ui.add(egui::Button::new(
-                            RichText::new("Share the logs").size(14.0).color(support_color),
-                        ).fill(Color32::TRANSPARENT).frame(false)).clicked() {
-                            do_export = true;
-                        }
-                    });
-                    
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    ui.horizontal(|ui| {
-                        icon_badge(ui, "ℹ️", support_color);
-                        ui.add_space(8.0);
-                        if ui.add(egui::Button::new(
                             RichText::new("Download logs").size(14.0).color(support_color),
                         ).fill(Color32::TRANSPARENT).frame(false)).clicked() {
                             do_export = true;
@@ -9539,6 +9527,101 @@ mod tests {
         assert_eq!(sats, 0);
         assert_eq!(usd, 0.0);
     }
+
+    #[test]
+    fn closure_reason_counterparty_force_close_captures_peer_msg() {
+        use ldk_node::lightning::events::ClosureReason;
+        use ldk_node::lightning::types::string::UntrustedString;
+
+        let reason = Some(ClosureReason::CounterpartyForceClosed {
+            peer_msg: UntrustedString("commitment tx confirmed".to_string()),
+        });
+        let v = super::closure_reason_to_json(&reason);
+        assert_eq!(v["kind"], "COUNTERPARTY_FORCE_CLOSED");
+        assert_eq!(v["peer_msg"], "commitment tx confirmed");
+    }
+
+    #[test]
+    fn closure_reason_structured_variants_and_unknown() {
+        use ldk_node::lightning::events::ClosureReason;
+
+        let pe = Some(ClosureReason::ProcessingError { err: "bad htlc".to_string() });
+        let v = super::closure_reason_to_json(&pe);
+        assert_eq!(v["kind"], "PROCESSING_ERROR");
+        assert_eq!(v["err"], "bad htlc");
+
+        let holder = Some(ClosureReason::HolderForceClosed {
+            broadcasted_latest_txn: Some(true),
+            message: "user force close".to_string(),
+        });
+        let v = super::closure_reason_to_json(&holder);
+        assert_eq!(v["kind"], "HOLDER_FORCE_CLOSED");
+        assert_eq!(v["broadcasted_latest_txn"], true);
+        assert_eq!(v["message"], "user force close");
+
+        let coop = Some(ClosureReason::LocallyInitiatedCooperativeClosure);
+        assert_eq!(
+            super::closure_reason_to_json(&coop)["kind"],
+            "LOCALLY_INITIATED_COOPERATIVE_CLOSURE"
+        );
+
+        let none: Option<ClosureReason> = None;
+        assert_eq!(super::closure_reason_to_json(&none)["kind"], "UNKNOWN");
+    }
+}
+
+/// Convert an LDK `ClosureReason` into a structured JSON object for the audit log so a channel
+/// close records *why* it happened (peer message, processing error, timed-out HTLC, etc.) instead
+/// of an opaque `Debug` string. Mirrors the structured fields the LSP records server-side.
+fn closure_reason_to_json(
+    reason: &Option<ldk_node::lightning::events::ClosureReason>,
+) -> serde_json::Value {
+    use ldk_node::lightning::events::ClosureReason as CR;
+    let reason = match reason {
+        Some(r) => r,
+        None => return json!({ "kind": "UNKNOWN" }),
+    };
+    match reason {
+        CR::CounterpartyForceClosed { peer_msg } => {
+            json!({ "kind": "COUNTERPARTY_FORCE_CLOSED", "peer_msg": peer_msg.to_string() })
+        }
+        CR::HolderForceClosed { broadcasted_latest_txn, message } => json!({
+            "kind": "HOLDER_FORCE_CLOSED",
+            "broadcasted_latest_txn": broadcasted_latest_txn,
+            "message": message,
+        }),
+        CR::LegacyCooperativeClosure => json!({ "kind": "LEGACY_COOPERATIVE_CLOSURE" }),
+        CR::CounterpartyInitiatedCooperativeClosure => {
+            json!({ "kind": "COUNTERPARTY_INITIATED_COOPERATIVE_CLOSURE" })
+        }
+        CR::LocallyInitiatedCooperativeClosure => {
+            json!({ "kind": "LOCALLY_INITIATED_COOPERATIVE_CLOSURE" })
+        }
+        CR::CommitmentTxConfirmed => json!({ "kind": "COMMITMENT_TX_CONFIRMED" }),
+        CR::FundingTimedOut => json!({ "kind": "FUNDING_TIMED_OUT" }),
+        CR::ProcessingError { err } => json!({ "kind": "PROCESSING_ERROR", "err": err }),
+        CR::DisconnectedPeer => json!({ "kind": "DISCONNECTED_PEER" }),
+        CR::OutdatedChannelManager => json!({ "kind": "OUTDATED_CHANNEL_MANAGER" }),
+        CR::CounterpartyCoopClosedUnfundedChannel => {
+            json!({ "kind": "COUNTERPARTY_COOP_CLOSED_UNFUNDED_CHANNEL" })
+        }
+        CR::LocallyCoopClosedUnfundedChannel => {
+            json!({ "kind": "LOCALLY_COOP_CLOSED_UNFUNDED_CHANNEL" })
+        }
+        CR::FundingBatchClosure => json!({ "kind": "FUNDING_BATCH_CLOSURE" }),
+        CR::HTLCsTimedOut { payment_hash } => json!({
+            "kind": "HTLCS_TIMED_OUT",
+            "payment_hash": payment_hash.as_ref().map(|h| hex::encode(h.0)),
+        }),
+        CR::PeerFeerateTooLow {
+            peer_feerate_sat_per_kw,
+            required_feerate_sat_per_kw,
+        } => json!({
+            "kind": "PEER_FEERATE_TOO_LOW",
+            "peer_feerate_sat_per_kw": peer_feerate_sat_per_kw,
+            "required_feerate_sat_per_kw": required_feerate_sat_per_kw,
+        }),
+    }
 }
 
 fn export_logs_to_zip() -> bool {
@@ -9549,7 +9632,9 @@ fn export_logs_to_zip() -> bool {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::FileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        for filename in &["app_debug.log", "audit_log.txt", "ldk-node.log"] {
+        // ldk-node's default filesystem logger writes to `ldk_node.log`; keep the hyphenated
+        // name as a fallback in case a custom logger path is configured.
+        for filename in &["audit_log.txt", "ldk_node.log", "ldk-node.log"] {
             let file_path = data_dir.join(filename);
             if let Ok(mut src) = std::fs::File::open(&file_path) {
                 let _ = zip.start_file(*filename, options);

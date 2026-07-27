@@ -1257,10 +1257,11 @@ class AppState {
             ])
             statusMessage = "Splice failed"
 
-        case .channelClosed(let channelId, let userChannelId, _, let reason):
+        case .channelClosed(let channelId, let userChannelId, let counterpartyNodeId, let reason):
             handleChannelClosed(
                 channelId: channelId,
                 userChannelId: userChannelId,
+                counterpartyNodeId: counterpartyNodeId,
                 reason: reason
             )
 
@@ -1642,20 +1643,70 @@ class AppState {
         )
     }
 
+    private func closureReasonData(_ reason: ClosureReason?) -> [String: Any] {
+        guard let reason else { return ["kind": "UNKNOWN"] }
+        switch reason {
+        case .counterpartyForceClosed(let peerMsg):
+            return ["kind": "COUNTERPARTY_FORCE_CLOSED", "peer_msg": peerMsg]
+        case .holderForceClosed(let broadcastedLatestTxn, let message):
+            var d: [String: Any] = ["kind": "HOLDER_FORCE_CLOSED", "message": message]
+            if let broadcastedLatestTxn { d["broadcasted_latest_txn"] = broadcastedLatestTxn }
+            return d
+        case .legacyCooperativeClosure:
+            return ["kind": "LEGACY_COOPERATIVE_CLOSURE"]
+        case .counterpartyInitiatedCooperativeClosure:
+            return ["kind": "COUNTERPARTY_INITIATED_COOPERATIVE_CLOSURE"]
+        case .locallyInitiatedCooperativeClosure:
+            return ["kind": "LOCALLY_INITIATED_COOPERATIVE_CLOSURE"]
+        case .commitmentTxConfirmed:
+            return ["kind": "COMMITMENT_TX_CONFIRMED"]
+        case .fundingTimedOut:
+            return ["kind": "FUNDING_TIMED_OUT"]
+        case .processingError(let err):
+            return ["kind": "PROCESSING_ERROR", "err": err]
+        case .disconnectedPeer:
+            return ["kind": "DISCONNECTED_PEER"]
+        case .outdatedChannelManager:
+            return ["kind": "OUTDATED_CHANNEL_MANAGER"]
+        case .counterpartyCoopClosedUnfundedChannel:
+            return ["kind": "COUNTERPARTY_COOP_CLOSED_UNFUNDED_CHANNEL"]
+        case .locallyCoopClosedUnfundedChannel:
+            return ["kind": "LOCALLY_COOP_CLOSED_UNFUNDED_CHANNEL"]
+        case .fundingBatchClosure:
+            return ["kind": "FUNDING_BATCH_CLOSURE"]
+        case .htlCsTimedOut(let paymentHash):
+            var d: [String: Any] = ["kind": "HTLCS_TIMED_OUT"]
+            if let paymentHash { d["payment_hash"] = paymentHash }
+            return d
+        case .peerFeerateTooLow(let peerFeerateSatPerKw, let requiredFeerateSatPerKw):
+            return [
+                "kind": "PEER_FEERATE_TOO_LOW",
+                "peer_feerate_sat_per_kw": Int(peerFeerateSatPerKw),
+                "required_feerate_sat_per_kw": Int(requiredFeerateSatPerKw)
+            ]
+        @unknown default:
+            return ["kind": "OTHER"]
+        }
+    }
+
     private func handleChannelClosed(
         channelId: ChannelId,
         userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey?,
         reason: ClosureReason?
     ) {
-        let reasonStr = reason.map { "\($0)" } ?? "unknown"
         let balanceSats = stableChannel.stableReceiverBTC.sats
 
-        AuditService.log("CHANNEL_CLOSED", data: [
+        var data: [String: Any] = [
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
-            "reason": reasonStr,
+            "reason": closureReasonData(reason),
             "balance_sats": "\(balanceSats)"
-        ])
+        ]
+        if let counterpartyNodeId {
+            data["counterparty_node_id"] = "\(counterpartyNodeId)"
+        }
+        AuditService.log("CHANNEL_CLOSED", data: data)
 
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 

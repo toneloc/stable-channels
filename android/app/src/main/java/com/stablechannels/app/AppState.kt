@@ -587,7 +587,7 @@ class AppState(private val context: Context) : ViewModel() {
                 AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
             }
             is Event.ChannelClosed -> {
-                handleChannelClosed(event.channelId, event.userChannelId, event.reason?.toString())
+                handleChannelClosed(event.channelId, event.userChannelId, event.counterpartyNodeId, event.reason)
             }
             else -> {}
         }
@@ -974,7 +974,31 @@ class AppState(private val context: Context) : ViewModel() {
         ))
     }
 
-    private fun handleChannelClosed(channelId: String, userChannelId: String, reason: String?) {
+    private fun closureReasonData(reason: ClosureReason?): JSONObject {
+        val obj = JSONObject()
+        if (reason == null) {
+            obj.put("kind", "UNKNOWN")
+            return obj
+        }
+        obj.put("kind", reason::class.simpleName ?: "UNKNOWN")
+        when (reason) {
+            is ClosureReason.CounterpartyForceClosed -> obj.put("peer_msg", reason.peerMsg)
+            is ClosureReason.HolderForceClosed -> {
+                obj.put("message", reason.message)
+                reason.broadcastedLatestTxn?.let { obj.put("broadcasted_latest_txn", it) }
+            }
+            is ClosureReason.ProcessingError -> obj.put("err", reason.err)
+            else -> {}
+        }
+        return obj
+    }
+
+    private fun handleChannelClosed(
+        channelId: String,
+        userChannelId: String,
+        counterpartyNodeId: String?,
+        reason: ClosureReason?
+    ) {
         val sc = _stableChannel.value
         if (sc.channelId == channelId || sc.userChannelId == userChannelId || nodeService.channels.isEmpty()) {
             val balanceSats = sc.stableReceiverBTC.sats
@@ -983,7 +1007,8 @@ class AppState(private val context: Context) : ViewModel() {
 
             AuditService.log("CHANNEL_CLOSED", mapOf(
                 "channel_id" to channelId,
-                "reason" to (reason ?: "unknown"),
+                "counterparty_node_id" to counterpartyNodeId,
+                "reason" to closureReasonData(reason),
                 "balance_sats" to balanceSats
             ))
 
