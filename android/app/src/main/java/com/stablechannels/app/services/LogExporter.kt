@@ -65,6 +65,9 @@ object LogExporter {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
+        // Suppress the node stop/resync for this in-app background cycle so returning
+        // from the share sheet doesn't visibly refresh the UI.
+        com.stablechannels.app.AppState.suppressNextBackgroundCycle = true
         context.startActivity(Intent.createChooser(intent, "Share Logs"))
     }
 

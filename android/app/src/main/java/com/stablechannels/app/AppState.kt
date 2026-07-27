@@ -32,6 +32,17 @@ enum class Phase {
 
 class AppState(private val context: Context) : ViewModel() {
 
+    companion object {
+        /**
+         * Set to true right before launching an in-app activity that backgrounds the app
+         * (e.g. the log share sheet). When set, [MainActivity] skips stopping/restarting the
+         * LDK node for that one background -> foreground cycle, so returning does not visibly
+         * refresh the UI. Cleared automatically on the next resume.
+         */
+        @Volatile
+        var suppressNextBackgroundCycle = false
+    }
+
     val nodeService = NodeService(context)
     val priceService = PriceService()
     var databaseService: DatabaseService? = null

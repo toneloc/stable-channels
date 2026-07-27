@@ -63,7 +63,7 @@ class MainActivity : FragmentActivity() {
     override fun onPause() {
         super.onPause()
         lastBackgroundedTime = System.currentTimeMillis()
-        if (::appState.isInitialized) {
+        if (::appState.isInitialized && !AppState.suppressNextBackgroundCycle) {
             appState.stopNodeForBackground()
         }
     }
@@ -71,12 +71,17 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         if (!::appState.isInitialized) return
-        if (isFirstResume) {
+        if (AppState.suppressNextBackgroundCycle) {
+            // Returning from an in-app activity (the log share sheet): the node was never
+            // stopped for this cycle, so skip the foreground resync that would refresh the UI.
+            AppState.suppressNextBackgroundCycle = false
+        } else if (isFirstResume) {
             isFirstResume = false
             appState.restartNodeFromForeground()
             return
+        } else {
+            appState.restartNodeFromForeground()
         }
-        appState.restartNodeFromForeground()
         if (AppAccessPreferencesManager.isAppUnlockEnabled(this)) {
             val elapsed = System.currentTimeMillis() - lastBackgroundedTime
             if (elapsed > 5000L) {
