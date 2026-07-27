@@ -27,7 +27,7 @@ use stable_channels::audit::*;
 use stable_channels::constants::*;
 use stable_channels::db::{self, DailyPriceRecord, Database, PaymentRecord, TradeRecord};
 use stable_channels::historical_prices::get_seed_prices;
-use stable_channels::price_feeds::get_cached_price_no_fetch;
+use stable_channels::price_feeds::{get_cached_price_no_fetch, get_fresh_cached_price_no_fetch};
 use stable_channels::stable;
 use stable_channels::stable::update_balances;
 use stable_channels::types::*;
@@ -2305,7 +2305,11 @@ impl UserApp {
             let mut sc = self.stable_channel.lock().unwrap();
             update_balances(&self.node, &mut sc);
         }
-        let price = self.stable_channel.lock().unwrap().latest_price;
+        // Accounting must not use `latest_price`: during quarantine or staleness it retains the
+        // last positive value, which would price this deduction at a pre-move quote. The fresh
+        // getter returns 0.0 in those states, routing into the deferral below until a new
+        // consensus is admitted.
+        let price = get_fresh_cached_price_no_fetch();
         let event_id = payment_id
             .map(|pid| format!("{pid}"))
             .unwrap_or_else(|| payment_hash.to_string());
@@ -2616,8 +2620,13 @@ impl UserApp {
                                     ack = false;
                                 }
                                 SpliceReconcileAction::ReconcileNow => {
-                                    let price = sc.latest_price;
+                                    // Same constraint as outgoing reconciliation: a quarantined or
+                                    // stale price must defer the deduction, not price it.
+                                    let price = get_fresh_cached_price_no_fetch();
                                     if !price.is_finite() || price <= 0.0 {
+                                        // Breaking out before the loop-tail ack check leaves the
+                                        // event unacknowledged, so LDK redelivers ChannelReady and
+                                        // this deduction retries once a fresh price is admitted.
                                         audit_event(
                                             "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
                                             json!({
