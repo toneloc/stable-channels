@@ -71,6 +71,13 @@ impl AccountingSnapshot {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+
+    fn is_complete(&self) -> bool {
+        self.expected_usd.is_some()
+            && self.backing_sats.is_some()
+            && self.native_sats.is_some()
+            && self.live_receiver_sats.is_some()
+    }
 }
 
 /// Typed input accepted by the ledger recorder.
@@ -175,6 +182,27 @@ pub struct LedgerPage {
     /// Chronological within the page. Pages themselves are selected newest-first.
     pub events: Vec<LedgerEvent>,
     pub next_cursor: Option<i64>,
+    pub overview: LedgerOverview,
+}
+
+/// Aggregate facts for one exact ledger identifier. Coverage and time bounds
+/// deliberately ignore the presentation filters, while `matching_events`
+/// reflects them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LedgerOverview {
+    pub total_events: u64,
+    pub matching_events: u64,
+    pub oldest_occurred_at_ms: Option<i64>,
+    pub newest_occurred_at_ms: Option<i64>,
+    pub observed_events: u64,
+    pub reconstructed_events: u64,
+    pub legacy_events: u64,
+    pub gap_events: u64,
+    pub latest_accounting: Option<AccountingSnapshot>,
+    pub latest_accounting_at_ms: Option<i64>,
+    /// `channels` for an exact user_channel_id, `ledger` for the newest
+    /// complete snapshot attached to any other exact reference.
+    pub latest_accounting_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,7 +429,144 @@ pub(crate) fn list_on_connection(conn: &Connection, query: &LedgerQuery) -> Sqli
             .collect::<SqliteResult<Vec<_>>>()?;
     }
     events.reverse();
-    Ok(LedgerPage { events, next_cursor })
+    let overview = overview_on_connection(conn, query)?;
+    Ok(LedgerPage { events, next_cursor, overview })
+}
+
+fn overview_on_connection(conn: &Connection, query: &LedgerQuery) -> SqliteResult<LedgerOverview> {
+    let identifier = query.identifier.as_deref().unwrap_or("").trim();
+    let category = query.category.as_deref().unwrap_or("").trim();
+    let status = query.status.as_deref().unwrap_or("").trim();
+    let completeness = query.completeness.as_deref().unwrap_or("").trim();
+
+    let (
+        total_events,
+        oldest_occurred_at_ms,
+        newest_occurred_at_ms,
+        observed_events,
+        reconstructed_events,
+        legacy_events,
+        gap_events,
+    ): (i64, Option<i64>, Option<i64>, i64, i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*), MIN(e.occurred_at_ms), MAX(e.occurred_at_ms),
+                COALESCE(SUM(e.completeness = 'observed'), 0),
+                COALESCE(SUM(e.completeness = 'reconstructed'), 0),
+                COALESCE(SUM(e.completeness = 'legacy'), 0),
+                COALESCE(SUM(e.completeness = 'gap'), 0)
+         FROM ledger_events e
+         WHERE (?1 = '' OR EXISTS (
+                  SELECT 1 FROM ledger_event_refs r WHERE r.event_id = e.id AND r.value = ?1
+               ))",
+        params![identifier],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        },
+    )?;
+    let matching_events: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM ledger_events e
+         WHERE (?1 = '' OR EXISTS (
+                  SELECT 1 FROM ledger_event_refs r WHERE r.event_id = e.id AND r.value = ?1
+               ))
+           AND (?2 = '' OR e.category = ?2)
+           AND (?3 = '' OR e.status = ?3)
+           AND (?4 = '' OR e.completeness = ?4)",
+        params![identifier, category, status, completeness],
+        |row| row.get(0),
+    )?;
+
+    let (latest_accounting, latest_accounting_at_ms, latest_accounting_source) =
+        latest_accounting_on_connection(conn, identifier)?;
+    Ok(LedgerOverview {
+        total_events: total_events.max(0) as u64,
+        matching_events: matching_events.max(0) as u64,
+        oldest_occurred_at_ms,
+        newest_occurred_at_ms,
+        observed_events: observed_events.max(0) as u64,
+        reconstructed_events: reconstructed_events.max(0) as u64,
+        legacy_events: legacy_events.max(0) as u64,
+        gap_events: gap_events.max(0) as u64,
+        latest_accounting,
+        latest_accounting_at_ms,
+        latest_accounting_source,
+    })
+}
+
+fn latest_accounting_on_connection(
+    conn: &Connection,
+    identifier: &str,
+) -> SqliteResult<(Option<AccountingSnapshot>, Option<i64>, Option<String>)> {
+    if identifier.is_empty() {
+        return Ok((None, None, None));
+    }
+
+    // Only this exact lookup is allowed to use the mutable current-state row.
+    // A channel_id/payment_id/node_id must not be guessed into a channel row.
+    let channel_state: Option<(f64, i64, i64, i64)> = conn
+        .query_row(
+            "SELECT expected_usd, stable_sats, native_sats, updated_at
+             FROM channels
+             WHERE user_channel_id = ?1
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            params![identifier],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    if let Some((expected_usd, backing_sats, native_sats, updated_at)) = channel_state {
+        let backing_sats = u64::try_from(backing_sats).ok();
+        let native_sats = u64::try_from(native_sats).ok();
+        let snapshot = AccountingSnapshot {
+            expected_usd: Some(expected_usd),
+            backing_sats,
+            native_sats,
+            live_receiver_sats: backing_sats
+                .zip(native_sats)
+                .map(|(backing, native)| backing.saturating_add(native)),
+            ..Default::default()
+        };
+        return Ok((
+            Some(snapshot),
+            Some(updated_at.saturating_mul(1_000)),
+            Some("channels".to_owned()),
+        ));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT e.occurred_at_ms, e.before_json, e.after_json
+         FROM ledger_events e
+         WHERE EXISTS (
+            SELECT 1 FROM ledger_event_refs r WHERE r.event_id = e.id AND r.value = ?1
+         )
+         ORDER BY e.occurred_at_ms DESC, e.id DESC",
+    )?;
+    let rows = stmt.query_map(params![identifier], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (occurred_at_ms, before_json, after_json) = row?;
+        let after: Option<AccountingSnapshot> = decode_optional_json(after_json)?;
+        let before: Option<AccountingSnapshot> = decode_optional_json(before_json)?;
+        if let Some(snapshot) = after.filter(AccountingSnapshot::is_complete) {
+            return Ok((Some(snapshot), Some(occurred_at_ms), Some("ledger".to_owned())));
+        }
+        if let Some(snapshot) = before.filter(AccountingSnapshot::is_complete) {
+            return Ok((Some(snapshot), Some(occurred_at_ms), Some("ledger".to_owned())));
+        }
+    }
+    Ok((None, None, None))
 }
 
 pub(crate) fn import_legacy_jsonl(conn: &Connection, path: &Path) -> SqliteResult<LegacyImportReport> {
@@ -724,5 +889,61 @@ mod tests {
             serde_json::json!({"correlation_id": "gap-1", "status": "completed"}),
         );
         assert_eq!(result.status, "completed");
+    }
+
+    #[test]
+    fn splice_ready_dedup_uses_funding_outpoint_as_event_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let splice = |funding_txo: &str| {
+            LedgerEventDraft::from_audit_event(
+                "CHANNEL_READY_SPLICE",
+                serde_json::json!({
+                    "user_channel_id": "stable-channel",
+                    "channel_id": "logical-channel",
+                    "funding_txo": funding_txo,
+                    "deducted": false,
+                }),
+            )
+        };
+
+        let first = append_on_connection(&conn, &splice("funding-one:0")).unwrap();
+        let replay = append_on_connection(&conn, &splice("funding-one:0")).unwrap();
+        let second = append_on_connection(&conn, &splice("funding-two:0")).unwrap();
+
+        assert!(first.inserted, "the first splice must be recorded");
+        assert!(!replay.inserted, "a replay of the same funding outpoint must deduplicate");
+        assert!(second.inserted, "a new funding outpoint is a distinct splice");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE event_type = 'CHANNEL_READY_SPLICE'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn splice_ready_extracts_direction_amount_and_balance_change() {
+        let draft = LedgerEventDraft::from_audit_event(
+            "CHANNEL_READY_SPLICE",
+            serde_json::json!({
+                "user_channel_id": "stable-channel",
+                "channel_id": "logical-channel",
+                "funding_txo": "funding:0",
+                "direction": "in",
+                "amount_sats": 9_769,
+                "before_live_receiver_sats": 154_516,
+                "after_live_receiver_sats": 164_285,
+                "before_btc_price": 65_000.0,
+                "btc_price": 65_000.0,
+            }),
+        );
+
+        assert_eq!(draft.detail["direction"], "in");
+        assert_eq!(draft.before.as_ref().and_then(|state| state.live_receiver_sats), Some(154_516));
+        assert_eq!(draft.after.as_ref().and_then(|state| state.live_receiver_sats), Some(164_285));
+        assert_eq!(draft.after.as_ref().and_then(|state| state.amount_sats), Some(9_769));
     }
 }

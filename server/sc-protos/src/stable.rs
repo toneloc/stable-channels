@@ -196,12 +196,44 @@ pub struct ListChannelLedgerEventsRequest {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChannelLedgerOverview {
+    /// All events carrying the exact identifier, before presentation filters.
+    #[prost(uint64, tag = "1")]
+    pub total_events: u64,
+    /// Events carrying the exact identifier and matching the active filters.
+    #[prost(uint64, tag = "2")]
+    pub matching_events: u64,
+    #[prost(int64, optional, tag = "3")]
+    pub oldest_occurred_at_ms: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "4")]
+    pub newest_occurred_at_ms: ::core::option::Option<i64>,
+    #[prost(uint64, tag = "5")]
+    pub observed_events: u64,
+    #[prost(uint64, tag = "6")]
+    pub reconstructed_events: u64,
+    #[prost(uint64, tag = "7")]
+    pub legacy_events: u64,
+    #[prost(uint64, tag = "8")]
+    pub gap_events: u64,
+    #[prost(message, optional, tag = "9")]
+    pub latest_accounting: ::core::option::Option<AccountingSnapshot>,
+    #[prost(int64, optional, tag = "10")]
+    pub latest_accounting_at_ms: ::core::option::Option<i64>,
+    /// `channels` for current user_channel_id state, or `ledger` for a complete snapshot.
+    #[prost(string, tag = "11")]
+    pub latest_accounting_source: ::prost::alloc::string::String,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChannelLedgerEventsResponse {
 	/// Chronological inside this newest-selected page.
 	#[prost(message, repeated, tag = "1")]
 	pub events: ::prost::alloc::vec::Vec<ChannelLedgerEvent>,
 	#[prost(string, optional, tag = "2")]
 	pub next_cursor: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "3")]
+    pub overview: ::core::option::Option<ChannelLedgerOverview>,
 }
 
 // Settlement payments
@@ -274,8 +306,45 @@ mod tests {
 				refs: vec![LedgerRef { role: "user_channel_id".into(), value: "42".into() }],
 			}],
 			next_cursor: Some("7".into()),
+			overview: Some(ChannelLedgerOverview {
+				total_events: 4,
+				matching_events: 1,
+				observed_events: 3,
+				gap_events: 1,
+				latest_accounting: Some(AccountingSnapshot {
+					expected_usd: Some(5.0),
+					..Default::default()
+				}),
+				latest_accounting_source: "channels".into(),
+				..Default::default()
+			}),
 		};
 		let decoded = ListChannelLedgerEventsResponse::decode(response.encode_to_vec().as_slice()).unwrap();
 		assert_eq!(decoded, response);
+	}
+
+	#[test]
+	fn ledger_overview_is_backward_compatible() {
+		#[allow(clippy::derive_partial_eq_without_eq)]
+		#[derive(Clone, PartialEq, ::prost::Message)]
+		struct LegacyResponse {
+			#[prost(message, repeated, tag = "1")]
+			events: Vec<ChannelLedgerEvent>,
+			#[prost(string, optional, tag = "2")]
+			next_cursor: Option<String>,
+		}
+
+		let legacy = LegacyResponse { events: Vec::new(), next_cursor: Some("9".into()) };
+		let modern = ListChannelLedgerEventsResponse::decode(legacy.encode_to_vec().as_slice()).unwrap();
+		assert_eq!(modern.next_cursor.as_deref(), Some("9"));
+		assert!(modern.overview.is_none());
+
+		let modern = ListChannelLedgerEventsResponse {
+			events: Vec::new(),
+			next_cursor: Some("8".into()),
+			overview: Some(ChannelLedgerOverview { total_events: 12, ..Default::default() }),
+		};
+		let legacy = LegacyResponse::decode(modern.encode_to_vec().as_slice()).unwrap();
+		assert_eq!(legacy.next_cursor.as_deref(), Some("8"));
 	}
 }

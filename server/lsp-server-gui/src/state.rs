@@ -258,12 +258,25 @@ pub struct EditStableChannelForm {
 	pub note: String,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ChannelLedgerForm {
 	pub identifier: String,
 	pub category: String,
 	pub status: String,
 	pub completeness: String,
+    pub newest_first: bool,
+}
+
+impl Default for ChannelLedgerForm {
+    fn default() -> Self {
+        Self {
+            identifier: String::new(),
+            category: String::new(),
+            status: String::new(),
+            completeness: String::new(),
+            newest_first: true,
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -287,7 +300,7 @@ pub struct Forms {
 	pub graph_get_node: GraphGetNodeForm,
 	pub ldk_log: LogForm,
 	pub audit_log: LogForm,
-	pub channel_history: ChannelLedgerForm,
+	pub channel_ledger: ChannelLedgerForm,
 	#[allow(dead_code)]
 	pub chain_source: ChainSourceForm,
 }
@@ -363,7 +376,8 @@ pub struct AsyncTasks {
 	pub list_settlement_payments: Option<ChannelTaskHandle<ListSettlementPaymentsResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 	pub audit_log: Option<ChannelTaskHandle<LogResponse>>,
-	pub channel_history: Option<ChannelTaskHandle<ListChannelLedgerEventsResponse>>,
+	pub channel_ledger: Option<ChannelTaskHandle<ListChannelLedgerEventsResponse>>,
+    pub channel_ledger_export: Option<ChannelTaskHandle<ListChannelLedgerEventsResponse>>,
 }
 
 impl Default for AsyncTasks {
@@ -404,7 +418,8 @@ impl Default for AsyncTasks {
 			list_settlement_payments: None,
 			ldk_log: None,
 			audit_log: None,
-			channel_history: None,
+			channel_ledger: None,
+            channel_ledger_export: None,
 		}
 	}
 }
@@ -446,7 +461,8 @@ impl AsyncTasks {
 			|| self.list_settlement_payments.is_some()
 			|| self.ldk_log.is_some()
 			|| self.audit_log.is_some()
-			|| self.channel_history.is_some()
+			|| self.channel_ledger.is_some()
+            || self.channel_ledger_export.is_some()
 	}
 }
 
@@ -488,9 +504,9 @@ pub struct AppState {
 	pub settlement_kinds: Option<HashMap<String, SettlementKind>>,
 	pub ldk_log: Option<LogResponse>,
 	pub audit_log: Option<LogResponse>,
-	pub channel_history: Option<ListChannelLedgerEventsResponse>,
-	pub channel_history_cursor: Option<String>,
-	pub channel_history_appending: bool,
+	pub channel_ledger: Option<ListChannelLedgerEventsResponse>,
+	pub channel_ledger_cursor: Option<String>,
+	pub channel_ledger_appending: bool,
 
 	// Operation results
 	pub onchain_address: Option<String>,
@@ -558,7 +574,7 @@ pub enum OnchainTab {
 pub enum LogsTab {
 	#[default]
 	Audit,
-	ChannelHistory,
+	ChannelLedger,
 	Ldk,
 }
 
@@ -594,9 +610,9 @@ impl Default for AppState {
 			settlement_kinds: None,
 			ldk_log: None,
 			audit_log: None,
-			channel_history: None,
-			channel_history_cursor: None,
-			channel_history_appending: false,
+			channel_ledger: None,
+			channel_ledger_cursor: None,
+			channel_ledger_appending: false,
 
 			onchain_address: None,
 			generated_invoice: None,

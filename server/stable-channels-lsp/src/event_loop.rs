@@ -153,6 +153,7 @@ async fn dispatch(
                 mgr.handle_channel_ready(
                     e.channel_id.clone(),
                     e.user_channel_id.clone(),
+                    e.funding_txo.clone(),
                     ldk,
                     btc_price,
                 )

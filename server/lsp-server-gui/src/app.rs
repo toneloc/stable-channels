@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,8 +19,9 @@ use sc_rest_client::ldk_server_grpc::api::{
 	VerifySignatureRequest,
 };
 use sc_rest_client::sc_protos::stable::{
-	EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
-	ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest,
+	ChannelLedgerEvent, EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
+	ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest,
+	LogRequest,
 };
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
@@ -29,7 +31,9 @@ use sc_rest_client::ldk_server_grpc::types::{
 use crate::config;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::state::ChainSourceForm;
-use crate::state::{ActiveTab, AppState, ConnectionStatus, StatusMessage};
+use crate::state::{
+	ActiveTab, AppState, ChannelLedgerForm, ConnectionStatus, LogsTab, StatusMessage,
+};
 use crate::task;
 use crate::ui;
 
@@ -82,6 +86,34 @@ pub struct LspServerApp {
 	pub state: AppState,
 	#[cfg(not(target_arch = "wasm32"))]
 	pub rt: Runtime,
+}
+
+fn merge_ledger_events(existing: &mut Vec<ChannelLedgerEvent>, incoming: Vec<ChannelLedgerEvent>) {
+    let mut seen = existing
+        .iter()
+        .map(|event| event.id)
+        .collect::<HashSet<_>>();
+    existing.extend(incoming.into_iter().filter(|event| seen.insert(event.id)));
+    existing.sort_by_key(|event| (event.occurred_at_ms, event.id));
+}
+
+fn checked_next_cursor(
+    requested_cursor: &str,
+    next_cursor: Option<String>,
+    seen_cursors: &mut HashSet<String>,
+) -> Result<Option<String>, String> {
+    let Some(next_cursor) = next_cursor else {
+        return Ok(None);
+    };
+    if next_cursor.is_empty()
+        || next_cursor == requested_cursor
+        || !seen_cursors.insert(next_cursor.clone())
+    {
+        return Err(
+            "Ledger export stopped because the server repeated a pagination cursor".to_owned(),
+        );
+    }
+    Ok(Some(next_cursor))
 }
 
 impl LspServerApp {
@@ -337,19 +369,19 @@ impl LspServerApp {
 	}
 
 	/// Query one newest-selected ledger page; each returned page is chronological.
-	pub fn fetch_channel_history(&mut self) {
-		if self.state.tasks.channel_history.is_some() {
+	pub fn fetch_channel_ledger(&mut self) {
+		if self.state.tasks.channel_ledger.is_some() {
 			return;
 		}
-		let form = self.state.forms.channel_history.clone();
-		let cursor = if self.state.channel_history_appending {
-			self.state.channel_history_cursor.clone().unwrap_or_default()
+		let form = self.state.forms.channel_ledger.clone();
+		let cursor = if self.state.channel_ledger_appending {
+			self.state.channel_ledger_cursor.clone().unwrap_or_default()
 		} else {
 			String::new()
 		};
 		if let Some(client) = &self.state.client {
 			let client = client.clone();
-			self.state.tasks.channel_history = Some(self.spawn_task(async move {
+			self.state.tasks.channel_ledger = Some(self.spawn_task(async move {
 				client.list_channel_ledger_events(ListChannelLedgerEventsRequest {
 					identifier: form.identifier.trim().to_owned(),
 					category: form.category,
@@ -361,6 +393,65 @@ impl LspServerApp {
 			}));
 		}
 	}
+
+    /// Fetch every page matching the current exact filters before opening the
+    /// JSONL save dialog. Export never depends on which pages happen to be loaded.
+    pub fn export_channel_ledger(&mut self) {
+        if self.state.tasks.channel_ledger_export.is_some() {
+            return;
+        }
+        let form = self.state.forms.channel_ledger.clone();
+        if let Some(client) = &self.state.client {
+            let client = client.clone();
+            self.state.tasks.channel_ledger_export = Some(self.spawn_task(async move {
+                let mut cursor = String::new();
+                let mut seen_cursors = HashSet::new();
+                let mut events = Vec::new();
+                let mut overview = None;
+                loop {
+                    let page = client
+                        .list_channel_ledger_events(ListChannelLedgerEventsRequest {
+                            identifier: form.identifier.trim().to_owned(),
+                            category: form.category.clone(),
+                            status: form.status.clone(),
+                            completeness: form.completeness.clone(),
+                            cursor: cursor.clone(),
+                            page_size: 200,
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if overview.is_none() {
+                        overview = page.overview.clone();
+                    }
+                    merge_ledger_events(&mut events, page.events);
+                    match checked_next_cursor(&cursor, page.next_cursor, &mut seen_cursors)? {
+                        Some(next) => cursor = next,
+                        None => break,
+                    }
+                }
+                Ok(ListChannelLedgerEventsResponse {
+                    events,
+                    next_cursor: None,
+                    overview,
+                })
+            }));
+        }
+    }
+
+    /// Open the ledger from an operator-facing stable-channel row using its
+    /// splice-stable user_channel_id and a clean filter set.
+    pub fn open_channel_ledger(&mut self, user_channel_id: String) {
+        self.state.forms.channel_ledger = ChannelLedgerForm {
+            identifier: user_channel_id,
+            ..Default::default()
+        };
+        self.state.channel_ledger = None;
+        self.state.channel_ledger_cursor = None;
+        self.state.channel_ledger_appending = false;
+        self.state.logs_tab = LogsTab::ChannelLedger;
+        self.state.active_tab = ActiveTab::Logs;
+        self.fetch_channel_ledger();
+    }
 
 	pub fn fetch_payment_details(&mut self, payment_id: String) {
 		if self.state.tasks.payment_details.is_some() {
@@ -1164,19 +1255,23 @@ impl LspServerApp {
 			self.state.audit_log = Some(v);
 		});
 
-		poll_task!(self.state.tasks.channel_history => |v| {
-			self.state.channel_history_cursor = v.next_cursor.clone();
-			if self.state.channel_history_appending {
-				let mut combined = v;
-				if let Some(current) = self.state.channel_history.take() {
-					combined.events.extend(current.events);
-				}
-				self.state.channel_history = Some(combined);
+		poll_task!(self.state.tasks.channel_ledger => |v| {
+			self.state.channel_ledger_cursor = v.next_cursor.clone();
+			if self.state.channel_ledger_appending {
+                let mut combined = self.state.channel_ledger.take().unwrap_or_default();
+                merge_ledger_events(&mut combined.events, v.events);
+                combined.next_cursor = v.next_cursor;
+                combined.overview = v.overview.or(combined.overview);
+				self.state.channel_ledger = Some(combined);
 			} else {
-				self.state.channel_history = Some(v);
+				self.state.channel_ledger = Some(v);
 			}
-			self.state.channel_history_appending = false;
+			self.state.channel_ledger_appending = false;
 		});
+
+        poll_task!(self.state.tasks.channel_ledger_export => |v| {
+            crate::ui::channel_ledger::export_jsonl(&v, &mut self.state.status_message);
+        });
 
 		poll_task!(self.state.tasks.payment_details => |v| {
 			self.state.payment_details = Some(v);
@@ -1511,4 +1606,42 @@ impl App for LspServerApp {
 			ctx.request_repaint_after(Duration::from_millis(50));
 		}
 	}
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+
+    fn event(id: i64, occurred_at_ms: i64) -> ChannelLedgerEvent {
+        ChannelLedgerEvent {
+            id,
+            occurred_at_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn older_pages_merge_chronologically_without_duplicates() {
+        let mut events = vec![event(3, 30), event(4, 40)];
+        merge_ledger_events(&mut events, vec![event(2, 20), event(3, 30), event(1, 10)]);
+        assert_eq!(
+            events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn export_cursor_validation_terminates_and_rejects_cycles() {
+        let mut seen = HashSet::new();
+        assert_eq!(
+            checked_next_cursor("", Some("50".to_owned()), &mut seen).unwrap(),
+            Some("50".to_owned())
+        );
+        assert!(checked_next_cursor("50", Some("50".to_owned()), &mut seen).is_err());
+        assert_eq!(checked_next_cursor("50", None, &mut seen).unwrap(), None);
+
+        let mut seen = HashSet::new();
+        assert!(checked_next_cursor("10", Some("20".to_owned()), &mut seen).is_ok());
+        assert!(checked_next_cursor("30", Some("20".to_owned()), &mut seen).is_err());
+    }
 }

@@ -32,6 +32,16 @@ fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     (local_sats, remote_sats)
 }
 
+fn splice_balance_change(before_sats: u64, after_sats: u64) -> (&'static str, u64) {
+    if after_sats > before_sats {
+        ("in", after_sats - before_sats)
+    } else if after_sats < before_sats {
+        ("out", before_sats - after_sats)
+    } else {
+        ("unchanged", 0)
+    }
+}
+
 /// Reproduce the wallet's trade-fee calculation from the allocation transition. Buys reduce the
 /// target by the gross amount. Sells increase it by the net amount, so the gross amount must be
 /// recovered before applying the one-percent fee. The wallet pays whole sats, with a one-msat
@@ -640,6 +650,7 @@ impl StableChannelManager {
         &mut self,
         channel_id: String,
         user_channel_id: String,
+        funding_txo: Option<String>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -658,7 +669,12 @@ impl StableChannelManager {
             .iter()
             .any(|sc| sc.user_channel_id == target_uid)
         {
-            self.handle_channel_ready_splice(target_uid, ldk, btc_price)
+            self.handle_channel_ready_splice(
+                target_uid,
+                funding_txo.as_deref(),
+                ldk,
+                btc_price,
+            )
                 .await;
             return;
         }
@@ -740,6 +756,7 @@ impl StableChannelManager {
             serde_json::json!({
                 "channel_id": channel_id,
                 "user_channel_id": user_channel_id,
+                "funding_txo": funding_txo,
             }),
         );
     }
@@ -1529,6 +1546,7 @@ impl StableChannelManager {
     async fn handle_channel_ready_splice(
         &mut self,
         uid: u128,
+        funding_txo: Option<&str>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -1561,6 +1579,9 @@ impl StableChannelManager {
             else {
                 return;
             };
+            let before_receiver_sats = sc.stable_receiver_btc.sats;
+            let (splice_direction, splice_amount_sats) =
+                splice_balance_change(before_receiver_sats, their_sats);
             // Refresh receiver balance from the new snapshot but PRESERVE backing_sats so reconcile_outgoing can infer the overflow.
             sc.channel_id =
                 ldk_node::lightning::ln::types::ChannelId::from_bytes(new_channel_id_bytes);
@@ -1592,11 +1613,24 @@ impl StableChannelManager {
                 sc.note.clone(),
                 counterparty_hex,
                 usd_deducted.is_some(),
+                splice_direction,
+                splice_amount_sats,
+                before_receiver_sats,
             )
         };
 
-        let (ucid_str, expected_usd_f, backing, native, note, counterparty_hex, deducted) =
-            persisted;
+        let (
+            ucid_str,
+            expected_usd_f,
+            backing,
+            native,
+            note,
+            counterparty_hex,
+            deducted,
+            splice_direction,
+            splice_amount_sats,
+            before_receiver_sats,
+        ) = persisted;
         if let Err(e) = self.db.save_channel(
             &channel_id_hex,
             &ucid_str,
@@ -1613,7 +1647,18 @@ impl StableChannelManager {
         }
         stable_channels::audit::audit_event(
             "CHANNEL_READY_SPLICE",
-            serde_json::json!({ "channel_id": channel_id_hex, "user_channel_id": ucid_str, "deducted": deducted }),
+            serde_json::json!({
+                "channel_id": channel_id_hex,
+                "user_channel_id": ucid_str,
+                "funding_txo": funding_txo,
+                "direction": splice_direction,
+                "amount_sats": splice_amount_sats,
+                "before_live_receiver_sats": before_receiver_sats,
+                "after_live_receiver_sats": their_sats,
+                "before_btc_price": btc_price,
+                "btc_price": btc_price,
+                "deducted": deducted,
+            }),
         );
         if deducted {
             let sent = self
@@ -2499,6 +2544,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -2516,12 +2562,14 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -2828,6 +2876,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -3815,6 +3864,13 @@ mod tests {
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a fresh signed trade must apply");
     }
 
+    #[test]
+    fn splice_balance_change_records_direction_and_net_amount() {
+        assert_eq!(splice_balance_change(50_000, 80_000), ("in", 30_000));
+        assert_eq!(splice_balance_change(50_000, 5_000), ("out", 45_000));
+        assert_eq!(splice_balance_change(50_000, 50_000), ("unchanged", 0));
+    }
+
     #[tokio::test]
     async fn splice_out_deducts_and_syncs() {
         let mut mgr = make_manager();
@@ -3828,6 +3884,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_DECIMAL.to_string(),
+            Some("splice-out-funding:0".to_owned()),
             &fake as &dyn LdkServerCalls,
             100_000.0,
         )
@@ -3850,6 +3907,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_DECIMAL.to_string(),
+            Some("splice-in-funding:0".to_owned()),
             &fake as &dyn LdkServerCalls,
             100_000.0,
         )
@@ -3871,6 +3929,7 @@ mod tests {
             mgr.handle_channel_ready(
                 CHANNEL_ID_HEX.to_string(),
                 USER_CHANNEL_ID_DECIMAL.to_string(),
+                Some("replayed-splice-funding:0".to_owned()),
                 &fake as &dyn LdkServerCalls,
                 100_000.0,
             )

@@ -1,5 +1,5 @@
 pub mod audit_log;
-pub mod channel_history;
+pub mod channel_ledger;
 pub mod balances;
 pub mod channels;
 pub mod connection;

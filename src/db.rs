@@ -3582,6 +3582,124 @@ mod tests {
     }
 
     #[test]
+    fn ledger_overview_counts_identifier_scope_and_current_channel_state() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO channels
+                    (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, updated_at)
+                 VALUES ('physical', 'stable-42', 99.0, 90, 9, 77)",
+                [],
+            )
+            .unwrap();
+        }
+        for (index, completeness) in [
+            LedgerCompleteness::Observed,
+            LedgerCompleteness::Reconstructed,
+            LedgerCompleteness::Legacy,
+            LedgerCompleteness::Gap,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut draft = LedgerEventDraft::from_audit_event(
+                "PAYMENT_NOTE",
+                serde_json::json!({"user_channel_id": "stable-42"}),
+            );
+            draft.occurred_at_ms = 1_000 + index as i64;
+            draft.completeness = completeness;
+            draft.category = if index == 0 { "payment" } else { "system" }.to_owned();
+            db.append_ledger_event(&draft).unwrap();
+        }
+        db.append_ledger_event(&LedgerEventDraft::from_audit_event(
+            "PAYMENT_NOTE",
+            serde_json::json!({"user_channel_id": "stable-420"}),
+        ))
+        .unwrap();
+
+        let page = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some("stable-42".to_owned()),
+                category: Some("payment".to_owned()),
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        let overview = page.overview;
+        assert_eq!(overview.total_events, 4);
+        assert_eq!(overview.matching_events, 1);
+        assert_eq!(overview.oldest_occurred_at_ms, Some(1_000));
+        assert_eq!(overview.newest_occurred_at_ms, Some(1_003));
+        assert_eq!(overview.observed_events, 1);
+        assert_eq!(overview.reconstructed_events, 1);
+        assert_eq!(overview.legacy_events, 1);
+        assert_eq!(overview.gap_events, 1);
+        assert_eq!(
+            overview.latest_accounting_source.as_deref(),
+            Some("channels")
+        );
+        assert_eq!(overview.latest_accounting_at_ms, Some(77_000));
+        let state = overview.latest_accounting.unwrap();
+        assert_eq!(state.expected_usd, Some(99.0));
+        assert_eq!(state.backing_sats, Some(90));
+        assert_eq!(state.native_sats, Some(9));
+        assert_eq!(state.live_receiver_sats, Some(99));
+    }
+
+    #[test]
+    fn non_user_identifier_uses_newest_complete_exact_snapshot_only() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO channels
+                    (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, updated_at)
+                 VALUES ('physical', 'stable-42', 99.0, 90, 9, 77)",
+                [],
+            )
+            .unwrap();
+        }
+        let mut complete = LedgerEventDraft::from_audit_event(
+            "CHANNEL_RECONSTRUCTED",
+            serde_json::json!({"channel_id": "physical"}),
+        );
+        complete.occurred_at_ms = 5_000;
+        complete.after = Some(AccountingSnapshot {
+            expected_usd: Some(12.0),
+            backing_sats: Some(12),
+            native_sats: Some(3),
+            live_receiver_sats: Some(15),
+            btc_price: Some(80_000.0),
+            ..Default::default()
+        });
+        db.append_ledger_event(&complete).unwrap();
+
+        let mut newer_partial = LedgerEventDraft::from_audit_event(
+            "CHANNEL_NOTE",
+            serde_json::json!({"channel_id": "physical"}),
+        );
+        newer_partial.occurred_at_ms = 6_000;
+        newer_partial.after = Some(AccountingSnapshot {
+            backing_sats: Some(100),
+            ..Default::default()
+        });
+        db.append_ledger_event(&newer_partial).unwrap();
+
+        let overview = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some("physical".to_owned()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .overview;
+        assert_eq!(overview.latest_accounting_source.as_deref(), Some("ledger"));
+        assert_eq!(overview.latest_accounting_at_ms, Some(5_000));
+        assert_eq!(overview.latest_accounting.unwrap().expected_usd, Some(12.0));
+    }
+
+    #[test]
     fn legacy_jsonl_imports_valid_rows_once_and_leaves_malformed_raw() {
         let db = Database::open_in_memory().unwrap();
         let dir = tempfile::tempdir().unwrap();

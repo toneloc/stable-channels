@@ -5,10 +5,10 @@ use axum::extract::State;
 use axum::response::Response;
 use ldk_server_client::ldk_server_grpc::error::ErrorCode;
 use sc_protos::stable::{
-    AccountingSnapshot as ProtoSnapshot, ChannelLedgerEvent, LedgerRef as ProtoRef,
-    ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse,
+    AccountingSnapshot as ProtoSnapshot, ChannelLedgerEvent, ChannelLedgerOverview,
+    LedgerRef as ProtoRef, ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse,
 };
-use stable_channels::ledger::{AccountingSnapshot, LedgerEvent, LedgerQuery};
+use stable_channels::ledger::{AccountingSnapshot, LedgerEvent, LedgerOverview, LedgerQuery};
 
 use crate::handlers::{decode_body, error_response, ok_response};
 use crate::state::AppState;
@@ -43,11 +43,28 @@ pub async fn list_channel_ledger_events(State(state): State<AppState>, body: Byt
         Ok(page) => ok_response(ListChannelLedgerEventsResponse {
             events: page.events.into_iter().map(to_proto_event).collect(),
             next_cursor: page.next_cursor.map(|cursor| cursor.to_string()),
+            overview: Some(to_proto_overview(page.overview)),
         }),
         Err(error) => error_response(
             ErrorCode::InternalServerError,
             format!("Failed to query channel ledger: {error}"),
         ),
+    }
+}
+
+fn to_proto_overview(overview: LedgerOverview) -> ChannelLedgerOverview {
+    ChannelLedgerOverview {
+        total_events: overview.total_events,
+        matching_events: overview.matching_events,
+        oldest_occurred_at_ms: overview.oldest_occurred_at_ms,
+        newest_occurred_at_ms: overview.newest_occurred_at_ms,
+        observed_events: overview.observed_events,
+        reconstructed_events: overview.reconstructed_events,
+        legacy_events: overview.legacy_events,
+        gap_events: overview.gap_events,
+        latest_accounting: overview.latest_accounting.map(to_proto_snapshot),
+        latest_accounting_at_ms: overview.latest_accounting_at_ms,
+        latest_accounting_source: overview.latest_accounting_source.unwrap_or_default(),
     }
 }
 
