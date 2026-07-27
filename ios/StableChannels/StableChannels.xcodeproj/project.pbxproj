@@ -336,6 +336,18 @@
 			);
 			sourceTree = "<group>";
 		};
+		495CB4013017917400560837 /* WebSocket */ = {
+			isa = PBXGroup;
+			children = (
+				495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */,
+				492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */,
+				495CB3FD3017724E00560837 /* ProcessedTxStore.swift */,
+				495CB3FE3017724E00560837 /* ReconnectionManager.swift */,
+				495CB3F93013F14100560837 /* TransactionMatcher.swift */,
+			);
+			path = WebSocket;
+			sourceTree = "<group>";
+		};
 		499127742FFEB4BF00D9C81F /* Services */ = {
 			isa = PBXGroup;
 			children = (
@@ -451,24 +463,20 @@
 				492B54AB300CC81D003EC383 /* EsploraError.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
-				495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */,
-				492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
-				495CB3FD3017724E00560837 /* ProcessedTxStore.swift */,
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
-				495CB3FE3017724E00560837 /* ReconnectionManager.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
 				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
 				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
-				495CB3F93013F14100560837 /* TransactionMatcher.swift */,
 				499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */,
 				492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
+				495CB4013017917400560837 /* WebSocket */,
 			);
 			path = Services;
 			sourceTree = "<group>";
