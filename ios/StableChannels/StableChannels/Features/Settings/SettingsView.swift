@@ -264,18 +264,15 @@ struct DiagnosticsSettingsView: View {
     var body: some View {
         List {
             Section {
-                Text("Save app logs to a file for debugging and support.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                let logUrls = AppLogger.shared.getExportLogs()
+                let logUrls = Constants.exportableLogURLs()
                 if !logUrls.isEmpty {
                     ShareLink(items: logUrls) {
-                        rowLabel(
-                            icon: "square.and.arrow.up",
-                            color: .green,
-                            text: "Share the logs"
-                        )
+                        HStack {
+                            Image(systemName: "square.and.arrow.up")
+                                .foregroundStyle(.green)
+                            Text("Share the logs")
+                                .foregroundStyle(.primary)
+                        }
                     }
                     Button {
                         var allLogs = ""
@@ -287,22 +284,31 @@ struct DiagnosticsSettingsView: View {
                         logDocument = LogTextDocument(text: allLogs)
                         isExporting = true
                     } label: {
-                        rowLabel(
-                            icon: "arrow.down.doc",
-                            color: .green,
-                            text: "Download logs"
-                        )
+                        HStack {
+                            Image(systemName: "arrow.down.doc")
+                                .foregroundStyle(.green)
+                            Text("Download logs")
+                                .foregroundStyle(.primary)
+                        }
                     }
                 } else {
                     Button {} label: {
-                        rowLabel(icon: "square.and.arrow.up", color: .gray, text: "Share the logs")
+                        HStack {
+                            Image(systemName: "square.and.arrow.up")
+                            Text("Share the logs")
+                        }
+                        .foregroundStyle(.gray)
                     }.disabled(true)
                     Button {} label: {
-                        rowLabel(icon: "arrow.down.doc", color: .gray, text: "Download logs")
+                        HStack {
+                            Image(systemName: "arrow.down.doc")
+                            Text("Download logs")
+                        }
+                        .foregroundStyle(.gray)
                     }.disabled(true)
                 }
-            } header: {
-                Text("Logs")
+            } footer: {
+                Text("Save app logs to a file for debugging and support.")
             }
         }
         .navigationTitle("Logs & Diagnostics")
@@ -319,21 +325,6 @@ struct DiagnosticsSettingsView: View {
             case .failure(let error):
                 print("Failed to save: \(error.localizedDescription)")
             }
-        }
-    }
-
-    private func rowLabel(icon: String, color: Color, text: String) -> some View {
-        HStack(spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(color)
-                    .frame(width: 32, height: 32)
-                Image(systemName: icon)
-                    .foregroundStyle(.white)
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            Text(text)
-                .foregroundStyle(.primary)
         }
     }
 }
