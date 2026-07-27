@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.stablechannels.app.util.LspPreferencesManager
 import org.lightningdevkit.ldknode.*
 import java.io.File
 
@@ -55,11 +56,13 @@ class NodeService(private val context: Context) {
         }
 
         val dataDir = Constants.userDataDir(context)
+        val lspPubkey = LspPreferencesManager.getLspPubkey(context)
+        val lspAddress = LspPreferencesManager.getLspAddress(context)
         var ldkNode: Node? = null
 
         try {
             val anchorConfig = AnchorChannelsConfig(
-                trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                trustedPeersNoReserve = listOf(lspPubkey),
                 perChannelReserveSats = 25_000UL
             )
 
@@ -69,7 +72,7 @@ class NodeService(private val context: Context) {
                 listeningAddresses = null,
                 announcementAddresses = null,
                 nodeAlias = null,
-                trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                trustedPeers0conf = listOf(lspPubkey),
                 probingLiquidityLimitMultiplier = 3UL,
                 anchorChannelsConfig = anchorConfig,
                 routeParameters = null,
@@ -94,8 +97,8 @@ class NodeService(private val context: Context) {
             builder.setGossipSourceRgs(rgsUrl)
 
             builder.setLiquiditySourceLsps2(
-                Constants.DEFAULT_LSP_PUBKEY,
-                Constants.DEFAULT_LSP_ADDRESS,
+                lspPubkey,
+                lspAddress,
                 null
             )
 
@@ -139,7 +142,7 @@ class NodeService(private val context: Context) {
 
             // Connect to LSP
             try {
-                startedNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+                startedNode.connect(lspPubkey, lspAddress, true)
             } catch (e: Exception) {
                 Log.w("NodeService", "LSP connect failed: ${e.message}")
             }

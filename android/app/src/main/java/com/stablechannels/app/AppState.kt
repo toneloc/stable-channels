@@ -11,6 +11,7 @@ import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.*
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,7 +70,7 @@ class AppState(private val context: Context) : ViewModel() {
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
 
-    private val _stableChannel = MutableStateFlow(StableChannel.DEFAULT)
+    private val _stableChannel = MutableStateFlow(StableChannel.defaultWithLsp(context))
     val stableChannel: StateFlow<StableChannel> = _stableChannel
 
     private val _statusMessage = MutableStateFlow("")
@@ -152,7 +153,7 @@ class AppState(private val context: Context) : ViewModel() {
         val cachedUserChannelId = prefs.getString("cached_user_channel_id", null)
         val cachedExpectedUsd = prefs.getFloat("cached_expected_usd", 0f)
         if (cachedUserChannelId != null) {
-            _stableChannel.value = StableChannel.DEFAULT.copy(
+            _stableChannel.value = StableChannel.defaultWithLsp(context).copy(
                 channelId = cachedChannelId ?: "",
                 userChannelId = cachedUserChannelId,
                 expectedUSD = USD(cachedExpectedUsd.toDouble())
@@ -487,6 +488,82 @@ class AppState(private val context: Context) : ViewModel() {
                 _errorMessage.value = e.message ?: "Restart failed"
             }
         }
+    }
+
+    /**
+     * Validates and saves a custom LSP pubkey/address, then performs an in-process soft
+     * restart of the LDK node so the new config takes effect immediately.
+     *
+     * A full node rebuild (not just a reconnect) is required because the LSP pubkey/address
+     * is baked into LDK's `Config`, `AnchorChannelsConfig`, and LSPS2 liquidity source at
+     * build time. This is only ever attempted with no open channels (re-checked here even
+     * though the UI already gates it), which makes an in-process [NodeService.stop] +
+     * [NodeService.start] the safest option: it reuses the already-hardened node lifecycle
+     * (including [LdkNodeOwner] release/reacquire) without tearing down the Activity,
+     * ViewModel, or other background jobs the way a full app-process restart via Intent would.
+     *
+     * @param onComplete called with `null` on success, or a human-readable error message.
+     */
+    fun switchLsp(pubkey: String, address: String, onComplete: (String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            nodeService.refreshChannels()
+            if (nodeService.channels.isNotEmpty()) {
+                onComplete("Close all channels before switching LSPs.")
+                return@launch
+            }
+            val validationError = LspPreferencesManager.saveCustomLsp(context, pubkey, address)
+            if (validationError != null) {
+                onComplete(validationError)
+                return@launch
+            }
+            try {
+                performLspNodeRestart()
+                onComplete(null)
+            } catch (e: Exception) {
+                Log.e("AppState", "Failed to restart node after LSP switch", e)
+                AuditService.log("LSP_SWITCH_FAILED", mapOf("error" to (e.message ?: "")))
+                onComplete("Failed to restart node: ${e.message}")
+            }
+        }
+    }
+
+    /** Clears any custom LSP override and restarts the node against the default (stablechannels.com). */
+    fun resetLspToDefault(onComplete: (String?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            nodeService.refreshChannels()
+            if (nodeService.channels.isNotEmpty()) {
+                onComplete("Close all channels before switching LSPs.")
+                return@launch
+            }
+            LspPreferencesManager.resetToDefault(context)
+            try {
+                performLspNodeRestart()
+                onComplete(null)
+            } catch (e: Exception) {
+                Log.e("AppState", "Failed to restart node after LSP reset", e)
+                AuditService.log("LSP_SWITCH_FAILED", mapOf("error" to (e.message ?: "")))
+                onComplete("Failed to restart node: ${e.message}")
+            }
+        }
+    }
+
+    /** Stops and rebuilds the LDK node in-place so it picks up the current LSP prefs.
+     *  Callers must confirm there are no open channels before invoking this. */
+    private fun performLspNodeRestart() {
+        stabilityJob?.cancel()
+        heartbeatJob?.cancel()
+        if (nodeService.isRunning) {
+            nodeService.stop()
+        }
+        nodeService.start(Network.BITCOIN, chainUrl, null)
+        refreshBalances()
+        ensureLSPConnected()
+        reregisterPushTokenIfNeeded()
+        startStabilityTimer()
+        AuditService.log("LSP_SWITCHED", mapOf(
+            "pubkey" to LspPreferencesManager.getLspPubkey(context),
+            "address" to LspPreferencesManager.getLspAddress(context)
+        ))
     }
 
     private fun handleEvent(event: Event) {
@@ -1078,7 +1155,7 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             databaseService?.deleteChannel(sc.userChannelId)
-            _stableChannel.value = StableChannel.DEFAULT
+            _stableChannel.value = StableChannel.defaultWithLsp(context)
             // Clear cached channel state
             context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
                 .remove("cached_channel_id")
@@ -1508,7 +1585,7 @@ class AppState(private val context: Context) : ViewModel() {
         val allUsable = nodeService.channels.isNotEmpty() && nodeService.channels.all { it.isUsable }
         if (allUsable) return
         try {
-            node.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+            node.connect(LspPreferencesManager.getLspPubkey(context), LspPreferencesManager.getLspAddress(context), true)
         } catch (e: Exception) {
             AuditService.log("LSP_CONNECT_FAILED", mapOf("error" to (e.message ?: "")))
         }
@@ -1741,7 +1818,7 @@ class AppState(private val context: Context) : ViewModel() {
         Log.d("AppState", "Processing pending push payment")
         FCMService.clearPendingPayment(context)
         try {
-            nodeService.node?.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+            nodeService.node?.connect(LspPreferencesManager.getLspPubkey(context), LspPreferencesManager.getLspAddress(context), true)
         } catch (e: Exception) {
             Log.w("AppState", "LSP connect failed in processPendingPushPayment: ${e.message}")
             AuditService.log("LSP_CONNECT_FAILED", mapOf("error" to (e.message ?: "")))

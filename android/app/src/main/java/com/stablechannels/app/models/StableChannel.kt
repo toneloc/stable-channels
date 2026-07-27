@@ -1,6 +1,8 @@
 package com.stablechannels.app.models
 
+import android.content.Context
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.LspPreferencesManager
 import kotlinx.serialization.Serializable
 import java.util.Locale
 import kotlin.math.abs
@@ -78,6 +80,14 @@ data class StableChannel(
     var lastStabilityPayment: Long = 0
 ) {
     companion object {
+        /** Static default — counterparty falls back to the hardcoded LSP constant.
+         *  Prefer [defaultWithLsp] wherever a [Context] is available so the active
+         *  (possibly user-configured) LSP pubkey is used instead. */
         val DEFAULT = StableChannel()
+
+        /** Same as [DEFAULT] but with `counterparty` resolved dynamically from
+         *  [LspPreferencesManager], honoring a custom LSP override if one is set. */
+        fun defaultWithLsp(context: Context): StableChannel =
+            StableChannel(counterparty = LspPreferencesManager.getLspPubkey(context))
     }
 }
