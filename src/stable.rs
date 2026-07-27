@@ -735,16 +735,6 @@ pub fn check_stability(
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
-            audit_event(
-                "STABILITY_PAYMENT_SENT",
-                json!({
-                    "amount_msats": amt,
-                    "payment_id": payment_id_str,
-                    "counterparty": counterparty_str,
-                    "expected_usd": target_usd,
-                    "new_backing_sats": new_backing
-                }),
-            );
             Some(StabilityPaymentInfo {
                 payment_id: payment_id_str,
                 amount_msat: amt,

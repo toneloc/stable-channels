@@ -32,7 +32,8 @@ use crate::config;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::state::ChainSourceForm;
 use crate::state::{
-	ActiveTab, AppState, ChannelLedgerForm, ConnectionStatus, LogsTab, StatusMessage,
+	ActiveTab, AppState, ChannelLedgerForm, ChannelLedgerRequestKey, ChannelLedgerTaskResult,
+	ConnectionStatus, LogsTab, StatusMessage,
 };
 use crate::task;
 use crate::ui;
@@ -374,7 +375,9 @@ impl LspServerApp {
 			return;
 		}
 		let form = self.state.forms.channel_ledger.clone();
-		let cursor = if self.state.channel_ledger_appending {
+		let request = ChannelLedgerRequestKey::from(&form);
+		let appending = self.state.channel_ledger_appending;
+		let cursor = if appending {
 			self.state.channel_ledger_cursor.clone().unwrap_or_default()
 		} else {
 			String::new()
@@ -382,14 +385,15 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let client = client.clone();
 			self.state.tasks.channel_ledger = Some(self.spawn_task(async move {
-				client.list_channel_ledger_events(ListChannelLedgerEventsRequest {
+				let response = client.list_channel_ledger_events(ListChannelLedgerEventsRequest {
 					identifier: form.identifier.trim().to_owned(),
 					category: form.category,
 					status: form.status,
 					completeness: form.completeness,
 					cursor,
 					page_size: 50,
-				}).await.map_err(|e| e.to_string())
+				}).await.map_err(|e| e.to_string())?;
+				Ok(ChannelLedgerTaskResult { request, appending, response })
 			}));
 		}
 	}
@@ -401,6 +405,7 @@ impl LspServerApp {
             return;
         }
         let form = self.state.forms.channel_ledger.clone();
+        let request = ChannelLedgerRequestKey::from(&form);
         if let Some(client) = &self.state.client {
             let client = client.clone();
             self.state.tasks.channel_ledger_export = Some(self.spawn_task(async move {
@@ -429,11 +434,12 @@ impl LspServerApp {
                         None => break,
                     }
                 }
-                Ok(ListChannelLedgerEventsResponse {
+                let response = ListChannelLedgerEventsResponse {
                     events,
                     next_cursor: None,
                     overview,
-                })
+                };
+                Ok(ChannelLedgerTaskResult { request, appending: false, response })
             }));
         }
     }
@@ -441,6 +447,10 @@ impl LspServerApp {
     /// Open the ledger from an operator-facing stable-channel row using its
     /// splice-stable user_channel_id and a clean filter set.
     pub fn open_channel_ledger(&mut self, user_channel_id: String) {
+        // Dropping old handles invalidates their results. The underlying requests may finish, but
+        // they can no longer overwrite or export the channel the operator just selected.
+        self.state.tasks.channel_ledger = None;
+        self.state.tasks.channel_ledger_export = None;
         self.state.forms.channel_ledger = ChannelLedgerForm {
             identifier: user_channel_id,
             ..Default::default()
@@ -1256,21 +1266,31 @@ impl LspServerApp {
 		});
 
 		poll_task!(self.state.tasks.channel_ledger => |v| {
-			self.state.channel_ledger_cursor = v.next_cursor.clone();
-			if self.state.channel_ledger_appending {
+			let current_request = ChannelLedgerRequestKey::from(&self.state.forms.channel_ledger);
+			if v.request != current_request {
+				self.state.channel_ledger_appending = false;
+			} else {
+				let appending = v.appending;
+				let v = v.response;
+				self.state.channel_ledger_cursor = v.next_cursor.clone();
+				if appending {
                 let mut combined = self.state.channel_ledger.take().unwrap_or_default();
                 merge_ledger_events(&mut combined.events, v.events);
                 combined.next_cursor = v.next_cursor;
                 combined.overview = v.overview.or(combined.overview);
-				self.state.channel_ledger = Some(combined);
-			} else {
-				self.state.channel_ledger = Some(v);
+					self.state.channel_ledger = Some(combined);
+				} else {
+					self.state.channel_ledger = Some(v);
+				}
+				self.state.channel_ledger_appending = false;
 			}
-			self.state.channel_ledger_appending = false;
 		});
 
         poll_task!(self.state.tasks.channel_ledger_export => |v| {
-            crate::ui::channel_ledger::export_jsonl(&v, &mut self.state.status_message);
+            let current_request = ChannelLedgerRequestKey::from(&self.state.forms.channel_ledger);
+            if v.request == current_request {
+                crate::ui::channel_ledger::export_jsonl(&v.response, &mut self.state.status_message);
+            }
         });
 
 		poll_task!(self.state.tasks.payment_details => |v| {
@@ -1643,5 +1663,22 @@ mod ledger_tests {
         let mut seen = HashSet::new();
         assert!(checked_next_cursor("10", Some("20".to_owned()), &mut seen).is_ok());
         assert!(checked_next_cursor("30", Some("20".to_owned()), &mut seen).is_err());
+    }
+
+    #[test]
+    fn ledger_request_identity_covers_identifier_and_server_filters() {
+        let form = ChannelLedgerForm {
+            identifier: "  stable-channel  ".to_owned(),
+            category: "payment".to_owned(),
+            status: "failed".to_owned(),
+            completeness: "observed".to_owned(),
+            newest_first: false,
+        };
+        let key = ChannelLedgerRequestKey::from(&form);
+        assert_eq!(key.identifier, "stable-channel");
+
+        let mut changed = form.clone();
+        changed.status = "completed".to_owned();
+        assert_ne!(key, ChannelLedgerRequestKey::from(&changed));
     }
 }

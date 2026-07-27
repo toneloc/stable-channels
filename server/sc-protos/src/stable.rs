@@ -178,7 +178,7 @@ pub struct ChannelLedgerEvent {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListChannelLedgerEventsRequest {
-	/// Exact match against any stored reference value; empty matches all.
+	/// Required exact match against any stored reference value.
 	#[prost(string, tag = "1")]
 	pub identifier: ::prost::alloc::string::String,
 	#[prost(string, tag = "2")]

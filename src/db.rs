@@ -410,8 +410,52 @@ impl Database {
     // =========================================================================
 
     pub fn append_ledger_event(&self, draft: &LedgerEventDraft) -> SqliteResult<AppendOutcome> {
-        let conn = self.conn.lock().unwrap();
-        ledger::append_on_connection(&conn, draft)
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let outcome = ledger::append_on_connection(&tx, draft)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Append a reconstructed snapshot only when this entity differs from the last snapshot seen
+    /// for the same scope. Unlike a permanent dedup key, overwriting the stored fingerprint keeps
+    /// A -> B -> A transitions visible while suppressing identical reconnect snapshots.
+    pub fn append_reconstructed_event_if_changed(
+        &self,
+        scope: &str,
+        identity: &str,
+        fingerprint: &str,
+        draft: &LedgerEventDraft,
+    ) -> SqliteResult<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous: Option<String> = tx
+            .query_row(
+                "SELECT fingerprint FROM ledger_reconstruction_state
+                 WHERE scope = ?1 AND identity = ?2",
+                params![scope, identity],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if previous.as_deref() == Some(fingerprint) {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        let outcome = ledger::append_on_connection(&tx, draft)?;
+        tx.execute(
+            "INSERT INTO ledger_reconstruction_state (scope, identity, fingerprint)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope, identity) DO UPDATE SET
+                fingerprint = excluded.fingerprint,
+                updated_at_ms = unixepoch('subsec') * 1000",
+            params![scope, identity, fingerprint],
+        )?;
+        tx.commit()?;
+        if outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(draft, outcome.event_id);
+        }
+        Ok(outcome.inserted)
     }
 
     pub fn list_ledger_events(&self, query: &LedgerQuery) -> SqliteResult<LedgerPage> {
@@ -449,14 +493,37 @@ impl Database {
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let mut mirror = None;
         let result = (|| {
-            let before: Option<(f64, i64, i64, String)> = conn
+            let before: Option<(f64, i64, i64, String, Option<i64>, Option<String>)> = conn
                 .query_row(
-                    "SELECT expected_usd, stable_sats, native_sats, channel_id
+                    "SELECT expected_usd, stable_sats, native_sats, channel_id, closed_at, note
                      FROM channels WHERE user_channel_id = ?1",
                     params![user_channel_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
                 )
                 .optional()?;
+            let accounting_changed = before.as_ref().map_or(true, |previous| {
+                previous.0.to_bits() != expected_usd.to_bits()
+                    || previous.1 != backing_sats as i64
+                    || previous.2 != native_sats as i64
+                    || previous.3 != channel_id
+                    || previous.4.is_some()
+            });
+            let row_changed = accounting_changed
+                || before
+                    .as_ref()
+                    .map_or(true, |previous| previous.5.as_deref() != note);
+            if !row_changed {
+                return Ok(());
+            }
             // Try to update by user_channel_id first (handles channel_id changes from splices)
             let updated = conn.execute(
             "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
@@ -489,6 +556,9 @@ impl Database {
                 params![channel_id, user_channel_id, expected_usd, backing_sats as i64, native_sats as i64, note],
                 )?;
             }
+            if !accounting_changed {
+                return Ok(());
+            }
             let live_receiver_sats = backing_sats.saturating_add(native_sats);
             let draft = LedgerEventDraft {
                 event_type: "CHANNEL_ACCOUNTING_STATE_COMMITTED".to_owned(),
@@ -498,11 +568,10 @@ impl Database {
                 source: "database".to_owned(),
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
-                dedup_key: Some(format!(
-                    "channel-state:{user_channel_id}:{channel_id}:{}:{backing_sats}:{native_sats}",
-                    expected_usd.to_bits()
-                )),
-                before: before.as_ref().map(|(expected, backing, native, _)| AccountingSnapshot {
+                dedup_key: None,
+                before: before
+                    .as_ref()
+                    .map(|(expected, backing, native, _, _, _)| AccountingSnapshot {
                     expected_usd: Some(*expected),
                     backing_sats: u64::try_from(*backing).ok(),
                     native_sats: u64::try_from(*native).ok(),
@@ -530,7 +599,7 @@ impl Database {
                         LedgerRef::new("user_channel_id", user_channel_id),
                         LedgerRef::new("channel_id", channel_id),
                     ];
-                    if let Some((_, _, _, previous_channel_id)) = &before {
+                    if let Some((_, _, _, previous_channel_id, _, _)) = &before {
                         if previous_channel_id != channel_id {
                             refs.push(LedgerRef::new("channel_id", previous_channel_id));
                         }
@@ -577,17 +646,41 @@ impl Database {
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let mut mirror = None;
         let result: SqliteResult<bool> = (|| {
-            let before: Option<(String, f64, i64, i64)> = conn
+            let before: Option<(String, f64, i64, i64, Option<i64>, Option<String>)> = conn
                 .query_row(
-                    "SELECT channel_id, expected_usd, stable_sats, native_sats
+                    "SELECT channel_id, expected_usd, stable_sats, native_sats, closed_at, note
                      FROM channels WHERE user_channel_id = ?1",
                     params![user_channel_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            let Some((previous_channel_id, previous_expected, backing, previous_native)) = before else {
+            let Some((
+                previous_channel_id,
+                previous_expected,
+                backing,
+                previous_native,
+                previous_closed_at,
+                previous_note,
+            )) = before
+            else {
                 return Ok(false);
             };
+            let accounting_changed = previous_channel_id != channel_id
+                || previous_expected.to_bits() != expected_usd.to_bits()
+                || previous_native != native_sats as i64
+                || previous_closed_at.is_some();
+            if !accounting_changed && previous_note.as_deref() == note {
+                return Ok(true);
+            }
             let updated = conn.execute(
                 "UPDATE channels SET channel_id = ?1, expected_usd = ?2,
                                      note = ?3, user_channel_id = ?4, native_sats = ?5,
@@ -602,6 +695,9 @@ impl Database {
                     native_sats as i64
                 ],
             )?;
+            if !accounting_changed {
+                return Ok(updated > 0);
+            }
             let draft = LedgerEventDraft {
                 event_type: "CHANNEL_ACCOUNTING_STATE_COMMITTED".to_owned(),
                 category: "channel".to_owned(),
@@ -610,10 +706,7 @@ impl Database {
                 source: "database".to_owned(),
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
-                dedup_key: Some(format!(
-                    "channel-state:{user_channel_id}:{channel_id}:{}:{backing}:{native_sats}",
-                    expected_usd.to_bits()
-                )),
+                dedup_key: None,
                 before: Some(AccountingSnapshot {
                     expected_usd: Some(previous_expected),
                     backing_sats: u64::try_from(backing).ok(),
@@ -781,7 +874,9 @@ impl Database {
             source: "signed_sync".to_owned(),
             completeness: LedgerCompleteness::Observed,
             occurred_at_ms: Utc::now().timestamp_millis(),
-            dedup_key: Some(format!("sync-v1:{user_channel_id}:{sync_version}")),
+            dedup_key: Some(format!(
+                "signed-sync:sync-v1:{user_channel_id}:{sync_version}"
+            )),
             before: before.map(|(expected, backing, native)| AccountingSnapshot {
                 expected_usd: Some(expected),
                 backing_sats: u64::try_from(backing).ok(),
@@ -883,7 +978,9 @@ impl Database {
                 source: "database".to_owned(),
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
-                dedup_key: Some(format!("channel-closed:{user_channel_id}")),
+                // The UPDATE guard above is the idempotency boundary. A later reopen followed by
+                // another close is a distinct transition and must remain visible.
+                dedup_key: None,
                 before: Some(snapshot.clone()),
                 after: Some(snapshot),
                 detail: serde_json::json!({
@@ -1484,7 +1581,9 @@ impl Database {
                 source: "ldk_event".to_owned(),
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
-                dedup_key: Some(format!("outgoing-reconcile:{event_id}:{user_channel_id}")),
+                dedup_key: Some(format!(
+                    "ldk-event:outgoing-reconcile:{event_id}:{user_channel_id}"
+                )),
                 before: before.map(|(expected, backing, native)| AccountingSnapshot {
                     expected_usd: Some(expected),
                     backing_sats: u64::try_from(backing).ok(),
@@ -1582,6 +1681,7 @@ impl Database {
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mut mirror = None;
         let result: SqliteResult<i64> = (|| {
             let before = i64::try_from(backing_sats_before)
                 .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, i64::MAX))?;
@@ -1631,21 +1731,70 @@ impl Database {
                 )?;
             }
 
+            let before_snapshot = AccountingSnapshot {
+                expected_usd: Some(expected_usd),
+                backing_sats: Some(backing_sats_before),
+                native_sats: Some(native_sats),
+                live_receiver_sats: Some(backing_sats_before.saturating_add(native_sats)),
+                btc_price: Some(btc_price),
+                amount_msat: Some(amount_msat),
+                amount_usd,
+                ..Default::default()
+            };
+            let after_snapshot = AccountingSnapshot {
+                backing_sats: Some(backing_sats_after),
+                live_receiver_sats: Some(backing_sats_after.saturating_add(native_sats)),
+                ..before_snapshot.clone()
+            };
+            let draft = LedgerEventDraft {
+                event_type: "STABILITY_PAYMENT_SENT".to_owned(),
+                category: "stability".to_owned(),
+                severity: "info".to_owned(),
+                status: "pending".to_owned(),
+                source: "desktop_wallet".to_owned(),
+                completeness: LedgerCompleteness::Observed,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+                dedup_key: Some(format!(
+                    "desktop-wallet:stability-payment-sent:{payment_id}"
+                )),
+                before: Some(before_snapshot),
+                after: Some(after_snapshot),
+                detail: serde_json::json!({
+                    "payment_id": payment_id,
+                    "channel_id": channel_id,
+                    "user_channel_id": user_channel_id,
+                    "counterparty_node_id": counterparty,
+                    "direction": "outbound",
+                    "amount_msat": amount_msat,
+                    "amount_usd": amount_usd,
+                    "btc_price": btc_price,
+                    "before_backing_sats": backing_sats_before,
+                    "after_backing_sats": backing_sats_after,
+                    "native_sats": native_sats,
+                    "expected_usd": expected_usd,
+                    "status": "pending",
+                }),
+                refs: vec![
+                    LedgerRef::new("payment_id", payment_id),
+                    LedgerRef::new("channel_id", channel_id),
+                    LedgerRef::new("user_channel_id", user_channel_id),
+                    LedgerRef::new("node_id", counterparty),
+                ],
+            };
+            let outcome = ledger::append_on_connection(&conn, &draft)?;
+            if outcome.inserted {
+                mirror = Some((draft, outcome.event_id));
+            }
+
             Ok(payment_db_id)
         })();
-        match result {
-            Ok(id) => match conn.execute_batch("COMMIT") {
-                Ok(()) => Ok(id),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    Err(e)
-                }
-            },
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
+        let committed = finish_transaction(&conn, result);
+        if committed.is_ok() {
+            if let Some((draft, event_id)) = mirror {
+                crate::audit::mirror_committed_ledger_event(&draft, event_id);
             }
         }
+        committed
     }
 
     /// Mark a pending stability payment failed and restore its prior backing only if no newer
@@ -1656,6 +1805,7 @@ impl Database {
     ) -> SqliteResult<Option<StabilityPaymentRollback>> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mut mirror = None;
         let result: SqliteResult<Option<StabilityPaymentRollback>> = (|| {
             let row: Option<(i64, Option<String>, Option<i64>, Option<i64>)> = conn
                 .query_row(
@@ -1679,6 +1829,17 @@ impl Database {
 
             let backing_sats_before = before_i64.and_then(|value| u64::try_from(value).ok());
             let backing_sats_after = after_i64.and_then(|value| u64::try_from(value).ok());
+            let channel_before: Option<(String, f64, i64, i64)> = match user_channel_id.as_deref() {
+                Some(uid) => conn
+                    .query_row(
+                        "SELECT channel_id, expected_usd, stable_sats, native_sats
+                         FROM channels WHERE user_channel_id = ?1",
+                        params![uid],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()?,
+                None => None,
+            };
             let restored = match (
                 user_channel_id.as_deref(),
                 backing_sats_before,
@@ -1702,6 +1863,59 @@ impl Database {
                 _ => false,
             };
 
+            let channel_after: Option<(String, f64, i64, i64)> = match user_channel_id.as_deref() {
+                Some(uid) => conn
+                    .query_row(
+                        "SELECT channel_id, expected_usd, stable_sats, native_sats
+                         FROM channels WHERE user_channel_id = ?1",
+                        params![uid],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            let snapshot = |row: &(String, f64, i64, i64)| AccountingSnapshot {
+                expected_usd: Some(row.1),
+                backing_sats: u64::try_from(row.2).ok(),
+                native_sats: u64::try_from(row.3).ok(),
+                live_receiver_sats: u64::try_from(row.2.saturating_add(row.3)).ok(),
+                ..Default::default()
+            };
+            let mut refs = vec![LedgerRef::new("payment_id", payment_id)];
+            if let Some(uid) = user_channel_id.as_deref() {
+                refs.push(LedgerRef::new("user_channel_id", uid));
+            }
+            if let Some((channel_id, ..)) = channel_after.as_ref().or(channel_before.as_ref()) {
+                refs.push(LedgerRef::new("channel_id", channel_id));
+            }
+            let draft = LedgerEventDraft {
+                event_type: "STABILITY_PAYMENT_FAILED_RECONCILED".to_owned(),
+                category: "stability".to_owned(),
+                severity: "error".to_owned(),
+                status: "failed".to_owned(),
+                source: "desktop_wallet".to_owned(),
+                completeness: LedgerCompleteness::Observed,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+                dedup_key: Some(format!(
+                    "desktop-wallet:stability-payment-failure:{payment_id}"
+                )),
+                before: channel_before.as_ref().map(snapshot),
+                after: channel_after.as_ref().map(snapshot),
+                detail: serde_json::json!({
+                    "payment_id": payment_id,
+                    "user_channel_id": user_channel_id,
+                    "backing_sats_before": backing_sats_before,
+                    "backing_sats_after": backing_sats_after,
+                    "database_restored": restored,
+                    "status": "failed",
+                }),
+                refs,
+            };
+            let outcome = ledger::append_on_connection(&conn, &draft)?;
+            if outcome.inserted {
+                mirror = Some((draft, outcome.event_id));
+            }
+
             Ok(Some(StabilityPaymentRollback {
                 user_channel_id,
                 backing_sats_before,
@@ -1709,19 +1923,133 @@ impl Database {
                 restored,
             }))
         })();
-        match result {
-            Ok(rollback) => match conn.execute_batch("COMMIT") {
-                Ok(()) => Ok(rollback),
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    Err(e)
-                }
-            },
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
+        let committed = finish_transaction(&conn, result);
+        if committed.is_ok() {
+            if let Some((draft, event_id)) = mirror {
+                crate::audit::mirror_committed_ledger_event(&draft, event_id);
             }
         }
+        committed
+    }
+
+    /// Complete a desktop stability payment and append its terminal ledger event atomically.
+    pub fn complete_pending_stability_payment(
+        &self,
+        payment_id: &str,
+        payment_hash: &str,
+        fee_paid_msat: Option<u64>,
+    ) -> SqliteResult<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let payment: Option<(i64, Option<String>, i64, Option<f64>, Option<f64>, Option<String>)> =
+            tx.query_row(
+                "SELECT id, user_channel_id, amount_msat, amount_usd, btc_price, counterparty
+                 FROM payments
+                 WHERE payment_id = ?1 AND payment_type = 'stability'
+                   AND direction = 'sent' AND status = 'pending'
+                 ORDER BY id DESC LIMIT 1",
+                params![payment_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((payment_db_id, user_channel_id, amount_msat, amount_usd, btc_price, counterparty)) =
+            payment
+        else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        let fee = fee_paid_msat.and_then(|value| i64::try_from(value).ok());
+        let updated = tx.execute(
+            "UPDATE payments SET status = 'completed', fee_msat = COALESCE(?1, fee_msat)
+             WHERE id = ?2 AND status = 'pending'",
+            params![fee, payment_db_id],
+        )?;
+        if updated != 1 {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        let channel: Option<(String, f64, i64, i64)> = match user_channel_id.as_deref() {
+            Some(user_channel_id) => tx
+                .query_row(
+                    "SELECT channel_id, expected_usd, stable_sats, native_sats
+                     FROM channels WHERE user_channel_id = ?1",
+                    params![user_channel_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?,
+            None => None,
+        };
+        let amount_msat = u64::try_from(amount_msat).ok();
+        let after = channel.as_ref().map(|(_, expected_usd, backing, native)| {
+            AccountingSnapshot {
+                expected_usd: Some(*expected_usd),
+                backing_sats: u64::try_from(*backing).ok(),
+                native_sats: u64::try_from(*native).ok(),
+                live_receiver_sats: u64::try_from(backing.saturating_add(*native)).ok(),
+                btc_price,
+                amount_msat,
+                amount_usd,
+                fee_msat: fee_paid_msat,
+                ..Default::default()
+            }
+        });
+        let mut refs = vec![
+            LedgerRef::new("payment_id", payment_id),
+            LedgerRef::new("payment_hash", payment_hash),
+        ];
+        if let Some(user_channel_id) = user_channel_id.as_deref() {
+            refs.push(LedgerRef::new("user_channel_id", user_channel_id));
+        }
+        if let Some((channel_id, ..)) = channel.as_ref() {
+            refs.push(LedgerRef::new("channel_id", channel_id));
+        }
+        if let Some(counterparty) = counterparty.as_deref() {
+            refs.push(LedgerRef::new("node_id", counterparty));
+        }
+        let draft = LedgerEventDraft {
+            event_type: "STABILITY_PAYMENT_SETTLED".to_owned(),
+            category: "stability".to_owned(),
+            severity: "info".to_owned(),
+            status: "completed".to_owned(),
+            source: "desktop_wallet".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!(
+                "desktop-wallet:stability-payment-settled:{payment_id}"
+            )),
+            before: None,
+            after,
+            detail: serde_json::json!({
+                "payment_id": payment_id,
+                "payment_hash": payment_hash,
+                "user_channel_id": user_channel_id,
+                "channel_id": channel.as_ref().map(|row| row.0.as_str()),
+                "counterparty_node_id": counterparty,
+                "amount_msat": amount_msat,
+                "amount_usd": amount_usd,
+                "btc_price": btc_price,
+                "fee_paid_msat": fee_paid_msat,
+                "direction": "outbound",
+                "status": "completed",
+            }),
+            refs,
+        };
+        let ledger_outcome = ledger::append_on_connection(&tx, &draft)?;
+        tx.commit()?;
+        if ledger_outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
+        }
+        Ok(true)
     }
 
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
@@ -1856,7 +2184,7 @@ impl Database {
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
                 dedup_key: Some(format!(
-                    "payment-recorded:{}:{status}",
+                    "ldk-event:payment-recorded:{}:{status}",
                     payment_id.map(str::to_owned).unwrap_or_else(|| format!("row-{payment_row_id}"))
                 )),
                 before: before_snapshot,
@@ -2086,7 +2414,9 @@ impl Database {
                 source: "ldk_event".to_owned(),
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
-                dedup_key: Some(format!("splice-reconcile:{txid}")),
+                dedup_key: Some(format!(
+                    "ldk-event:splice-reconcile:{txid}:{user_channel_id}"
+                )),
                 before: before.map(|(expected, backing, native, _)| AccountingSnapshot {
                     expected_usd: Some(expected),
                     backing_sats: u64::try_from(backing).ok(),
@@ -2272,17 +2602,24 @@ impl Database {
         Ok(())
     }
 
-    /// Record the reversible allocation transition for an outbound stability payment.
-    /// Returns false only if the payment id was already present.
+    /// Record the reversible allocation transition, optimistic channel state, and ledger event in
+    /// one transaction. Returns false only if the payment id was already present or the supplied
+    /// rollback metadata is invalid.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_stability_settlement_with_rollback(
         &self,
         payment_id: &str,
         user_channel_id: &str,
+        channel_id: &str,
         backing_sats_before: u64,
         backing_sats_after: u64,
         native_sats_before: u64,
         expected_usd: f64,
         last_stability_payment_before: i64,
+        amount_msat: u64,
+        direction: &str,
+        counterparty: &str,
+        note: Option<&str>,
     ) -> SqliteResult<bool> {
         if backing_sats_before > i64::MAX as u64
             || backing_sats_after > i64::MAX as u64
@@ -2293,35 +2630,248 @@ impl Database {
             return Ok(false);
         }
         let conn = self.conn.lock().unwrap();
-        let inserted = conn.execute(
-            "INSERT OR IGNORE INTO settlement_payments
-                (payment_id, kind, user_channel_id, backing_sats_before,
-                 backing_sats_after, native_sats_before, expected_usd,
-                 last_stability_payment_before)
-             VALUES (?1, 'stability', ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                payment_id,
-                user_channel_id,
-                backing_sats_before as i64,
-                backing_sats_after as i64,
-                native_sats_before as i64,
-                expected_usd,
-                last_stability_payment_before,
-            ],
-        )?;
-        Ok(inserted == 1)
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mut mirror = None;
+        let result = (|| {
+            let before: Option<(String, f64, i64, i64)> = conn
+                .query_row(
+                    "SELECT channel_id, expected_usd, stable_sats, native_sats
+                     FROM channels WHERE user_channel_id = ?1",
+                    params![user_channel_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let inserted = conn.execute(
+                "INSERT OR IGNORE INTO settlement_payments
+                    (payment_id, kind, user_channel_id, backing_sats_before,
+                     backing_sats_after, native_sats_before, expected_usd,
+                     last_stability_payment_before)
+                 VALUES (?1, 'stability', ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    payment_id,
+                    user_channel_id,
+                    backing_sats_before as i64,
+                    backing_sats_after as i64,
+                    native_sats_before as i64,
+                    expected_usd,
+                    last_stability_payment_before,
+                ],
+            )?;
+            if inserted != 1 {
+                return Ok(false);
+            }
+
+            let updated = conn.execute(
+                "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+                                     native_sats = ?4, note = ?5, closed_at = NULL,
+                                     updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?6",
+                params![
+                    channel_id,
+                    expected_usd,
+                    backing_sats_after as i64,
+                    native_sats_before as i64,
+                    note,
+                    user_channel_id,
+                ],
+            )?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO channels
+                        (channel_id, user_channel_id, expected_usd, stable_sats, native_sats, note)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                        user_channel_id = ?2, expected_usd = ?3, stable_sats = ?4,
+                        native_sats = ?5, note = ?6, closed_at = NULL,
+                        updated_at = strftime('%s', 'now')",
+                    params![
+                        channel_id,
+                        user_channel_id,
+                        expected_usd,
+                        backing_sats_after as i64,
+                        native_sats_before as i64,
+                        note,
+                    ],
+                )?;
+            }
+
+            let before_snapshot = before
+                .as_ref()
+                .map(|(_, expected, backing, native)| AccountingSnapshot {
+                    expected_usd: Some(*expected),
+                    backing_sats: u64::try_from(*backing).ok(),
+                    native_sats: u64::try_from(*native).ok(),
+                    live_receiver_sats: u64::try_from(backing.saturating_add(*native)).ok(),
+                    amount_msat: Some(amount_msat),
+                    ..Default::default()
+                })
+                .unwrap_or_else(|| AccountingSnapshot {
+                    expected_usd: Some(expected_usd),
+                    backing_sats: Some(backing_sats_before),
+                    native_sats: Some(native_sats_before),
+                    live_receiver_sats: Some(backing_sats_before.saturating_add(native_sats_before)),
+                    amount_msat: Some(amount_msat),
+                    ..Default::default()
+                });
+            let after_snapshot = AccountingSnapshot {
+                expected_usd: Some(expected_usd),
+                backing_sats: Some(backing_sats_after),
+                native_sats: Some(native_sats_before),
+                live_receiver_sats: Some(backing_sats_after.saturating_add(native_sats_before)),
+                amount_msat: Some(amount_msat),
+                ..Default::default()
+            };
+            let draft = LedgerEventDraft {
+                event_type: "STABILITY_PAYMENT_SENT".to_owned(),
+                category: "stability".to_owned(),
+                severity: "info".to_owned(),
+                status: "pending".to_owned(),
+                source: "lsp".to_owned(),
+                completeness: LedgerCompleteness::Observed,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+                dedup_key: Some(format!("lsp:stability-payment-sent:{payment_id}")),
+                before: Some(before_snapshot),
+                after: Some(after_snapshot),
+                detail: serde_json::json!({
+                    "payment_id": payment_id,
+                    "channel_id": channel_id,
+                    "user_channel_id": user_channel_id,
+                    "counterparty_node_id": counterparty,
+                    "direction": direction,
+                    "amount_msat": amount_msat,
+                    "expected_usd": expected_usd,
+                    "before_backing_sats": backing_sats_before,
+                    "after_backing_sats": backing_sats_after,
+                    "native_sats": native_sats_before,
+                    "status": "pending",
+                }),
+                refs: vec![
+                    LedgerRef::new("payment_id", payment_id),
+                    LedgerRef::new("channel_id", channel_id),
+                    LedgerRef::new("user_channel_id", user_channel_id),
+                    LedgerRef::new("node_id", counterparty),
+                ],
+            };
+            let outcome = ledger::append_on_connection(&conn, &draft)?;
+            if outcome.inserted {
+                mirror = Some((draft, outcome.event_id));
+            }
+            Ok(true)
+        })();
+        let committed = finish_transaction(&conn, result);
+        if committed.is_ok() {
+            if let Some((draft, event_id)) = mirror {
+                crate::audit::mirror_committed_ledger_event(&draft, event_id);
+            }
+        }
+        committed
     }
 
-    /// Mark a settlement successful so a duplicate/conflicting failure event can never roll it
-    /// back. Returns true when this call consumed the pending outcome.
-    pub fn mark_settlement_succeeded(&self, payment_id: &str) -> SqliteResult<bool> {
-        let conn = self.conn.lock().unwrap();
-        let updated = conn.execute(
+    /// Mark a settlement successful and append its terminal ledger event in the same transaction.
+    /// Returns true when this call consumed the pending outcome.
+    pub fn mark_settlement_succeeded(
+        &self,
+        payment_id: &str,
+        amount_msat: Option<u64>,
+        fee_paid_msat: Option<u64>,
+        direction: Option<&str>,
+    ) -> SqliteResult<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, Option<String>, String)> = tx
+            .query_row(
+                "SELECT kind, user_channel_id, outcome FROM settlement_payments
+                 WHERE payment_id = ?1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((kind, user_channel_id, outcome)) = row else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if outcome != "pending" {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let updated = tx.execute(
             "UPDATE settlement_payments SET outcome = 'succeeded'
              WHERE payment_id = ?1 AND outcome = 'pending'",
             params![payment_id],
         )?;
-        Ok(updated == 1)
+        if updated != 1 {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        let channel: Option<(String, f64, i64, i64)> = match user_channel_id.as_deref() {
+            Some(user_channel_id) => tx
+                .query_row(
+                    "SELECT channel_id, expected_usd, stable_sats, native_sats
+                     FROM channels WHERE user_channel_id = ?1",
+                    params![user_channel_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?,
+            None => None,
+        };
+        let after = channel.as_ref().map(|(_, expected_usd, backing, native)| {
+            AccountingSnapshot {
+                expected_usd: Some(*expected_usd),
+                backing_sats: u64::try_from(*backing).ok(),
+                native_sats: u64::try_from(*native).ok(),
+                live_receiver_sats: u64::try_from(backing.saturating_add(*native)).ok(),
+                amount_msat,
+                fee_msat: fee_paid_msat,
+                ..Default::default()
+            }
+        });
+        let mut refs = vec![LedgerRef::new("payment_id", payment_id)];
+        if let Some(user_channel_id) = user_channel_id.as_deref() {
+            refs.push(LedgerRef::new("user_channel_id", user_channel_id));
+        }
+        if let Some((channel_id, ..)) = channel.as_ref() {
+            refs.push(LedgerRef::new("channel_id", channel_id));
+        }
+        let event_type = if kind == "stability" {
+            "STABILITY_PAYMENT_SETTLED"
+        } else {
+            "PAYMENT_SETTLED"
+        };
+        let category = if kind == "stability" {
+            "stability"
+        } else {
+            "payment"
+        };
+        let draft = LedgerEventDraft {
+            event_type: event_type.to_owned(),
+            category: category.to_owned(),
+            severity: "info".to_owned(),
+            status: "completed".to_owned(),
+            source: "lsp".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!("lsp:{}:{payment_id}", event_type.to_ascii_lowercase())),
+            before: None,
+            after,
+            detail: serde_json::json!({
+                "payment_id": payment_id,
+                "user_channel_id": user_channel_id,
+                "channel_id": channel.as_ref().map(|row| row.0.as_str()),
+                "settlement_kind": kind,
+                "amount_msat": amount_msat,
+                "fee_paid_msat": fee_paid_msat,
+                "direction": direction,
+                "status": "completed",
+            }),
+            refs,
+        };
+        let ledger_outcome = ledger::append_on_connection(&tx, &draft)?;
+        tx.commit()?;
+        if ledger_outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
+        }
+        Ok(true)
     }
 
     /// Consume a failed outbound stability settlement and conditionally restore its allocation.
@@ -2367,6 +2917,15 @@ impl Database {
             return Ok(None);
         }
 
+        let channel_before: Option<(String, f64, i64, i64)> = tx
+            .query_row(
+                "SELECT channel_id, expected_usd, stable_sats, native_sats
+                 FROM channels WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
         let consumed = tx.execute(
             "UPDATE settlement_payments SET outcome = 'failed'
              WHERE payment_id = ?1 AND outcome = 'pending'",
@@ -2383,7 +2942,61 @@ impl Database {
                    AND native_sats = ?2 AND expected_usd = ?5",
             params![before, native_before, user_channel_id, after, expected_usd],
         )? == 1;
+        let channel_after: Option<(String, f64, i64, i64)> = tx
+            .query_row(
+                "SELECT channel_id, expected_usd, stable_sats, native_sats
+                 FROM channels WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let snapshot = |row: &(String, f64, i64, i64)| AccountingSnapshot {
+            expected_usd: Some(row.1),
+            backing_sats: u64::try_from(row.2).ok(),
+            native_sats: u64::try_from(row.3).ok(),
+            live_receiver_sats: u64::try_from(row.2.saturating_add(row.3)).ok(),
+            ..Default::default()
+        };
+        let event_type = if applied {
+            "STABILITY_PAYMENT_ROLLED_BACK"
+        } else {
+            "STABILITY_PAYMENT_ROLLBACK_SKIPPED"
+        };
+        let mut refs = vec![
+            LedgerRef::new("payment_id", payment_id),
+            LedgerRef::new("user_channel_id", &user_channel_id),
+        ];
+        if let Some((channel_id, ..)) = channel_after.as_ref().or(channel_before.as_ref()) {
+            refs.push(LedgerRef::new("channel_id", channel_id));
+        }
+        let draft = LedgerEventDraft {
+            event_type: event_type.to_owned(),
+            category: "stability".to_owned(),
+            severity: "error".to_owned(),
+            status: "failed".to_owned(),
+            source: "lsp".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!("lsp:stability-payment-failure:{payment_id}")),
+            before: channel_before.as_ref().map(snapshot),
+            after: channel_after.as_ref().map(snapshot),
+            detail: serde_json::json!({
+                "payment_id": payment_id,
+                "user_channel_id": user_channel_id,
+                "backing_sats_before": before,
+                "backing_sats_after": after,
+                "restored_native_sats": native_before,
+                "expected_usd": expected_usd,
+                "database_restored": applied,
+                "status": "failed",
+            }),
+            refs,
+        };
+        let ledger_outcome = ledger::append_on_connection(&tx, &draft)?;
         tx.commit()?;
+        if ledger_outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
+        }
 
         Ok(Some(StabilityRollback {
             user_channel_id,
@@ -2396,14 +3009,49 @@ impl Database {
         }))
     }
 
-    /// Record a forward's fingerprint. Returns true if newly inserted (not seen before).
-    pub fn record_forwarded_seen(&self, fingerprint: &str) -> SqliteResult<bool> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute(
+    /// Record a forward and its ledger row in one transaction. The fingerprint marker cannot
+    /// survive without the event, so a transient ledger failure remains retryable on reconnect.
+    pub fn append_forwarded_event_if_unseen(
+        &self,
+        fingerprint: &str,
+        draft: &LedgerEventDraft,
+    ) -> SqliteResult<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let inserted = tx.execute(
             "INSERT OR IGNORE INTO forwarded_seen (fingerprint) VALUES (?1)",
             params![fingerprint],
         )?;
-        Ok(n == 1)
+        if inserted == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let outcome = ledger::append_on_connection(&tx, draft)?;
+        tx.commit()?;
+        if outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(draft, outcome.event_id);
+        }
+        Ok(outcome.inserted)
+    }
+
+    pub fn settlement_exists(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settlement_payments WHERE payment_id = ?1)",
+            params![payment_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Pending protocol payments whose terminal LDK outcome still needs to be persisted.
+    pub fn list_pending_settlements(&self) -> SqliteResult<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id, kind FROM settlement_payments
+             WHERE outcome = 'pending' ORDER BY recorded_at ASC, payment_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
     }
 
     /// Return the stored `user_channel_id` for a payment_id, or None if absent/NULL/not found.
@@ -2531,6 +3179,9 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list.contains(&("pay_a".to_string(), "stability".to_string())));
         assert!(list.contains(&("pay_b".to_string(), "sync".to_string())));
+        assert!(db.settlement_exists("pay_a").unwrap());
+        assert!(!db.settlement_exists("missing").unwrap());
+        assert_eq!(db.list_pending_settlements().unwrap().len(), 2);
     }
 
     #[test]
@@ -2553,7 +3204,8 @@ mod tests {
             .unwrap();
         assert!(db
             .record_stability_settlement_with_rollback(
-                "payment", "user-channel", 50_000, 62_500, 50_000, 50.0, 17,
+                "payment", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 17,
+                12_500_000, "lsp_to_user", "counterparty", None,
             )
             .unwrap());
         db.save_channel("channel", "user-channel", 50.0, 62_500, 50_000, None)
@@ -2582,7 +3234,8 @@ mod tests {
         db.save_channel("channel", "user-channel", 50.0, 50_000, 50_000, None)
             .unwrap();
         db.record_stability_settlement_with_rollback(
-            "payment", "user-channel", 50_000, 62_500, 50_000, 50.0, 0,
+            "payment", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 0,
+            12_500_000, "lsp_to_user", "counterparty", None,
         )
         .unwrap();
         db.save_channel("channel", "user-channel", 55.0, 70_000, 30_000, None)
@@ -2604,10 +3257,18 @@ mod tests {
         db.save_channel("channel", "user-channel", 50.0, 62_500, 50_000, None)
             .unwrap();
         db.record_stability_settlement_with_rollback(
-            "payment", "user-channel", 50_000, 62_500, 50_000, 50.0, 0,
+            "payment", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 0,
+            12_500_000, "lsp_to_user", "counterparty", None,
         )
         .unwrap();
-        assert!(db.mark_settlement_succeeded("payment").unwrap());
+        assert!(db
+            .mark_settlement_succeeded(
+                "payment",
+                Some(12_500_000),
+                Some(1_000),
+                Some("outbound"),
+            )
+            .unwrap());
         assert!(db
             .rollback_failed_stability_settlement("payment")
             .unwrap()
@@ -2619,6 +3280,19 @@ mod tests {
                 .backing_sats,
             62_500
         );
+        let terminal = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some("user-channel".to_owned()),
+                status: Some("completed".to_owned()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|event| event.event_type == "STABILITY_PAYMENT_SETTLED")
+            .unwrap();
+        assert_eq!(terminal.detail["payment_id"], "payment");
     }
 
     #[test]
@@ -2717,8 +3391,49 @@ mod tests {
         let fp = forward_fingerprint("aa", "bb", Some(1000), Some(7));
         assert_eq!(fp, forward_fingerprint("aa", "bb", Some(1000), Some(7)));
         assert_ne!(fp, forward_fingerprint("aa", "bb", Some(1001), Some(7)));
-        assert!(db.record_forwarded_seen(&fp).unwrap());   // first insert -> true
-        assert!(!db.record_forwarded_seen(&fp).unwrap());  // repeat -> false
+        let draft = LedgerEventDraft::from_audit_event(
+            "PAYMENT_FORWARDED",
+            serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb"}),
+        );
+        assert!(db.append_forwarded_event_if_unseen(&fp, &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen(&fp, &draft).unwrap());
+    }
+
+    #[test]
+    fn forwarded_marker_rolls_back_when_ledger_append_fails() {
+        let db = Database::open_in_memory().unwrap();
+        let fingerprint = forward_fingerprint("aa", "bb", Some(1_000), Some(7));
+        let draft = LedgerEventDraft::from_audit_event(
+            "PAYMENT_FORWARDED_BACKFILL",
+            serde_json::json!({
+                "prev_channel_id": "aa",
+                "next_channel_id": "bb",
+                "outbound_amount_msat": 1_000,
+                "total_fee_msat": 7,
+            }),
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER inject_forward_ledger_failure
+                 BEFORE INSERT ON ledger_event_refs
+                 BEGIN SELECT RAISE(ABORT, 'injected forward ledger failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db
+            .append_forwarded_event_if_unseen(&fingerprint, &draft)
+            .is_err());
+        let conn = db.conn.lock().unwrap();
+        let marker_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM forwarded_seen", [], |row| row.get(0))
+            .unwrap();
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(marker_count, 0);
+        assert_eq!(event_count, 0);
     }
 
     #[test]
@@ -3572,13 +4287,53 @@ mod tests {
         assert!(newest.events.windows(2).all(|pair| pair[0].id < pair[1].id));
         let older = db
             .list_ledger_events(&LedgerQuery {
-                before_id: newest.next_cursor,
+                before: newest.next_cursor,
                 limit: 3,
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(older.events.len(), 3);
         assert!(older.events.last().unwrap().id < newest.events.first().unwrap().id);
+    }
+
+    #[test]
+    fn ledger_pagination_follows_timeline_not_insertion_order() {
+        let db = Database::open_in_memory().unwrap();
+        for occurred_at_ms in [100, 400, 200, 300] {
+            let mut draft = LedgerEventDraft::from_audit_event(
+                "OPERATOR_NOTE_EDITED",
+                serde_json::json!({"correlation_id": format!("at-{occurred_at_ms}")}),
+            );
+            draft.occurred_at_ms = occurred_at_ms;
+            db.append_ledger_event(&draft).unwrap();
+        }
+
+        let newest = db
+            .list_ledger_events(&LedgerQuery { limit: 2, ..Default::default() })
+            .unwrap();
+        assert_eq!(
+            newest
+                .events
+                .iter()
+                .map(|event| event.occurred_at_ms)
+                .collect::<Vec<_>>(),
+            vec![300, 400]
+        );
+        let older = db
+            .list_ledger_events(&LedgerQuery {
+                before: newest.next_cursor,
+                limit: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            older
+                .events
+                .iter()
+                .map(|event| event.occurred_at_ms)
+                .collect::<Vec<_>>(),
+            vec![100, 200]
+        );
     }
 
     #[test]
@@ -3738,6 +4493,314 @@ mod tests {
             .unwrap()
             .events
             .len(), 1);
+    }
+
+    #[test]
+    fn legacy_jsonl_import_skips_invalid_utf8_without_failing() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit_log.txt");
+        let mut raw = br#"{"event":"CHANNEL_READY","data":{"user_channel_id":"42"}}
+"#
+        .to_vec();
+        raw.extend_from_slice(b"\xff\xfe\n");
+        std::fs::write(&path, raw).unwrap();
+
+        let report = db.import_legacy_audit_log(&path).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(report.skipped, 1);
+    }
+
+    #[test]
+    fn stability_payment_ledger_failure_rolls_back_payment_and_accounting() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER inject_stability_ledger_failure
+                 BEFORE INSERT ON ledger_events
+                 BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;",
+            )
+            .unwrap();
+        }
+
+        assert!(db
+            .record_pending_stability_payment(
+                "payment", 1_000_000, Some(1.0), 100_000.0, "counterparty", "physical",
+                "stable", 10.0, 10_000, 9_000, 5_000, None,
+            )
+            .is_err());
+        assert!(!db.payment_exists("payment").unwrap());
+        assert_eq!(db.load_channel("stable").unwrap().unwrap().backing_sats, 10_000);
+    }
+
+    #[test]
+    fn failed_settlement_ledger_failure_rolls_back_the_rollback() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        db.record_stability_settlement_with_rollback(
+            "payment", "stable", "physical", 10_000, 9_000, 5_000, 10.0, 0,
+            1_000_000, "lsp_to_user", "counterparty", None,
+        )
+        .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER inject_rollback_ledger_failure
+                 BEFORE INSERT ON ledger_events
+                 BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;",
+            )
+            .unwrap();
+        }
+
+        assert!(db.rollback_failed_stability_settlement("payment").is_err());
+        assert_eq!(db.load_channel("stable").unwrap().unwrap().backing_sats, 9_000);
+        let outcome: String = db.conn.lock().unwrap().query_row(
+            "SELECT outcome FROM settlement_payments WHERE payment_id = 'payment'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(outcome, "pending");
+    }
+
+    #[test]
+    fn generic_ledger_append_rolls_back_event_when_reference_insert_fails() {
+        let db = Database::open_in_memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER inject_reference_failure
+                 BEFORE INSERT ON ledger_event_refs
+                 BEGIN SELECT RAISE(ABORT, 'injected reference failure'); END;",
+            )
+            .unwrap();
+        let draft = LedgerEventDraft::from_audit_event(
+            "PAYMENT_SUCCESSFUL",
+            serde_json::json!({"payment_id": "atomic-payment"}),
+        );
+
+        assert!(db.append_ledger_event(&draft).is_err());
+        let event_count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(event_count, 0);
+    }
+
+    #[test]
+    fn reconstructed_snapshots_suppress_only_consecutive_duplicates() {
+        let db = Database::open_in_memory().unwrap();
+        let snapshot = |state: &str| {
+            LedgerEventDraft::from_audit_event(
+                "PEER_RECONSTRUCTED",
+                serde_json::json!({"node_id": "peer", "state": state}),
+            )
+        };
+
+        assert!(db
+            .append_reconstructed_event_if_changed("peer", "peer", "A", &snapshot("A"))
+            .unwrap());
+        assert!(!db
+            .append_reconstructed_event_if_changed("peer", "peer", "A", &snapshot("A"))
+            .unwrap());
+        assert!(db
+            .append_reconstructed_event_if_changed("peer", "peer", "B", &snapshot("B"))
+            .unwrap());
+        assert!(db
+            .append_reconstructed_event_if_changed("peer", "peer", "A", &snapshot("A"))
+            .unwrap());
+
+        let event_count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE event_type = 'PEER_RECONSTRUCTED'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 3);
+    }
+
+    #[test]
+    fn unchanged_channel_saves_do_not_append_accounting_events() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE channels SET updated_at = 42 WHERE user_channel_id = 'stable'",
+                [],
+            )
+            .unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        assert!(db
+            .save_channel_preserving_backing("physical", "stable", 10.0, 5_000, None)
+            .unwrap());
+        let unchanged_updated_at: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT updated_at FROM channels WHERE user_channel_id = 'stable'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unchanged_updated_at, 42);
+        db.save_channel("physical", "stable", 11.0, 11_000, 4_000, None)
+            .unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+
+        let event_count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM ledger_events
+                 WHERE event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_count, 3);
+    }
+
+    #[test]
+    fn desktop_stability_success_is_terminal_and_atomic() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "payment",
+            1_000_000,
+            Some(1.0),
+            100_000.0,
+            "counterparty",
+            "physical",
+            "stable",
+            10.0,
+            10_000,
+            9_000,
+            5_000,
+            None,
+        )
+        .unwrap();
+        assert!(db
+            .complete_pending_stability_payment("payment", "hash", Some(25))
+            .unwrap());
+
+        let payment_status: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM payments WHERE payment_id = 'payment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payment_status, "completed");
+        let terminal = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some("stable".to_owned()),
+                status: Some("completed".to_owned()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|event| event.event_type == "STABILITY_PAYMENT_SETTLED")
+            .unwrap();
+        assert_eq!(terminal.detail["payment_id"], "payment");
+    }
+
+    #[test]
+    fn terminal_ledger_failure_leaves_settlements_pending() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "desktop-payment",
+            1_000_000,
+            Some(1.0),
+            100_000.0,
+            "counterparty",
+            "physical",
+            "stable",
+            10.0,
+            10_000,
+            9_000,
+            5_000,
+            None,
+        )
+        .unwrap();
+        db.record_stability_settlement_with_rollback(
+            "lsp-payment",
+            "stable",
+            "physical",
+            9_000,
+            8_000,
+            5_000,
+            10.0,
+            0,
+            1_000_000,
+            "outbound",
+            "counterparty",
+            None,
+        )
+        .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER inject_terminal_ledger_failure
+                 BEFORE INSERT ON ledger_events
+                 WHEN NEW.event_type IN ('PAYMENT_SETTLED', 'STABILITY_PAYMENT_SETTLED')
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db
+            .complete_pending_stability_payment("desktop-payment", "hash", None)
+            .is_err());
+        assert!(db
+            .mark_settlement_succeeded("lsp-payment", Some(1_000_000), None, Some("outbound"))
+            .is_err());
+        let desktop_status: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM payments WHERE payment_id = 'desktop-payment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let lsp_outcome: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT outcome FROM settlement_payments WHERE payment_id = 'lsp-payment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(desktop_status, "pending");
+        assert_eq!(lsp_outcome, "pending");
     }
 
     #[test]

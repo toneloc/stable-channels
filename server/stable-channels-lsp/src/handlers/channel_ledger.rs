@@ -8,7 +8,9 @@ use sc_protos::stable::{
     AccountingSnapshot as ProtoSnapshot, ChannelLedgerEvent, ChannelLedgerOverview,
     LedgerRef as ProtoRef, ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse,
 };
-use stable_channels::ledger::{AccountingSnapshot, LedgerEvent, LedgerOverview, LedgerQuery};
+use stable_channels::ledger::{
+    AccountingSnapshot, LedgerCursor, LedgerEvent, LedgerOverview, LedgerQuery,
+};
 
 use crate::handlers::{decode_body, error_response, ok_response};
 use crate::state::AppState;
@@ -18,11 +20,17 @@ pub async fn list_channel_ledger_events(State(state): State<AppState>, body: Byt
         Ok(req) => req,
         Err(response) => return response,
     };
-    let before_id = if req.cursor.trim().is_empty() {
+    let Some(identifier) = nonempty(req.identifier) else {
+        return error_response(
+            ErrorCode::InvalidRequestError,
+            "An exact ledger identifier is required",
+        );
+    };
+    let before = if req.cursor.trim().is_empty() {
         None
     } else {
-        match req.cursor.parse::<i64>() {
-            Ok(value) if value > 0 => Some(value),
+        match parse_cursor(&req.cursor) {
+            Some(cursor) => Some(cursor),
             _ => return error_response(ErrorCode::InvalidRequestError, "Invalid ledger cursor"),
         }
     };
@@ -32,17 +40,17 @@ pub async fn list_channel_ledger_events(State(state): State<AppState>, body: Byt
         return error_response(ErrorCode::InvalidRequestError, "Invalid completeness filter");
     }
     let query = LedgerQuery {
-        identifier: nonempty(req.identifier),
+        identifier: Some(identifier),
         category: nonempty(req.category),
         status: nonempty(req.status),
         completeness: nonempty(req.completeness),
-        before_id,
+        before,
         limit: req.page_size as usize,
     };
     match state.db.list_ledger_events(&query) {
         Ok(page) => ok_response(ListChannelLedgerEventsResponse {
             events: page.events.into_iter().map(to_proto_event).collect(),
-            next_cursor: page.next_cursor.map(|cursor| cursor.to_string()),
+            next_cursor: page.next_cursor.map(format_cursor),
             overview: Some(to_proto_overview(page.overview)),
         }),
         Err(error) => error_response(
@@ -50,6 +58,17 @@ pub async fn list_channel_ledger_events(State(state): State<AppState>, body: Byt
             format!("Failed to query channel ledger: {error}"),
         ),
     }
+}
+
+fn parse_cursor(raw: &str) -> Option<LedgerCursor> {
+    let (occurred_at_ms, id) = raw.trim().split_once(':')?;
+    let occurred_at_ms = occurred_at_ms.parse::<i64>().ok()?;
+    let id = id.parse::<i64>().ok()?;
+    (occurred_at_ms != 0 && id > 0).then_some(LedgerCursor { occurred_at_ms, id })
+}
+
+fn format_cursor(cursor: LedgerCursor) -> String {
+    format!("{}:{}", cursor.occurred_at_ms, cursor.id)
 }
 
 fn to_proto_overview(overview: LedgerOverview) -> ChannelLedgerOverview {
@@ -106,5 +125,28 @@ fn to_proto_snapshot(snapshot: AccountingSnapshot) -> ProtoSnapshot {
         amount_usd: snapshot.amount_usd,
         fee_sats: snapshot.fee_sats,
         fee_msat: snapshot.fee_msat,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_cursor_round_trips_and_rejects_legacy_ids() {
+        let cursor = LedgerCursor { occurred_at_ms: 1_234, id: 56 };
+        assert_eq!(parse_cursor(&format_cursor(cursor)), Some(cursor));
+        assert_eq!(parse_cursor("56"), None);
+        assert_eq!(parse_cursor("0:56"), None);
+        assert_eq!(parse_cursor("1234:0"), None);
+    }
+
+    #[test]
+    fn exact_identifier_must_not_be_empty() {
+        assert_eq!(nonempty("  ".to_owned()), None);
+        assert_eq!(
+            nonempty("channel-1".to_owned()).as_deref(),
+            Some("channel-1")
+        );
     }
 }

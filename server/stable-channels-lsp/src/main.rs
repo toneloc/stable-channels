@@ -40,7 +40,7 @@ use ldk_server_client::ldk_server_grpc::endpoints::{
 use stable_channels::audit::{set_audit_ledger, set_audit_log_path};
 use stable_channels::db::Database;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
@@ -102,13 +102,16 @@ async fn main() -> Result<()> {
     }
 
     let db = Database::open(&data_dir).map_err(|e| anyhow::anyhow!("DB open failed: {}", e))?;
-    let import = db
-        .import_legacy_audit_log(&cfg.audit_log_path())
-        .map_err(|e| anyhow::anyhow!("legacy audit import failed: {}", e))?;
-    info!(
-        "channel ledger legacy import: imported={}, skipped={}, already_imported={}",
-        import.imported, import.skipped, import.already_imported
-    );
+    match db.import_legacy_audit_log(&cfg.audit_log_path()) {
+        Ok(import) => info!(
+            "channel ledger legacy import: imported={}, skipped={}, already_imported={}",
+            import.imported, import.skipped, import.already_imported
+        ),
+        Err(error) => warn!(
+            "channel ledger legacy import skipped after error; continuing with SQLite ledger: {}",
+            error
+        ),
+    }
     set_audit_ledger(db.clone());
     let channel_count = db
         .load_all_channels()
