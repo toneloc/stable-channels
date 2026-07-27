@@ -170,12 +170,21 @@ class DatabaseService {
                 resolved_at INTEGER
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS block_headers (
+                height INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)"
+            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)",
+            "CREATE INDEX IF NOT EXISTS idx_block_headers_hash ON block_headers(hash)"
         ]
 
         for sql in statements {
@@ -206,5 +215,66 @@ class DatabaseService {
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
+    }
+}
+// MARK: - Block Headers (SPV)
+
+extension DatabaseService {
+    func insertHeader(height: UInt32, hash: String, prevHash: String, timestamp: UInt32) throws {
+        let sql = """
+        INSERT OR REPLACE INTO block_headers (height, hash, prev_hash, timestamp)
+        VALUES (?, ?, ?, ?);
+        """
+        try rawSQL.execute(sql, params: [
+            .integer(Int64(height)),
+            .text(hash),
+            .text(prevHash),
+            .integer(Int64(timestamp))
+        ])
+    }
+
+    func fetchLatestHeader() throws -> BlockHeaderRecord? {
+        let sql = "SELECT height, hash, prev_hash, timestamp FROM block_headers ORDER BY height DESC LIMIT 1;"
+        let rows = try rawSQL.query(sql)
+        guard let row = rows.first,
+              let rawHeight = row[0] as? Int64,
+              let hash = row[1] as? String,
+              let prevHash = row[2] as? String,
+              let rawTimestamp = row[3] as? Int64,
+              let height = UInt32(exactly: rawHeight),
+              let timestamp = UInt32(exactly: rawTimestamp) else {
+            return nil
+        }
+        return BlockHeaderRecord(
+            height: height,
+            hash: hash,
+            prevHash: prevHash,
+            timestamp: timestamp
+        )
+    }
+
+    func findCommonAncestorHeight(prevHash: String) throws -> UInt32? {
+        let sql = "SELECT height FROM block_headers WHERE hash = ? LIMIT 1;"
+        let rows = try rawSQL.query(sql, params: [.text(prevHash)])
+        guard let row = rows.first,
+              let rawHeight = row[0] as? Int64,
+              let height = UInt32(exactly: rawHeight) else {
+            return nil
+        }
+        return height
+    }
+
+    func rollbackHeadersAbove(height: UInt32) throws {
+        let sql = "DELETE FROM block_headers WHERE height > ?;"
+        try rawSQL.execute(sql, params: [.integer(Int64(height))])
+    }
+
+    func rollbackPaymentsConfirmedAfter(height: UInt32) throws {
+        let sql = """
+        UPDATE payments
+        SET status = 'pending', confirmations = 0
+        WHERE confirmations > 0 AND created_at > ?;
+        """
+        try rawSQL.execute(sql, params: [.integer(Int64(height))])
     }
 }
