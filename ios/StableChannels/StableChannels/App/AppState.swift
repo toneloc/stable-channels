@@ -72,6 +72,7 @@ class AppState {
         provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
     )
     var confirmationPollingService: ConfirmationPollingService?
+    var spvHeaderChainService: SPVHeaderChainService?
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
@@ -222,9 +223,24 @@ class AppState {
                 await pollingService?.pollOnce()
             }
         }
-        mempoolWebSocketService.onBlockHeader = { [weak self] _ in
-            Task { @MainActor in
-                await self?.blockHeightService.refresh()
+        if let db = databaseService, let polling = pollingService {
+            let spvService = SPVHeaderChainService(
+                databaseService: db,
+                blockHeightService: blockHeightService,
+                confirmationPollingService: polling
+            )
+            spvHeaderChainService = spvService
+
+            mempoolWebSocketService.onBlockHeader = { [weak spvService] block in
+                Task { @MainActor in
+                    await spvService?.processBlockHeader(block)
+                }
+            }
+        } else {
+            mempoolWebSocketService.onBlockHeader = { [weak self] _ in
+                Task { @MainActor in
+                    await self?.blockHeightService.refresh()
+                }
             }
         }
         mempoolWebSocketService.onTransactionDetected = { [weak self] event in

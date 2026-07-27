@@ -12,7 +12,7 @@ protocol MempoolWebSocketProtocol: AnyObject {
     var onTransactionDetected: ((WebSocketEvent) -> Void)? {
         get set
     }
-    var onBlockHeader: ((_ height: UInt32) -> Void)? { get set }
+    var onBlockHeader: ((MempoolWSBlock) -> Void)? { get set }
     func connect()
     func disconnect()
     func trackAddress(_ address: String)
