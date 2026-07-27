@@ -218,11 +218,6 @@ class AppState {
         pollingService?.onUpdate = { [weak self] in
             self?.confirmationUpdateEpoch += 1
         }
-        blockHeightService.onHeightUpdated = { [weak pollingService] _ in
-            Task { @MainActor in
-                await pollingService?.pollOnce()
-            }
-        }
         if let db = databaseService, let polling = pollingService {
             let spvService = SPVHeaderChainService(
                 databaseService: db,
@@ -231,12 +226,28 @@ class AppState {
             )
             spvHeaderChainService = spvService
 
+            // SPV path: advanceHeight() inside SPVHeaderChainService calls updateHeight(),
+            // which fires onHeightUpdated → pollOnce(). Wire onHeightUpdated here so the
+            // polling hook still runs for any height update that comes from HTTP polling
+            // (BlockHeightService.refresh) rather than from the WebSocket block header.
+            blockHeightService.onHeightUpdated = { [weak polling] _ in
+                Task { @MainActor in
+                    await polling?.pollOnce()
+                }
+            }
+
             mempoolWebSocketService.onBlockHeader = { [weak spvService] block in
                 Task { @MainActor in
                     await spvService?.processBlockHeader(block)
                 }
             }
         } else {
+            // Fallback when DB is unavailable: still advance height and poll via HTTP.
+            blockHeightService.onHeightUpdated = { [weak pollingService] _ in
+                Task { @MainActor in
+                    await pollingService?.pollOnce()
+                }
+            }
             mempoolWebSocketService.onBlockHeader = { [weak self] _ in
                 Task { @MainActor in
                     await self?.blockHeightService.refresh()

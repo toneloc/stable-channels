@@ -220,6 +220,11 @@ class DatabaseService {
 // MARK: - Block Headers (SPV)
 
 extension DatabaseService {
+    /// Maximum number of block headers to retain in the local chain.
+    /// 2016 = one Bitcoin difficulty epoch (~2 weeks): wide enough to cover any realistic
+    /// reorg depth while keeping the table under ~160 KB on disk.
+    static let headerRetentionDepth: UInt32 = 2016
+
     func insertHeader(height: UInt32, hash: String, prevHash: String, timestamp: UInt32) throws {
         let sql = """
         INSERT OR REPLACE INTO block_headers (height, hash, prev_hash, timestamp)
@@ -231,6 +236,13 @@ extension DatabaseService {
             .text(prevHash),
             .integer(Int64(timestamp))
         ])
+    }
+
+    /// Returns true if we already have a header for this height+hash (idempotent guard).
+    func headerExists(height: UInt32, hash: String) throws -> Bool {
+        let sql = "SELECT 1 FROM block_headers WHERE height = ? AND hash = ? LIMIT 1;"
+        let rows = try query(sql, params: [.integer(Int64(height)), .text(hash)])
+        return !rows.isEmpty
     }
 
     func fetchLatestHeader() throws -> BlockHeaderRecord? {
@@ -276,5 +288,14 @@ extension DatabaseService {
         WHERE confirmations > 0 AND created_at > ?;
         """
         try rawSQL.execute(sql, params: [.integer(Int64(height))])
+    }
+
+    /// Rolling-window prune that keeps only the most recent `headerRetentionDepth` headers.
+    /// Older entries are silently discarded — they predate any realistic reorg depth.
+    func pruneOldHeaders(currentHeight: UInt32) throws {
+        guard currentHeight >= Self.headerRetentionDepth else { return }
+        let cutoff = currentHeight - Self.headerRetentionDepth
+        let sql = "DELETE FROM block_headers WHERE height < ?;"
+        try execute(sql, params: [.integer(Int64(cutoff))])
     }
 }
