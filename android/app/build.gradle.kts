@@ -12,12 +12,12 @@ if (file("../google-services.json").exists() || file("google-services.json").exi
 
 android {
     namespace = "com.stablechannels.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.stablechannels.app"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 3
         versionName = "0.9.2"
     }
