@@ -70,11 +70,21 @@ enum Constants {
         TestOverrides.shared.syncIntervalSecs ?? 60
     }
 
+    /// Production checks splice confirmation conservatively; regtest reuses
+    /// its shorter sync cadence so mined demo transactions clear promptly.
+    static var spliceConfirmationPollIntervalSecs: UInt64 {
+        TestOverrides.shared.syncIntervalSecs ?? 30
+    }
+
     static let feeRateCacheUpdateIntervalSecs: UInt64 = 1200
 
     static let invoiceExpirySecs: UInt32 = 3600
     static let balanceUpdateIntervalSecs: UInt64 = 30
-    static let stabilityCheckIntervalSecs: UInt64 = 60
+    /// The E2E override also drives deposit detection, which shares the
+    /// stability timer. Production retains the conservative 60-second tick.
+    static var stabilityCheckIntervalSecs: UInt64 {
+        TestOverrides.shared.syncIntervalSecs ?? 60
+    }
 
     // MARK: - Business Logic
 

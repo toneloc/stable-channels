@@ -16,17 +16,17 @@ fi
 [ -n "$LSP_NODE_ID" ] || die "LSP_NODE_ID not found; run backend.sh first"
 
 MAC_DATA_DIR="$E2E_DIR/.mac-user"
-mkdir -p "$MAC_DATA_DIR"
-
 export SC_E2E=1
-export SC_PRICE_FEED_BASE="$HARNESS_API"
 export SC_MAC_NETWORK=regtest
+export SC_MAC_USER_DATA_DIR="$MAC_DATA_DIR"
+sc_reset_mac_e2e_data_dir "$MAC_DATA_DIR"
+
+export SC_PRICE_FEED_BASE="$HARNESS_API"
 export SC_MAC_CHAIN_URL=http://127.0.0.1:30000
 export SC_MAC_FALLBACK_CHAIN_URL=http://127.0.0.1:30000
 export SC_MAC_LSP_PUBKEY="$LSP_NODE_ID"
 export SC_MAC_LSP_ADDRESS=127.0.0.1:9735
 export SC_MAC_USER_PORT=19736
-export SC_MAC_USER_DATA_DIR="$MAC_DATA_DIR"
 
 info "cargo test --features e2e --lib desktop_config …"
 cargo test --features e2e --lib desktop_config -- --nocapture

@@ -24,48 +24,45 @@ S     := ./scripts
 FLOWS ?=
 LOG   := .last-run.log
 
-# Every target streams to the terminal AND to $(LOG) so you can watch it live
-# from another pane:  tail -f e2e/.last-run.log
+# Concise progress streams to the terminal and $(LOG). Verbose Docker/BuildKit
+# output is captured separately in .build.log.
 
 .PHONY: ios android mac mac-smoke mac-flows mac-ui mac-demo mac-all up rebuild down clean logs help
 
 ios: ## build + prep the iOS simulator, then run the flows
-	@set -o pipefail; { $(S)/backend.sh && $(S)/prepare-ios.sh \
-		&& $(S)/run-flows.sh ios $(FLOWS); } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh ios $(FLOWS) 2>&1 | tee $(LOG)
 
 android: ## build + prep the Android emulator, then run the flows
-	@set -o pipefail; { $(S)/backend.sh && $(S)/prepare-android.sh \
-		&& $(S)/run-flows.sh android $(FLOWS); } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh android $(FLOWS) 2>&1 | tee $(LOG)
 
 mac: mac-flows ## alias for the native desktop Mac lifecycle flows
 
 mac-smoke: ## start the backend, then run native desktop Mac smoke checks
-	@set -o pipefail; { $(S)/backend.sh && $(S)/run-mac-smoke.sh; } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh mac-smoke 2>&1 | tee $(LOG)
 
 mac-flows: ## start the backend, then run native desktop Mac lifecycle flows
-	@set -o pipefail; { $(S)/backend.sh && $(S)/run-mac-flows.sh; } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh mac-flows 2>&1 | tee $(LOG)
 
 mac-ui: ## start the backend, then open native desktop Mac UI on regtest
-	@set -o pipefail; { $(S)/backend.sh && $(S)/run-mac-ui.sh; } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh mac-ui 2>&1 | tee $(LOG)
 
 mac-demo: ## start the backend, then run visible native desktop Mac demo
-	@set -o pipefail; { $(S)/backend.sh && $(S)/run-mac-demo.sh; } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh mac-demo 2>&1 | tee $(LOG)
 
 mac-all: ## start the backend, then run Mac smoke + lifecycle flows
-	@set -o pipefail; { $(S)/backend.sh && $(S)/run-mac-smoke.sh \
-		&& $(S)/run-mac-flows.sh; } 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh mac-all 2>&1 | tee $(LOG)
 
 up: ## start the docker backend (reuse images) and bootstrap the channel
-	@$(S)/backend.sh 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh up 2>&1 | tee $(LOG)
 
 rebuild: ## force-rebuild backend images, then start (after LSP/harness source changes)
-	@REBUILD=1 $(S)/backend.sh 2>&1 | tee $(LOG)
+	@set -o pipefail; $(S)/run-target.sh rebuild 2>&1 | tee $(LOG)
 
 down: ## stop the docker backend (keeps volumes)
-	@cd harness && docker compose --profile gui down --remove-orphans
+	@$(S)/run-target.sh down
 
 clean: ## stop the backend AND wipe volumes (fresh chain/channel next time)
-	@cd harness && docker compose --profile gui down -v --remove-orphans
+	@$(S)/run-target.sh clean
 
 logs: ## follow the backend logs
 	@cd harness && docker compose --profile gui logs -f

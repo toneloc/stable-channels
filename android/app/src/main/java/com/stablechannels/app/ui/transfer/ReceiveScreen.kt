@@ -48,8 +48,15 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    val paymentReceived by appState.paymentFlash.collectAsState()
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+
+    LaunchedEffect(paymentReceived) {
+        if (paymentReceived && invoice != null) {
+            onDismiss()
+        }
+    }
 
     val enteredUSD = amountUSD.toDoubleOrNull() ?: 0.0
     val enteredSats = if (btcPrice > 0 && enteredUSD > 0) {

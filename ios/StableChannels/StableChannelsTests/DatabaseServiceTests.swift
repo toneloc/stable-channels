@@ -230,6 +230,34 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertTrue(service.claimPendingSend(amountMsat: 456_000, price: 90_000))
     }
 
+    // MARK: - Splice completion
+
+    func testCompleteSpliceStampsUnresolvedSpliceInRow() throws {
+        XCTAssertTrue(
+            try service.recordPayment(
+                paymentId: nil,
+                paymentType: "splice_in",
+                direction: "received",
+                amountMsat: 100_000_000,
+                amountUSD: 100,
+                btcPrice: 100_000,
+                counterparty: nil,
+                status: "pending"
+            )
+        )
+        XCTAssertTrue(try service.hasPendingSplice())
+
+        let txid = String(repeating: "a", count: 64)
+        XCTAssertTrue(service.completeSplice(txid: txid))
+        XCTAssertFalse(try service.hasPendingSplice())
+
+        let payment = try XCTUnwrap(service.getRecentPayments(limit: 1).first)
+        XCTAssertEqual(payment.paymentType, "splice_in")
+        XCTAssertEqual(payment.txid, txid)
+        XCTAssertEqual(payment.status, "completed")
+        XCTAssertEqual(payment.confirmations, 1)
+    }
+
     // MARK: - pending_operations
 
     func testPendingOperationsInsertFetch() {

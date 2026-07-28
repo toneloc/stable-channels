@@ -122,7 +122,7 @@ impl MacFlowHarness {
         Ok(())
     }
 
-    fn audit_tail_contains_after(&self, after: &str, events: &[&str]) -> Result<bool, String> {
+    fn audit_tail_has_lsp_stability_after(&self, after: &str) -> Result<bool, String> {
         let response = self.get("/audit-tail?n=100")?;
         let Some(lines) = response["lines"].as_array() else {
             return Ok(false);
@@ -135,13 +135,10 @@ impl MacFlowHarness {
             let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
                 continue;
             };
-            let Some(name) = event["event"].as_str() else {
-                continue;
-            };
-            let Some(ts) = event["ts"].as_str() else {
-                continue;
-            };
-            if ts > after && events.iter().any(|candidate| candidate == &name) {
+            if event["event"].as_str() == Some("STABILITY_PAYMENT_SENT")
+                && event["data"]["direction"].as_str() == Some("lsp_to_user")
+                && event["ts"].as_str().is_some_and(|ts| ts > after)
+            {
                 return Ok(true);
             }
         }
@@ -249,42 +246,27 @@ impl MacFlowRunner {
 
     fn flow_usd_stability(&mut self) -> Result<(), String> {
         let marker = chrono::Utc::now().to_rfc3339();
-        self.harness.set_price(101_000.0)?;
-        self.set_price(101_000.0)?;
+        let before_lightning = self.lightning_sats();
+        self.harness.set_price(99_500.0)?;
+        self.set_price(99_500.0)?;
 
         let payment_info = {
             let mut sc = self.app.stable_channel.lock().unwrap();
             stable::check_stability(&self.app.node, &mut sc, self.price_usd)
         };
-        let Some(payment_info) = payment_info else {
-            return Err("stability check did not send a settlement payment".to_string());
-        };
+        if payment_info.is_some() {
+            return Err("app sent a stability payment after a price drop; expected the LSP to pay"
+                .to_string());
+        }
 
-        let amount_usd = (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
-            * payment_info.btc_price;
-        let _ = self.app.db.record_payment(
-            Some(&payment_info.payment_id),
-            "stability",
-            "sent",
-            payment_info.amount_msat,
-            Some(amount_usd),
-            Some(payment_info.btc_price),
-            Some(&payment_info.counterparty),
-            "pending",
-            None,
-            None,
-        );
-        self.app.save_channel_settings();
-
-        self.wait_until("LSP observed settlement", Duration::from_secs(200), |runner| {
+        self.wait_until("LSP sent stability payment", Duration::from_secs(200), |runner| {
             runner
                 .harness
-                .audit_tail_contains_after(&marker, &["PAYMENT_RECEIVED", "MESSAGE_RECEIVED"])
+                .audit_tail_has_lsp_stability_after(&marker)
         })?;
-
-        self.harness.set_price(100_000.0)?;
-        self.set_price(100_000.0)?;
-        Ok(())
+        self.wait_until("app received stability payment", Duration::from_secs(90), |runner| {
+            Ok(runner.lightning_sats() > before_lightning)
+        })
     }
 
     fn flow_lightning_receive(&mut self) -> Result<(), String> {
@@ -468,6 +450,7 @@ impl MacFlowRunner {
             .sync_wallets()
             .map_err(|err| format!("wallet sync failed: {err}"))?;
         self.app.process_events();
+        clear_confirmed_demo_splice_in(&self.app);
         {
             let mut sc = self.app.stable_channel.lock().unwrap();
             stable::update_balances(&self.app.node, &mut sc);
@@ -605,6 +588,52 @@ fn mac_demo_pause_ms() -> u64 {
         .unwrap_or(1_800)
 }
 
+/// The normal UI housekeeping loop detects a completed splice-in every 30 seconds.
+/// Demo flows already force a wallet sync every 350–500ms, so apply that same
+/// balance-drop signal immediately instead of passively waiting for housekeeping.
+#[cfg(debug_assertions)]
+fn clear_confirmed_demo_splice_in(app: &UserApp) {
+    use std::sync::atomic::Ordering;
+
+    if !app.auto_splice_in_progress.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let previous = app.auto_splice_onchain_at_start.load(Ordering::Relaxed);
+    let current = app.node.list_balances().total_onchain_balance_sats;
+    if previous == 0 || current >= previous {
+        return;
+    }
+
+    // The background housekeeping thread may wake at the same time. Only the
+    // winner clears the marker and emits the completion audit.
+    if app
+        .auto_splice_in_progress
+        .compare_exchange(true, false, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    app.auto_splice_onchain_at_start.store(0, Ordering::Release);
+    if let Ok(mut pending) = app.pending_splice.lock() {
+        if pending
+            .as_ref()
+            .is_some_and(|splice| splice.direction == "in")
+        {
+            *pending = None;
+        }
+    }
+    audit_event(
+        "AUTO_SPLICE_CONFIRMED",
+        json!({
+            "prev_onchain": previous,
+            "new_onchain": current,
+            "source": "mac_demo_fast_sync",
+        }),
+    );
+}
+
 #[cfg(debug_assertions)]
 struct MacDemoTask {
     label: String,
@@ -624,7 +653,6 @@ enum MacDemoStep {
     StabilitySetPrice,
     StabilitySetPriceWait,
     StabilityAuditWait,
-    StabilityResetPriceWait,
     LightningReceiveGenerate,
     LightningReceivePayWait,
     LightningReceiveSettleWait,
@@ -829,46 +857,34 @@ impl MacDemoController {
                     self.enter_flow(
                         MacDemoStep::StabilitySetPrice,
                         "03 USD Stability",
-                        "Moving price up 1%",
+                        "Moving price down 0.5%",
                     );
                 }
             }
             MacDemoStep::StabilitySetPrice => {
                 self.settlement_marker = chrono::Utc::now().to_rfc3339();
-                self.start_task("Set mock BTC/USD price to $101,000", |harness| {
-                    harness.set_price(101_000.0)?;
+                self.before_lightning_sats = self.lightning_sats(app);
+                self.start_task("Set mock BTC/USD price to $99,500", |harness| {
+                    harness.set_price(99_500.0)?;
                     Ok(json!({}))
                 });
                 self.enter(MacDemoStep::StabilitySetPriceWait);
             }
             MacDemoStep::StabilitySetPriceWait => {
                 if self.take_task_result().is_some() {
-                    self.set_app_price(app, 101_000.0);
+                    self.set_app_price(app, 99_500.0);
                     let payment_info = {
                         let mut sc = app.stable_channel.lock().unwrap();
                         stable::check_stability(&app.node, &mut sc, self.price_usd)
                     };
-                    let Some(payment_info) = payment_info else {
-                        self.fail("stability check did not send a settlement payment".to_string());
+                    if payment_info.is_some() {
+                        self.fail(
+                            "app sent a stability payment after a price drop; expected the LSP to pay"
+                                .to_string(),
+                        );
                         return;
-                    };
-                    let amount_usd =
-                        (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
-                            * payment_info.btc_price;
-                    let _ = app.db.record_payment(
-                        Some(&payment_info.payment_id),
-                        "stability",
-                        "sent",
-                        payment_info.amount_msat,
-                        Some(amount_usd),
-                        Some(payment_info.btc_price),
-                        Some(&payment_info.counterparty),
-                        "pending",
-                        None,
-                        None,
-                    );
-                    app.save_channel_settings();
-                    self.action = "Waiting for LSP settlement audit".to_string();
+                    }
+                    self.action = "Waiting for LSP stability payment".to_string();
                     self.last_poll = std::time::Instant::now()
                         .checked_sub(Duration::from_secs(10))
                         .unwrap_or_else(std::time::Instant::now);
@@ -877,38 +893,31 @@ impl MacDemoController {
             }
             MacDemoStep::StabilityAuditWait => {
                 if self.step_started.elapsed() > Duration::from_secs(200) {
-                    self.fail("timed out waiting for LSP settlement audit".to_string());
+                    self.fail("timed out waiting for LSP stability payment".to_string());
                     return;
                 }
                 if self.last_poll.elapsed() >= Duration::from_secs(2) {
                     self.last_poll = std::time::Instant::now();
-                    match self.harness.audit_tail_contains_after(
-                        &self.settlement_marker,
-                        &["PAYMENT_RECEIVED", "MESSAGE_RECEIVED"],
-                    ) {
-                        Ok(true) => {
-                            self.start_task("Reset mock BTC/USD price to $100,000", |harness| {
-                                harness.set_price(100_000.0)?;
-                                Ok(json!({}))
-                            });
-                            self.enter(MacDemoStep::StabilityResetPriceWait);
+                    match self
+                        .harness
+                        .audit_tail_has_lsp_stability_after(&self.settlement_marker)
+                    {
+                        Ok(true) if self.lightning_sats(app) > self.before_lightning_sats => {
+                            self.complete_flow("03_usd_stability");
+                            self.enter_flow(
+                                MacDemoStep::LightningReceiveGenerate,
+                                "04 Lightning Receive",
+                                "Generating a Lightning invoice",
+                            );
                         }
                         Ok(false) => {
-                            self.detail = "Polling LSP audit log".to_string();
+                            self.detail = "Polling LSP stability audit".to_string();
+                        }
+                        Ok(true) => {
+                            self.detail = "Waiting for the received balance".to_string();
                         }
                         Err(err) => self.fail(err),
                     }
-                }
-            }
-            MacDemoStep::StabilityResetPriceWait => {
-                if self.take_task_result().is_some() {
-                    self.set_app_price(app, 100_000.0);
-                    self.complete_flow("03_usd_stability");
-                    self.enter_flow(
-                        MacDemoStep::LightningReceiveGenerate,
-                        "04 Lightning Receive",
-                        "Generating a Lightning invoice",
-                    );
                 }
             }
             MacDemoStep::LightningReceiveGenerate => {
@@ -1468,6 +1477,7 @@ impl MacDemoController {
             .sync_wallets()
             .map_err(|err| format!("wallet sync failed: {err}"))?;
         app.process_events();
+        clear_confirmed_demo_splice_in(app);
         {
             let mut sc = app.stable_channel.lock().unwrap();
             stable::update_balances(&app.node, &mut sc);

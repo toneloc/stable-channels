@@ -7,7 +7,8 @@ env:
   HARNESS_API: "http://localhost:9737"
   MINE_BLOCKS: "6"
 ---
-- launchApp
+- launchApp:
+    stopApp: false
 
 - runScript:
     file: helpers/create_address.js
@@ -28,13 +29,25 @@ env:
       platform: iOS
     commands:
       - tapOn: "Invoice or onchain address"
-- inputText: ${output.address}
+- setClipboard: ${output.address}
+- pasteText
 
-# Onchain input needs an amount. extendedWaitUntil (not a bare assert) so a slow
-# screen transition on a loaded machine doesn't race to an instant failure.
-- extendedWaitUntil:
-    visible: "(Amount \\(USD\\)|Onchain Address)"   # Android label / iOS chip
-    timeout: 20000
+# Onchain input needs an amount. Android exposes the field label; iOS exposes
+# the enclosing detected-type section as "Onchain Address".
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Amount \\(USD\\)"
+          timeout: 20000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Onchain Address"
+          timeout: 20000
 - tapOn: "0.00"
 - inputText: "5"
 # Both platforms label the button "Send", colliding with the sheet title
@@ -48,18 +61,36 @@ env:
     text: "Send"
     index: 1
 
-- extendedWaitUntil:
-    visible: "Splice-out initiated"
-    timeout: 60000
-# Android shows a success screen with Done; iOS shows the inline status —
-# dismiss the sheet either way.
+# Assert the platform's actual post-send success UI. On iOS, "Splice-out
+# initiated" is also the pre-send route hint, so it cannot prove the send.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Splice-out initiated"
+          timeout: 60000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Payment sent.*"
+          timeout: 60000
+# Both platforms expose Done after the send starts.
 - tapOn:
-    text: "(Done|Cancel)"
+    text: "Done"
     optional: true
 
+# Do not mine until the splice transaction exists. Both platforms expose
+# "Move pending..." once the splice transaction has been broadcast.
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
 - runScript:
     file: helpers/mine_blocks.js
-# Move pending row clears once the splice confirms
+# Use the positive completion signal instead of checking that pending is absent:
+# absence can pass before the UI has observed the pending splice.
 - extendedWaitUntil:
-    notVisible: "Move pending.*"
+    visible: "Move confirmed"
     timeout: 180000

@@ -775,6 +775,29 @@ class DatabaseService {
                 """,
                 params: [.text(txid)]
             )
+            if sqlite3_changes(db) > 0 {
+                return true
+            }
+
+            // SplicePending is not guaranteed to arrive before ChannelReady.
+            // In that ordering the splice-in initiation row still has no txid,
+            // even though the confirmation monitor knows the new funding txid.
+            // There can only be one in-flight splice, so bind and complete the
+            // latest unstamped splice-in row atomically.
+            try execute(
+                """
+                UPDATE payments
+                SET txid = ?, status = 'completed', confirmations = 1
+                WHERE id = (
+                    SELECT id FROM payments
+                    WHERE payment_type = 'splice_in'
+                      AND txid IS NULL
+                      AND status IN ('pending', 'failed')
+                    ORDER BY id DESC LIMIT 1
+                )
+                """,
+                params: [.text(txid)]
+            )
             return sqlite3_changes(db) > 0
         } catch {
             return false

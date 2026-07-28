@@ -45,6 +45,15 @@ log inside its Docker volume is trimmed after 50 MiB
 run `make clean` first; use `docker system prune -a --volumes` only when you
 are ready to delete unused Docker images, containers, and volumes.
 
+The live terminal shows concise build progress. Full Docker/BuildKit output is
+written to `e2e/.build.log` and its tail is printed automatically on failure.
+Set `SC_E2E_VERBOSE_BUILD=1` to stream the raw build output as before.
+
+Only one E2E lifecycle may run at a time. The runner holds `e2e/.run-lock`
+across backend startup, device preparation, and every flow so another `make`
+invocation cannot erase the simulator or restart the LSP mid-test. A stale lock
+is released automatically by the operating system if a process is killed.
+
 Docker Rust builds auto-tune from Docker's reported RAM while preserving manual
 overrides. 8-10 GiB stays at `COMPOSE_PARALLEL_LIMIT=1`,
 `SC_DOCKER_CARGO_JOBS=1`, and `SC_DOCKER_CODEGEN_UNITS=1`; 12+ GiB raises Cargo
@@ -61,9 +70,11 @@ Screenshots + logs land in `~/.maestro/tests/<timestamp>/`;
 `maestro record <flow>` produces an mp4.
 
 The runner reset-once-then-carry-state model means 01 onboards, 02 trades on
-that state, 03 settles, etc. `make ios`/`make android` handle device reset,
-so don't add `clearState` to a flow (it wipes the regtest `test_config.json`
-and the app silently falls back to MAINNET).
+that state, 03 settles, etc. At suite startup, `run-flows.sh` clears only
+Stable Channels app data and then restores the regtest `test_config.json`.
+Set `RESET_APP_STATE=0` only to continue an interrupted run. Don't add
+`clearState` to an individual flow: later flows need the wallet created by
+earlier ones, and Maestro would remove the test configuration.
 
 ### What the targets do for you
 
@@ -100,7 +111,9 @@ seed/restart path directly.
 `make mac` uses the same Docker regtest backend as the mobile flows, then runs
 `cargo run --features e2e --bin stable-channels -- mac-flows`. It starts from a
 fresh dedicated wallet under `e2e/.mac-user-flows` and executes all 12 lifecycle
-steps.
+steps. Mac smoke, flow, and demo startup reset only their exact allowlisted
+`e2e/.mac-user*` directories; the production directory under
+`~/Library/Application Support/StableChannels` is never a valid cleanup target.
 
 `make mac-smoke` runs the fast endpoint/config guard only:
 `cargo run --features e2e --bin stable-channels -- mac-smoke`.
@@ -151,7 +164,7 @@ it adds a desktop-native guard over the same money-moving lifecycle.
 | `09_close_channel`      | Close Channel | runnable; verifies settings navigation and close dialog |
 | `10_backup_keys`        | Back Up Keys | runnable as an opt-in seed-copy flow |
 | `11_import_keys`        | Import Keys | runnable with `RESTORE_SEED="word1 ..."` |
-| `12_offboard_onchain`   | Offboard Onchain | runnable; Android sweeps to zero, iOS asserts a balance drop |
+| `12_offboard_onchain`   | Offboard Onchain | runnable; Android and iOS sweep the wallet to zero |
 
 Flows `10_backup_keys` and `11_import_keys` are opt-in because import needs a
 fresh app state plus a `RESTORE_SEED`; the canonical suite runs `01` through `09`
@@ -240,7 +253,7 @@ price, **1,000 sats = $1** — all conversions are checkable by eye.
 | Lightning send (Step 6) | 5,000 sats ($5) | keep under native so the base run doesn't dip into USD; run variant b) above native for the overflow assertion |
 | Onchain send (Step 7) | $5 | |
 | Trades (Steps 2/8) | $75 sell, $20 buy-back | the sell creates a large enough stable position; the buy is capped below the remaining stable balance |
-| Stability move (Step 3) | +1% → $101,000 | ~$0.75 settlement on the $75 position; clears the $0.25 AND 0.1% thresholds |
+| Stability move (Step 3) | -0.5% → $99,500 | LSP pays ~$0.38 on the $75 position; clears the $0.25 AND 0.1% thresholds; this price remains for later flows |
 
 ## Conventions
 

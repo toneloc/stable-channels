@@ -56,6 +56,77 @@ die()  { printf '%serror:%s %s\n' "$C_RED$C_BOLD" "$C_RESET" "$*" >&2; exit 1; }
 
 # --- helpers ----------------------------------------------------------------
 
+SC_E2E_BUILD_LOG="${SC_E2E_BUILD_LOG:-$E2E_DIR/.build.log}"
+SC_E2E_RUN_LOCK_FILE="${SC_E2E_RUN_LOCK_FILE:-$E2E_DIR/.run-lock}"
+
+# Run a command under an OS-managed, non-blocking lock. lockf/flock releases
+# automatically on normal exit, errors, and SIGKILL, so a crashed test cannot
+# leave a stale lock behind.
+sc_with_e2e_run_lock() {
+    local label="${1:-E2E run}" rc=0
+    shift
+
+    if [ "${SC_E2E_RUN_LOCK_HELD:-}" = "$SC_E2E_RUN_LOCK_FILE" ]; then
+        "$@"
+        return
+    fi
+
+    if command -v lockf >/dev/null 2>&1; then
+        lockf -t 0 "$SC_E2E_RUN_LOCK_FILE" \
+            env SC_E2E_RUN_LOCK_HELD="$SC_E2E_RUN_LOCK_FILE" "$@" || rc=$?
+    elif command -v flock >/dev/null 2>&1; then
+        flock -E 75 -n "$SC_E2E_RUN_LOCK_FILE" \
+            env SC_E2E_RUN_LOCK_HELD="$SC_E2E_RUN_LOCK_FILE" "$@" || rc=$?
+    else
+        die "lockf or flock is required to serialize E2E runs"
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        case "$rc" in
+            75) die "another E2E run is active; wait for it to finish before starting $label" ;;
+            *) return "$rc" ;;
+        esac
+    fi
+}
+
+sc_build_log_display_path() {
+    case "$SC_E2E_BUILD_LOG" in
+        "$REPO_DIR"/*) printf '%s\n' "${SC_E2E_BUILD_LOG#"$REPO_DIR"/}" ;;
+        *) printf '%s\n' "$SC_E2E_BUILD_LOG" ;;
+    esac
+}
+
+sc_reset_build_log() {
+    mkdir -p "$(dirname "$SC_E2E_BUILD_LOG")"
+    : > "$SC_E2E_BUILD_LOG"
+    printf 'Stable Channels E2E build log — %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+        >> "$SC_E2E_BUILD_LOG"
+}
+
+# Keep verbose Docker/BuildKit output out of the live scoreboard while retaining
+# it for diagnosis. Set SC_E2E_VERBOSE_BUILD=1 to restore live streaming.
+sc_run_build_logged() {
+    local rc=0 tail_lines="${SC_E2E_BUILD_LOG_TAIL:-80}"
+
+    {
+        printf '\n$'
+        printf ' %q' "$@"
+        printf '\n'
+    } >> "$SC_E2E_BUILD_LOG"
+
+    if [ "${SC_E2E_VERBOSE_BUILD:-0}" = "1" ]; then
+        "$@" 2>&1 | tee -a "$SC_E2E_BUILD_LOG" || rc=$?
+    else
+        "$@" >> "$SC_E2E_BUILD_LOG" 2>&1 || rc=$?
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        bad "build command failed (exit $rc); last $tail_lines log lines:"
+        tail -n "$tail_lines" "$SC_E2E_BUILD_LOG" >&2 || true
+        return "$rc"
+    fi
+}
+
 sc_bytes_from_gib() {
     local gib="${1:?GiB value required}"
     case "$gib" in
@@ -166,6 +237,36 @@ sc_guard_path_size() {
     fi
 
     die "$label is $(sc_human_bytes "$size") (max ${max_gib} GiB). Remove it before retrying."
+}
+
+sc_reset_mac_e2e_data_dir() {
+    local path="${1:?Mac E2E data path required}"
+
+    [ "${SC_E2E:-0}" = "1" ] \
+        || die "refusing Mac data reset without SC_E2E=1"
+    [ "${SC_MAC_NETWORK:-}" = "regtest" ] \
+        || die "refusing Mac data reset outside regtest"
+    [ "${SC_MAC_USER_DATA_DIR:-}" = "$path" ] \
+        || die "refusing Mac data reset: SC_MAC_USER_DATA_DIR does not match $path"
+
+    # This exact allowlist deliberately excludes the production default:
+    # ~/Library/Application Support/StableChannels/user.
+    case "$path" in
+        "$E2E_DIR"/.mac-user | \
+        "$E2E_DIR"/.mac-user-flows | \
+        "$E2E_DIR"/.mac-user-ui | \
+        "$E2E_DIR"/.mac-user-demo) ;;
+        *) die "refusing to clean non-E2E Mac data dir: $path" ;;
+    esac
+
+    [ ! -L "$path" ] \
+        || die "refusing to clean symlinked Mac E2E data dir: $path"
+
+    info "resetting E2E-only Mac data: $path"
+    if [ -e "$path" ]; then
+        rm -rf -- "$path"
+    fi
+    mkdir -p "$path"
 }
 
 sc_positive_int() {

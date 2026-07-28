@@ -4,18 +4,47 @@
 appId: com.stablechannels.app
 tags: [android, ios, trade]
 ---
-- launchApp
+- launchApp:
+    stopApp: false
 - extendedWaitUntil:
     visible: "BTC → USD"      # disabled until channel ready
     timeout: 30000
-- tapOn: "BTC → USD"
 
-- assertVisible: "(Amount \\(USD\\)|How much BTC to convert to USD\\?)"   # Android / iOS copy
-- tapOn: "0.00"
-- inputText: "75"      # large stable position — sized so a +1% move in flow 03 clears the $0.25 settlement threshold ($0.75 drift)
+# Exercise the allocation slider itself. The first slow, outward gesture stays
+# clamped at the left edge so the demo visibly holds on "0% USD  100% BTC"
+# without opening a trade. The second gesture sells $75 of the $85 balance:
+# target = barStart + (75 / 85) * barWidth.
+- runFlow:
+    when:
+      platform: Android
+    file: helpers/drag_btc_to_usd_android.yaml
+- runFlow:
+    when:
+      platform: iOS
+    file: helpers/hold_btc_slider_ios.yaml
+- runFlow:
+    when:
+      platform: iOS
+    file: helpers/drag_btc_to_usd_ios.yaml
+
+- assertVisible: "How much BTC to convert to USD\\?"
 - tapOn: "Continue"
 
-- assertVisible: "(Confirm Order|Review BTC -> USD)"
+- assertVisible: "Review BTC -> USD"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - assertVisible: "\\$76\\.07"
+      - assertVisible: "\\$0\\.76"
+      - assertVisible: "\\$75\\.31( USD)?"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - assertVisible: "\\$74\\.97"
+      - assertVisible: "\\$0\\.75"
+      - assertVisible: "\\$74\\.22( USD)?"
 # Confirm button is now "Confirm Order" on both platforms (iOS button was
 # relabeled from "BTC → USD" in the copy-changes PR).
 - tapOn: "Confirm Order"

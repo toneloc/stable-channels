@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Run the E2E flows on a prepared device with a descriptive, checkmarked
-# scoreboard. State carries across flows (no clearState) — the device is reset
-# once by prepare-*.sh, then 01 onboards, 02 trades on that state, etc.
+# scoreboard. Stable Channels app data is reset once at suite startup, then
+# state carries across flows: 01 onboards, 02 trades on that state, etc.
 #
 # Usage: run-flows.sh <ios|android> [flow ...]     (flows default to canonical)
+# Set RESET_APP_STATE=0 only when intentionally continuing an existing run.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 PLATFORM="${1:-}"; shift || true
@@ -19,8 +20,44 @@ else
     DEVICE="$("$ADB" get-serialno 2>/dev/null)" || die "no android device (run prepare-android.sh)"
 fi
 
-# Clean price so a prior aborted flow-03 doesn't leave it at 101k.
-harness_set_price 100000 || die "harness not reachable — is the backend up? (make up)"
+if [ "${RESET_APP_STATE:-1}" = "1" ]; then
+    step "Reset Stable Channels app data"
+    if [ "$PLATFORM" = "ios" ]; then
+        IOS_APP_BUNDLE="$E2E_DIR/.dd-ios/Build/Products/Debug-iphonesimulator/StableChannels.app"
+        [ -d "$IOS_APP_BUNDLE" ] || die "iOS app bundle missing; run prepare-ios.sh first"
+
+        # Uninstalling clears the entire app container, including the wallet,
+        # database, preferences, and cached state.
+        xcrun simctl terminate "$DEVICE" "$APP_ID" >/dev/null 2>&1 || true
+        if xcrun simctl get_app_container "$DEVICE" "$APP_ID" data >/dev/null 2>&1; then
+            xcrun simctl uninstall "$DEVICE" "$APP_ID" >/dev/null \
+                || die "could not uninstall $APP_ID from iOS simulator $DEVICE"
+        fi
+        xcrun simctl install "$DEVICE" "$IOS_APP_BUNDLE"
+        (
+            cd "$HARNESS_DIR"
+            IOS_SIM_UDID="$DEVICE" HARNESS_HOST=localhost \
+                ./push-test-config-ios.sh >/dev/null
+        )
+    else
+        ANDROID_CLEAR_RESULT=""
+        "$ADB" shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
+        ANDROID_CLEAR_RESULT="$("$ADB" shell pm clear "$APP_ID" 2>/dev/null | tr -d '\r')" \
+            || die "could not clear Android app data for $APP_ID"
+        [ "$ANDROID_CLEAR_RESULT" = "Success" ] \
+            || die "Android app-data reset failed: ${ANDROID_CLEAR_RESULT:-no response}"
+        ( cd "$HARNESS_DIR" && ./push-test-config.sh >/dev/null )
+    fi
+    ok "app data cleared and regtest config restored"
+
+    # A clean suite begins at the canonical price. Flow 03 moves to $99,500
+    # and intentionally leaves that price in place for every later flow.
+    harness_set_price 100000 || die "harness not reachable — is the backend up? (make up)"
+    ok "mock price reset to \$100,000"
+else
+    info "keeping existing app data (RESET_APP_STATE=0)"
+    info "keeping the current mock price for the resumed lifecycle"
+fi
 
 step "Running ${#FLOWS[@]} flows on ${PLAT_UP}  (device $DEVICE)"
 

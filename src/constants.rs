@@ -68,8 +68,12 @@ pub const INVOICE_EXPIRY_SECS: u32 = 3600;
 /// Balance update interval for UI (in seconds)
 pub const BALANCE_UPDATE_INTERVAL_SECS: u64 = 30;
 
-/// Stability check interval (in seconds)
+/// Stability check interval (in seconds). The E2E LSP uses a short tick so
+/// Flow 03 verifies the same logic without a minute of passive waiting.
+#[cfg(not(feature = "e2e"))]
 pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 60;
+#[cfg(feature = "e2e")]
+pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 5;
 
 // ============================================================================
 // BUSINESS LOGIC CONSTANTS

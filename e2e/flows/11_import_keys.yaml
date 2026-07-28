@@ -13,7 +13,8 @@ env:
 ---
 # NOTE: no clearState (would wipe test_config.json too). Run after 09, and pass
 # RESTORE_SEED from the wallet shown in 10_backup_keys or a known test seed.
-- launchApp
+- launchApp:
+    stopApp: false
 
 - runScript:
     script: |

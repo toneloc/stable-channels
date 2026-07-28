@@ -1844,7 +1844,9 @@ class AppState {
                     self.completeConfirmedSplice(txid: normalizedTxid)
                     return
                 }
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                try? await Task.sleep(
+                    nanoseconds: Constants.spliceConfirmationPollIntervalSecs * 1_000_000_000
+                )
             }
         }
     }

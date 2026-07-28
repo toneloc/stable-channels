@@ -1,0 +1,8 @@
+appId: com.stablechannels.app
+---
+# A single slow pull gives Compose time to show 100% BTC at the starting
+# position before moving, then sells roughly $75 of the $85 balance.
+- swipe:
+    start: 9%, 21%
+    end: 86%, 21%
+    duration: 4000

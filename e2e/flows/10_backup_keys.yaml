@@ -4,7 +4,8 @@
 appId: com.stablechannels.app
 tags: [android, ios, keys]
 ---
-- launchApp
+- launchApp:
+    stopApp: false
 
 - tapOn: "Settings"
 - runFlow:

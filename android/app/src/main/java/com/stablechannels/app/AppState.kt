@@ -912,7 +912,7 @@ class AppState(private val context: Context) : ViewModel() {
                     completeConfirmedSplice(normalizedTxid)
                     break
                 }
-                delay(30_000)
+                delay(Constants.SPLICE_CONFIRMATION_POLL_INTERVAL_SECS * 1000)
             }
         }
     }
@@ -1326,7 +1326,7 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             while (isActive && _spendableOnchainSats.value == 0L && _onchainBalanceSats.value > 0) {
-                delay(10_000)
+                delay(Constants.ONCHAIN_DEPOSIT_POLL_INTERVAL_SECS * 1000)
                 refreshBalances()
             }
             

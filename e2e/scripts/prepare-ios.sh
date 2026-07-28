@@ -67,5 +67,9 @@ xcrun simctl install "$IOS_SIM_UDID" "$APP_GLOB"
 ok "app installed"
 
 info "push regtest config (before first launch) …"
-( cd "$HARNESS_DIR" && HARNESS_HOST=localhost ./push-test-config-ios.sh >/dev/null )
+(
+    cd "$HARNESS_DIR"
+    IOS_SIM_UDID="$IOS_SIM_UDID" HARNESS_HOST=localhost \
+        ./push-test-config-ios.sh >/dev/null
+)
 ok "test_config.json written — device ready"

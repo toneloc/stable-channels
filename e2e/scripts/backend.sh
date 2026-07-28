@@ -7,12 +7,19 @@
 # Safe to run repeatedly — a no-op once everything is already up.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
+if [ "${SC_E2E_RUN_LOCK_HELD:-}" != "$SC_E2E_RUN_LOCK_FILE" ]; then
+    sc_with_e2e_run_lock "backend startup" "$0" "$@"
+    exit $?
+fi
+
 step "Backend (docker regtest stack)"
 cd "$HARNESS_DIR"
 sc_require_free_space "$REPO_DIR" "${SC_E2E_MIN_FREE_GIB:-25}" "e2e backend"
 sc_warn_docker_raw_size "${SC_DOCKER_RAW_WARN_GIB:-150}"
 export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
 sc_autotune_docker_build_limits
+sc_reset_build_log
+info "Docker build output writing to $(sc_build_log_display_path)"
 
 # Optional LSP operator GUI (web build of server/lsp-server-gui) at
 # http://127.0.0.1:3003. Set E2E_LSP_GUI=1/0 to skip the prompt; non-interactive
@@ -36,7 +43,9 @@ sc_build_images_serially() {
     local svc
     for svc in ldk-server sc-lsp ldk-node lsp-gui; do
         info "building image: $svc …"
-        docker compose build "$svc"
+        sc_run_build_logged docker compose build "$svc" \
+            || die "could not build $svc (full output: $(sc_build_log_display_path))"
+        ok "image ready: $svc"
     done
 }
 
@@ -47,13 +56,19 @@ sc_build_images_serially() {
 if [ "${COMPOSE_PARALLEL_LIMIT:-1}" = "1" ]; then
     sc_build_images_serially
     info "docker compose up -d (images pre-built serially) …"
-    docker compose up -d --remove-orphans
+    sc_run_build_logged docker compose up -d --remove-orphans \
+        || die "could not start backend (full output: $(sc_build_log_display_path))"
+    ok "backend containers started"
 elif [ "${REBUILD:-0}" = "1" ]; then
     info "docker compose up -d --build (forced rebuild) …"
-    docker compose up -d --build --remove-orphans
+    sc_run_build_logged docker compose up -d --build --remove-orphans \
+        || die "could not rebuild backend (full output: $(sc_build_log_display_path))"
+    ok "backend containers rebuilt and started"
 else
     info "docker compose up -d (reuse images; 'make rebuild' to force) …"
-    docker compose up -d --remove-orphans
+    sc_run_build_logged docker compose up -d --remove-orphans \
+        || die "could not start backend (full output: $(sc_build_log_display_path))"
+    ok "backend containers started"
 fi
 
 # Stale-tip trap: after >24h idle, restarted bitcoind reports IBD=true (old
@@ -93,7 +108,7 @@ if [ "${SYNC_LSP_NODE_ID_UPDATED:-0}" = "1" ]; then
     ok "harness API reloaded LSP node id"
 fi
 
-info "bootstrapping counterparty↔LSP channel (idempotent) …"
+info "bootstrapping counterparty↔LSP channel …"
 curl -fsS -X POST "$HARNESS_API/bootstrap" \
     -H 'Content-Type: application/json' -d '{}' >/dev/null \
     || die "bootstrap failed (LSP onchain funds? see: make logs)"

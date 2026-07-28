@@ -69,6 +69,11 @@ struct ReceiveView: View {
                 }
             }
         }
+        .onChange(of: appState.paymentFlash) {
+            if appState.paymentFlash, invoice != nil {
+                dismiss()
+            }
+        }
         .onDisappear { copyResetTask?.cancel() }
     }
 

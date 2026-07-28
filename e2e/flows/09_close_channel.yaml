@@ -8,7 +8,8 @@ env:
   HARNESS_API: "http://localhost:9737"
   MINE_BLOCKS: "6"
 ---
-- launchApp
+- launchApp:
+    stopApp: false
 - tapOn: "Settings"
 - tapOn: "Channel"
 - tapOn: "Close channel"
@@ -21,12 +22,8 @@ env:
     text: "Close channel"
     index: 1
 
-# Cooperative close broadcasts; confirm it.
-- runScript:
-    file: helpers/mine_blocks.js
-
-# Back to Home and wait for the closing/closed state to surface. The funds
-# land onchain once the close confirms (sync interval up to 120s).
+# Return Home and wait until the close txid is exposed. Mining immediately
+# after tapping Close can precede the asynchronous broadcast.
 - tapOn:
     text: "(Back|Settings)"
     optional: true
@@ -34,5 +31,23 @@ env:
     text: "Home"
     optional: true
 - extendedWaitUntil:
-    visible: "(Channel clos|Deposit confirming|Onchain).*"
+    visible: "View on [Ee]xplorer"
+    timeout: 120000
+
+# Confirm the observable close transaction, then prove the channel is gone.
+- runScript:
+    file: helpers/mine_blocks.js
+- tapOn: "Settings"
+- tapOn: "Channel"
+- extendedWaitUntil:
+    visible: "No channel open yet.*"
     timeout: 240000
+- tapOn:
+    text: "(Back|Settings)"
+    optional: true
+- tapOn:
+    text: "Home"
+    optional: true
+- extendedWaitUntil:
+    visible: "Onchain Account"
+    timeout: 30000

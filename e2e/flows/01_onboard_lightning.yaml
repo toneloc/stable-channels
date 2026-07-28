@@ -6,10 +6,10 @@ tags: [android, ios, onboard]
 env:
   HARNESS_API: "http://localhost:9737"
 ---
-# NOTE: no clearState here — pm clear would also wipe test_config.json and
-# relaunch the app against MAINNET. Fresh state is prepared by ../run.sh
-# (pm clear + re-push config) before maestro starts.
-- launchApp
+# NOTE: no clearState here — the suite runner clears app data once, restores
+# test_config.json, then carries the resulting wallet state across all flows.
+- launchApp:
+    stopApp: false
 
 # iOS first launch shows the notifications permission dialog; Android doesn't.
 - tapOn:
@@ -33,19 +33,14 @@ env:
 - extendedWaitUntil:
     visible: "(Copy|Your Lightning Invoice)"   # Android button / iOS label
     timeout: 20000
+- assertVisible: "\\$85\\.00"
 - copyTextFrom:
     text: "ln.*"      # the truncated invoice text element
 - runScript:
     file: helpers/pay_invoice.js
 
-# The app auto-dismisses the receive sheet when the payment lands — Cancel
-# only needs tapping if we beat the dismissal.
-- tapOn:
-    text: "(Cancel|Done)"   # Android: Cancel; iOS: Done
-    optional: true
-
-# Onboarded: payment banner + trade buttons enabled on Home.
+# The receive sheet dismisses when the incoming payment event arrives.
+# Onboarded: the trade buttons are durable; the payment banner is transient.
 - extendedWaitUntil:
-    visible: "(Payment received|Received).*"   # Android / iOS copy
-    timeout: 120000
-- assertVisible: "USD → BTC"
+    visible: "USD → BTC"
+    timeout: 60000

@@ -11,10 +11,11 @@ fi
 [ -z "$LSP_NODE_ID" ] && { echo "error: LSP_NODE_ID not given and not in .env" >&2; exit 1; }
 
 BUNDLE_ID="com.stablechannels.app"
+SIM_TARGET="${IOS_SIM_UDID:-booted}"
 # iOS simulator reaches the host directly via localhost.
 HOST="${HARNESS_HOST:-localhost}"
 
-CONTAINER=$(xcrun simctl get_app_container booted "$BUNDLE_ID" data)
+CONTAINER=$(xcrun simctl get_app_container "$SIM_TARGET" "$BUNDLE_ID" data)
 mkdir -p "$CONTAINER/Documents"
 cat > "$CONTAINER/Documents/test_config.json" << EOF
 {
@@ -27,8 +28,8 @@ cat > "$CONTAINER/Documents/test_config.json" << EOF
   "push_register_url": "http://${HOST}:3002/api/register-push",
   "channel_exists_url": "http://${HOST}:3002/api/channel-exists",
   "disable_send_auth": true,
-  "sync_interval_secs": 10
+  "sync_interval_secs": 3
 }
 EOF
 echo "wrote test config (LSP ${LSP_NODE_ID:0:16}...) -> $CONTAINER/Documents/"
-echo "restart the app to apply:  xcrun simctl terminate booted $BUNDLE_ID"
+echo "restart the app to apply:  xcrun simctl terminate $SIM_TARGET $BUNDLE_ID"

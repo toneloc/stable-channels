@@ -52,7 +52,14 @@ object Constants {
 
     const val INVOICE_EXPIRY_SECS: Int = 3600
     const val BALANCE_UPDATE_INTERVAL_SECS: Long = 30
-    const val STABILITY_CHECK_INTERVAL_SECS: Long = 60
+    // Deposit detection shares this timer. Keep production at 60s while
+    // allowing regtest to observe mined deposits without passive waiting.
+    val STABILITY_CHECK_INTERVAL_SECS: Long get() =
+        TestOverrides.syncIntervalSecs ?: 60
+    val SPLICE_CONFIRMATION_POLL_INTERVAL_SECS: Long get() =
+        TestOverrides.syncIntervalSecs ?: 30
+    val ONCHAIN_DEPOSIT_POLL_INTERVAL_SECS: Long get() =
+        TestOverrides.syncIntervalSecs ?: 10
     const val MAX_RISK_LEVEL = 100
     const val STABILITY_THRESHOLD_PERCENT: Double = 0.1
     const val STABILITY_THRESHOLD_USD: Double = 0.25

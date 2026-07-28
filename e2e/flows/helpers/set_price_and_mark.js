@@ -1,4 +1,4 @@
-// Set the mocked price AND record the moment, so assert_settlement.js only
+// Set the mocked price AND record the moment, so the settlement assertion only
 // accepts LSP audit events newer than this.
 const price = typeof PRICE_USD !== 'undefined' ? parseFloat(PRICE_USD) : 100000.0;
 const res = http.post(`${HARNESS_API}/price`, {

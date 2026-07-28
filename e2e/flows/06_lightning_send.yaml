@@ -8,7 +8,8 @@ env:
   HARNESS_API: "http://localhost:9737"
   INVOICE_MSAT: "5000000"     # 5k sats
 ---
-- launchApp
+- launchApp:
+    stopApp: false
 
 # Counterparty creates the invoice we will pay
 - runScript:
@@ -30,7 +31,8 @@ env:
       platform: iOS
     commands:
       - tapOn: "Invoice or onchain address"
-- inputText: ${output.invoice}
+- setClipboard: ${output.invoice}
+- pasteText
 # Send button: Android has two "Send" texts (title + button, index 1);
 # iOS button is "Send Payment". hideKeyboard is unreliable on iOS sims.
 - runFlow:

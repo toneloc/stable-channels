@@ -7,16 +7,17 @@ env:
   SEND_SATS: "100000"
   MINE_BLOCKS: "6"
 ---
-- launchApp
+- launchApp:
+    stopApp: false
 - tapOn: "Receive"
 - tapOn: "Onchain"          # ReceiveScreen toolbar -> FundWalletScreen
 
 # Address on the Fund Wallet screen (regtest = bcrt1...)
 - extendedWaitUntil:
-    visible: "(bc|tb|bcrt)1.*"
+    visible: "bcrt1.*"
     timeout: 20000
 - copyTextFrom:
-    text: "(bc|tb|bcrt)1.*"
+    text: "bcrt1.*"
 - runScript:
     file: helpers/send_onchain.js
 - runScript:
@@ -24,26 +25,23 @@ env:
 
 - tapOn: "(Back|Receive)"    # Android Back / iOS nav-back (labeled by prev screen)
 - tapOn:
-    text: "(Cancel|Done)"
+    text: "Done"
     optional: true
 
 # Deposit confirms -> the onchain card appears on Home with a Swap button
 - extendedWaitUntil:
     visible: "(Swap|Move)"       # Android / iOS label
-    timeout: 240000              # iOS onchain sync interval is 120s
+    timeout: 240000              # E2E config syncs every 3s; keep a generous CI ceiling
 - tapOn: "(Swap|Move)"
 
-# The sweep-start status is transient — on regtest the splice negotiates in
-# ~1s and the status moves on. Assert it opportunistically. Copy differs by
-# platform: Android "Moving all onchain funds to channel...", iOS "Fetching
-# fee rate..." then "Move pending...".
-- assertVisible:
-    text: "(Moving all onchain funds to channel|Fetching fee rate|Move pending).*"
-    optional: true
+# Prove the splice entered its pending state before mining.
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
 - runScript:
     file: helpers/mine_blocks.js
 
-# Durable signal: splice confirms, onchain drains, the Swap button clears.
+# Durable signal: the pending state clears only after splice confirmation.
 - extendedWaitUntil:
-    notVisible: "(Swap|Move)"
+    notVisible: "Move pending.*"
     timeout: 240000
