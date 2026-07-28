@@ -511,6 +511,13 @@ class AppState(private val context: Context) : ViewModel() {
                 onComplete("Close all channels before switching LSPs.")
                 return@launch
             }
+            // Check this *before* touching prefs — if the background stability service currently
+            // owns the LDK node, nodeService.start() would throw for a reason unrelated to the new
+            // LSP being invalid, and we don't want to misattribute that as a bad config and roll back.
+            if (!waitForBackgroundService()) {
+                onComplete("Background sync is in progress — try again in a moment.")
+                return@launch
+            }
             // Capture the currently-working config so a bad new LSP can be rolled back to it —
             // LDK validates the pubkey/address at node-build time, which happens *after* we've
             // already persisted the new values, so a failure here must not leave the node
@@ -553,6 +560,10 @@ class AppState(private val context: Context) : ViewModel() {
                 onComplete("Close all channels before switching LSPs.")
                 return@launch
             }
+            if (!waitForBackgroundService()) {
+                onComplete("Background sync is in progress — try again in a moment.")
+                return@launch
+            }
             LspPreferencesManager.resetToDefault(context)
             try {
                 performLspNodeRestart()
@@ -567,9 +578,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     /** Stops and rebuilds the LDK node in-place so it picks up the current LSP prefs.
      *  Callers must confirm there are no open channels before invoking this. */
-    private fun performLspNodeRestart() {
-        stabilityJob?.cancel()
-        heartbeatJob?.cancel()
+    private suspend fun performLspNodeRestart() {
+        // cancelAndJoin (not cancel) — coroutine cancellation is cooperative, so if the periodic
+        // stabilityJob tick is already inside a native LDK call (e.g. ensureLSPConnected ->
+        // node.connect) when we ask it to cancel, it keeps running until it hits a suspension
+        // point. Joining guarantees it has actually stopped before we touch nodeService.node below.
+        stabilityJob?.cancelAndJoin()
+        heartbeatJob?.cancelAndJoin()
         if (nodeService.isRunning) {
             nodeService.stop()
         }
