@@ -351,7 +351,29 @@ class DatabaseService {
         }
     }
 
+    // MARK: - Onchain Reconcilation Helpers
+
     // MARK: - Payment Operations
+
+    func paymentExists(txid: String, excludePaymentId: String) -> Bool {
+        do {
+            let rows = try query(
+                "SELECT 1 FROM payments WHERE txid = ? AND payment_id != ? LIMIT 1",
+                params: [.text(txid), .text(excludePaymentId)]
+            )
+            return !rows.isEmpty
+        } catch {
+            return false
+        }
+    }
+
+    func deletePayment(paymentId: String) {
+        do {
+            try execute("DELETE FROM payments WHERE payment_id = ?", params: [.text(paymentId)])
+        } catch {
+            // Ignore
+        }
+    }
 
     func recordPayment(
         paymentId: String?,
@@ -813,6 +835,13 @@ class DatabaseService {
         }
     }
 
+    func failPaymentByTxid(txid: String) throws {
+        try execute(
+            "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
+            params: [.text(txid)]
+        )
+    }
+
     func isOutgoingStabilityPayment(paymentId: String) throws -> Bool {
         let rows = try query(
             "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
@@ -919,6 +948,27 @@ class DatabaseService {
                 LIMIT 1
                 """,
                 params: [.text(opId)]
+            )
+            return rows.first.map { Self.parsePendingOperation($0) }
+        } catch {
+            return nil
+        }
+    }
+
+    /// Fetch a single pending_operations row by its funding outpoint txid.
+    /// Used by the WebSocket handler to instantly map a tracked outspend back to its opId.
+    func fetchPendingOperationByFundingTxid(_ txid: String) -> PendingOperation? {
+        do {
+            let rows = try query(
+                """
+                SELECT op_id, op_type, funding_outpoint_txid, funding_outpoint_vout,
+                       closing_txid, balance_sats, balance_usd, btc_price, counterparty,
+                       status, created_at, resolved_at
+                FROM pending_operations
+                WHERE funding_outpoint_txid = ? AND status = 'pending'
+                LIMIT 1
+                """,
+                params: [.text(txid)]
             )
             return rows.first.map { Self.parsePendingOperation($0) }
         } catch {
