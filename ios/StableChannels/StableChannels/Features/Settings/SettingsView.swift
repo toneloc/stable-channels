@@ -109,6 +109,15 @@ struct SettingsView: View {
                             text: String(localized: "link_push_connectivity", defaultValue: "Push Connectivity")
                         )
                     }
+                    NavigationLink {
+                        LSPSettingsView()
+                    } label: {
+                        rowLabel(
+                            icon: "server.rack",
+                            color: .cyan,
+                            text: String(localized: "link_lsp", defaultValue: "Lightning Service Provider")
+                        )
+                    }
                 } header: {
                     Text(String(localized: "section_node_network", defaultValue: "Node & Network"))
                         .font(.headline)
