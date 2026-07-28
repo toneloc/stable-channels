@@ -76,6 +76,7 @@ class AppState {
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
+    let lspService = LSPService()
 
     // MARK: - State
 
@@ -100,6 +101,9 @@ class AppState {
     }()
 
     var hasReadyChannel: Bool = false
+
+    /// The active LSP configuration managed by `LSPService`.
+    var activeLSP: LSPConfig { lspService.activeLSP }
 
     var totalBalanceSats: UInt64 {
         if isChannelClosing {
@@ -323,7 +327,8 @@ class AppState {
             try await nodeService.start(
                 network: .bitcoin,
                 esploraURL: chainURL,
-                mnemonic: words
+                mnemonic: words,
+                lspConfig: activeLSP
             )
 
             let nodeId = nodeService.nodeId
@@ -554,7 +559,8 @@ class AppState {
                 try await nodeService.start(
                     network: .bitcoin,
                     esploraURL: chainURL,
-                    mnemonic: "" // Uses existing seed from data dir
+                    mnemonic: "", // Uses existing seed from data dir
+                    lspConfig: activeLSP
                 )
                 // Store node_id in shared UserDefaults for NSE and push registration
                 let nodeId = nodeService.nodeId
@@ -598,7 +604,8 @@ class AppState {
                 try await nodeService.start(
                     network: .bitcoin,
                     esploraURL: chainURL,
-                    mnemonic: ""
+                    mnemonic: "",
+                    lspConfig: activeLSP
                 )
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
@@ -802,7 +809,8 @@ class AppState {
             try await nodeService.start(
                 network: .bitcoin,
                 esploraURL: chainURL,
-                mnemonic: ""
+                mnemonic: "",
+                lspConfig: activeLSP
             )
             refreshBalances()
             blockHeightService.start()
@@ -1060,8 +1068,8 @@ class AppState {
         // Reconnect to LSP so pending payment can be received
         do {
             try nodeService.node?.connect(
-                nodeId: Constants.defaultLSPPubkey,
-                address: Constants.defaultLSPAddress,
+                nodeId: activeLSP.pubkey,
+                address: activeLSP.address,
                 persist: true
             )
 
@@ -1107,8 +1115,8 @@ class AppState {
             guard let self, self.nodeService.isRunning else { return }
             // Re-connect to LSP to ensure we can receive the pending payment
             try? self.nodeService.node?.connect(
-                nodeId: Constants.defaultLSPPubkey,
-                address: Constants.defaultLSPAddress,
+                nodeId: self.activeLSP.pubkey,
+                address: self.activeLSP.address,
                 persist: true
             )
             self.refreshBalances()
@@ -2027,8 +2035,8 @@ class AppState {
         // can block for seconds — long enough for the iOS watchdog to kill the app.
         // Dispatch off the main actor so the UI stays responsive. .utility priority because
         // this is opportunistic plumbing — no user is actively waiting on it.
-        let lspPubkey = Constants.defaultLSPPubkey
-        let lspAddress = Constants.defaultLSPAddress
+        let lspPubkey = activeLSP.pubkey
+        let lspAddress = activeLSP.address
         Task.detached(priority: .utility) {
             try? node.connect(nodeId: lspPubkey, address: lspAddress, persist: true)
         }
@@ -2395,8 +2403,8 @@ class AppState {
                 // Reserve some sats for fees
                 let channelSats = spendable - 5_000
                 try await nodeService.connectAndOpenChannel(
-                    pubkey: Constants.defaultLSPPubkey,
-                    address: Constants.defaultLSPAddress,
+                    pubkey: activeLSP.pubkey,
+                    address: activeLSP.address,
                     amountSats: channelSats
                 )
                 await MainActor.run {
@@ -2681,5 +2689,20 @@ class AppState {
         } catch {
             print("[Chart] Failed to seed historical prices: \(error)")
         }
+    }
+
+    // MARK: - LSP Configuration
+
+    /// Switch to a new LSP configuration via LSPService.
+    @MainActor
+    func switchLSP(to newConfig: LSPConfig) async -> Bool {
+        await lspService.switchLSP(
+            to: newConfig,
+            nodeService: nodeService,
+            chainURL: chainURL,
+            onSuccess: { [weak self] in
+                self?.refreshBalances()
+            }
+        )
     }
 }
