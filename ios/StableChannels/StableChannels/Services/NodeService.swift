@@ -86,7 +86,8 @@ protocol NodeServiceProtocol {
     var nodeId: String { get }
     var channels: [ChannelDetails] { get }
     var savedMnemonic: String? { get }
-    func start(network: Network, esploraURL: String, mnemonic: String) async throws
+    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws
+    func stop()
 }
 
 @Observable
@@ -120,7 +121,7 @@ class NodeService: NodeServiceProtocol {
 
     // MARK: - Lifecycle
 
-    func start(network: Network, esploraURL: String, mnemonic: String) async throws {
+    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig = .default) async throws {
         guard !isRunning else { throw NodeServiceError.alreadyRunning }
         isStarting = true
         defer { isStarting = false }
@@ -147,11 +148,11 @@ class NodeService: NodeServiceProtocol {
         var config = defaultConfig()
         config.storageDirPath = dataDir
         config.network = network
-        config.trustedPeers0conf = [Constants.defaultLSPPubkey]
+        config.trustedPeers0conf = [lspConfig.pubkey]
 
         // Anchor channels: trust LSP so no reserve held for their channel
         config.anchorChannelsConfig = AnchorChannelsConfig(
-            trustedPeersNoReserve: [Constants.defaultLSPPubkey],
+            trustedPeersNoReserve: [lspConfig.pubkey],
             perChannelReserveSats: 25_000
         )
 
@@ -189,9 +190,9 @@ class NodeService: NodeServiceProtocol {
 
         // LSPS2 liquidity source — enables JIT channel opening on first receive
         builder.setLiquiditySourceLsps2(
-            nodeId: Constants.defaultLSPPubkey,
-            address: Constants.defaultLSPAddress,
-            token: nil
+            nodeId: lspConfig.pubkey,
+            address: lspConfig.address,
+            token: lspConfig.token
         )
 
         let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
@@ -236,8 +237,8 @@ class NodeService: NodeServiceProtocol {
 
         // Connect to LSP
         try? ldkNode.connect(
-            nodeId: Constants.defaultLSPPubkey,
-            address: Constants.defaultLSPAddress,
+            nodeId: lspConfig.pubkey,
+            address: lspConfig.address,
             persist: true
         )
 
