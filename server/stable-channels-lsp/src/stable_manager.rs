@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::error::LdkServerError;
 use ldk_server_client::ldk_server_grpc::api::{
-    GetBalancesRequest, GetBalancesResponse, ListChannelsRequest, ListChannelsResponse,
-    ListForwardedPaymentsRequest, ListForwardedPaymentsResponse, ListPeersRequest,
-    ListPeersResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
+    GetBalancesRequest, GetBalancesResponse, GetPaymentDetailsRequest, GetPaymentDetailsResponse,
+    ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest,
+    ListForwardedPaymentsResponse, ListPeersRequest, ListPeersResponse, ListPaymentsRequest,
+    ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
     SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
@@ -29,6 +30,16 @@ fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     let remote_sats = (channel.inbound_capacity_msat / 1000)
         .saturating_add(channel.counterparty_unspendable_punishment_reserve);
     (local_sats, remote_sats)
+}
+
+fn splice_balance_change(before_sats: u64, after_sats: u64) -> (&'static str, u64) {
+    if after_sats > before_sats {
+        ("in", after_sats - before_sats)
+    } else if after_sats < before_sats {
+        ("out", before_sats - after_sats)
+    } else {
+        ("unchanged", 0)
+    }
 }
 
 /// Reproduce the wallet's trade-fee calculation from the allocation transition. Buys reduce the
@@ -118,6 +129,18 @@ pub trait LdkServerCalls: Send + Sync {
     ) -> Result<ListPeersResponse, LdkServerError> {
         Ok(ListPeersResponse::default())
     }
+    async fn list_payments(
+        &self,
+        _req: ListPaymentsRequest,
+    ) -> Result<ListPaymentsResponse, LdkServerError> {
+        Ok(ListPaymentsResponse::default())
+    }
+    async fn get_payment_details(
+        &self,
+        _req: GetPaymentDetailsRequest,
+    ) -> Result<GetPaymentDetailsResponse, LdkServerError> {
+        Ok(GetPaymentDetailsResponse::default())
+    }
 }
 
 #[async_trait]
@@ -163,6 +186,18 @@ impl LdkServerCalls for LdkServerClient {
         req: ListPeersRequest,
     ) -> Result<ListPeersResponse, LdkServerError> {
         LdkServerClient::list_peers(self, req).await
+    }
+    async fn list_payments(
+        &self,
+        req: ListPaymentsRequest,
+    ) -> Result<ListPaymentsResponse, LdkServerError> {
+        LdkServerClient::list_payments(self, req).await
+    }
+    async fn get_payment_details(
+        &self,
+        req: GetPaymentDetailsRequest,
+    ) -> Result<GetPaymentDetailsResponse, LdkServerError> {
+        LdkServerClient::get_payment_details(self, req).await
     }
 }
 
@@ -239,26 +274,6 @@ impl StableChannelManager {
             }
             self.stability_throttle
                 .remove(&rollback_user_channel_id.unwrap_or_default());
-            stable_channels::audit::audit_event(
-                "STABILITY_PAYMENT_ROLLED_BACK",
-                serde_json::json!({
-                    "payment_id": payment_id,
-                    "user_channel_id": rollback.user_channel_id,
-                    "backing_sats_before": rollback.backing_sats_before,
-                    "backing_sats_after": rollback.backing_sats_after,
-                    "restored_native_sats": rollback.native_sats_before,
-                }),
-            );
-        } else {
-            stable_channels::audit::audit_event(
-                "STABILITY_PAYMENT_ROLLBACK_SKIPPED",
-                serde_json::json!({
-                    "payment_id": payment_id,
-                    "user_channel_id": rollback.user_channel_id,
-                    "expected_optimistic_backing_sats": rollback.backing_sats_after,
-                    "reason": "allocation changed after payment was sent",
-                }),
-            );
         }
 
         Some(rollback)
@@ -627,6 +642,7 @@ impl StableChannelManager {
         &mut self,
         channel_id: String,
         user_channel_id: String,
+        funding_txo: Option<String>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -645,7 +661,12 @@ impl StableChannelManager {
             .iter()
             .any(|sc| sc.user_channel_id == target_uid)
         {
-            self.handle_channel_ready_splice(target_uid, ldk, btc_price)
+            self.handle_channel_ready_splice(
+                target_uid,
+                funding_txo.as_deref(),
+                ldk,
+                btc_price,
+            )
                 .await;
             return;
         }
@@ -727,6 +748,7 @@ impl StableChannelManager {
             serde_json::json!({
                 "channel_id": channel_id,
                 "user_channel_id": user_channel_id,
+                "funding_txo": funding_txo,
             }),
         );
     }
@@ -1097,24 +1119,33 @@ impl StableChannelManager {
                         ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
                     let native_before = sc.native_sats;
                     let last_stability_payment_before = sc.last_stability_payment;
+                    let counterparty_for_db = sc.counterparty.to_string();
                     match ldk.spontaneous_send(send_req).await {
                         Ok(resp) => {
-                            if !resp.payment_id.is_empty() {
+                            let persisted = if resp.payment_id.is_empty() {
+                                false
+                            } else {
                                 match self.db.record_stability_settlement_with_rollback(
                                     &resp.payment_id,
                                     &user_channel_id_clone,
+                                    &channel_id_clone,
                                     backing_before,
                                     backing_after,
                                     native_before,
                                     expected_usd_for_db,
                                     last_stability_payment_before,
+                                    amount_msat,
+                                    direction,
+                                    &counterparty_for_db,
+                                    note_for_db.as_deref(),
                                 ) {
-                                    Ok(true) => {},
+                                    Ok(true) => true,
                                     Ok(false) => {
                                         stable_channels::audit::audit_event(
                                             "DB_WRITE_FAILED",
                                             serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": "duplicate payment id or invalid rollback metadata" }),
                                         );
+                                        false
                                     },
                                     Err(e) => {
                                         tracing::error!(
@@ -1125,45 +1156,20 @@ impl StableChannelManager {
                                             "DB_WRITE_FAILED",
                                             serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
                                         );
+                                        false
                                     },
                                 }
-                            }
+                            };
                             sc.last_stability_payment = now;
-                            // Reset backing_sats to equilibrium so the next tick doesn't re-pay the same drift forever. Native is recomputed on the next balance refresh.
-                            sc.backing_sats = backing_after;
-                            let backing = sc.backing_sats;
-                            let native = sc.native_sats;
-                            if let Err(e) = self.db.save_channel(
-                                &channel_id_clone,
-                                &user_channel_id_clone,
-                                expected_usd_for_db,
-                                backing,
-                                native,
-                                note_for_db.as_deref(),
-                            ) {
-                                tracing::error!(
-                                    "[stable] run_tick: db.save_channel failed: {}",
-                                    e
-                                );
-                                stable_channels::audit::audit_event(
-                                    "DB_WRITE_FAILED",
-                                    serde_json::json!({ "op": "save_channel", "context": "run_tick_post_send", "channel_id": channel_id_clone, "user_channel_id": user_channel_id_clone, "error": e.to_string() }),
-                                );
+                            if persisted {
+                                // The database and ledger own this optimistic transition. Only
+                                // update the cache after that transaction commits.
+                                sc.backing_sats = backing_after;
                             }
-                            stable_channels::audit::audit_event(
-                                "STABILITY_PAYMENT_SENT",
-                                serde_json::json!({
-                                    "channel_id": channel_id_clone,
-                                    "user_channel_id": user_channel_id_clone.clone(),
-                                    "direction": direction,
-                                    "amount_msat": amount_msat,
-                                    "payment_id": resp.payment_id,
-                                    "counterparty": sc.counterparty.to_string(),
-                                    "expected_usd": expected_usd_for_db,
-                                    "new_backing_sats": sc.backing_sats,
-                                }),
+                            self.stability_throttle.insert(
+                                sc.user_channel_id,
+                                (if persisted { "payment_sent" } else { "payment_persist_failed" }.to_string(), stable_usd_value),
                             );
-                            self.stability_throttle.insert(sc.user_channel_id, ("payment_sent".to_string(), stable_usd_value));
                         },
                         Err(e) => {
                             tracing::warn!(
@@ -1364,20 +1370,40 @@ impl StableChannelManager {
         btc_price: f64,
     ) {
         let total_sats = outbound_amount_forwarded_msat.saturating_add(fee_msat) / 1000;
-        stable_channels::audit::audit_event(
-            "PAYMENT_FORWARDED",
-            serde_json::json!({
-                "prev_user_channel_id": prev_user_channel_id,
-                "next_user_channel_id": next_user_channel_id,
-                "prev_channel_id": prev_channel_id,
-                "next_channel_id": next_channel_id,
-                "prev_node_id": prev_node_id,
-                "next_node_id": next_node_id,
-                "forwarded_msat": outbound_amount_forwarded_msat,
-                "fee_msat": fee_msat,
-                "total_sats": total_sats,
-            }),
+        let forward_detail = serde_json::json!({
+            "prev_user_channel_id": prev_user_channel_id,
+            "next_user_channel_id": next_user_channel_id,
+            "prev_channel_id": prev_channel_id,
+            "next_channel_id": next_channel_id,
+            "prev_node_id": prev_node_id,
+            "next_node_id": next_node_id,
+            "forwarded_msat": outbound_amount_forwarded_msat,
+            "fee_msat": fee_msat,
+            "total_sats": total_sats,
+        });
+        let fingerprint = stable_channels::db::forward_fingerprint(
+            &prev_channel_id,
+            &next_channel_id,
+            Some(outbound_amount_forwarded_msat),
+            Some(fee_msat),
         );
+        let draft = stable_channels::ledger::LedgerEventDraft::from_audit_event(
+            "PAYMENT_FORWARDED",
+            forward_detail,
+        );
+        if let Err(error) = self
+            .db
+            .append_forwarded_event_if_unseen(&fingerprint, &draft)
+        {
+            stable_channels::audit::audit_event(
+                "DB_WRITE_FAILED",
+                serde_json::json!({
+                    "op": "append_forwarded_event_if_unseen",
+                    "fingerprint": fingerprint,
+                    "error": error.to_string(),
+                }),
+            );
+        }
 
         let Some(target_uid) = parse_user_channel_id(&prev_user_channel_id) else {
             return;
@@ -1516,6 +1542,7 @@ impl StableChannelManager {
     async fn handle_channel_ready_splice(
         &mut self,
         uid: u128,
+        funding_txo: Option<&str>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -1548,6 +1575,9 @@ impl StableChannelManager {
             else {
                 return;
             };
+            let before_receiver_sats = sc.stable_receiver_btc.sats;
+            let (splice_direction, splice_amount_sats) =
+                splice_balance_change(before_receiver_sats, their_sats);
             // Refresh receiver balance from the new snapshot but PRESERVE backing_sats so reconcile_outgoing can infer the overflow.
             sc.channel_id =
                 ldk_node::lightning::ln::types::ChannelId::from_bytes(new_channel_id_bytes);
@@ -1579,11 +1609,24 @@ impl StableChannelManager {
                 sc.note.clone(),
                 counterparty_hex,
                 usd_deducted.is_some(),
+                splice_direction,
+                splice_amount_sats,
+                before_receiver_sats,
             )
         };
 
-        let (ucid_str, expected_usd_f, backing, native, note, counterparty_hex, deducted) =
-            persisted;
+        let (
+            ucid_str,
+            expected_usd_f,
+            backing,
+            native,
+            note,
+            counterparty_hex,
+            deducted,
+            splice_direction,
+            splice_amount_sats,
+            before_receiver_sats,
+        ) = persisted;
         if let Err(e) = self.db.save_channel(
             &channel_id_hex,
             &ucid_str,
@@ -1600,7 +1643,19 @@ impl StableChannelManager {
         }
         stable_channels::audit::audit_event(
             "CHANNEL_READY_SPLICE",
-            serde_json::json!({ "channel_id": channel_id_hex, "user_channel_id": ucid_str, "deducted": deducted }),
+            serde_json::json!({
+                "channel_id": channel_id_hex,
+                "user_channel_id": ucid_str,
+                "funding_txo": funding_txo,
+                "dedup_key": funding_txo.map(|outpoint| format!("lsp:channel-ready-splice:{ucid_str}:{outpoint}")),
+                "direction": splice_direction,
+                "amount_sats": splice_amount_sats,
+                "before_live_receiver_sats": before_receiver_sats,
+                "after_live_receiver_sats": their_sats,
+                "before_btc_price": btc_price,
+                "btc_price": btc_price,
+                "deducted": deducted,
+            }),
         );
         if deducted {
             let sent = self
@@ -2067,13 +2122,16 @@ mod tests {
     use super::*;
     use ldk_server_client::error::LdkServerErrorCode;
     use ldk_server_client::ldk_server_grpc::api::{
-        ListForwardedPaymentsRequest, ListForwardedPaymentsResponse, GetBalancesRequest,
-        GetBalancesResponse, ListPeersRequest, ListPeersResponse,
+        GetBalancesRequest, GetBalancesResponse, GetPaymentDetailsRequest,
+        GetPaymentDetailsResponse, ListForwardedPaymentsRequest, ListForwardedPaymentsResponse,
+        ListPaymentsRequest, ListPaymentsResponse, ListPeersRequest, ListPeersResponse,
     };
     use ldk_server_client::ldk_server_grpc::types::{
         Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment, HtlcLocator,
+        PageToken, Payment as GrpcPayment, PaymentStatus,
         PendingSweepBalance as GrpcPendingSweepBalance, Peer as GrpcPeer,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
 
@@ -2087,8 +2145,11 @@ mod tests {
         pub signature: String,
         pub sign_calls: StdMutex<Vec<Vec<u8>>>,
         pub forwarded: StdMutex<Vec<GrpcForwardedPayment>>,
+        pub forward_next_page_token: StdMutex<Option<PageToken>>,
+        pub forward_calls: AtomicUsize,
         pub sweeps: StdMutex<Vec<GrpcPendingSweepBalance>>,
         pub peers: StdMutex<Vec<GrpcPeer>>,
+        pub payments: StdMutex<Vec<GrpcPayment>>,
     }
 
     impl FakeLdkServer {
@@ -2101,8 +2162,11 @@ mod tests {
                 signature: "fake-sig".to_string(),
                 sign_calls: StdMutex::new(Vec::new()),
                 forwarded: StdMutex::new(Vec::new()),
+                forward_next_page_token: StdMutex::new(None),
+                forward_calls: AtomicUsize::new(0),
                 sweeps: StdMutex::new(Vec::new()),
                 peers: StdMutex::new(Vec::new()),
+                payments: StdMutex::new(Vec::new()),
             }
         }
         pub fn with_send_failure(mut self) -> Self {
@@ -2114,8 +2178,13 @@ mod tests {
             self
         }
         pub fn with_forwarded(self, f: Vec<GrpcForwardedPayment>) -> Self { *self.forwarded.lock().unwrap() = f; self }
+        pub fn with_forward_cursor(self, token: PageToken) -> Self {
+            *self.forward_next_page_token.lock().unwrap() = Some(token);
+            self
+        }
         pub fn with_sweeps(self, s: Vec<GrpcPendingSweepBalance>) -> Self { *self.sweeps.lock().unwrap() = s; self }
         pub fn with_peers(self, p: Vec<GrpcPeer>) -> Self { *self.peers.lock().unwrap() = p; self }
+        pub fn with_payments(self, p: Vec<GrpcPayment>) -> Self { *self.payments.lock().unwrap() = p; self }
     }
 
     #[async_trait]
@@ -2162,7 +2231,11 @@ mod tests {
         }
         async fn list_forwarded_payments(&self, _req: ListForwardedPaymentsRequest)
             -> Result<ListForwardedPaymentsResponse, LdkServerError> {
-            Ok(ListForwardedPaymentsResponse { forwarded_payments: self.forwarded.lock().unwrap().clone(), next_page_token: None })
+            self.forward_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ListForwardedPaymentsResponse {
+                forwarded_payments: self.forwarded.lock().unwrap().clone(),
+                next_page_token: self.forward_next_page_token.lock().unwrap().clone(),
+            })
         }
         async fn get_balances(&self, _req: GetBalancesRequest)
             -> Result<GetBalancesResponse, LdkServerError> {
@@ -2171,6 +2244,22 @@ mod tests {
         async fn list_peers(&self, _req: ListPeersRequest)
             -> Result<ListPeersResponse, LdkServerError> {
             Ok(ListPeersResponse { peers: self.peers.lock().unwrap().clone() })
+        }
+        async fn list_payments(&self, _req: ListPaymentsRequest)
+            -> Result<ListPaymentsResponse, LdkServerError> {
+            Ok(ListPaymentsResponse { payments: self.payments.lock().unwrap().clone(), next_page_token: None })
+        }
+        async fn get_payment_details(&self, req: GetPaymentDetailsRequest)
+            -> Result<GetPaymentDetailsResponse, LdkServerError> {
+            Ok(GetPaymentDetailsResponse {
+                payment: self
+                    .payments
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|payment| payment.id == req.payment_id)
+                    .cloned(),
+            })
         }
     }
 
@@ -2478,6 +2567,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -2495,12 +2585,14 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -2767,13 +2859,11 @@ mod tests {
 
     #[tokio::test]
     async fn payment_forwarded_audit_records_both_legs() {
-        let _g = AUDIT_TEST_GUARD.lock().unwrap();
         let (mut mgr, fake) = seed_forwarded_fixture().await;
         *fake.channels.lock().unwrap() = vec![make_channel(
             CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
             100_000, 95_000_000, true,
         )];
-        stable_channels::audit::enable_test_capture();
         mgr.handle_payment_forwarded(
             USER_CHANNEL_ID_DECIMAL.to_string(),
             Some("outbound-ucid".to_string()),
@@ -2786,14 +2876,23 @@ mod tests {
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
-        let events = stable_channels::audit::drain_test_capture();
-        stable_channels::audit::disable_test_capture();
-        let (_, data) = events.iter().find(|(e, _)| e == "PAYMENT_FORWARDED")
+        let page = mgr
+            .db
+            .list_ledger_events(&stable_channels::ledger::LedgerQuery {
+                identifier: Some("prev-chan-hex".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        let data = page
+            .events
+            .iter()
+            .find(|event| event.event_type == "PAYMENT_FORWARDED")
             .expect("PAYMENT_FORWARDED must be emitted");
-        assert_eq!(data["prev_user_channel_id"], USER_CHANNEL_ID_DECIMAL, "inbound leg must be recorded");
-        assert_eq!(data["next_user_channel_id"], "outbound-ucid", "outbound leg must be recorded");
-        assert_eq!(data["prev_node_id"], "prev-node-pubkey");
-        assert_eq!(data["next_node_id"], "next-node-pubkey");
+        assert_eq!(data.detail["prev_user_channel_id"], USER_CHANNEL_ID_DECIMAL, "inbound leg must be recorded");
+        assert_eq!(data.detail["next_user_channel_id"], "outbound-ucid", "outbound leg must be recorded");
+        assert_eq!(data.detail["prev_node_id"], "prev-node-pubkey");
+        assert_eq!(data.detail["next_node_id"], "next-node-pubkey");
     }
 
     #[tokio::test]
@@ -2807,6 +2906,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -3794,6 +3894,13 @@ mod tests {
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a fresh signed trade must apply");
     }
 
+    #[test]
+    fn splice_balance_change_records_direction_and_net_amount() {
+        assert_eq!(splice_balance_change(50_000, 80_000), ("in", 30_000));
+        assert_eq!(splice_balance_change(50_000, 5_000), ("out", 45_000));
+        assert_eq!(splice_balance_change(50_000, 50_000), ("unchanged", 0));
+    }
+
     #[tokio::test]
     async fn splice_out_deducts_and_syncs() {
         let mut mgr = make_manager();
@@ -3807,6 +3914,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_DECIMAL.to_string(),
+            Some("splice-out-funding:0".to_owned()),
             &fake as &dyn LdkServerCalls,
             100_000.0,
         )
@@ -3829,6 +3937,7 @@ mod tests {
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_DECIMAL.to_string(),
+            Some("splice-in-funding:0".to_owned()),
             &fake as &dyn LdkServerCalls,
             100_000.0,
         )
@@ -3850,6 +3959,7 @@ mod tests {
             mgr.handle_channel_ready(
                 CHANNEL_ID_HEX.to_string(),
                 USER_CHANNEL_ID_DECIMAL.to_string(),
+                Some("replayed-splice-funding:0".to_owned()),
                 &fake as &dyn LdkServerCalls,
                 100_000.0,
             )
@@ -3919,8 +4029,217 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = stable_channels::db::Database::open(dir.path()).unwrap();
         let fake = FakeLdkServer::new(vec![]).with_forwarded(vec![fwd("aa", "bb", 1000), fwd("cc", "dd", 2000)]);
-        assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await, 2); // both unseen
-        assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await, 0); // both now seen
+        assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await.emitted, 2); // both unseen
+        assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await.emitted, 0); // both now seen
+    }
+
+    #[tokio::test]
+    async fn forward_backfill_stops_on_repeated_cursor() {
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        let fake = FakeLdkServer::new(vec![]).with_forward_cursor(PageToken {
+            token: "same-page".to_owned(),
+            index: 7,
+        });
+
+        let result = crate::backfill::backfill_forwards(&fake, &db).await;
+        assert!(result.failure.is_none());
+        assert!(result.incomplete.as_deref().unwrap().contains("repeated"));
+        assert_eq!(fake.forward_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn reconnect_reconstructs_channel_payment_forward_peer_and_sweep() {
+        use ldk_server_client::ldk_server_grpc::types::{
+            pending_sweep_balance, PendingBroadcast,
+        };
+        use stable_channels::ledger::{LedgerQuery, LedgerCompleteness};
+
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            40_000_000,
+            true,
+        )])
+        .with_payments(vec![GrpcPayment {
+            id: "payment-no-channel".into(),
+            amount_msat: Some(21_000),
+            fee_paid_msat: Some(10),
+            direction: 1,
+            status: 1,
+            latest_update_timestamp: 123,
+            ..Default::default()
+        }])
+        .with_forwarded(vec![fwd("aa", "bb", 1_000)])
+        .with_peers(vec![GrpcPeer {
+            node_id: COUNTERPARTY_HEX.into(),
+            address: "127.0.0.1:9735".into(),
+            is_connected: true,
+            ..Default::default()
+        }])
+        .with_sweeps(vec![GrpcPendingSweepBalance {
+            balance_type: Some(pending_sweep_balance::BalanceType::PendingBroadcast(
+                PendingBroadcast { channel_id: Some(CHANNEL_ID_HEX.into()), amount_satoshis: 777 },
+            )),
+        }]);
+
+        let counts = crate::backfill::reconcile_event_history(&fake, &db).await;
+        assert_eq!(counts.channels, 1);
+        assert_eq!(counts.payments, 1);
+        assert_eq!(counts.forwards, 1);
+        assert_eq!(counts.peers, 1);
+        assert_eq!(counts.sweeps, 1);
+        assert_eq!(counts.failed_scopes, 0);
+
+        let page = db.list_ledger_events(&LedgerQuery {
+            completeness: Some("reconstructed".into()),
+            limit: 50,
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(page.events.len(), 5);
+        assert!(page.events.iter().all(|event| event.completeness == LedgerCompleteness::Reconstructed));
+        let payment = page.events.iter().find(|event| event.event_type == "PAYMENT_RECONSTRUCTED").unwrap();
+        assert_eq!(payment.status, "completed");
+        assert_eq!(payment.detail["ldk_status"], "SUCCEEDED");
+        assert_eq!(payment.detail["channel_association"], "unavailable_from_ldk");
+        assert!(!payment.refs.iter().any(|reference| reference.role.contains("channel")));
+
+        let replay_counts = crate::backfill::reconcile_event_history(&fake, &db).await;
+        assert_eq!(replay_counts.channels, 0);
+        assert_eq!(replay_counts.forwards, 0);
+        assert_eq!(replay_counts.peers, 0);
+        assert_eq!(replay_counts.sweeps, 0);
+        let replay_page = db
+            .list_ledger_events(&LedgerQuery {
+                completeness: Some("reconstructed".into()),
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(replay_page.events.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn reconnect_persists_missed_successful_settlement_before_live_dispatch() {
+        use stable_channels::ledger::LedgerQuery;
+
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        db.record_stability_settlement_with_rollback(
+            "successful-payment",
+            "stable",
+            "physical",
+            10_000,
+            9_000,
+            5_000,
+            10.0,
+            0,
+            1_000_000,
+            "outbound",
+            COUNTERPARTY_HEX,
+            None,
+        )
+        .unwrap();
+        let fake = FakeLdkServer::new(vec![]).with_payments(vec![GrpcPayment {
+            id: "successful-payment".into(),
+            amount_msat: Some(1_000_000),
+            fee_paid_msat: Some(25),
+            direction: 1,
+            status: PaymentStatus::Succeeded as i32,
+            latest_update_timestamp: 123,
+            ..Default::default()
+        }]);
+
+        let counts = crate::backfill::reconcile_event_history(&fake, &db).await;
+        assert!(counts.settlement_outcomes_safe);
+        assert!(db.list_pending_settlements().unwrap().is_empty());
+        let terminal = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some("successful-payment".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|event| event.event_type == "STABILITY_PAYMENT_SETTLED")
+            .unwrap();
+        assert_eq!(terminal.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn sweep_reconstruction_identity_survives_unrelated_list_shifts() {
+        use ldk_server_client::ldk_server_grpc::types::{
+            pending_sweep_balance, AwaitingThresholdConfirmations,
+            BroadcastAwaitingConfirmation, PendingBroadcast,
+        };
+
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        let pending = GrpcPendingSweepBalance {
+            balance_type: Some(pending_sweep_balance::BalanceType::PendingBroadcast(
+                PendingBroadcast {
+                    channel_id: Some("channel-a".into()),
+                    amount_satoshis: 111,
+                },
+            )),
+        };
+        let broadcast = GrpcPendingSweepBalance {
+            balance_type: Some(
+                pending_sweep_balance::BalanceType::BroadcastAwaitingConfirmation(
+                    BroadcastAwaitingConfirmation {
+                        channel_id: Some("channel-b".into()),
+                        latest_broadcast_height: 100,
+                        latest_spending_txid: "sweep-txid".into(),
+                        amount_satoshis: 222,
+                    },
+                ),
+            ),
+        };
+        let fake = FakeLdkServer::new(vec![])
+            .with_sweeps(vec![pending, broadcast.clone()]);
+        assert_eq!(
+            crate::backfill::reconcile_event_history(&fake, &db).await.sweeps,
+            2
+        );
+
+        *fake.sweeps.lock().unwrap() = vec![broadcast];
+        assert_eq!(
+            crate::backfill::reconcile_event_history(&fake, &db).await.sweeps,
+            0,
+            "removing an earlier sweep must not make the remaining sweep look new"
+        );
+
+        *fake.sweeps.lock().unwrap() = vec![GrpcPendingSweepBalance {
+            balance_type: Some(
+                pending_sweep_balance::BalanceType::AwaitingThresholdConfirmations(
+                    AwaitingThresholdConfirmations {
+                        channel_id: Some("channel-b".into()),
+                        latest_spending_txid: "sweep-txid".into(),
+                        confirmation_hash: "block-hash".into(),
+                        confirmation_height: 101,
+                        amount_satoshis: 222,
+                    },
+                ),
+            ),
+        }];
+        assert_eq!(
+            crate::backfill::reconcile_event_history(&fake, &db).await.sweeps,
+            1,
+            "the same sweep changing confirmation state must remain visible"
+        );
     }
 
     #[test]

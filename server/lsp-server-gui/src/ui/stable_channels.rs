@@ -89,7 +89,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						.column(Column::auto()) // Backing
 						.column(Column::auto()) // Role
 						.column(Column::remainder().at_least(64.0).clip(true)) // Note
-						.column(Column::auto()) // Edit
+						.column(Column::auto()) // Actions
 						.header(22.0, |mut header| {
                             header.col(|ui| {
                                 widgets::table_header_with_info(ui, "Channel ID", HELP_CHANNEL_ID);
@@ -121,7 +121,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
                                 widgets::table_header_with_info(ui, "Note", HELP_NOTE);
                             });
                             header.col(|ui| {
-                                ui.strong("");
+                                ui.strong("Actions");
                             });
 						})
 						.body(|mut body| {
@@ -180,18 +180,19 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
                                             &row.note
                                         });
                                     });
-									// Prefill the edit form from this row
+									// Open the exact stable identity or prefill the edit form.
 									r.col(|ui| {
-                                        if ui
-                                            .button("Edit")
-                                            .on_hover_text("Edit this channel's stable target")
-                                            .clicked()
-                                        {
-											let form = &mut app.state.forms.edit_stable_channel;
-											form.channel_id = row.channel_id.clone();
-											form.expected_usd = format!("{:.2}", row.expected_usd);
-											form.note = row.note.clone();
-										}
+										ui.horizontal(|ui| {
+											if ui.button("View Ledger").on_hover_text("Open this stable user_channel_id").clicked() {
+												app.open_channel_ledger(row.user_channel_id.clone());
+											}
+											if ui.button("Edit").on_hover_text("Edit this channel's stable target").clicked() {
+												let form = &mut app.state.forms.edit_stable_channel;
+												form.channel_id = row.channel_id.clone();
+												form.expected_usd = format!("{:.2}", row.expected_usd);
+												form.note = row.note.clone();
+											}
+										});
 									});
 								});
 							}

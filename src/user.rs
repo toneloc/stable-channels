@@ -2357,16 +2357,15 @@ impl UserApp {
                             })
                     })
                     .unwrap_or_else(|| "Payment sent".to_string());
-                audit_event(
-                    "PAYMENT_SUCCESSFUL",
-                    json!({
-                        "payment_hash": payment_hash,
-                        "payment_id": event_id,
-                        "fee_paid_msat": fee_paid_msat,
-                    }),
-                );
-
                 if needs_reconcile {
+                    audit_event(
+                        "PAYMENT_SUCCESSFUL",
+                        json!({
+                            "payment_hash": payment_hash,
+                            "payment_id": event_id,
+                            "fee_paid_msat": fee_paid_msat,
+                        }),
+                    );
                     let persisted = {
                         let mut sc = self.stable_channel.lock().unwrap();
                         let before_reconcile = sc.clone();
@@ -2453,21 +2452,32 @@ impl UserApp {
                                     .to_string();
                         }
                     }
-                } else if let Some(pending) = pending {
-                    let _ = self.db.update_payment_status(
-                        pending.payment_db_id,
-                        "completed",
-                        fee_paid_msat,
-                    );
-                    if let Some(pid) = payment_id {
-                        self.pending_payments.remove(&pid);
-                    }
                 } else {
-                    let _ = self.db.update_payment_status_by_pid(
+                    match self.db.complete_pending_stability_payment(
                         &event_id,
-                        "completed",
+                        payment_hash,
                         fee_paid_msat,
-                    );
+                    ) {
+                        Ok(_) => {
+                            if let Some(pid) = payment_id {
+                                self.pending_payments.remove(&pid);
+                            }
+                        },
+                        Err(error) => {
+                            *ack = false;
+                            audit_event(
+                                "STABILITY_PAYMENT_SUCCESS_PERSIST_FAILED",
+                                json!({
+                                    "payment_hash": payment_hash,
+                                    "payment_id": event_id,
+                                    "error": error.to_string(),
+                                }),
+                            );
+                            self.status_message =
+                                "Stability payment settled but could not be saved; retrying"
+                                    .to_string();
+                        },
+                    }
                 }
 
                 if *ack {
@@ -3231,7 +3241,6 @@ impl UserApp {
                         {
                             Ok(Some(rollback)) => {
                                 handled_stability_failure = true;
-                                let mut memory_restored = false;
                                 if rollback.restored {
                                     if let (Some(uid), Some(before), Some(after)) = (
                                         rollback.user_channel_id.as_deref(),
@@ -3250,24 +3259,9 @@ impl UserApp {
                                             stable::recompute_native(&mut sc);
                                             sc.last_stability_payment = 0;
                                             sc.payment_made = false;
-                                            memory_restored = true;
                                         }
                                     }
                                 }
-
-                                audit_event(
-                                    "STABILITY_PAYMENT_FAILED_RECONCILED",
-                                    json!({
-                                        "payment_id": format!("{pid}"),
-                                        "payment_hash": payment_hash.map(|h| format!("{h}")),
-                                        "reason": format!("{:?}", reason),
-                                        "user_channel_id": rollback.user_channel_id,
-                                        "backing_sats_before": rollback.backing_sats_before,
-                                        "backing_sats_after": rollback.backing_sats_after,
-                                        "database_restored": rollback.restored,
-                                        "memory_restored": memory_restored,
-                                    }),
-                                );
                                 self.status_message = if rollback.restored {
                                     "Stability payment failed; allocation restored".to_string()
                                 } else {
