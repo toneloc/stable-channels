@@ -1,6 +1,6 @@
 # Step 7 — Onchain Send
-# "User sends an onchain payment to another app." With a ready channel this
-# routes via splice-out (SendScreen.kt: result = "Splice-out initiated").
+# "User sends an onchain payment to another app. Funds come from the BTC balance first, then USD if needed."
+# With a ready channel, this routes via splice-out (SendScreen.kt: result = "Splice-out initiated").
 appId: com.stablechannels.app
 tags: [android, ios, send, onchain]
 env:

@@ -1,5 +1,5 @@
 # Step 5 — Onchain Receive
-# "User receives an onchain payment, first to the 'onchain box'; then spliced in."
+# "User receives an onchain payment from another app into the onchain box, then splices it into the channel."
 appId: com.stablechannels.app
 tags: [android, onchain, receive]
 env:

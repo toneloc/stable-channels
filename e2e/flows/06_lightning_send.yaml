@@ -1,6 +1,5 @@
 # Step 6 — Lightning Send
-# "User sends a Lightning payment to another app. Funds are first taken from
-#  BTC balance, overflow taken from USD."
+# "User sends a Lightning payment to another app. Funds come from the BTC balance first, then USD if needed."
 # Selectors verified against SendScreen.kt.
 appId: com.stablechannels.app
 tags: [android, ios, send]

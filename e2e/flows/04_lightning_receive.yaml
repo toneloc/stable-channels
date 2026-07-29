@@ -1,5 +1,5 @@
 # Step 4 — Lightning Receive
-# "User receives a Lightning payment from another app and BTC balance increases."
+# "User receives a Lightning payment from another app, increasing their BTC balance."
 # Selectors verified against ReceiveScreen.kt.
 appId: com.stablechannels.app
 tags: [android, ios, receive]

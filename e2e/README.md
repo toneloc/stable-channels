@@ -72,6 +72,9 @@ Screenshots + logs land in `~/.maestro/tests/<timestamp>/`;
 The runner reset-once-then-carry-state model means 01 onboards, 02 trades on
 that state, 03 settles, etc. At suite startup, `run-flows.sh` clears only
 Stable Channels app data and then restores the regtest `test_config.json`.
+Once setup is complete, the runner displays
+`Ready for testing — press Space to continue.` before starting the first flow.
+Set `SC_E2E_AUTO_START=1` to skip this pause in automated runs.
 Set `RESET_APP_STATE=0` only to continue an interrupted run. Don't add
 `clearState` to an individual flow: later flows need the wallet created by
 earlier ones, and Maestro would remove the test configuration.

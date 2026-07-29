@@ -59,6 +59,32 @@ else
     info "keeping the current mock price for the resumed lifecycle"
 fi
 
+wait_for_test_start() {
+    if [ "${SC_E2E_AUTO_START:-0}" = "1" ]; then
+        info "Ready for testing — auto-start enabled"
+        return
+    fi
+
+    if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+        info "Ready for testing — continuing automatically (no interactive terminal)"
+        return
+    fi
+
+    printf '\n%sReady for testing — press Space to continue.%s' \
+        "$C_BOLD$C_CYAN" "$C_RESET" > /dev/tty
+
+    local key
+    while true; do
+        if ! IFS= read -r -s -n 1 key < /dev/tty; then
+            printf '\n' > /dev/tty
+            die "could not read from the terminal"
+        fi
+        [ "$key" = " " ] && break
+    done
+    printf '\n' > /dev/tty
+}
+
+wait_for_test_start
 step "Running ${#FLOWS[@]} flows on ${PLAT_UP}  (device $DEVICE)"
 
 # Dim + indent maestro's own step lines so the suite's structure (badges,

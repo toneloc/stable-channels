@@ -1,5 +1,5 @@
 # Step 3 — USD Stability
-# "Settlement payments occur."
+# "A stability settlement occurs after the BTC price changes."
 # The harness moves the mocked price -0.5%; the LSP's stability tick must send
 # a settlement keysend to the app. The flow verifies both the LSP audit event
 # and the app's received-payment status.

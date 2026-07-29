@@ -1,5 +1,5 @@
 # Step 9 — Close channel
-# "User initiates an onchain cooperative close."
+# "User initiates a cooperative onchain channel close."
 # Identical labels on both platforms: Settings tab -> Channel row ->
 # Close channel -> "Close channel" alert -> Close channel.
 appId: com.stablechannels.app

@@ -1,5 +1,5 @@
 # Step 10 — Back Up Keys
-# "User copies from the screen."
+# "User reveals and copies their recovery keys from the screen."
 # Settings -> Backup -> reveal seed -> exercise copy confirmation.
 appId: com.stablechannels.app
 tags: [android, ios, keys]

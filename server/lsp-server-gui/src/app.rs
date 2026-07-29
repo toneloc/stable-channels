@@ -1599,7 +1599,7 @@ impl App for LspServerApp {
 
 		egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
 			ui.horizontal(|ui| {
-				ui.heading("LSP Server");
+				ui.heading("Stable Channels LSP");
 				ui.separator();
 				ui::connection::render_status(ui, &self.state);
 				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
