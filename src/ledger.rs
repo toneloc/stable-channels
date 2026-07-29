@@ -4,6 +4,7 @@
 //! module as a best-effort JSONL mirror for operators and older tooling.
 
 use std::collections::BTreeSet;
+use std::io::{BufRead, Cursor};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -114,7 +115,7 @@ impl LedgerEventDraft {
             .get("occurred_at_ms")
             .and_then(Value::as_i64)
             .unwrap_or_else(|| Utc::now().timestamp_millis());
-        let mut draft = Self {
+        Self {
             event_type: event_type.to_owned(),
             category: category_for(&upper).to_owned(),
             severity: severity_for(&upper).to_owned(),
@@ -135,11 +136,7 @@ impl LedgerEventDraft {
             after,
             detail,
             refs,
-        };
-        if draft.dedup_key.is_none() {
-            draft.dedup_key = natural_dedup_key(&draft, &upper);
         }
-        draft
     }
 
     pub fn with_ref(mut self, role: impl Into<String>, value: impl Into<String>) -> Self {
@@ -172,16 +169,22 @@ pub struct LedgerQuery {
     pub category: Option<String>,
     pub status: Option<String>,
     pub completeness: Option<String>,
-    /// Return rows with an id lower than this cursor.
-    pub before_id: Option<i64>,
+    /// Return rows chronologically before this opaque timeline position.
+    pub before: Option<LedgerCursor>,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerCursor {
+    pub occurred_at_ms: i64,
+    pub id: i64,
 }
 
 #[derive(Debug, Clone)]
 pub struct LedgerPage {
     /// Chronological within the page. Pages themselves are selected newest-first.
     pub events: Vec<LedgerEvent>,
-    pub next_cursor: Option<i64>,
+    pub next_cursor: Option<LedgerCursor>,
     pub overview: LedgerOverview,
 }
 
@@ -247,7 +250,16 @@ pub(crate) fn init_schema(conn: &Connection) -> SqliteResult<()> {
             value TEXT NOT NULL,
             updated_at_ms INTEGER NOT NULL DEFAULT (unixepoch('subsec') * 1000)
          );
+         CREATE TABLE IF NOT EXISTS ledger_reconstruction_state (
+            scope TEXT NOT NULL,
+            identity TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL DEFAULT (unixepoch('subsec') * 1000),
+            PRIMARY KEY (scope, identity)
+         );
          CREATE INDEX IF NOT EXISTS idx_ledger_events_page ON ledger_events(id DESC);
+         CREATE INDEX IF NOT EXISTS idx_ledger_events_timeline
+            ON ledger_events(occurred_at_ms DESC, id DESC);
          CREATE INDEX IF NOT EXISTS idx_ledger_events_filters
             ON ledger_events(category, status, completeness, id DESC);
          CREATE INDEX IF NOT EXISTS idx_ledger_refs_exact
@@ -370,7 +382,7 @@ pub(crate) fn list_on_connection(conn: &Connection, query: &LedgerQuery) -> Sqli
     let category = query.category.as_deref().unwrap_or("").trim();
     let status = query.status.as_deref().unwrap_or("").trim();
     let completeness = query.completeness.as_deref().unwrap_or("").trim();
-    let before_id = query.before_id.unwrap_or(0);
+    let before = query.before.unwrap_or(LedgerCursor { occurred_at_ms: 0, id: 0 });
     let limit = if query.limit == 0 { 50 } else { query.limit.min(200) };
     let mut stmt = conn.prepare(
         "SELECT id, event_type, category, severity, status, source, completeness,
@@ -382,12 +394,21 @@ pub(crate) fn list_on_connection(conn: &Connection, query: &LedgerQuery) -> Sqli
            AND (?2 = '' OR e.category = ?2)
            AND (?3 = '' OR e.status = ?3)
            AND (?4 = '' OR e.completeness = ?4)
-           AND (?5 = 0 OR e.id < ?5)
-         ORDER BY e.id DESC
-         LIMIT ?6",
+           AND (?5 = 0 OR e.occurred_at_ms < ?5
+                OR (e.occurred_at_ms = ?5 AND e.id < ?6))
+         ORDER BY e.occurred_at_ms DESC, e.id DESC
+         LIMIT ?7",
     )?;
     let rows = stmt.query_map(
-        params![identifier, category, status, completeness, before_id, (limit + 1) as i64],
+        params![
+            identifier,
+            category,
+            status,
+            completeness,
+            before.occurred_at_ms,
+            before.id,
+            (limit + 1) as i64,
+        ],
         |row| {
             let before_json: Option<String> = row.get(10)?;
             let after_json: Option<String> = row.get(11)?;
@@ -417,7 +438,14 @@ pub(crate) fn list_on_connection(conn: &Connection, query: &LedgerQuery) -> Sqli
     if has_more {
         events.truncate(limit);
     }
-    let next_cursor = has_more.then(|| events.last().map(|e| e.id)).flatten();
+    let next_cursor = has_more
+        .then(|| {
+            events.last().map(|event| LedgerCursor {
+                occurred_at_ms: event.occurred_at_ms,
+                id: event.id,
+            })
+        })
+        .flatten();
     let mut refs_stmt = conn.prepare(
         "SELECT role, value FROM ledger_event_refs WHERE event_id = ?1 ORDER BY role, value",
     )?;
@@ -583,13 +611,23 @@ pub(crate) fn import_legacy_jsonl(conn: &Connection, path: &Path) -> SqliteResul
             return Ok(LegacyImportReport { already_imported: true, ..Default::default() });
         }
 
-        let content = match std::fs::read_to_string(path) {
+        let content = match std::fs::read(path) {
             Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
         };
         let mut report = LegacyImportReport::default();
-        for (line_no, line) in content.lines().enumerate() {
+        for (line_no, line) in Cursor::new(content).split(b'\n').enumerate() {
+            let line = line.map_err(|error| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+            })?;
+            let line = match std::str::from_utf8(&line) {
+                Ok(line) => line,
+                Err(_) => {
+                    report.skipped += 1;
+                    continue;
+                }
+            };
             let parsed: Value = match serde_json::from_str(line) {
                 Ok(value) => value,
                 Err(_) => {
@@ -705,33 +743,6 @@ fn status_for(event: &str) -> &'static str {
     } else {
         "observed"
     }
-}
-
-fn natural_dedup_key(draft: &LedgerEventDraft, event: &str) -> Option<String> {
-    let stable = event.contains("RECONSTRUCTED")
-        || event.contains("BACKFILL")
-        || event.contains("SETTLED")
-        || event.contains("SUCCESS")
-        || event.contains("FAILED")
-        || event.contains("APPLIED")
-        || event.contains("READY")
-        || event.contains("CLOSED");
-    let throttled = event.contains("COOLDOWN") || event.contains("SKIPPED_UNCHANGED");
-    if !stable && !throttled {
-        return None;
-    }
-    let mut refs = draft
-        .refs
-        .iter()
-        .map(|r| format!("{}={}", r.role, r.value))
-        .collect::<Vec<_>>();
-    refs.sort();
-    if refs.is_empty() {
-        return None;
-    }
-    let version = draft.detail.get("sync_version").and_then(Value::as_u64).unwrap_or(0);
-    let bucket = if throttled { draft.occurred_at_ms / 300_000 } else { 0 };
-    Some(format!("event:{}:{}:v{}:b{}", draft.event_type, refs.join("|"), version, bucket))
 }
 
 fn extract_refs(detail: &Value) -> Vec<LedgerRef> {
@@ -873,6 +884,28 @@ mod tests {
     }
 
     #[test]
+    fn repeated_business_events_require_an_explicit_replay_identity_to_deduplicate() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let event = LedgerEventDraft::from_audit_event(
+            "PAYMENT_FAILED",
+            serde_json::json!({"payment_id": "retryable-payment"}),
+        );
+
+        assert!(append_on_connection(&conn, &event).unwrap().inserted);
+        assert!(append_on_connection(&conn, &event).unwrap().inserted);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE event_type = 'PAYMENT_FAILED'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn reconnect_markers_preserve_gap_and_result_status() {
         let gap = LedgerEventDraft::from_audit_event(
             "EVENT_STREAM_GAP_STARTED",
@@ -902,6 +935,7 @@ mod tests {
                     "user_channel_id": "stable-channel",
                     "channel_id": "logical-channel",
                     "funding_txo": funding_txo,
+                    "dedup_key": format!("lsp:channel-ready-splice:stable-channel:{funding_txo}"),
                     "deducted": false,
                 }),
             )

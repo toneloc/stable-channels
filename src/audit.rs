@@ -50,32 +50,10 @@ pub fn record_event(event: &str, data: Value) -> rusqlite::Result<AppendOutcome>
     {
         CAPTURE.lock().unwrap().push((event.to_owned(), data.clone()));
     }
-    let mut draft = LedgerEventDraft::from_audit_event(event, data.clone());
+    let draft = LedgerEventDraft::from_audit_event(event, data.clone());
     let database = AUDIT_LEDGER.lock().unwrap().clone();
     let outcome = match database {
-        Some(database) => {
-            // Named compatibility events often carry the price/amount decision
-            // but omit unchanged allocation fields. Enrich them from the
-            // authoritative post-commit channel row so the structured event is
-            // directly auditable without parsing a neighboring log line.
-            if let Some(user_channel_id) = draft
-                .refs
-                .iter()
-                .find(|reference| reference.role == "user_channel_id")
-                .map(|reference| reference.value.clone())
-            {
-                if let Some(channel) = database.load_channel(&user_channel_id)? {
-                    let snapshot = draft.after.get_or_insert_with(Default::default);
-                    snapshot.expected_usd.get_or_insert(channel.expected_usd);
-                    snapshot.backing_sats.get_or_insert(channel.backing_sats);
-                    snapshot.native_sats.get_or_insert(channel.native_sats);
-                    snapshot
-                        .live_receiver_sats
-                        .get_or_insert(channel.backing_sats.saturating_add(channel.native_sats));
-                }
-            }
-            database.append_ledger_event(&draft)?
-        },
+        Some(database) => database.append_ledger_event(&draft)?,
         None => AppendOutcome { event_id: 0, inserted: true },
     };
     // Deduplicated replays already have a mirrored first occurrence.
@@ -216,5 +194,34 @@ mod tests {
         mirror_event_at(&path, "CHANNEL_READY", serde_json::json!({}), Some(41)).unwrap();
         let line: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(line["ledger_id"], 41);
+    }
+
+    #[test]
+    fn generic_audit_events_do_not_infer_an_after_snapshot() {
+        let database = Database::open_in_memory().unwrap();
+        database
+            .save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        set_audit_ledger(database.clone());
+
+        record_event(
+            "PEER_CONNECTED",
+            serde_json::json!({"user_channel_id": "stable", "node_id": "peer"}),
+        )
+        .unwrap();
+        let event = database
+            .list_ledger_events(&crate::ledger::LedgerQuery {
+                identifier: Some("peer".to_owned()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|event| event.event_type == "PEER_CONNECTED")
+            .unwrap();
+        assert!(event.after.is_none());
+
+        *AUDIT_LEDGER.lock().unwrap() = None;
     }
 }

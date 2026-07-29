@@ -90,6 +90,7 @@ class AppState {
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
+    let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
 
     // MARK: - State
 
@@ -203,6 +204,7 @@ class AppState {
         nodeService.databaseService = databaseService
 
         txidResolutionService.databaseService = databaseService
+        txidResolutionService.mempoolWebSocketService = mempoolWebSocketService
         txidResolutionService.configureResolvers(urls: Constants.esploraChainURLs)
 
         txidResolutionService.didResolveTxid = { [weak self] event in
@@ -229,6 +231,16 @@ class AppState {
         blockHeightService.onHeightUpdated = { [weak pollingService] _ in
             Task { @MainActor in
                 await pollingService?.pollOnce()
+            }
+        }
+        mempoolWebSocketService.onBlockHeader = { [weak self] _ in
+            Task { @MainActor in
+                await self?.blockHeightService.refresh()
+            }
+        }
+        mempoolWebSocketService.onTransactionDetected = { [weak self] event in
+            Task { @MainActor in
+                self?.handleWebSocketTransactionDetected(event: event)
             }
         }
 
@@ -340,6 +352,10 @@ class AppState {
             updateStableBalances()
             startStabilityTimer()
             blockHeightService.start()
+            mempoolWebSocketService.connect()
+            if let addr = transactionLinkService.onchainReceiveAddress, !addr.isEmpty {
+                mempoolWebSocketService.trackAddress(addr)
+            }
             Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
@@ -393,6 +409,7 @@ class AppState {
     private func dropDatabaseServices() {
         blockHeightService.stop()
         blockHeightService.onHeightUpdated = nil
+        mempoolWebSocketService.disconnect()
         confirmationPollingService = nil
         nodeService.databaseService = nil
         nodeService.clearSavedMnemonic()
@@ -571,6 +588,7 @@ class AppState {
                         .string(forKey: "funding_txid")
                     resumePendingSpliceConfirmation()
                     blockHeightService.start()
+                    mempoolWebSocketService.connect()
                     Task { await confirmationPollingService?.pollOnce() }
                 }
                 startStabilityTimer()
@@ -605,6 +623,7 @@ class AppState {
                 await MainActor.run {
                     phase = .wallet
                     blockHeightService.start()
+                    mempoolWebSocketService.connect()
                     Task { await confirmationPollingService?.pollOnce() }
                     refreshBalances()
                     updateStableBalances()
@@ -751,6 +770,7 @@ class AppState {
         spliceConfirmationTask?.cancel()
         spliceConfirmationTask = nil
         monitoredSpliceTxid = nil
+        mempoolWebSocketService.disconnect()
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -781,6 +801,7 @@ class AppState {
             print("[App] Node still running (grace period), reconnecting")
             ensureLSPConnected()
             refreshBalances()
+            mempoolWebSocketService.connect()
             updateStableBalances()
             resumePendingSpliceConfirmation()
             return
@@ -800,6 +821,7 @@ class AppState {
             )
             refreshBalances()
             blockHeightService.start()
+            mempoolWebSocketService.connect()
             Task { await confirmationPollingService?.pollOnce() }
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
@@ -1272,10 +1294,11 @@ class AppState {
             ])
             statusMessage = "Splice failed"
 
-        case .channelClosed(let channelId, let userChannelId, _, let reason):
+        case .channelClosed(let channelId, let userChannelId, let counterpartyNodeId, let reason):
             handleChannelClosed(
                 channelId: channelId,
                 userChannelId: userChannelId,
+                counterpartyNodeId: counterpartyNodeId,
                 reason: reason
             )
 
@@ -1657,20 +1680,70 @@ class AppState {
         )
     }
 
+    private func closureReasonData(_ reason: ClosureReason?) -> [String: Any] {
+        guard let reason else { return ["kind": "UNKNOWN"] }
+        switch reason {
+        case .counterpartyForceClosed(let peerMsg):
+            return ["kind": "COUNTERPARTY_FORCE_CLOSED", "peer_msg": peerMsg]
+        case .holderForceClosed(let broadcastedLatestTxn, let message):
+            var d: [String: Any] = ["kind": "HOLDER_FORCE_CLOSED", "message": message]
+            if let broadcastedLatestTxn { d["broadcasted_latest_txn"] = broadcastedLatestTxn }
+            return d
+        case .legacyCooperativeClosure:
+            return ["kind": "LEGACY_COOPERATIVE_CLOSURE"]
+        case .counterpartyInitiatedCooperativeClosure:
+            return ["kind": "COUNTERPARTY_INITIATED_COOPERATIVE_CLOSURE"]
+        case .locallyInitiatedCooperativeClosure:
+            return ["kind": "LOCALLY_INITIATED_COOPERATIVE_CLOSURE"]
+        case .commitmentTxConfirmed:
+            return ["kind": "COMMITMENT_TX_CONFIRMED"]
+        case .fundingTimedOut:
+            return ["kind": "FUNDING_TIMED_OUT"]
+        case .processingError(let err):
+            return ["kind": "PROCESSING_ERROR", "err": err]
+        case .disconnectedPeer:
+            return ["kind": "DISCONNECTED_PEER"]
+        case .outdatedChannelManager:
+            return ["kind": "OUTDATED_CHANNEL_MANAGER"]
+        case .counterpartyCoopClosedUnfundedChannel:
+            return ["kind": "COUNTERPARTY_COOP_CLOSED_UNFUNDED_CHANNEL"]
+        case .locallyCoopClosedUnfundedChannel:
+            return ["kind": "LOCALLY_COOP_CLOSED_UNFUNDED_CHANNEL"]
+        case .fundingBatchClosure:
+            return ["kind": "FUNDING_BATCH_CLOSURE"]
+        case .htlCsTimedOut(let paymentHash):
+            var d: [String: Any] = ["kind": "HTLCS_TIMED_OUT"]
+            if let paymentHash { d["payment_hash"] = paymentHash }
+            return d
+        case .peerFeerateTooLow(let peerFeerateSatPerKw, let requiredFeerateSatPerKw):
+            return [
+                "kind": "PEER_FEERATE_TOO_LOW",
+                "peer_feerate_sat_per_kw": Int(peerFeerateSatPerKw),
+                "required_feerate_sat_per_kw": Int(requiredFeerateSatPerKw)
+            ]
+        @unknown default:
+            return ["kind": "OTHER"]
+        }
+    }
+
     private func handleChannelClosed(
         channelId: ChannelId,
         userChannelId: UserChannelId,
+        counterpartyNodeId: PublicKey?,
         reason: ClosureReason?
     ) {
-        let reasonStr = reason.map { "\($0)" } ?? "unknown"
         let balanceSats = stableChannel.stableReceiverBTC.sats
 
-        AuditService.log("CHANNEL_CLOSED", data: [
+        var data: [String: Any] = [
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
-            "reason": reasonStr,
+            "reason": closureReasonData(reason),
             "balance_sats": "\(balanceSats)"
-        ])
+        ]
+        if let counterpartyNodeId {
+            data["counterparty_node_id"] = "\(counterpartyNodeId)"
+        }
+        AuditService.log("CHANNEL_CLOSED", data: data)
 
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
@@ -1738,7 +1811,12 @@ class AppState {
     private func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
         if let db = databaseService,
            let row = db.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
-            db.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
+            if db.paymentExists(txid: txid, excludePaymentId: row.paymentId) {
+                // WebSocket beat us to it, this fallback placeholder is a duplicate.
+                db.deletePayment(paymentId: row.paymentId)
+            } else {
+                db.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
+            }
         }
         if let db = databaseService,
            let latest = db.fetchLatestResolvedOnchainTxid() {
@@ -2248,6 +2326,70 @@ class AppState {
             ])
         }
         prevOnchainSats = currentOnchain
+    }
+
+    func handleWebSocketTransactionDetected(event: WebSocketEvent) {
+        guard let db = databaseService else { return }
+
+        switch event {
+        case .trackedOutspend(let trackedTxid, let spendingTxid):
+            guard isChannelClosing else { return }
+
+            // A tracked funding txid was outspent: this is a channel close!
+            txidResolutionService.mempoolWebSocketService?.untrackTx(trackedTxid)
+
+            // Instantly resolve the close payment row
+            if let op = db.fetchPendingOperationByFundingTxid(trackedTxid) {
+                handleCloseTxidResolved(opId: op.opId, closingTxid: spendingTxid)
+            }
+
+        case .removed(let target, let txid):
+            guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
+            do {
+                try db.failPaymentByTxid(txid: txid)
+                let currentOnchain = onchainBalanceSats
+                if currentOnchain < prevOnchainSats {
+                    prevOnchainSats = currentOnchain
+                }
+                AuditService.log("WEBSOCKET_RBF_FAILED_PAYMENT", data: ["txid": txid, "target": target])
+            } catch {
+                AuditService.log("WEBSOCKET_RBF_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
+            }
+
+        case .receive(let target, let txid, let amountSats):
+            guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
+
+            // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
+            if amountSats >= 1000 {
+                let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+                let amountUSD: Double? = price > 0 ? Double(amountSats) / 100_000_000.0 * price : nil
+                let paymentId = "onchain_receive_\(txid)"
+
+                do {
+                    let recorded = try db.recordPayment(
+                        paymentId: paymentId,
+                        paymentType: "onchain",
+                        direction: "received",
+                        amountMsat: UInt64(amountSats * 1000),
+                        amountUSD: amountUSD,
+                        btcPrice: price > 0 ? price : nil,
+                        counterparty: nil,
+                        status: "pending",
+                        txid: txid,
+                        address: target
+                    )
+                    if recorded {
+                        AuditService.log(
+                            "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                            data: ["txid": txid, "sats": "\(amountSats)"]
+                        )
+                        paymentFlash.toggle()
+                    }
+                } catch {
+                    AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
+                }
+            }
+        }
     }
 
     // MARK: - Sweep to Channel

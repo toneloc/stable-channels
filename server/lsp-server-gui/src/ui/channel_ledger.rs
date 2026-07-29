@@ -9,7 +9,7 @@ use sc_rest_client::sc_protos::stable::{
 };
 
 use crate::app::LspServerApp;
-use crate::state::StatusMessage;
+use crate::state::{ChannelLedgerRequestKey, StatusMessage};
 use crate::ui::layout::{AMBER, SECONDARY};
 use crate::ui::widgets;
 
@@ -17,6 +17,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
     ui.heading("Channel Ledger");
     ui.add_space(8.0);
 
+    let request_before = ChannelLedgerRequestKey::from(&app.state.forms.channel_ledger);
     ui.horizontal_wrapped(|ui| {
         ui.label("Identifier:");
         ui.add(
@@ -64,6 +65,14 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
             &["observed", "reconstructed", "legacy", "gap"],
         );
     });
+    if request_before != ChannelLedgerRequestKey::from(&app.state.forms.channel_ledger) {
+        // Never display or merge data fetched for the previous identifier/filter set.
+        app.state.tasks.channel_ledger = None;
+        app.state.tasks.channel_ledger_export = None;
+        app.state.channel_ledger = None;
+        app.state.channel_ledger_cursor = None;
+        app.state.channel_ledger_appending = false;
+    }
 
     ui.horizontal_wrapped(|ui| {
         let loading = app.state.tasks.channel_ledger.is_some();
@@ -91,8 +100,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
         if ui
             .add_enabled(
                 !exporting && has_identifier,
-                egui::Button::new("Export all JSONL"),
+                egui::Button::new("Export matching JSONL"),
             )
+            .on_hover_text("Export every page matching the current identifier and filters")
             .on_disabled_hover_text("Enter one exact identifier")
             .clicked()
         {
@@ -129,6 +139,13 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
             Some(history) => {
                 if let Some(overview) = history.overview.as_ref() {
                     render_overview(ui, overview);
+                    if let Some(caption) = loaded_events_caption(
+                        history.events.len(),
+                        overview.matching_events,
+                        history.next_cursor.is_some(),
+                    ) {
+                        ui.label(RichText::new(caption).small().color(SECONDARY));
+                    }
                     ui.add_space(10.0);
                 }
                 for index in timeline_order(&history.events, newest_first) {
@@ -145,6 +162,10 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
                 );
             }
         });
+}
+
+fn loaded_events_caption(loaded: usize, matching: u64, has_more: bool) -> Option<String> {
+    has_more.then(|| format!("Showing {loaded} of {matching} matching events — Load older for more"))
 }
 
 fn filter_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut String, choices: &[&str]) {
@@ -561,6 +582,7 @@ fn human_summary(event: &ChannelLedgerEvent) -> String {
         "SPLICE_RECONCILED" => "Splice completed".to_owned(),
         "SPLICE_OUT_STABLE_DEDUCTED" => "Splice out reduced stable backing".to_owned(),
         "STABILITY_PAYMENT_SENT" => "Stability payment sent".to_owned(),
+        "STABILITY_PAYMENT_SETTLED" => "Stability payment completed".to_owned(),
         "EVENT_STREAM_GAP_CLOSED" => "Channel recovered after reconnect".to_owned(),
         "CHANNEL_ACCOUNTING_STATE_COMMITTED" => "Channel accounting state recorded".to_owned(),
         "CHANNEL_CLOSED_COMMITTED" | "CHANNEL_CLOSED" => "Channel closed".to_owned(),
@@ -606,6 +628,9 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         }
         "STABILITY_PAYMENT_SENT" => {
             "The LSP sent a Lightning payment to move the channel's stable value toward its target."
+        }
+        "STABILITY_PAYMENT_SETTLED" => {
+            "The stability payment completed successfully and is no longer in flight."
         }
         "STABILITY_PAYMENT_RECORDED" => {
             "A stability payment was associated with this channel and stored for settlement tracking."
@@ -1107,7 +1132,7 @@ pub(crate) fn export_jsonl(
             match std::fs::write(&path, content) {
                 Ok(()) => {
                     *status = Some(StatusMessage::success(format!(
-                        "Exported all {} events to {}",
+                        "Exported {} matching events to {}",
                         history.events.len(),
                         path.display()
                     )))
@@ -1233,6 +1258,19 @@ mod tests {
         let legacy_splice = event(8, "CHANNEL_READY_SPLICE");
         assert_eq!(human_summary(&legacy_splice), "Splice completed");
         assert!(event_help(&legacy_splice).contains("reconciled"));
+
+        let settled = event(9, "STABILITY_PAYMENT_SETTLED");
+        assert_eq!(human_summary(&settled), "Stability payment completed");
+        assert!(event_help(&settled).contains("no longer in flight"));
+    }
+
+    #[test]
+    fn loaded_count_explains_remaining_pages() {
+        assert_eq!(
+            loaded_events_caption(50, 300, true).as_deref(),
+            Some("Showing 50 of 300 matching events — Load older for more")
+        );
+        assert_eq!(loaded_events_caption(50, 50, false), None);
     }
 
     #[test]

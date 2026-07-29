@@ -195,3 +195,16 @@ enum SeedConstants {
     static let animationDuration: TimeInterval = 0.3
     static let successDisplaySeconds: UInt64 = 1_500_000_000
 }
+
+extension Constants {
+    /// URLs for the logs the app already writes today (audit log and LDK node log),
+    /// filtered to those that currently exist on disk. Used by the Logs & Diagnostics export UI.
+    static func exportableLogURLs() -> [URL] {
+        let fileManager = FileManager.default
+        let candidates = [
+            userDataDir.appendingPathComponent("audit_log.txt"),
+            userDataDir.appendingPathComponent("ldk-node.log")
+        ]
+        return candidates.filter { fileManager.fileExists(atPath: $0.path) }
+    }
+}

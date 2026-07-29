@@ -279,6 +279,31 @@ impl Default for ChannelLedgerForm {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelLedgerRequestKey {
+    pub identifier: String,
+    pub category: String,
+    pub status: String,
+    pub completeness: String,
+}
+
+impl From<&ChannelLedgerForm> for ChannelLedgerRequestKey {
+    fn from(form: &ChannelLedgerForm) -> Self {
+        Self {
+            identifier: form.identifier.trim().to_owned(),
+            category: form.category.clone(),
+            status: form.status.clone(),
+            completeness: form.completeness.clone(),
+        }
+    }
+}
+
+pub struct ChannelLedgerTaskResult {
+    pub request: ChannelLedgerRequestKey,
+    pub appending: bool,
+    pub response: ListChannelLedgerEventsResponse,
+}
+
 #[derive(Default, Clone)]
 pub struct Forms {
 	pub open_channel: OpenChannelForm,
@@ -376,8 +401,8 @@ pub struct AsyncTasks {
 	pub list_settlement_payments: Option<ChannelTaskHandle<ListSettlementPaymentsResponse>>,
 	pub ldk_log: Option<ChannelTaskHandle<LogResponse>>,
 	pub audit_log: Option<ChannelTaskHandle<LogResponse>>,
-	pub channel_ledger: Option<ChannelTaskHandle<ListChannelLedgerEventsResponse>>,
-    pub channel_ledger_export: Option<ChannelTaskHandle<ListChannelLedgerEventsResponse>>,
+	pub channel_ledger: Option<ChannelTaskHandle<ChannelLedgerTaskResult>>,
+	pub channel_ledger_export: Option<ChannelTaskHandle<ChannelLedgerTaskResult>>,
 }
 
 impl Default for AsyncTasks {

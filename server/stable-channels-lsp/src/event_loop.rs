@@ -17,6 +17,12 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOutcome {
+    Continue,
+    Reconnect,
+}
+
 /// Build the audit `data` for a claimable (unclaimed inbound) payment; no user_channel_id exists yet.
 fn claimable_audit_data(
     payment_id: Option<&str>,
@@ -101,47 +107,64 @@ async fn run(state: AppState) {
                 state.ldk_server.as_ref(),
                 state.db.as_ref(),
             ).await;
+            let reconciliation_complete =
+                counts.failed_scopes == 0 && counts.incomplete_scopes == 0;
             stable_channels::audit::audit_event(
                 "RECONCILIATION_RESULT",
                 serde_json::json!({
                     "correlation_id": gap_correlation_id.as_deref(),
                     "counts": counts,
-                    "status": if counts.failed_scopes == 0 { "completed" } else { "partial" },
+                    "status": if reconciliation_complete { "completed" } else { "partial" },
                 }),
             );
-            if let Some(correlation_id) = gap_correlation_id.take() {
-                stable_channels::audit::audit_event(
-                    "EVENT_STREAM_GAP_CLOSED",
-                    serde_json::json!({ "correlation_id": correlation_id }),
+            if !counts.settlement_outcomes_safe {
+                warn!(
+                    "[event_loop] terminal settlement reconciliation incomplete; retrying before live dispatch"
                 );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            if reconciliation_complete {
+                if let Some(correlation_id) = gap_correlation_id.take() {
+                    stable_channels::audit::audit_event(
+                        "EVENT_STREAM_GAP_CLOSED",
+                        serde_json::json!({ "correlation_id": correlation_id }),
+                    );
+                }
             }
         }
         while let Some(item) = stream.next_message().await {
-            dispatch(item, &state).await;
+            if dispatch(item, &state).await == DispatchOutcome::Reconnect {
+                break;
+            }
         }
         warn!("[event_loop] stream ended; reconnecting");
-        let correlation_id = format!("event-stream-gap-{}", now_millis());
+        let correlation_id = gap_correlation_id
+            .clone()
+            .unwrap_or_else(|| format!("event-stream-gap-{}", now_millis()));
         stable_channels::audit::audit_event(
             "EVENT_STREAM_DISCONNECTED",
             serde_json::json!({ "correlation_id": correlation_id }),
         );
-        stable_channels::audit::audit_event(
-            "EVENT_STREAM_GAP_STARTED",
-            serde_json::json!({ "correlation_id": correlation_id }),
-        );
-        gap_correlation_id = Some(correlation_id);
+        if gap_correlation_id.is_none() {
+            stable_channels::audit::audit_event(
+                "EVENT_STREAM_GAP_STARTED",
+                serde_json::json!({ "correlation_id": correlation_id }),
+            );
+            gap_correlation_id = Some(correlation_id);
+        }
     }
 }
 
 async fn dispatch(
     item: Result<EventEnvelope, ldk_server_client::error::LdkServerError>,
     state: &AppState,
-) {
+) -> DispatchOutcome {
     let envelope = match item {
         Ok(e) => e,
         Err(e) => {
             warn!("[event_loop] item error: {}", e);
-            return;
+            return DispatchOutcome::Reconnect;
         },
     };
     let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
@@ -213,12 +236,6 @@ async fn dispatch(
                 let next = fp.next_htlcs.first();
                 let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
                 let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
-                let fp_key = stable_channels::db::forward_fingerprint(
-                    &prev_channel_id,
-                    &next_channel_id,
-                    fp.outbound_amount_forwarded_msat,
-                    fp.total_fee_earned_msat,
-                );
                 mgr.handle_payment_forwarded(
                     prev.and_then(|h| h.user_channel_id.clone()).unwrap_or_default(),
                     next.and_then(|h| h.user_channel_id.clone()),
@@ -232,7 +249,6 @@ async fn dispatch(
                     btc_price,
                 )
                 .await;
-                let _ = state.db.record_forwarded_seen(&fp_key);
             }
         },
         Some(EventVariant::PaymentSuccessful(e)) => {
@@ -240,30 +256,46 @@ async fn dispatch(
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
+            let mut settlement_handled = false;
             if let Some(payment_id) = payment_id.as_deref() {
-                if let Err(error) = state.db.mark_settlement_succeeded(payment_id) {
-                    stable_channels::audit::audit_event(
-                        "DB_WRITE_FAILED",
-                        serde_json::json!({
-                            "op": "mark_settlement_succeeded",
-                            "payment_id": payment_id,
-                            "error": error.to_string(),
-                        }),
-                    );
+                let known_settlement = state
+                    .db
+                    .settlement_exists(payment_id)
+                    .ok()
+                    .unwrap_or(false);
+                match state.db.mark_settlement_succeeded(
+                    payment_id,
+                    amount_msat,
+                    fee_paid_msat,
+                    direction,
+                ) {
+                    Ok(true) => settlement_handled = true,
+                    Ok(false) if known_settlement => settlement_handled = true,
+                    Ok(false) => {},
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "mark_settlement_succeeded",
+                                "payment_id": payment_id,
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return DispatchOutcome::Reconnect;
+                    },
                 }
             }
-            let user_channel_id = payment_id.as_deref()
-                .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten());
-            stable_channels::audit::audit_event(
-                "PAYMENT_SETTLED",
-                serde_json::json!({
-                    "payment_id": payment_id,
-                    "amount_msat": amount_msat,
-                    "fee_paid_msat": fee_paid_msat,
-                    "direction": direction,
-                    "user_channel_id": user_channel_id,
-                }),
-            );
+            if !settlement_handled {
+                stable_channels::audit::audit_event(
+                    "PAYMENT_SETTLED",
+                    serde_json::json!({
+                        "payment_id": payment_id,
+                        "amount_msat": amount_msat,
+                        "fee_paid_msat": fee_paid_msat,
+                        "direction": direction,
+                    }),
+                );
+            }
         },
         Some(EventVariant::PaymentFailed(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.id.clone());
@@ -303,6 +335,7 @@ async fn dispatch(
         },
         _ => {},
     }
+    DispatchOutcome::Continue
 }
 
 #[cfg(test)]
