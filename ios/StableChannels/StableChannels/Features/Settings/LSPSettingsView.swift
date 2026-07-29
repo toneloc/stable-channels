@@ -47,7 +47,7 @@ struct LSPSettingsView: View {
             ))
         }
         .alert(
-            String(localized: "alert_reset_lsp_title", defaultValue: "Reset to Default"),
+            String(localized: "alert_reset_lsp_title", defaultValue: "Reset LSP"),
             isPresented: $showResetAlert
         ) {
             Button(String(localized: "alert_cancel", defaultValue: "Cancel"), role: .cancel) {}
@@ -281,7 +281,7 @@ struct LSPSettingsView: View {
             } label: {
                 HStack {
                     Image(systemName: "arrow.counterclockwise")
-                    Text(String(localized: "button_reset_lsp", defaultValue: "Reset to Default LSP"))
+                    Text(String(localized: "button_reset_lsp", defaultValue: "Reset LSP"))
                 }
             }
             .disabled(appState.activeLSP.isDefault || isRestarting)

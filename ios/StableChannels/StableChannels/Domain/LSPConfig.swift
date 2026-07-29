@@ -29,7 +29,9 @@ struct LSPConfig: Codable, Equatable {
 
     func save() {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        if let data = try? JSONEncoder().encode(self) {
+        if isDefault {
+            shared?.removeObject(forKey: Self.userDefaultsKey)
+        } else if let data = try? JSONEncoder().encode(self) {
             shared?.set(data, forKey: Self.userDefaultsKey)
         }
     }

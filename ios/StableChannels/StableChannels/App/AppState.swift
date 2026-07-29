@@ -2701,7 +2701,11 @@ class AppState {
             nodeService: nodeService,
             chainURL: chainURL,
             onSuccess: { [weak self] in
-                self?.refreshBalances()
+                guard let self else { return }
+                if self.stableChannel.channelId.isEmpty {
+                    self.stableChannel.counterparty = newConfig.pubkey
+                }
+                self.refreshBalances()
             }
         )
     }

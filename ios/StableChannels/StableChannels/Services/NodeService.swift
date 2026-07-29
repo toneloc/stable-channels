@@ -235,12 +235,21 @@ class NodeService: NodeServiceProtocol {
         self.isRunning = true
         self.nodeId = ldkNode.nodeId()
 
-        // Connect to LSP
-        try? ldkNode.connect(
-            nodeId: lspConfig.pubkey,
-            address: lspConfig.address,
-            persist: true
-        )
+        // Connect to LSP — propagate error if custom LSP fails so switchLSP rolls back
+        do {
+            try ldkNode.connect(
+                nodeId: lspConfig.pubkey,
+                address: lspConfig.address,
+                persist: true
+            )
+        } catch {
+            print(
+                "[NodeService] Warning: Could not connect to LSP (\(lspConfig.address)): \(error.localizedDescription)"
+            )
+            if !lspConfig.isDefault {
+                throw error
+            }
+        }
 
         refreshChannels()
         startEventLoop()
