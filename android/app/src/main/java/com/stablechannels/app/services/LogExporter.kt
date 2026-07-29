@@ -1,11 +1,17 @@
 package com.stablechannels.app.services
 
+import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.stablechannels.app.util.Constants
 import java.io.File
@@ -77,7 +83,51 @@ object LogExporter {
             Toast.makeText(context, "No logs available", Toast.LENGTH_SHORT).show()
             return
         }
-        try {
+        // Scoped storage (API 29+) disallows writing directly into the public Downloads
+        // directory; go through MediaStore.Downloads instead, which needs no permission there.
+        val saved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveToDownloadsViaMediaStore(context, zipFile)
+        } else {
+            saveToDownloadsLegacy(context, zipFile)
+        }
+        if (saved) {
+            Toast.makeText(context, "Saved to Downloads", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(context, "Failed to save logs", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun saveToDownloadsViaMediaStore(context: Context, zipFile: File): Boolean {
+        return try {
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "stable_channels_logs.zip")
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return false
+            val wrote = resolver.openOutputStream(uri)?.use { output ->
+                zipFile.inputStream().use { input -> input.copyTo(output) }
+            }
+            wrote != null
+        } catch (e: Exception) {
+            Log.e("LogExporter", "Failed to save logs via MediaStore", e)
+            false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun saveToDownloadsLegacy(context: Context, zipFile: File): Boolean {
+        if (ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.e("LogExporter", "WRITE_EXTERNAL_STORAGE not granted; cannot save to Downloads")
+            return false
+        }
+        return try {
             val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             val destFile = File(downloadsDir, "stable_channels_logs.zip")
             zipFile.inputStream().use { input ->
@@ -85,10 +135,10 @@ object LogExporter {
                     input.copyTo(output)
                 }
             }
-            Toast.makeText(context, "Saved to Downloads", Toast.LENGTH_LONG).show()
+            true
         } catch (e: Exception) {
             Log.e("LogExporter", "Failed to save logs to Downloads", e)
-            Toast.makeText(context, "Failed to save logs", Toast.LENGTH_SHORT).show()
+            false
         }
     }
 }

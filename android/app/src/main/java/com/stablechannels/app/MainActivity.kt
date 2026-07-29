@@ -19,9 +19,21 @@ import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.ui.ContentView
 import com.stablechannels.app.ui.theme.StableChannelsTheme
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
+
+    companion object {
+        // How long we tolerate the app being backgrounded by the system share/chooser dialog
+        // before treating it as a real background transition. Bounds the suppression requested
+        // in AppState.suppressNextBackgroundCycle so a user who continues into another app still
+        // gets the node stopped (and later correctly resynced) instead of it staying active and
+        // the eventual foreground sync being skipped indefinitely.
+        private const val SHARE_SUPPRESS_WINDOW_MS = 3000L
+    }
 
     private lateinit var appState: AppState
 
@@ -32,6 +44,7 @@ class MainActivity : FragmentActivity() {
     private var isAuthenticating by mutableStateOf(false)
     private var lastBackgroundedTime: Long = 0L
     private var isFirstResume = true
+    private var pendingBackgroundStopJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,7 +76,18 @@ class MainActivity : FragmentActivity() {
     override fun onPause() {
         super.onPause()
         lastBackgroundedTime = System.currentTimeMillis()
-        if (::appState.isInitialized && !AppState.suppressNextBackgroundCycle) {
+        if (!::appState.isInitialized) return
+        if (AppState.suppressNextBackgroundCycle) {
+            // Give the transient share/chooser dialog a short grace window instead of stopping
+            // the node immediately. If the user is still away once the window elapses (e.g. they
+            // continued into the target app), fall back to the normal background stop so the
+            // node doesn't stay active indefinitely and the next resume still resyncs correctly.
+            pendingBackgroundStopJob = lifecycleScope.launch {
+                delay(SHARE_SUPPRESS_WINDOW_MS)
+                AppState.suppressNextBackgroundCycle = false
+                appState.stopNodeForBackground()
+            }
+        } else {
             appState.stopNodeForBackground()
         }
     }
@@ -71,10 +95,13 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         if (!::appState.isInitialized) return
-        if (AppState.suppressNextBackgroundCycle) {
-            // Returning from an in-app activity (the log share sheet): the node was never
-            // stopped for this cycle, so skip the foreground resync that would refresh the UI.
-            AppState.suppressNextBackgroundCycle = false
+        val quickReturnFromShare = AppState.suppressNextBackgroundCycle
+        pendingBackgroundStopJob?.cancel()
+        pendingBackgroundStopJob = null
+        AppState.suppressNextBackgroundCycle = false
+        if (quickReturnFromShare) {
+            // Returned within the grace window: the node was never stopped, so skip the
+            // foreground resync that would otherwise refresh the UI.
         } else if (isFirstResume) {
             isFirstResume = false
             appState.restartNodeFromForeground()

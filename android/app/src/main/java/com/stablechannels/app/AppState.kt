@@ -35,9 +35,13 @@ class AppState(private val context: Context) : ViewModel() {
     companion object {
         /**
          * Set to true right before launching an in-app activity that backgrounds the app
-         * (e.g. the log share sheet). When set, [MainActivity] skips stopping/restarting the
-         * LDK node for that one background -> foreground cycle, so returning does not visibly
-         * refresh the UI. Cleared automatically on the next resume.
+         * (e.g. the log share sheet). [MainActivity] honors this only for a short grace window
+         * (see `SHARE_SUPPRESS_WINDOW_MS`): if the app resumes within that window the node
+         * stop/restart is skipped so returning doesn't visibly refresh the UI, but if the user
+         * continues into another app past the window, [MainActivity] falls back to the normal
+         * background stop so the node doesn't stay active indefinitely and the eventual
+         * foreground resync still happens. Always cleared by [MainActivity] on the next
+         * pause/resume.
          */
         @Volatile
         var suppressNextBackgroundCycle = false
