@@ -77,11 +77,6 @@ The application works out of the box with sensible defaults defined in `src/cons
 # User interface
 cargo run --bin stable-channels user
 
-# LSP backend server
-cargo run --bin lsp_backend
-
-# LSP dashboard
-cargo run --bin lsp_frontend
 ```
 
 More instructions on running the LSP backend are forthcoming.
