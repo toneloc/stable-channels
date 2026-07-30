@@ -2602,6 +2602,14 @@ class AppState {
                 stableChannel.nativeSats = record.nativeSats
                 stableChannel.note = record.note
 
+                // Restore authoritative counterparty: prefer active channel's counterpartyNodeId, fallback to active
+                // LSP pubkey
+                if let activeChannel = nodeService.channels.first(where: { $0.isChannelReady }) {
+                    stableChannel.counterparty = activeChannel.counterpartyNodeId
+                } else {
+                    stableChannel.counterparty = lspService.activeLSP.pubkey
+                }
+
                 // Restore cached balances so UI shows immediately
                 if record.receiverSats > 0 {
                     stableChannel.stableReceiverBTC = Bitcoin(sats: record.receiverSats)

@@ -267,7 +267,7 @@ struct LSPSettingsView: View {
         } footer: {
             Text(String(
                 localized: "info_custom_lsp",
-                defaultValue: "Enter the details of any LSPS2-compatible Lightning Service Provider. Your node will restart to apply the new configuration."
+                defaultValue: "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
             ))
         }
     }
