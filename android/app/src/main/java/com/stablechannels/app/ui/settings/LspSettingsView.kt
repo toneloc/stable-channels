@@ -197,7 +197,7 @@ private fun SwitchLspDialog(
         text = {
             Column {
                 Text(
-                    text = "Enter the pubkey and address of your custom Lightning Service Provider.",
+                    text = "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

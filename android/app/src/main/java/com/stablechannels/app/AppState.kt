@@ -1684,6 +1684,15 @@ class AppState(private val context: Context) : ViewModel() {
                     fundingTxid = currentTxid
                 }
             }
+            // Derive the authoritative counterparty from the live channel. For an open channel
+            // this is the ground truth — it defends against sc.counterparty drifting from the
+            // node the channel is actually with (the channels table doesn't persist the
+            // counterparty pubkey, so a relaunch would otherwise fall back to the LSP-pref
+            // default and could target the wrong node for trades/keysends).
+            val liveCounterparty = channel.counterpartyNodeId
+            if (liveCounterparty.isNotEmpty() && _stableChannel.value.counterparty != liveCounterparty) {
+                _stableChannel.value = _stableChannel.value.copy(counterparty = liveCounterparty)
+            }
         }
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
