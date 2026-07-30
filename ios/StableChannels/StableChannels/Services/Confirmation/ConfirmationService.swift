@@ -11,18 +11,16 @@ final class ConfirmationService {
         self.provider = provider
     }
 
-    func resolve(payment: PaymentRecord, currentBlockHeight: UInt32) async -> ConfirmationOutcome {
+    func resolve(
+        payment: PaymentRecord,
+        currentBlockHeight: UInt32,
+        forceRecheck: Bool = false
+    ) async -> ConfirmationOutcome {
         guard let txid = payment.txid, !txid.isEmpty else {
             return .noTxid
         }
-        // Fast path: only trust the cached tx_block_height for payments that
-        // have already reached full confirmation (6+ confs). These are deep
-        // enough that a reorg is essentially impossible.
-        //
-        // For payments still under 6 confs, always re-fetch from Esplora so
-        // shallow reorgs that move the tx to a different block are caught
-        // immediately. Cost: one cheap call per pending payment per block.
-        if let existingHeight = payment.txBlockHeight, existingHeight > 0 {
+        // Fast path: only trust cached tx_block_height when not forceRechecking
+        if !forceRecheck, let existingHeight = payment.txBlockHeight, existingHeight > 0 {
             let progress = calculator.progress(for: existingHeight, currentBlockHeight: currentBlockHeight)
             if progress.isComplete {
                 return .confirmed(progress: progress, blockHeight: existingHeight)

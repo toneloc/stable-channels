@@ -686,6 +686,38 @@ class DatabaseService {
         }
     }
 
+    /// Fetches payments that are marked completed within the given recent block window.
+    /// Used during offline gap or reorg revalidation to detect orphaned transactions.
+    func recentConfirmedPayments(confirmedAfterHeight: UInt32) throws -> [PaymentRecord] {
+        let sql = """
+        SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+        counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
+        FROM payments
+        WHERE txid IS NOT NULL
+        AND txid != ''
+        AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
+        AND status = 'completed'
+        AND tx_block_height IS NOT NULL
+        AND tx_block_height >= ?
+        ORDER BY created_at DESC
+        """
+        let rows = try query(sql, params: [.integer(Int64(confirmedAfterHeight))])
+        return rows.compactMap { row in
+            guard row.count >= 15 else { return nil }
+            return paymentRecord(from: row)
+        }
+    }
+
+    /// Downgrades an orphaned payment back to pending status with 0 confirmations.
+    func downgradePaymentToPending(paymentId: Int64) throws {
+        let sql = """
+        UPDATE payments
+        SET status = 'pending', confirmations = 0, tx_block_height = NULL
+        WHERE id = ?
+        """
+        try execute(sql, params: [.integer(paymentId)])
+    }
+
     func getPayment(byId id: Int64) throws -> PaymentRecord? {
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,

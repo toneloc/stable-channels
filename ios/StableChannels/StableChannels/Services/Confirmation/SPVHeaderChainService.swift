@@ -103,10 +103,9 @@ final class SPVHeaderChainService {
 
         } else if incomingHeight > tip.height + 1 {
             // The app was backgrounded and we missed N intermediate blocks.
-            // prevHash won't match our tip, but this is not a reorg — store the new tip
-            // and let the next confirmation poll fill in any gaps.
+            // Store the new tip and trigger full revalidation of recently confirmed payments via Esplora.
             logger.info(
-                "[SPV] Offline gap: tip=#\(tip.height), incoming=#\(incomingHeight). Storing new tip without rollback."
+                "[SPV] Offline gap: tip=#\(tip.height), incoming=#\(incomingHeight). Refreshing Esplora & revalidating payments."
             )
             try databaseService.insertHeader(
                 height: incomingHeight,
@@ -118,6 +117,8 @@ final class SPVHeaderChainService {
                 "prevTip": "\(tip.height)",
                 "newTip": "\(incomingHeight)"
             ])
+
+            await confirmationPollingService.revalidateRecentPayments()
 
         } else {
             // prevHash mismatch at the same or lower height — a competing block won the
@@ -139,11 +140,8 @@ final class SPVHeaderChainService {
                 timestamp: timestamp
             )
 
-            // Poll immediately — payments may have been rolled back to "pending".
-            // Use setHeightSilently to advance the height counter without firing
-            // onHeightUpdated, which would trigger a second redundant pollOnce().
             blockHeightService.setHeightSilently(incomingHeight)
-            await confirmationPollingService.pollOnce()
+            await confirmationPollingService.revalidateRecentPayments()
         }
     }
 
