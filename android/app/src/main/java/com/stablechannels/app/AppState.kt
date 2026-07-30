@@ -564,14 +564,29 @@ class AppState(private val context: Context) : ViewModel() {
                 onComplete("Background sync is in progress — try again in a moment.")
                 return@launch
             }
+            // Capture the previous custom config so a restart failure doesn't leave the user
+            // stuck on default with their working custom LSP already erased (same rationale as
+            // the rollback in switchLsp()).
+            val hadCustomLsp = LspPreferencesManager.hasCustomLsp(context)
+            val previousPubkey = LspPreferencesManager.getLspPubkey(context)
+            val previousAddress = LspPreferencesManager.getLspAddress(context)
+
             LspPreferencesManager.resetToDefault(context)
             try {
                 performLspNodeRestart()
                 onComplete(null)
             } catch (e: Exception) {
-                Log.e("AppState", "Failed to restart node after LSP reset", e)
+                Log.e("AppState", "Failed to restart node after LSP reset — rolling back", e)
                 AuditService.log("LSP_SWITCH_FAILED", mapOf("error" to (e.message ?: "")))
-                onComplete("Failed to restart node: ${e.message}")
+                if (hadCustomLsp) {
+                    LspPreferencesManager.saveCustomLsp(context, previousPubkey, previousAddress)
+                    try {
+                        performLspNodeRestart()
+                    } catch (rollbackError: Exception) {
+                        Log.e("AppState", "Rollback restart also failed", rollbackError)
+                    }
+                }
+                onComplete("Failed to reset LSP — reverted to previous settings. (${e.message})")
             }
         }
     }
@@ -589,6 +604,15 @@ class AppState(private val context: Context) : ViewModel() {
             nodeService.stop()
         }
         nodeService.start(Network.BITCOIN, chainUrl, null)
+        // The in-memory StableChannel's `counterparty` is only ever set from the LSP pubkey
+        // active at construction time and is never otherwise refreshed — without this, a switch
+        // would silently leave trades/keysends targeting the *previous* LSP's pubkey until a
+        // channel is opened and reloaded from the DB. Only safe to overwrite when there's no
+        // channel yet (which switchLsp/resetLspToDefault already require).
+        val sc = _stableChannel.value
+        if (sc.channelId.isEmpty() && sc.userChannelId.isEmpty()) {
+            _stableChannel.value = sc.copy(counterparty = LspPreferencesManager.getLspPubkey(context))
+        }
         refreshBalances()
         ensureLSPConnected()
         reregisterPushTokenIfNeeded()

@@ -66,11 +66,13 @@ fun LspSettingsView(appState: AppState) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("LSP Address", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        text = if (isCustom) "Custom" else "Default",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isCustom) Color(0xFF3B82F6) else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (isCustom) {
+                        Text(
+                            text = "Custom",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF3B82F6)
+                        )
+                    }
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -141,7 +143,7 @@ fun LspSettingsView(appState: AppState) {
                 enabled = !isBusy && isCustom,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text("Reset to Default")
+                Text("Reset")
             }
         }
 

@@ -140,11 +140,17 @@ class NodeService(private val context: Context) {
             _isRunning.value = true
             nodeId = startedNode.nodeId()
 
-            // Connect to LSP
+            // Connect to LSP — for a custom (non-default) LSP, propagate the failure so
+            // AppState.switchLsp()/performLspNodeRestart() sees it and rolls back to the
+            // previously-working config instead of silently saving an unreachable LSP as
+            // "successful" (mirrors NodeService.swift's connect handling).
             try {
                 startedNode.connect(lspPubkey, lspAddress, true)
             } catch (e: Exception) {
                 Log.w("NodeService", "LSP connect failed: ${e.message}")
+                if (LspPreferencesManager.hasCustomLsp(context)) {
+                    throw e
+                }
             }
 
             refreshChannels()
