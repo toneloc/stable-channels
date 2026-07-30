@@ -50,6 +50,10 @@ class DatabaseService {
             "PRAGMA journal_mode = WAL;",
             "PRAGMA synchronous = NORMAL;",
             "PRAGMA temp_store = MEMORY;",
+            "PRAGMA cache_size = -8000;", // 8 MB page cache (vs default ~2 MB)
+            "PRAGMA mmap_size = 134217728;", // 128 MB memory-mapped I/O
+            "PRAGMA wal_autocheckpoint = 200;", // checkpoint every 200 pages (vs default 1000)
+            "PRAGMA foreign_keys = ON;",
             """
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
@@ -170,7 +174,14 @@ class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)"
+            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)",
+            "CREATE INDEX IF NOT EXISTS idx_payments_payment_id ON payments(payment_id)",
+            "CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)",
+            "CREATE INDEX IF NOT EXISTS idx_payments_txid ON payments(txid) WHERE txid IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_pending_ops_funding_txid ON pending_operations(funding_outpoint_txid) WHERE funding_outpoint_txid IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_payments_resolution_id ON payments(resolution_id) WHERE resolution_id IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_payments_type_status ON payments(payment_type, status)",
+            "CREATE INDEX IF NOT EXISTS idx_trades_channel_id ON trades(channel_id)"
         ]
 
         for sql in statements {
@@ -201,6 +212,11 @@ class DatabaseService {
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
+
+        // Prune price_history rows older than 90 days to prevent unbounded growth
+        try rawSQL.execute(
+            "DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - 7776000"
+        )
     }
 
     // MARK: - Channel Operations Facade
