@@ -15,19 +15,29 @@ final class PriceRepository {
     }
 
     func backfillHourlyPrices(_ prices: [(timestamp: Int64, price: Double)]) throws -> Int {
+        guard !prices.isEmpty else { return 0 }
         var count = 0
-        for (ts, price) in prices {
-            let existing = try rawSQL.query(
-                "SELECT 1 FROM price_history WHERE timestamp BETWEEN ? AND ? LIMIT 1",
-                params: [.integer(ts - 1800), .integer(ts + 1800)]
-            )
-            if existing.isEmpty {
-                try rawSQL.execute(
-                    "INSERT INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)",
-                    params: [.real(price), .integer(ts)]
+        // Wrap in a single transaction: without this each INSERT auto-commits individually
+        // (one WAL sync per row). For 720 hourly prices that's 720 syncs vs 1.
+        try rawSQL.execute("BEGIN")
+        do {
+            for (ts, price) in prices {
+                let existing = try rawSQL.query(
+                    "SELECT 1 FROM price_history WHERE timestamp BETWEEN ? AND ? LIMIT 1",
+                    params: [.integer(ts - 1800), .integer(ts + 1800)]
                 )
-                count += 1
+                if existing.isEmpty {
+                    try rawSQL.execute(
+                        "INSERT INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)",
+                        params: [.real(price), .integer(ts)]
+                    )
+                    count += 1
+                }
             }
+            try rawSQL.execute("COMMIT")
+        } catch {
+            try? rawSQL.execute("ROLLBACK")
+            throw error
         }
         return count
     }
@@ -93,18 +103,25 @@ final class PriceRepository {
     }
 
     func bulkInsertDailyPrices(_ prices: [(String, Double, Double, Double, Double, Double?)]) throws -> Int {
-        var count = 0
-        for (date, open, high, low, close, volume) in prices {
-            try rawSQL.execute(
-                "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'seed')",
-                params: [
-                    .text(date), .real(open), .real(high), .real(low), .real(close),
-                    volume.map { .real($0) } ?? .null
-                ]
-            )
-            count += 1
+        guard !prices.isEmpty else { return 0 }
+        // Single transaction: N individual INSERTs without this = N WAL syncs.
+        try rawSQL.execute("BEGIN")
+        do {
+            for (date, open, high, low, close, volume) in prices {
+                try rawSQL.execute(
+                    "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'seed')",
+                    params: [
+                        .text(date), .real(open), .real(high), .real(low), .real(close),
+                        volume.map { .real($0) } ?? .null
+                    ]
+                )
+            }
+            try rawSQL.execute("COMMIT")
+        } catch {
+            try? rawSQL.execute("ROLLBACK")
+            throw error
         }
-        return count
+        return prices.count
     }
 
     func getOldestDailyPriceDate() throws -> String? {
