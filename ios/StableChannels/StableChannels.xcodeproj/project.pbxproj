@@ -396,6 +396,56 @@
 			path = Protocols;
 			sourceTree = "<group>";
 		};
+		49ACB1D0301BCBEB00C3B1A7 /* Backup */ = {
+			isa = PBXGroup;
+			children = (
+				6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */,
+				49E4D8A42FED9FF3002AF338 /* BackupSettingsICloudSection.swift */,
+				49E4D8A52FED9FF3002AF338 /* BackupSettingsSupportBanner.swift */,
+				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
+				BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */,
+				F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */,
+				55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */,
+			);
+			path = Backup;
+			sourceTree = "<group>";
+		};
+		49ACB1D1301BCC2A00C3B1A7 /* Seed */ = {
+			isa = PBXGroup;
+			children = (
+				49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */,
+				88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */,
+			);
+			path = Seed;
+			sourceTree = "<group>";
+		};
+		49ACB1D2301BCC3C00C3B1A7 /* Sections */ = {
+			isa = PBXGroup;
+			children = (
+				49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */,
+				49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */,
+				49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */,
+				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
+				499E5369301A7D260050E3F8 /* DiagnosticsSettingsView.swift */,
+				134775C01F3C51CA39B262FC /* LSPSettingsView.swift */,
+				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
+				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
+				49F0B0DC2FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift */,
+				49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */,
+			);
+			path = Sections;
+			sourceTree = "<group>";
+		};
+		49ACB1D3301BCC7C00C3B1A7 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */,
+				499E536F301A92900050E3F8 /* SettingsBannerView.swift */,
+				499E5370301A92900050E3F8 /* SettingsIconBadgeView.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
 		49FC3EEB2FDC8A9E0054CD38 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -507,29 +557,11 @@
 		9EB6CDA4F614F973AF602691 /* Settings */ = {
 			isa = PBXGroup;
 			children = (
-				49F0B0D52FC0EF3A003A3B89 /* AboutSettingsView.swift */,
-				49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */,
-				49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */,
-				6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */,
-				49E4D8A42FED9FF3002AF338 /* BackupSettingsICloudSection.swift */,
-				49E4D8A52FED9FF3002AF338 /* BackupSettingsSupportBanner.swift */,
-				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
-				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
-				499E5369301A7D260050E3F8 /* DiagnosticsSettingsView.swift */,
-				BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */,
-				134775C01F3C51CA39B262FC /* LSPSettingsView.swift */,
-				49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */,
-				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
-				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
-				49F0B0DC2FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift */,
-				F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */,
-				55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */,
-				49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */,
-				88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */,
-				499E536F301A92900050E3F8 /* SettingsBannerView.swift */,
-				499E5370301A92900050E3F8 /* SettingsIconBadgeView.swift */,
 				7DB261201C1C656BAAED5283 /* SettingsView.swift */,
-				49F0B0DD2FC0EF3A003A3B89 /* StablePositionView.swift */,
+				49ACB1D0301BCBEB00C3B1A7 /* Backup */,
+				49ACB1D3301BCC7C00C3B1A7 /* Components */,
+				49ACB1D2301BCC3C00C3B1A7 /* Sections */,
+				49ACB1D1301BCC2A00C3B1A7 /* Seed */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -853,8 +885,6 @@
 				1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */,
 				A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */,
 				7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */,
-				499E536D301A8EF30050E3F8 /* SettingsBanner.swift in Sources */,
-				499E536E301A8EF30050E3F8 /* SettingsIconBadge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
