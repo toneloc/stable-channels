@@ -2602,12 +2602,12 @@ class AppState {
                 stableChannel.nativeSats = record.nativeSats
                 stableChannel.note = record.note
 
-                // Restore authoritative counterparty: prefer active channel's counterpartyNodeId, fallback to active
-                // LSP pubkey
-                if let activeChannel = nodeService.channels.first(where: { $0.isChannelReady }) {
-                    stableChannel.counterparty = activeChannel.counterpartyNodeId
-                } else {
-                    stableChannel.counterparty = lspService.activeLSP.pubkey
+                // Restore the counterparty from the same channel identity used to load this record.
+                // Readiness is intentionally irrelevant: pending channels still have an authoritative peer.
+                if let matchingChannel = nodeService.channels.first(where: {
+                    $0.userChannelId == record.userChannelId
+                }) {
+                    stableChannel.counterparty = matchingChannel.counterpartyNodeId
                 }
 
                 // Restore cached balances so UI shows immediately
