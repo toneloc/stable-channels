@@ -18,8 +18,8 @@ android {
         applicationId = "com.stablechannels.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.9.2"
+        versionCode = 4
+        versionName = "0.9.3"
     }
 
     // Play upload signing. Reads STABLECHANNELS_UPLOAD_* Gradle properties
@@ -68,7 +68,7 @@ dependencies {
     // mirroring how iOS pulls the xcframework through SwiftPM.
     implementation("org.lightningdevkit:ldk-node-android:0.7.5@aar")
     // The @aar dependency carries no POM, so its transitive deps are declared explicitly:
-    implementation("net.java.dev.jna:jna:5.12.0@aar") // loads libldk_node.so via JNA
+    implementation("net.java.dev.jna:jna:5.17.0@aar") // loads libldk_node.so via JNA; 5.17+ is 16 KB page aligned (Play requirement)
     implementation("org.slf4j:slf4j-api:1.7.30")
     implementation("androidx.appcompat:appcompat:1.4.0")
 
