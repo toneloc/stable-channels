@@ -11,6 +11,7 @@
 		05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0446A88D1E083A380EDC5436 /* PriceService.swift */; };
 		06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B785A33E02FD999CB62019AD /* StableChannelsApp.swift */; };
 		0CB88B7AD5C868A8BAB15AB7 /* ExportImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */; };
+		1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 379669F5815ECD9926C3A5D2 /* LSPConfig.swift */; };
 		10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */; };
 		1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95055FDBC76859CB74803660 /* HomeView.swift */; };
 		1A972F89DB503A5171D1525C /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFF3730F0DCCB9662892DE /* KeychainService.swift */; };
@@ -103,6 +104,7 @@
 		6CC27037A08B1EC6BC4E3B4F /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DCB92A88D9FEEAE6BF49737 /* NotificationService.swift */; };
 		6FC18A5668E49E3CD5E990A8 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DB261201C1C656BAAED5283 /* SettingsView.swift */; };
 		7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F22F6639A59D4B86A959586 /* Constants.swift */; };
+		7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */; };
 		76D934F4495402F7B4944BE3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8811E90D4B2B5C5C51093A95 /* Assets.xcassets */; };
 		8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BB0D1D623E0794FC1ED6ED /* NodeService.swift */; };
 		88769D82377C43BCF549A52C /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 702A9339F75D1A3A7B5313C7 /* HistoryView.swift */; };
@@ -113,6 +115,7 @@
 		96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */; };
 		96F38A820CB6644940199C95 /* KeychainAccess in Frameworks */ = {isa = PBXBuildFile; productRef = 79D34B41CFF9ABC3C914B624 /* KeychainAccess */; };
 		9EBF713364DF88022CB4F1D0 /* RestoreSeedSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */; };
+		A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 134775C01F3C51CA39B262FC /* LSPSettingsView.swift */; };
 		A9F8B3821ACA38AD4DF869BD /* CloudBackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */; };
 		B4C85619D6A5506E1BD9FC11 /* SellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 955C6E8D6DB076A3B20A6F46 /* SellView.swift */; };
 		B58FDE639A431D2000E0F86D /* StableChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DDD82B198645873A6F492F2 /* StableChannel.swift */; };
@@ -162,7 +165,9 @@
 /* Begin PBXFileReference section */
 		0446A88D1E083A380EDC5436 /* PriceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceService.swift; sourceTree = "<group>"; };
 		07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
+		134775C01F3C51CA39B262FC /* LSPSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPSettingsView.swift; sourceTree = "<group>"; };
 		24158DEF5FC6BF7AE004C56B /* StableChannels.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StableChannels.entitlements; sourceTree = "<group>"; };
+		379669F5815ECD9926C3A5D2 /* LSPConfig.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPConfig.swift; sourceTree = "<group>"; };
 		3940DC5406ABC63AA090441A /* DatabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseService.swift; sourceTree = "<group>"; };
 		3B46630309755AE15EF291D4 /* HistoricalPrices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoricalPrices.swift; sourceTree = "<group>"; };
 		445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveView.swift; sourceTree = "<group>"; };
@@ -243,6 +248,7 @@
 		5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBackupService.swift; sourceTree = "<group>"; };
 		55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreSeedSheet.swift; sourceTree = "<group>"; };
 		5AFFF3730F0DCCB9662892DE /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPService.swift; sourceTree = "<group>"; };
 		61BB0D1D623E0794FC1ED6ED /* NodeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeService.swift; sourceTree = "<group>"; };
 		623F41D841B312F0C9AE01E6 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		6666E1947A119ECA89E2F4C2 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -319,6 +325,7 @@
 			isa = PBXGroup;
 			children = (
 				ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */,
+				379669F5815ECD9926C3A5D2 /* LSPConfig.swift */,
 				499F1E563009F03E00936944 /* PaymentProgress.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
@@ -463,6 +470,7 @@
 				492B54AB300CC81D003EC383 /* EsploraError.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
+				5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
@@ -502,6 +510,7 @@
 				49F0B0D72FC0EF3A003A3B89 /* BackupSettingsView.swift */,
 				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
 				BDDC110C0BEE6FCEFE32C0AE /* ExportImportSheet.swift */,
+				134775C01F3C51CA39B262FC /* LSPSettingsView.swift */,
 				49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */,
 				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
 				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
@@ -829,6 +838,9 @@
 				10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */,
 				495CB3FF3017724E00560837 /* ReconnectionManager.swift in Sources */,
 				495CB4003017724E00560837 /* ProcessedTxStore.swift in Sources */,
+				1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */,
+				A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */,
+				7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
