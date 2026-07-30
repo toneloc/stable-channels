@@ -182,7 +182,8 @@ class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_payments_resolution_id ON payments(resolution_id) WHERE resolution_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_payments_type_status ON payments(payment_type, status)",
             "CREATE INDEX IF NOT EXISTS idx_trades_channel_id ON trades(channel_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id_unique ON payments(payment_id) WHERE payment_id IS NOT NULL"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id_unique ON payments(payment_id) WHERE payment_id IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_payments_confirmation_scan ON payments(txid, payment_type, status, confirmations) WHERE txid IS NOT NULL"
         ]
 
         for sql in statements {
