@@ -90,6 +90,7 @@ extension [Any?] {
 
 final class RawSQL {
     let getDB: () -> OpaquePointer?
+    private let queue = DispatchQueue(label: "com.stablechannels.rawsql", qos: .userInitiated)
 
     init(getDB: @escaping () -> OpaquePointer?) {
         self.getDB = getDB
@@ -113,61 +114,83 @@ final class RawSQL {
     }
 
     func execute(_ sql: String, params: [SQLValue] = []) throws {
-        guard let db = getDB() else {
-            throw DatabaseError.executeFailed("Database handle is nil")
-        }
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            throw DatabaseError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-        }
-        defer { sqlite3_finalize(stmt) }
+        try queue.sync {
+            guard let db = getDB() else {
+                throw DatabaseError.executeFailed("Database handle is nil")
+            }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw DatabaseError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
 
-        bindParams(stmt, params: params)
+            bindParams(stmt, params: params)
 
-        let result = sqlite3_step(stmt)
-        guard result == SQLITE_DONE || result == SQLITE_ROW else {
-            throw DatabaseError.executeFailed(String(cString: sqlite3_errmsg(db)))
+            let result = sqlite3_step(stmt)
+            guard result == SQLITE_DONE || result == SQLITE_ROW else {
+                throw DatabaseError.executeFailed(String(cString: sqlite3_errmsg(db)))
+            }
         }
     }
 
     func query(_ sql: String, params: [SQLValue] = []) throws -> [[Any?]] {
-        guard let db = getDB() else {
-            throw DatabaseError.executeFailed("Database handle is nil")
-        }
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            throw DatabaseError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-        }
-        defer { sqlite3_finalize(stmt) }
-
-        bindParams(stmt, params: params)
-
-        var rows: [[Any?]] = []
-        let colCount = sqlite3_column_count(stmt)
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            var row: [Any?] = []
-            for col in 0..<colCount {
-                switch sqlite3_column_type(stmt, col) {
-                case SQLITE_INTEGER: row.append(sqlite3_column_int64(stmt, col))
-                case SQLITE_FLOAT: row.append(sqlite3_column_double(stmt, col))
-                case SQLITE_TEXT: row.append(String(cString: sqlite3_column_text(stmt, col)))
-                case SQLITE_NULL: row.append(nil)
-                default: row.append(nil)
-                }
+        try queue.sync {
+            guard let db = getDB() else {
+                throw DatabaseError.executeFailed("Database handle is nil")
             }
-            rows.append(row)
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw DatabaseError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            bindParams(stmt, params: params)
+
+            var rows: [[Any?]] = []
+            let colCount = sqlite3_column_count(stmt)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                var row: [Any?] = []
+                for col in 0..<colCount {
+                    switch sqlite3_column_type(stmt, col) {
+                    case SQLITE_INTEGER: row.append(sqlite3_column_int64(stmt, col))
+                    case SQLITE_FLOAT: row.append(sqlite3_column_double(stmt, col))
+                    case SQLITE_TEXT: row.append(String(cString: sqlite3_column_text(stmt, col)))
+                    case SQLITE_NULL: row.append(nil)
+                    default: row.append(nil)
+                    }
+                }
+                rows.append(row)
+            }
+            return rows
         }
-        return rows
+    }
+
+    /// Execute a block within a database transaction.
+    /// Rolls back automatically if the block throws an error.
+    func inTransaction<T>(mode: String = "IMMEDIATE", _ body: () throws -> T) throws -> T {
+        try execute("BEGIN \(mode)")
+        do {
+            let result = try body()
+            try execute("COMMIT")
+            return result
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     var changes: Int32 {
-        guard let db = getDB() else { return 0 }
-        return sqlite3_changes(db)
+        queue.sync {
+            guard let db = getDB() else { return 0 }
+            return sqlite3_changes(db)
+        }
     }
 
     var lastInsertRowId: Int64 {
-        guard let db = getDB() else { return 0 }
-        return Int64(sqlite3_last_insert_rowid(db))
+        queue.sync {
+            guard let db = getDB() else { return 0 }
+            return Int64(sqlite3_last_insert_rowid(db))
+        }
     }
 }
 

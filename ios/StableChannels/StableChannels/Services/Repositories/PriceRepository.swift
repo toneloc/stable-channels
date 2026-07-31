@@ -16,11 +16,8 @@ final class PriceRepository {
 
     func backfillHourlyPrices(_ prices: [(timestamp: Int64, price: Double)]) throws -> Int {
         guard !prices.isEmpty else { return 0 }
-        var count = 0
-        // Wrap in a single transaction: without this each INSERT auto-commits individually
-        // (one WAL sync per row). For 720 hourly prices that's 720 syncs vs 1.
-        try rawSQL.execute("BEGIN")
-        do {
+        return try rawSQL.inTransaction(mode: "DEFERRED") {
+            var count = 0
             for (ts, price) in prices {
                 let existing = try rawSQL.query(
                     "SELECT 1 FROM price_history WHERE timestamp BETWEEN ? AND ? LIMIT 1",
@@ -34,12 +31,8 @@ final class PriceRepository {
                     count += 1
                 }
             }
-            try rawSQL.execute("COMMIT")
-        } catch {
-            try? rawSQL.execute("ROLLBACK")
-            throw error
+            return count
         }
-        return count
     }
 
     func getOldestPriceHistoryTimestamp() throws -> Int64? {
@@ -104,9 +97,7 @@ final class PriceRepository {
 
     func bulkInsertDailyPrices(_ prices: [(String, Double, Double, Double, Double, Double?)]) throws -> Int {
         guard !prices.isEmpty else { return 0 }
-        // Single transaction: N individual INSERTs without this = N WAL syncs.
-        try rawSQL.execute("BEGIN")
-        do {
+        return try rawSQL.inTransaction(mode: "DEFERRED") {
             for (date, open, high, low, close, volume) in prices {
                 try rawSQL.execute(
                     "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'seed')",
@@ -116,12 +107,8 @@ final class PriceRepository {
                     ]
                 )
             }
-            try rawSQL.execute("COMMIT")
-        } catch {
-            try? rawSQL.execute("ROLLBACK")
-            throw error
+            return prices.count
         }
-        return prices.count
     }
 
     func getOldestDailyPriceDate() throws -> String? {

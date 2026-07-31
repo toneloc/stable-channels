@@ -45,15 +45,32 @@ class DatabaseService {
 
     // MARK: - Schema
 
+    // MARK: - Schema & Migration Initialization
+
     private func initSchema() throws {
-        let statements = [
+        try configurePragmas()
+        try createTablesAndIndexes()
+        try applyMigrations()
+        try pruneHistoricalData()
+    }
+
+    private func configurePragmas() throws {
+        let pragmas = [
             "PRAGMA journal_mode = WAL;",
             "PRAGMA synchronous = NORMAL;",
             "PRAGMA temp_store = MEMORY;",
             "PRAGMA cache_size = -8000;", // 8 MB page cache (vs default ~2 MB)
             "PRAGMA mmap_size = 134217728;", // 128 MB memory-mapped I/O
             "PRAGMA wal_autocheckpoint = 200;", // checkpoint every 200 pages (vs default 1000)
-            "PRAGMA foreign_keys = ON;",
+            "PRAGMA foreign_keys = ON;"
+        ]
+        for sql in pragmas {
+            try rawSQL.execute(sql)
+        }
+    }
+
+    private func createTablesAndIndexes() throws {
+        let statements = [
             """
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
@@ -189,8 +206,9 @@ class DatabaseService {
         for sql in statements {
             try rawSQL.execute(sql)
         }
+    }
 
-        // Migrate: add receiver_sats and latest_price if missing
+    private func applyMigrations() throws {
         let cols = try rawSQL.query("PRAGMA table_info(channels)")
         let colNames = cols.compactMap { $0[1] as? String }
         if !colNames.contains("receiver_sats") {
@@ -203,18 +221,17 @@ class DatabaseService {
             try rawSQL.execute("ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0")
         }
 
-        // Migrate: add tx_block_height to payments if missing (on-chain confirmation tracking)
         let paymentsCols = try rawSQL.query("PRAGMA table_info(payments)")
         let paymentsColNames = paymentsCols.compactMap { $0[1] as? String }
         if !paymentsColNames.contains("tx_block_height") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN tx_block_height INTEGER")
         }
-
-        // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
+    }
 
+    private func pruneHistoricalData() throws {
         // Prune price_history rows older than 90 days to prevent unbounded growth
         try rawSQL.execute(
             "DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - 7776000"

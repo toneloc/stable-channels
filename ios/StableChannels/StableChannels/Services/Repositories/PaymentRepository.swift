@@ -162,28 +162,20 @@ final class PaymentRepository {
 
     func claimPendingSend(amountMsat: UInt64, price: Double) -> Bool {
         do {
-            try rawSQL.execute("BEGIN IMMEDIATE")
-        } catch {
-            return false
-        }
-        do {
-            let existing = try rawSQL.query("SELECT id FROM pending_stability_send WHERE id = 1")
-            guard existing.isEmpty else {
-                try rawSQL.execute("ROLLBACK")
-                return false
+            return try rawSQL.inTransaction(mode: "IMMEDIATE") {
+                let existing = try rawSQL.query("SELECT id FROM pending_stability_send WHERE id = 1")
+                guard existing.isEmpty else { return false }
+                try rawSQL.execute(
+                    "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
+                    params: [
+                        .integer(Int64(amountMsat)),
+                        .real(price),
+                        .integer(Int64(Date().timeIntervalSince1970))
+                    ]
+                )
+                return true
             }
-            try rawSQL.execute(
-                "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
-                params: [
-                    .integer(Int64(amountMsat)),
-                    .real(price),
-                    .integer(Int64(Date().timeIntervalSince1970))
-                ]
-            )
-            try rawSQL.execute("COMMIT")
-            return true
         } catch {
-            try? rawSQL.execute("ROLLBACK")
             return false
         }
     }
