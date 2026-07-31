@@ -11,6 +11,9 @@ class DatabaseService {
     let rawSQL: RawSQL
     let channelRepo: ChannelRepository
     let paymentRepo: PaymentRepository
+    let spliceRepo: SpliceRepository
+    let stabilityRepo: StabilitySendRepository
+    let pendingOpRepo: PendingOperationRepository
     let onchainRepo: OnchainReceiveRepository
     let priceRepo: PriceRepository
 
@@ -31,8 +34,12 @@ class DatabaseService {
         let sqlHelper = RawSQL { databaseHandle }
         self.rawSQL = sqlHelper
 
+        let payment = PaymentRepository(rawSQL: sqlHelper)
         self.channelRepo = ChannelRepository(rawSQL: sqlHelper)
-        self.paymentRepo = PaymentRepository(rawSQL: sqlHelper)
+        self.paymentRepo = payment
+        self.spliceRepo = payment.spliceRepo
+        self.stabilityRepo = payment.stabilityRepo
+        self.pendingOpRepo = payment.pendingOpRepo
         self.onchainRepo = OnchainReceiveRepository(rawSQL: sqlHelper)
         self.priceRepo = PriceRepository(rawSQL: sqlHelper)
 
@@ -47,10 +54,20 @@ class DatabaseService {
 
     // MARK: - Schema & Migration Initialization
 
+    private let targetSchemaVersion: Int64 = 1
+
     private func initSchema() throws {
         try configurePragmas()
-        try createTablesAndIndexes()
-        try applyMigrations()
+
+        let rows = try rawSQL.query("PRAGMA user_version")
+        let currentVersion = (rows.first?.first as? Int64) ?? 0
+
+        if currentVersion < targetSchemaVersion {
+            try createTablesAndIndexes()
+            try applyMigrations()
+            try rawSQL.execute("PRAGMA user_version = \(targetSchemaVersion);")
+        }
+
         try pruneHistoricalData()
     }
 
