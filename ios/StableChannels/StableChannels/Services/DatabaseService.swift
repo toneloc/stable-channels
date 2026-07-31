@@ -34,12 +34,11 @@ class DatabaseService {
         let sqlHelper = RawSQL { databaseHandle }
         self.rawSQL = sqlHelper
 
-        let payment = PaymentRepository(rawSQL: sqlHelper)
         self.channelRepo = ChannelRepository(rawSQL: sqlHelper)
-        self.paymentRepo = payment
-        self.spliceRepo = payment.spliceRepo
-        self.stabilityRepo = payment.stabilityRepo
-        self.pendingOpRepo = payment.pendingOpRepo
+        self.paymentRepo = PaymentRepository(rawSQL: sqlHelper)
+        self.spliceRepo = SpliceRepository(rawSQL: sqlHelper)
+        self.stabilityRepo = StabilitySendRepository(rawSQL: sqlHelper)
+        self.pendingOpRepo = PendingOperationRepository(rawSQL: sqlHelper)
         self.onchainRepo = OnchainReceiveRepository(rawSQL: sqlHelper)
         self.priceRepo = PriceRepository(rawSQL: sqlHelper)
 
@@ -209,7 +208,6 @@ class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)",
-            "CREATE INDEX IF NOT EXISTS idx_payments_payment_id ON payments(payment_id)",
             "CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_txid ON payments(txid) WHERE txid IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_pending_ops_funding_txid ON pending_operations(funding_outpoint_txid) WHERE funding_outpoint_txid IS NOT NULL",

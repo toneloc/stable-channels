@@ -3,15 +3,9 @@ import SQLite3
 
 final class PaymentRepository {
     private let rawSQL: RawSQL
-    let spliceRepo: SpliceRepository
-    let stabilityRepo: StabilitySendRepository
-    let pendingOpRepo: PendingOperationRepository
 
     init(rawSQL: RawSQL) {
         self.rawSQL = rawSQL
-        self.spliceRepo = SpliceRepository(rawSQL: rawSQL)
-        self.stabilityRepo = StabilitySendRepository(rawSQL: rawSQL)
-        self.pendingOpRepo = PendingOperationRepository(rawSQL: rawSQL)
     }
 
     func paymentExists(txid: String, excludePaymentId: String) -> Bool {
@@ -211,8 +205,7 @@ final class PaymentRepository {
         userChannelId: String?,
         backingDeltaSats: Int64?
     ) throws -> PaymentPersistenceResult {
-        try rawSQL.execute("BEGIN IMMEDIATE")
-        do {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
             // INSERT OR IGNORE: the partial unique index on payment_id enforces dedup atomically.
             // changes == 0 means this payment_id was already recorded (duplicate LDK event).
             try rawSQL.execute(
@@ -231,7 +224,6 @@ final class PaymentRepository {
                     userChannelId: userChannelId,
                     required: backingDeltaSats != nil
                 )
-                try rawSQL.execute("ROLLBACK")
                 return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
             }
             var resultingBacking: UInt64?
@@ -266,14 +258,10 @@ final class PaymentRepository {
                 }
                 resultingBacking = UInt64(newBacking)
             }
-            try rawSQL.execute("COMMIT")
             return PaymentPersistenceResult(
                 isNewPayment: true,
                 backingSats: resultingBacking
             )
-        } catch {
-            try? rawSQL.execute("ROLLBACK")
-            throw error
         }
     }
 
@@ -318,63 +306,5 @@ final class PaymentRepository {
             confirmations: row.uInt32(13),
             txBlockHeight: row.optUInt32(14)
         )
-    }
-
-    // MARK: - Forwarding Delegates for Sub-Repositories
-
-    func setPendingSpliceTxid(_ txid: String) throws { try spliceRepo.setPendingSpliceTxid(txid) }
-    func getPendingSpliceTxid() throws -> String? { try spliceRepo.getPendingSpliceTxid() }
-    func hasPendingSplice() throws -> Bool { try spliceRepo.hasPendingSplice() }
-    @discardableResult func completeLatestSplice(txid: String?) -> Bool { spliceRepo.completeLatestSplice(txid: txid) }
-    @discardableResult func completeSplice(txid: String) -> Bool { spliceRepo.completeSplice(txid: txid) }
-    @discardableResult func failLatestPendingSplice() -> Bool { spliceRepo.failLatestPendingSplice() }
-
-    func claimPendingSend(amountMsat: UInt64, price: Double) -> Bool { stabilityRepo.claimPendingSend(
-        amountMsat: amountMsat,
-        price: price
-    ) }
-    @discardableResult func setPendingSendPaymentId(_ paymentId: String) -> Bool { stabilityRepo
-        .setPendingSendPaymentId(paymentId)
-    }
-
-    func loadPendingSend() -> PendingStabilitySend? { stabilityRepo.loadPendingSend() }
-    func clearPendingSend() { stabilityRepo.clearPendingSend() }
-    func isOutgoingStabilityPayment(paymentId: String) throws -> Bool { try stabilityRepo
-        .isOutgoingStabilityPayment(paymentId: paymentId)
-    }
-
-    @discardableResult
-    func insertPendingOperation(
-        opId: String,
-        opType: String,
-        fundingOutpointTxid: String?,
-        fundingOutpointVout: UInt32?,
-        balanceSats: UInt64? = nil,
-        balanceUsd: Double? = nil,
-        btcPrice: Double? = nil,
-        counterparty: String? = nil
-    ) -> Bool {
-        pendingOpRepo.insertPendingOperation(
-            opId: opId,
-            opType: opType,
-            fundingOutpointTxid: fundingOutpointTxid,
-            fundingOutpointVout: fundingOutpointVout,
-            balanceSats: balanceSats,
-            balanceUsd: balanceUsd,
-            btcPrice: btcPrice,
-            counterparty: counterparty
-        )
-    }
-
-    @discardableResult func updatePendingOperation(opId: String, closingTxid: String,
-                                                   status: String) -> Bool { pendingOpRepo.updatePendingOperation(
-        opId: opId,
-        closingTxid: closingTxid,
-        status: status
-    ) }
-    func fetchPendingOperations() -> [PendingOperation] { pendingOpRepo.fetchPendingOperations() }
-    func fetchPendingOperation(opId: String) -> PendingOperation? { pendingOpRepo.fetchPendingOperation(opId: opId) }
-    func fetchPendingOperationByFundingTxid(_ txid: String) -> PendingOperation? { pendingOpRepo
-        .fetchPendingOperationByFundingTxid(txid)
     }
 }

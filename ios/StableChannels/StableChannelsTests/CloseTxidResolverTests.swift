@@ -64,7 +64,7 @@ final class CloseTxidResolverTests: XCTestCase {
     }
 
     private func seedPending(opId: String = "close-test") {
-        _ = service.paymentRepo.insertPendingOperation(
+        _ = service.pendingOpRepo.insertPendingOperation(
             opId: opId,
             opType: "channel_close",
             fundingOutpointTxid: String(repeating: "a", count: 64),
@@ -137,7 +137,7 @@ final class CloseTxidResolverTests: XCTestCase {
 
         // PK lookup: fetchPendingOperations() filters by status='pending',
         // so a resolved row is excluded.
-        let op = service.paymentRepo.fetchPendingOperation(opId: "close-test")
+        let op = service.pendingOpRepo.fetchPendingOperation(opId: "close-test")
         XCTAssertNotNil(op)
         guard let op else { return }
         XCTAssertEqual(op.status, "resolved")
@@ -154,7 +154,7 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver(maxAttempts: 3, backoffSeconds: [0, 0])
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let ops = service.paymentRepo.fetchPendingOperations()
+        let ops = service.pendingOpRepo.fetchPendingOperations()
         XCTAssertEqual(ops.count, 1)
         XCTAssertEqual(ops[0].status, "pending",
                        "Row must remain pending when resolver exhausts attempts")
@@ -181,7 +181,7 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver(maxAttempts: 5, backoffSeconds: [0, 0, 0, 0])
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let op = service.paymentRepo.fetchPendingOperation(opId: "close-test")
+        let op = service.pendingOpRepo.fetchPendingOperation(opId: "close-test")
         XCTAssertNotNil(op)
         guard let op else { return }
         XCTAssertEqual(op.status, "resolved")
@@ -198,7 +198,7 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver(maxAttempts: 2, backoffSeconds: [0])
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let ops = service.paymentRepo.fetchPendingOperations()
+        let ops = service.pendingOpRepo.fetchPendingOperations()
         XCTAssertEqual(ops[0].status, "pending",
                        "Row must stay pending when Esplora returns garbage")
         XCTAssertNil(ops[0].closingTxid)
@@ -221,7 +221,7 @@ final class CloseTxidResolverTests: XCTestCase {
         let resolver = makeResolver(maxAttempts: 3, backoffSeconds: [0, 0])
         await resolver.resolve(opId: "close-test", databaseService: service)
 
-        let op = service.paymentRepo.fetchPendingOperation(opId: "close-test")
+        let op = service.pendingOpRepo.fetchPendingOperation(opId: "close-test")
         XCTAssertNotNil(op)
         guard let op else { return }
         XCTAssertEqual(op.status, "resolved",

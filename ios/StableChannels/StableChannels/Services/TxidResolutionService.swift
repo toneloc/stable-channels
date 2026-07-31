@@ -66,7 +66,7 @@ final class TxidResolutionService {
         }
         var fundingTxid: String?
         if let db = databaseService,
-           let op = db.paymentRepo.fetchPendingOperation(opId: opId) {
+           let op = db.pendingOpRepo.fetchPendingOperation(opId: opId) {
             fundingTxid = op.fundingOutpointTxid
         }
         if let fundingTxid {
@@ -99,7 +99,7 @@ final class TxidResolutionService {
 
     func replayPendingChannelCloses() {
         guard let db = databaseService else { return }
-        let pending = db.paymentRepo.fetchPendingOperations()
+        let pending = db.pendingOpRepo.fetchPendingOperations()
         for (i, op) in pending.enumerated() where op.opType == "channel_close" {
             let delay = UInt64(i)
             startCloseTxidResolver(opId: op.opId, delaySeconds: delay)

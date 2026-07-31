@@ -203,35 +203,35 @@ final class DatabaseServiceTests: XCTestCase {
     // MARK: - pending_stability_send
 
     func testClaimPendingSendClaimDenyClearCycle() throws {
-        XCTAssertNil(service.paymentRepo.loadPendingSend())
+        XCTAssertNil(service.stabilityRepo.loadPendingSend())
 
         // First claim wins the slot with an empty payment id.
-        XCTAssertTrue(service.paymentRepo.claimPendingSend(amountMsat: 123_000, price: 100_000))
-        var pending = try XCTUnwrap(service.paymentRepo.loadPendingSend())
+        XCTAssertTrue(service.stabilityRepo.claimPendingSend(amountMsat: 123_000, price: 100_000))
+        var pending = try XCTUnwrap(service.stabilityRepo.loadPendingSend())
         XCTAssertEqual(pending.paymentId, "")
         XCTAssertEqual(pending.amountMsat, 123_000)
         XCTAssertEqual(pending.price, 100_000)
         XCTAssertGreaterThan(pending.createdAt, 0)
 
         // Second claim is denied while the marker exists.
-        XCTAssertFalse(service.paymentRepo.claimPendingSend(amountMsat: 456_000, price: 100_000))
-        pending = try XCTUnwrap(service.paymentRepo.loadPendingSend())
+        XCTAssertFalse(service.stabilityRepo.claimPendingSend(amountMsat: 456_000, price: 100_000))
+        pending = try XCTUnwrap(service.stabilityRepo.loadPendingSend())
         XCTAssertEqual(pending.amountMsat, 123_000, "Denied claim must not overwrite the marker")
 
         // The real payment id attaches once the keysend returns.
-        XCTAssertTrue(service.paymentRepo.setPendingSendPaymentId("payment-abc"))
-        pending = try XCTUnwrap(service.paymentRepo.loadPendingSend())
+        XCTAssertTrue(service.stabilityRepo.setPendingSendPaymentId("payment-abc"))
+        pending = try XCTUnwrap(service.stabilityRepo.loadPendingSend())
         XCTAssertEqual(pending.paymentId, "payment-abc")
         XCTAssertEqual(pending.amountMsat, 123_000)
 
         // Clear frees the slot for the next claim.
-        service.paymentRepo.clearPendingSend()
-        XCTAssertNil(service.paymentRepo.loadPendingSend())
-        XCTAssertTrue(service.paymentRepo.claimPendingSend(amountMsat: 456_000, price: 90_000))
+        service.stabilityRepo.clearPendingSend()
+        XCTAssertNil(service.stabilityRepo.loadPendingSend())
+        XCTAssertTrue(service.stabilityRepo.claimPendingSend(amountMsat: 456_000, price: 90_000))
     } // MARK: - pending_operations
 
     func testPendingOperationsInsertFetch() {
-        let ok = service.paymentRepo.insertPendingOperation(
+        let ok = service.pendingOpRepo.insertPendingOperation(
             opId: "close-abc",
             opType: "channel_close",
             fundingOutpointTxid: "deadbeef",
@@ -239,7 +239,7 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertTrue(ok)
 
-        let ops = service.paymentRepo.fetchPendingOperations()
+        let ops = service.pendingOpRepo.fetchPendingOperations()
         XCTAssertEqual(ops.count, 1)
         let op = ops[0]
         XCTAssertEqual(op.opId, "close-abc")
@@ -252,13 +252,13 @@ final class DatabaseServiceTests: XCTestCase {
     }
 
     func testPendingOperationsUpdatePreservesRow() {
-        _ = service.paymentRepo.insertPendingOperation(
+        _ = service.pendingOpRepo.insertPendingOperation(
             opId: "close-xyz",
             opType: "channel_close",
             fundingOutpointTxid: "cafebabe",
             fundingOutpointVout: 0
         )
-        let ok = service.paymentRepo.updatePendingOperation(
+        let ok = service.pendingOpRepo.updatePendingOperation(
             opId: "close-xyz",
             closingTxid: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             status: "resolved"
@@ -267,7 +267,7 @@ final class DatabaseServiceTests: XCTestCase {
 
         // fetchPendingOperations() filters by status='pending', so the
         // resolved row is excluded. Use the PK lookup instead.
-        let op = service.paymentRepo.fetchPendingOperation(opId: "close-xyz")
+        let op = service.pendingOpRepo.fetchPendingOperation(opId: "close-xyz")
         XCTAssertNotNil(op)
         guard let op else { return }
         XCTAssertEqual(op.opId, "close-xyz")
@@ -281,14 +281,14 @@ final class DatabaseServiceTests: XCTestCase {
     }
 
     func testUpdatePendingOperationOnlyUpdatesPending() {
-        _ = service.paymentRepo.insertPendingOperation(
+        _ = service.pendingOpRepo.insertPendingOperation(
             opId: "close-q",
             opType: "channel_close",
             fundingOutpointTxid: nil,
             fundingOutpointVout: nil
         )
         // First update succeeds and flips status to resolved.
-        let first = service.paymentRepo.updatePendingOperation(
+        let first = service.pendingOpRepo.updatePendingOperation(
             opId: "close-q",
             closingTxid: "first",
             status: "resolved"
@@ -296,7 +296,7 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertTrue(first)
 
         // Second update must be a no-op because the row is no longer pending.
-        let second = service.paymentRepo.updatePendingOperation(
+        let second = service.pendingOpRepo.updatePendingOperation(
             opId: "close-q",
             closingTxid: "second",
             status: "resolved"
@@ -305,7 +305,7 @@ final class DatabaseServiceTests: XCTestCase {
 
         // fetchPendingOperations() filters by status='pending', so the resolved
         // row is excluded. Use the PK lookup to verify the first txid stuck.
-        let op = service.paymentRepo.fetchPendingOperation(opId: "close-q")
+        let op = service.pendingOpRepo.fetchPendingOperation(opId: "close-q")
         XCTAssertEqual(op?.closingTxid, "first")
     }
 

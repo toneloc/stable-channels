@@ -1179,7 +1179,7 @@ class AppState {
                 let fundingTxid: String? = nodeService.channels
                     .first(where: { "\($0.userChannelId)" == "\(userChannelId)" })
                     .flatMap { $0.fundingTxo.map { "\($0.txid)" } }
-                let pendingDbTxid = (try? databaseService?.paymentRepo.getPendingSpliceTxid()) ?? nil
+                let pendingDbTxid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? nil
                 pendingSpliceCandidate = [pendingDbTxid, spliceTxid]
                     .compactMap { $0 }
                     .first { candidate in
@@ -1246,10 +1246,10 @@ class AppState {
                 // If this is the in-flight stability send, the failure means no sats
                 // moved — clear the marker so future sends are unblocked (no debit).
                 if let pid = paymentId,
-                   let pending = databaseService?.paymentRepo.loadPendingSend(),
+                   let pending = databaseService?.stabilityRepo.loadPendingSend(),
                    !pending.paymentId.isEmpty,
                    pending.paymentId == "\(pid)" {
-                    databaseService?.paymentRepo.clearPendingSend()
+                    databaseService?.stabilityRepo.clearPendingSend()
                     AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
                         "payment_id": "\(pid)",
                         "reason": "payment_failed"
@@ -1279,7 +1279,7 @@ class AppState {
             monitoredSpliceTxid = nil
             sweepOnchainStart = 0
             pendingSplice = nil
-            databaseService?.paymentRepo.failLatestPendingSplice()
+            databaseService?.spliceRepo.failLatestPendingSplice()
 
             AuditService.log("SPLICE_FAILED", data: [
                 "channel_id": "\(channelId)",
@@ -1543,7 +1543,7 @@ class AppState {
         feePaidMsat: UInt64?
     ) -> Bool {
         let paymentIdString = paymentId.map { "\($0)" }
-        if var pending = databaseService?.paymentRepo.loadPendingSend() {
+        if var pending = databaseService?.stabilityRepo.loadPendingSend() {
             if pending.paymentId.isEmpty {
                 // Process died between the keysend and the marker update. Adopt this
                 // event if it is our send (amount matches the marker), then reconcile
@@ -1552,7 +1552,7 @@ class AppState {
                    let details = nodeService.node?.payment(paymentId: paymentId),
                    details.direction == .outbound,
                    details.amountMsat == pending.amountMsat {
-                    databaseService?.paymentRepo.setPendingSendPaymentId(paymentIdString)
+                    databaseService?.stabilityRepo.setPendingSendPaymentId(paymentIdString)
                     pending = PendingStabilitySend(
                         paymentId: paymentIdString,
                         amountMsat: pending.amountMsat,
@@ -1625,7 +1625,7 @@ class AppState {
         let isRecordedStabilityPayment: Bool
         if let databaseService {
             isRecordedStabilityPayment =
-                (try? databaseService.paymentRepo.isOutgoingStabilityPayment(paymentId: paymentIdString)) == true
+                (try? databaseService.stabilityRepo.isOutgoingStabilityPayment(paymentId: paymentIdString)) == true
         } else {
             isRecordedStabilityPayment = false
         }
@@ -1767,7 +1767,7 @@ class AppState {
     }
 
     private func handleCloseTxidResolved(opId: String, closingTxid: String) {
-        let op = databaseService?.paymentRepo.fetchPendingOperation(opId: opId)
+        let op = databaseService?.pendingOpRepo.fetchPendingOperation(opId: opId)
         let balanceSats = op?.balanceSats ?? 0
         let balanceUSD = op?.balanceUsd
         let price = op?.btcPrice ?? 0
@@ -1847,7 +1847,7 @@ class AppState {
             pendingSplice = nil
             if splice.direction == "in" {
                 // Auto-sweep splice_in was already recorded — update with txid
-                try? databaseService?.paymentRepo.setPendingSpliceTxid(txidStr)
+                try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
             } else {
                 let price = stableChannel.latestPrice
                 let amountMsat = splice.amountSats * 1000
@@ -1870,7 +1870,7 @@ class AppState {
             // is a restart replay, the latest NULL-txid splice row is this
             // splice's initiation row — stamp it so ChannelReady can complete it
             // and the no-txid expiry can't mark it failed.
-            try? databaseService?.paymentRepo.setPendingSpliceTxid(txidStr)
+            try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
         }
 
         refreshBalances()
@@ -1921,9 +1921,9 @@ class AppState {
     }
 
     private func resumePendingSpliceConfirmation() {
-        guard let hasSplice = try? databaseService?.paymentRepo.hasPendingSplice(), hasSplice else { return }
+        guard let hasSplice = try? databaseService?.spliceRepo.hasPendingSplice(), hasSplice else { return }
         isSweeping = true
-        spliceTxid = (try? databaseService?.paymentRepo.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
+        spliceTxid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
         if let txid = spliceTxid, !txid.isEmpty {
             startSpliceConfirmationMonitor(txid: txid)
         }
@@ -1960,7 +1960,7 @@ class AppState {
     }
 
     private func completeConfirmedSplice(txid: String) {
-        let completed = databaseService?.paymentRepo.completeSplice(txid: txid) == true
+        let completed = databaseService?.spliceRepo.completeSplice(txid: txid) == true
         if completed {
             refreshBalances()
             updateStableBalances()
@@ -2072,7 +2072,7 @@ class AppState {
 
         // Claim the durable send slot (cross-process atomic via BEGIN IMMEDIATE).
         // If the NSE — or a previous run — already holds it, abort this run.
-        guard databaseService.paymentRepo.claimPendingSend(amountMsat: amountMsat, price: price) else {
+        guard databaseService.stabilityRepo.claimPendingSend(amountMsat: amountMsat, price: price) else {
             AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
                 "reason": "pending_send_already_claimed"
             ])
@@ -2091,7 +2091,7 @@ class AppState {
                 tlvs: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))]
             )
         } catch {
-            databaseService.paymentRepo.clearPendingSend()
+            databaseService.stabilityRepo.clearPendingSend()
             AuditService.log("STABILITY_PAYMENT_FAILED", data: [
                 "error": error.localizedDescription
             ])
@@ -2099,7 +2099,7 @@ class AppState {
         }
 
         let paymentIdString = "\(paymentId)"
-        let guardSaved = databaseService.paymentRepo.setPendingSendPaymentId(paymentIdString)
+        let guardSaved = databaseService.stabilityRepo.setPendingSendPaymentId(paymentIdString)
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.set(Date().timeIntervalSince1970, forKey: "nse_last_stability_sent")
         shared?.synchronize()
@@ -2130,7 +2130,7 @@ class AppState {
             stableChannel.paymentMade = true
             stableChannel.backingSats = backing
             saveChannelToDB(preserveBacking: true)
-            databaseService.paymentRepo.clearPendingSend()
+            databaseService.stabilityRepo.clearPendingSend()
 
             AuditService.log("STABILITY_PAYMENT_SENT", data: [
                 "amount_msat": "\(amountMsat)",
@@ -2152,7 +2152,7 @@ class AppState {
 
     private func reconcilePendingOutgoingStabilityPayment(status: String = "pending") -> Bool {
         guard let databaseService else { return false }
-        guard var pending = databaseService.paymentRepo.loadPendingSend() else { return true }
+        guard var pending = databaseService.stabilityRepo.loadPendingSend() else { return true }
 
         if pending.paymentId.isEmpty {
             // Process died mid-keysend. Resolve the marker against LDK's payment
@@ -2178,7 +2178,7 @@ class AppState {
                 // Sats left the channel — adopt the id and replay the debit below
                 // (recordPaymentAndMaybeUpdateBacking dedups on payment_id).
                 let adoptedId = "\(succeeded.id)"
-                databaseService.paymentRepo.setPendingSendPaymentId(adoptedId)
+                databaseService.stabilityRepo.setPendingSendPaymentId(adoptedId)
                 pending = PendingStabilitySend(
                     paymentId: adoptedId,
                     amountMsat: pending.amountMsat,
@@ -2198,7 +2198,7 @@ class AppState {
                 if case .failed = $0.status { return true } else { return false }
             }) {
                 // Send failed — no sats moved, no debit to record.
-                databaseService.paymentRepo.clearPendingSend()
+                databaseService.stabilityRepo.clearPendingSend()
                 AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
                     "payment_id": "\(failed.id)",
                     "reason": "payment_failed"
@@ -2206,7 +2206,7 @@ class AppState {
                 return true
             } else if Int64(Date().timeIntervalSince1970) - pending.createdAt > 120 {
                 // No matching payment ever appeared — the send never left.
-                databaseService.paymentRepo.clearPendingSend()
+                databaseService.stabilityRepo.clearPendingSend()
                 AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
                     "reason": "send_never_left",
                     "amount_msat": "\(pending.amountMsat)"
@@ -2242,7 +2242,7 @@ class AppState {
             }
             stableChannel.backingSats = backing
             saveChannelToDB(preserveBacking: true)
-            databaseService.paymentRepo.clearPendingSend()
+            databaseService.stabilityRepo.clearPendingSend()
             return true
         } catch {
             UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -2336,7 +2336,7 @@ class AppState {
             txidResolutionService.mempoolWebSocketService?.untrackTx(trackedTxid)
 
             // Instantly resolve the close payment row
-            if let op = db.paymentRepo.fetchPendingOperationByFundingTxid(trackedTxid) {
+            if let op = db.pendingOpRepo.fetchPendingOperationByFundingTxid(trackedTxid) {
                 handleCloseTxidResolved(opId: op.opId, closingTxid: spendingTxid)
             }
 
