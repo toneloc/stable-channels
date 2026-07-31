@@ -265,7 +265,7 @@ struct BuyView: View {
             // Do NOT apply trade yet — wait for PaymentSuccessful event (matches desktop)
 
             // Record trade in DB as pending
-            let tradeDbId = try appState.databaseService?.recordTrade(
+            let tradeDbId = try appState.databaseService?.channelRepo.recordTrade(
                 channelId: sc.channelId,
                 action: "buy",
                 amountUSD: amountUSD,

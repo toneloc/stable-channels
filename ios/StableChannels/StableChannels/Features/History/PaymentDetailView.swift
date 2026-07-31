@@ -46,7 +46,7 @@ struct PaymentDetailView: View {
     private func loadPayment() async {
         guard let db = appState.databaseService else { return }
         do {
-            payment = try db.getPayment(byId: paymentId)
+            payment = try db.paymentRepo.getPayment(byId: paymentId)
             loadError = false
         } catch {
             loadError = true

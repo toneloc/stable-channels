@@ -23,7 +23,7 @@ final class DatabaseServiceTests: XCTestCase {
     // MARK: - Atomic backing updates
 
     func testBackingDeltaIsAtomicAndDuplicateReturnsStoredBacking() throws {
-        try service.saveChannel(
+        try service.channelRepo.saveChannel(
             channelId: "channel-1",
             userChannelId: "user-channel-1",
             expectedUSD: 100,
@@ -31,7 +31,7 @@ final class DatabaseServiceTests: XCTestCase {
             note: nil
         )
 
-        let first = try service.recordPaymentAndMaybeUpdateBacking(
+        let first = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-1",
             paymentType: "stability",
             direction: "received",
@@ -45,7 +45,7 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertTrue(first.isNewPayment)
         XCTAssertEqual(first.backingSats, 1_100)
 
-        let duplicate = try service.recordPaymentAndMaybeUpdateBacking(
+        let duplicate = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-1",
             paymentType: "stability",
             direction: "received",
@@ -59,7 +59,7 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertFalse(duplicate.isNewPayment)
         XCTAssertEqual(duplicate.backingSats, 1_100)
 
-        let second = try service.recordPaymentAndMaybeUpdateBacking(
+        let second = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-2",
             paymentType: "stability",
             direction: "received",
@@ -72,7 +72,7 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertEqual(second.backingSats, 1_150)
 
-        let outgoing = try service.recordPaymentAndMaybeUpdateBacking(
+        let outgoing = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-outgoing",
             paymentType: "stability",
             direction: "sent",
@@ -86,7 +86,7 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertTrue(outgoing.isNewPayment)
         XCTAssertEqual(outgoing.backingSats, 950)
 
-        let outgoingReplay = try service.recordPaymentAndMaybeUpdateBacking(
+        let outgoingReplay = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-outgoing",
             paymentType: "stability",
             direction: "sent",
@@ -100,19 +100,19 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertFalse(outgoingReplay.isNewPayment)
         XCTAssertEqual(outgoingReplay.backingSats, 950)
 
-        try service.saveChannelPreservingBacking(
+        try service.channelRepo.saveChannelPreservingBacking(
             channelId: "channel-1",
             userChannelId: "user-channel-1",
             expectedUSD: 125,
             note: "metadata-only"
         )
-        let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
+        let stored = try XCTUnwrap(service.channelRepo.loadChannel(userChannelId: "user-channel-1"))
         XCTAssertEqual(stored.backingSats, 950)
         XCTAssertEqual(stored.expectedUSD, 125)
     }
 
     func testDebitBelowZeroClampsToZeroAndSucceeds() throws {
-        try service.saveChannel(
+        try service.channelRepo.saveChannel(
             channelId: "channel-1",
             userChannelId: "user-channel-1",
             expectedUSD: 100,
@@ -123,7 +123,7 @@ final class DatabaseServiceTests: XCTestCase {
         // A debit larger than the stored backing clamps to 0 and still records
         // the payment — it runs after a successful keysend, so refusing to
         // record would wedge reconcile forever.
-        let clamped = try service.recordPaymentAndMaybeUpdateBacking(
+        let clamped = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-too-large",
             paymentType: "stability",
             direction: "sent",
@@ -137,11 +137,11 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertTrue(clamped.isNewPayment)
         XCTAssertEqual(clamped.backingSats, 0)
 
-        let stored = try XCTUnwrap(service.loadChannel(userChannelId: "user-channel-1"))
+        let stored = try XCTUnwrap(service.channelRepo.loadChannel(userChannelId: "user-channel-1"))
         XCTAssertEqual(stored.backingSats, 0)
 
         // Replay of the same payment dedups and reports the clamped backing.
-        let replay = try service.recordPaymentAndMaybeUpdateBacking(
+        let replay = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-too-large",
             paymentType: "stability",
             direction: "sent",
@@ -158,7 +158,7 @@ final class DatabaseServiceTests: XCTestCase {
 
     func testBackingUpdateWithMissingChannelRowThrowsDedicatedError() throws {
         XCTAssertThrowsError(
-            try service.recordPaymentAndMaybeUpdateBacking(
+            try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
                 paymentId: "payment-no-row",
                 paymentType: "stability",
                 direction: "sent",
@@ -178,14 +178,14 @@ final class DatabaseServiceTests: XCTestCase {
 
         // The whole transaction rolled back: after the channel row is recreated,
         // the same payment id inserts as new (no orphan payments row).
-        try service.saveChannel(
+        try service.channelRepo.saveChannel(
             channelId: "channel-1",
             userChannelId: "no-such-channel",
             expectedUSD: 100,
             backingSats: 1_000,
             note: nil
         )
-        let retried = try service.recordPaymentAndMaybeUpdateBacking(
+        let retried = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
             paymentId: "payment-no-row",
             paymentType: "stability",
             direction: "sent",
@@ -203,37 +203,35 @@ final class DatabaseServiceTests: XCTestCase {
     // MARK: - pending_stability_send
 
     func testClaimPendingSendClaimDenyClearCycle() throws {
-        XCTAssertNil(service.loadPendingSend())
+        XCTAssertNil(service.paymentRepo.loadPendingSend())
 
         // First claim wins the slot with an empty payment id.
-        XCTAssertTrue(service.claimPendingSend(amountMsat: 123_000, price: 100_000))
-        var pending = try XCTUnwrap(service.loadPendingSend())
+        XCTAssertTrue(service.paymentRepo.claimPendingSend(amountMsat: 123_000, price: 100_000))
+        var pending = try XCTUnwrap(service.paymentRepo.loadPendingSend())
         XCTAssertEqual(pending.paymentId, "")
         XCTAssertEqual(pending.amountMsat, 123_000)
         XCTAssertEqual(pending.price, 100_000)
         XCTAssertGreaterThan(pending.createdAt, 0)
 
         // Second claim is denied while the marker exists.
-        XCTAssertFalse(service.claimPendingSend(amountMsat: 456_000, price: 100_000))
-        pending = try XCTUnwrap(service.loadPendingSend())
+        XCTAssertFalse(service.paymentRepo.claimPendingSend(amountMsat: 456_000, price: 100_000))
+        pending = try XCTUnwrap(service.paymentRepo.loadPendingSend())
         XCTAssertEqual(pending.amountMsat, 123_000, "Denied claim must not overwrite the marker")
 
         // The real payment id attaches once the keysend returns.
-        XCTAssertTrue(service.setPendingSendPaymentId("payment-abc"))
-        pending = try XCTUnwrap(service.loadPendingSend())
+        XCTAssertTrue(service.paymentRepo.setPendingSendPaymentId("payment-abc"))
+        pending = try XCTUnwrap(service.paymentRepo.loadPendingSend())
         XCTAssertEqual(pending.paymentId, "payment-abc")
         XCTAssertEqual(pending.amountMsat, 123_000)
 
         // Clear frees the slot for the next claim.
-        service.clearPendingSend()
-        XCTAssertNil(service.loadPendingSend())
-        XCTAssertTrue(service.claimPendingSend(amountMsat: 456_000, price: 90_000))
-    }
-
-    // MARK: - pending_operations
+        service.paymentRepo.clearPendingSend()
+        XCTAssertNil(service.paymentRepo.loadPendingSend())
+        XCTAssertTrue(service.paymentRepo.claimPendingSend(amountMsat: 456_000, price: 90_000))
+    } // MARK: - pending_operations
 
     func testPendingOperationsInsertFetch() {
-        let ok = service.insertPendingOperation(
+        let ok = service.paymentRepo.insertPendingOperation(
             opId: "close-abc",
             opType: "channel_close",
             fundingOutpointTxid: "deadbeef",
@@ -241,7 +239,7 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertTrue(ok)
 
-        let ops = service.fetchPendingOperations()
+        let ops = service.paymentRepo.fetchPendingOperations()
         XCTAssertEqual(ops.count, 1)
         let op = ops[0]
         XCTAssertEqual(op.opId, "close-abc")
@@ -254,13 +252,13 @@ final class DatabaseServiceTests: XCTestCase {
     }
 
     func testPendingOperationsUpdatePreservesRow() {
-        _ = service.insertPendingOperation(
+        _ = service.paymentRepo.insertPendingOperation(
             opId: "close-xyz",
             opType: "channel_close",
             fundingOutpointTxid: "cafebabe",
             fundingOutpointVout: 0
         )
-        let ok = service.updatePendingOperation(
+        let ok = service.paymentRepo.updatePendingOperation(
             opId: "close-xyz",
             closingTxid: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             status: "resolved"
@@ -269,7 +267,7 @@ final class DatabaseServiceTests: XCTestCase {
 
         // fetchPendingOperations() filters by status='pending', so the
         // resolved row is excluded. Use the PK lookup instead.
-        let op = service.fetchPendingOperation(opId: "close-xyz")
+        let op = service.paymentRepo.fetchPendingOperation(opId: "close-xyz")
         XCTAssertNotNil(op)
         guard let op else { return }
         XCTAssertEqual(op.opId, "close-xyz")
@@ -283,14 +281,14 @@ final class DatabaseServiceTests: XCTestCase {
     }
 
     func testUpdatePendingOperationOnlyUpdatesPending() {
-        _ = service.insertPendingOperation(
+        _ = service.paymentRepo.insertPendingOperation(
             opId: "close-q",
             opType: "channel_close",
             fundingOutpointTxid: nil,
             fundingOutpointVout: nil
         )
         // First update succeeds and flips status to resolved.
-        let first = service.updatePendingOperation(
+        let first = service.paymentRepo.updatePendingOperation(
             opId: "close-q",
             closingTxid: "first",
             status: "resolved"
@@ -298,7 +296,7 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertTrue(first)
 
         // Second update must be a no-op because the row is no longer pending.
-        let second = service.updatePendingOperation(
+        let second = service.paymentRepo.updatePendingOperation(
             opId: "close-q",
             closingTxid: "second",
             status: "resolved"
@@ -307,24 +305,24 @@ final class DatabaseServiceTests: XCTestCase {
 
         // fetchPendingOperations() filters by status='pending', so the resolved
         // row is excluded. Use the PK lookup to verify the first txid stuck.
-        let op = service.fetchPendingOperation(opId: "close-q")
+        let op = service.paymentRepo.fetchPendingOperation(opId: "close-q")
         XCTAssertEqual(op?.closingTxid, "first")
     }
 
     // MARK: - onchain_receive_txids
 
     func testInsertOnchainReceiveResolution_returnsNonZeroId() {
-        let id = service.insertOnchainReceiveResolution(address: "bc1qexampleaddress")
+        let id = service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qexampleaddress")
         XCTAssertNotNil(id)
         let unwrapped = try? XCTUnwrap(id)
         XCTAssertGreaterThan(unwrapped ?? 0, 0)
     }
 
     func testFetchPendingOnchainReceives_returnsInsertedRow() {
-        _ = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qfirst"))
-        _ = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qsecond"))
+        _ = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qfirst"))
+        _ = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qsecond"))
 
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertEqual(pending.count, 2)
         XCTAssertEqual(pending[0].address, "bc1qfirst")
         XCTAssertEqual(pending[1].address, "bc1qsecond")
@@ -335,62 +333,62 @@ final class DatabaseServiceTests: XCTestCase {
 
     func testUpdateOnchainReceiveResolution_setsTxidAndMarksResolved() {
         let id = try? XCTUnwrap(
-            service.insertOnchainReceiveResolution(address: "bc1qtoupdate")
+            service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qtoupdate")
         )
         let txid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-        let ok = service.updateOnchainReceiveResolution(
+        let ok = service.onchainRepo.updateOnchainReceiveResolution(
             id: id ?? 0,
             txid: txid
         )
         XCTAssertTrue(ok)
 
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertTrue(pending.isEmpty, "Resolved rows must not appear in pending fetch")
 
         // Re-insert another pending row so we can confirm via absence the resolved
         // row is no longer in the pending list.
-        _ = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qother"))
-        let stillPending = service.fetchPendingOnchainReceives()
+        _ = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qother"))
+        let stillPending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertEqual(stillPending.count, 1)
         XCTAssertEqual(stillPending[0].address, "bc1qother")
     }
 
     func testFetchPendingOnchainReceives_excludesResolvedRows() {
         let id = try? XCTUnwrap(
-            service.insertOnchainReceiveResolution(address: "bc1qresolve")
+            service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qresolve")
         )
         XCTAssertTrue(
-            service.updateOnchainReceiveResolution(
+            service.onchainRepo.updateOnchainReceiveResolution(
                 id: id ?? 0,
                 txid: String(repeating: "f", count: 64)
             )
         )
 
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertTrue(pending.isEmpty)
     }
 
     func testUpdateOnchainReceiveResolution_onlyAffectsTargetRow() {
-        let idA = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qA"))
-        let idB = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qB"))
+        let idA = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qA"))
+        let idB = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qB"))
         let txidA = String(repeating: "a", count: 64)
         let txidB = String(repeating: "b", count: 64)
 
         XCTAssertTrue(
-            service.updateOnchainReceiveResolution(id: idA ?? 0, txid: txidA)
+            service.onchainRepo.updateOnchainReceiveResolution(id: idA ?? 0, txid: txidA)
         )
 
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending[0].id, idB)
         XCTAssertEqual(pending[0].address, "bc1qB")
         XCTAssertNil(pending[0].txid)
 
         XCTAssertTrue(
-            service.updateOnchainReceiveResolution(id: idB ?? 0, txid: txidB)
+            service.onchainRepo.updateOnchainReceiveResolution(id: idB ?? 0, txid: txidB)
         )
-        let finalPending = service.fetchPendingOnchainReceives()
+        let finalPending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertTrue(finalPending.isEmpty)
     }
 
@@ -403,14 +401,14 @@ final class DatabaseServiceTests: XCTestCase {
         let address = "tb1qfakeaddressforintegrationtest1234567890abcdef"
 
         // 1) Insert resolution row
-        guard let resolutionId = service.insertOnchainReceiveResolution(address: address) else {
+        guard let resolutionId = service.onchainRepo.insertOnchainReceiveResolution(address: address) else {
             XCTFail("insertOnchainReceiveResolution returned nil")
             return
         }
         XCTAssertGreaterThan(resolutionId, 0)
 
         // 2) Verify the row is in pending state
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending[0].address, address)
         XCTAssertEqual(pending[0].id, resolutionId)
@@ -419,47 +417,47 @@ final class DatabaseServiceTests: XCTestCase {
 
         // 3) Update with a real txid
         let txid = String(repeating: "a", count: 64)
-        let updated = service.updateOnchainReceiveResolution(id: resolutionId, txid: txid)
+        let updated = service.onchainRepo.updateOnchainReceiveResolution(id: resolutionId, txid: txid)
         XCTAssertTrue(updated)
 
         // 4) Verify the row is no longer in the pending fetch
-        let stillPending = service.fetchPendingOnchainReceives()
+        let stillPending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertEqual(stillPending.count, 0, "Resolved row should not appear in pending fetch")
 
         // 5) Latest resolved txid
-        XCTAssertEqual(service.fetchLatestResolvedOnchainTxid(), txid)
+        XCTAssertEqual(service.onchainRepo.fetchLatestResolvedOnchainTxid(), txid)
     }
 
     /// Dedup invariant: a second `updateOnchainReceiveResolution` on the same
     /// row must return false (the SQL is gated by `status = 'pending'`, so a
     /// resolved row is no longer updatable via this method).
     func testUpdateOnchainReceiveResolution_returnsFalseOnSecondCall() {
-        guard let id = service.insertOnchainReceiveResolution(address: "tb1qtest") else {
+        guard let id = service.onchainRepo.insertOnchainReceiveResolution(address: "tb1qtest") else {
             XCTFail("insertOnchainReceiveResolution returned nil")
             return
         }
         let txidA = String(repeating: "a", count: 64)
         let txidB = String(repeating: "b", count: 64)
 
-        XCTAssertTrue(service.updateOnchainReceiveResolution(id: id, txid: txidA))
+        XCTAssertTrue(service.onchainRepo.updateOnchainReceiveResolution(id: id, txid: txidA))
         XCTAssertFalse(
-            service.updateOnchainReceiveResolution(id: id, txid: txidB),
+            service.onchainRepo.updateOnchainReceiveResolution(id: id, txid: txidB),
             "Second update must be a no-op (row is no longer pending)"
         )
 
         // The original txid must be preserved.
-        XCTAssertEqual(service.fetchLatestResolvedOnchainTxid(), txidA)
+        XCTAssertEqual(service.onchainRepo.fetchLatestResolvedOnchainTxid(), txidA)
     }
 
     /// `fetchPendingOnchainReceiveRow` returns the row tied to a given
     /// `resolution_id`; a non-matching id returns nil.
     func testFetchPendingOnchainReceiveRow_returnsMatchingRow() {
-        guard let resId = service.insertOnchainReceiveResolution(address: "tb1qtest") else {
+        guard let resId = service.onchainRepo.insertOnchainReceiveResolution(address: "tb1qtest") else {
             XCTFail("insertOnchainReceiveResolution returned nil")
             return
         }
 
-        let ok = service.recordOnchainPaymentWithResolution(
+        let ok = service.onchainRepo.recordOnchainPaymentWithResolution(
             paymentId: "p1",
             amountMsat: 50_000_000,
             amountUSD: 100.0,
@@ -468,13 +466,13 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertTrue(ok)
 
-        let row = service.fetchPendingOnchainReceiveRow(resolutionId: resId)
+        let row = service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resId)
         XCTAssertNotNil(row)
         XCTAssertEqual(row?.paymentId, "p1")
         XCTAssertEqual(row?.amountMsat, 50_000_000)
 
         // Different resolutionId returns nil (no row linked to it).
-        XCTAssertNil(service.fetchPendingOnchainReceiveRow(resolutionId: resId + 1))
+        XCTAssertNil(service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resId + 1))
     }
 
     /// `recordOnchainPaymentWithResolution` writes a row that is
@@ -482,13 +480,13 @@ final class DatabaseServiceTests: XCTestCase {
     /// (b) survives rollback of the resolution row by the cleanup path
     /// (we just verify the write itself succeeds and is findable).
     func testRecordOnchainPaymentWithResolution_writesResolutionId() {
-        guard let resId = service.insertOnchainReceiveResolution(address: "tb1qtest") else {
+        guard let resId = service.onchainRepo.insertOnchainReceiveResolution(address: "tb1qtest") else {
             XCTFail("insertOnchainReceiveResolution returned nil")
             return
         }
 
         XCTAssertTrue(
-            service.recordOnchainPaymentWithResolution(
+            service.onchainRepo.recordOnchainPaymentWithResolution(
                 paymentId: "p1",
                 amountMsat: 1_000_000,
                 amountUSD: nil,
@@ -498,13 +496,13 @@ final class DatabaseServiceTests: XCTestCase {
         )
 
         // The payments row exists, linked to the resolution.
-        let row = service.fetchPendingOnchainReceiveRow(resolutionId: resId)
+        let row = service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resId)
         XCTAssertNotNil(row, "Inserted payment must be findable via resolutionId")
         XCTAssertEqual(row?.paymentId, "p1")
         XCTAssertEqual(row?.amountMsat, 1_000_000)
 
         // And the resolution row itself is still in pending state.
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending[0].id, resId)
     }
@@ -513,12 +511,12 @@ final class DatabaseServiceTests: XCTestCase {
     /// payments row linked to it survives (resolution cleanup must not
     /// cascade — the resolution is a separate concern from the payment).
     func testDeleteOnchainReceiveResolution_removesResolutionRow() {
-        guard let resId = service.insertOnchainReceiveResolution(address: "tb1qtest") else {
+        guard let resId = service.onchainRepo.insertOnchainReceiveResolution(address: "tb1qtest") else {
             XCTFail("insertOnchainReceiveResolution returned nil")
             return
         }
         XCTAssertTrue(
-            service.recordOnchainPaymentWithResolution(
+            service.onchainRepo.recordOnchainPaymentWithResolution(
                 paymentId: "p1",
                 amountMsat: 1_000_000,
                 amountUSD: nil,
@@ -528,14 +526,14 @@ final class DatabaseServiceTests: XCTestCase {
         )
 
         // Delete the resolution row.
-        XCTAssertTrue(service.deleteOnchainReceiveResolution(id: resId))
+        XCTAssertTrue(service.onchainRepo.deleteOnchainReceiveResolution(id: resId))
 
         // The resolution is gone.
-        let pending = service.fetchPendingOnchainReceives()
+        let pending = service.onchainRepo.fetchPendingOnchainReceives()
         XCTAssertTrue(pending.isEmpty, "Resolution row must be deleted")
 
         // The payments row survives — it's the user-facing record.
-        let row = service.fetchPendingOnchainReceiveRow(resolutionId: resId)
+        let row = service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resId)
         XCTAssertNotNil(row, "Payments row must survive resolution deletion")
     }
 
@@ -546,20 +544,20 @@ final class DatabaseServiceTests: XCTestCase {
     /// the basic contract: a resolved txid is queryable, and after two
     /// distinct resolutions the call still returns one of them).
     func testFetchLatestResolvedOnchainTxid_returnsResolvedTxid() {
-        let idA = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qA"))
-        let idB = try? XCTUnwrap(service.insertOnchainReceiveResolution(address: "bc1qB"))
+        let idA = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qA"))
+        let idB = try? XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qB"))
         let txidA = String(repeating: "a", count: 64)
         let txidB = String(repeating: "b", count: 64)
 
-        XCTAssertTrue(service.updateOnchainReceiveResolution(id: idA ?? 0, txid: txidA))
-        let first = service.fetchLatestResolvedOnchainTxid()
+        XCTAssertTrue(service.onchainRepo.updateOnchainReceiveResolution(id: idA ?? 0, txid: txidA))
+        let first = service.onchainRepo.fetchLatestResolvedOnchainTxid()
         XCTAssertTrue(
             first == txidA || first == txidB,
             "Expected a resolved txid, got \(first ?? "nil")"
         )
 
-        XCTAssertTrue(service.updateOnchainReceiveResolution(id: idB ?? 0, txid: txidB))
-        let second = service.fetchLatestResolvedOnchainTxid()
+        XCTAssertTrue(service.onchainRepo.updateOnchainReceiveResolution(id: idB ?? 0, txid: txidB))
+        let second = service.onchainRepo.fetchLatestResolvedOnchainTxid()
         XCTAssertTrue(
             second == txidA || second == txidB,
             "Expected a resolved txid, got \(second ?? "nil")"

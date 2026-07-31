@@ -451,7 +451,7 @@ struct SendView: View {
                     Double(actualMsat) / 1000.0 / 100_000_000.0
                 ) *
                     price : nil
-                _ = try? appState.databaseService?.recordPayment(
+                _ = try? appState.databaseService?.paymentRepo.recordPayment(
                     paymentId: "\(paymentId)",
                     paymentType: "lightning",
                     direction: "sent",
@@ -470,7 +470,7 @@ struct SendView: View {
                 let msat = sats * 1000
                 let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
                 let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
-                _ = try? appState.databaseService?.recordPayment(
+                _ = try? appState.databaseService?.paymentRepo.recordPayment(
                     paymentId: "\(paymentId)",
                     paymentType: "bolt12",
                     direction: "sent",
@@ -509,7 +509,7 @@ struct SendView: View {
                     }
                 } else {
                     let txid = try appState.nodeService.sendOnchain(address: trimmed, amountSats: sats)
-                    _ = try? appState.databaseService?.recordPayment(
+                    _ = try? appState.databaseService?.paymentRepo.recordPayment(
                         paymentId: txid,
                         paymentType: "onchain",
                         direction: "sent",

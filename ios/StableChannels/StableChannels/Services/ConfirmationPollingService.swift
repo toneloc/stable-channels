@@ -37,7 +37,7 @@ final class ConfirmationPollingService {
 
         let pending: [PaymentRecord]
         do {
-            pending = try databaseService.paymentsNeedingConfirmation()
+            pending = try databaseService.paymentRepo.paymentsNeedingConfirmation()
         } catch {
             logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
             return
@@ -61,7 +61,7 @@ final class ConfirmationPollingService {
             // Skip redundant writes — only update if confirmations actually changed OR if block height changed (reorg)
             guard progress.display != payment.confirmations || blockHeight != payment.txBlockHeight else { return }
             do {
-                try databaseService.updateConfirmations(
+                try databaseService.paymentRepo.updateConfirmations(
                     paymentId: payment.id,
                     txBlockHeight: blockHeight,
                     currentBlockHeight: currentHeight

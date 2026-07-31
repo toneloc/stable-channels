@@ -17,7 +17,7 @@ final class OnchainTxidResolverTests: XCTestCase {
             .appendingPathComponent("OnchainTxidResolverTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         service = try? DatabaseService(dataDir: dataDir)
-        resolutionId = service?.insertOnchainReceiveResolution(address: testAddress)
+        resolutionId = service?.onchainRepo.insertOnchainReceiveResolution(address: testAddress)
         XCTAssertNotNil(resolutionId, "Failed to insert seed row for test")
 
         let config = URLSessionConfiguration.ephemeral
@@ -101,7 +101,7 @@ final class OnchainTxidResolverTests: XCTestCase {
         XCTAssertEqual(captured?.txid, validTxid)
 
         // DB should be updated to resolved; row no longer pending
-        let pending = service.fetchPendingOnchainReceives().first { $0.id == resolutionId }
+        let pending = service.onchainRepo.fetchPendingOnchainReceives().first { $0.id == resolutionId }
         XCTAssertNil(pending, "Row should no longer be pending after resolve")
     }
 
@@ -159,7 +159,7 @@ final class OnchainTxidResolverTests: XCTestCase {
         XCTAssertNil(captured, "onResolved must not fire when all responses are empty")
 
         // Row must remain pending
-        let pending = service.fetchPendingOnchainReceives().first { $0.id == resolutionId }
+        let pending = service.onchainRepo.fetchPendingOnchainReceives().first { $0.id == resolutionId }
         XCTAssertNotNil(pending, "Row should still be pending")
     }
 
@@ -180,7 +180,7 @@ final class OnchainTxidResolverTests: XCTestCase {
         XCTAssertNil(captured, "Invalid txid must not fire onResolved")
 
         // Row must remain pending
-        let pending = service.fetchPendingOnchainReceives().first { $0.id == resolutionId }
+        let pending = service.onchainRepo.fetchPendingOnchainReceives().first { $0.id == resolutionId }
         XCTAssertNotNil(pending)
     }
 
