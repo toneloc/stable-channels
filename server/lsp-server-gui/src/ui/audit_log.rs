@@ -73,7 +73,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 
 	match &app.state.audit_log {
 		Some(resp) if resp.content.is_empty() => {
-			ui.label("Empty audit log.");
+			ui.label("No audit events yet.");
 		},
 		Some(_) => {
 			let display: String = if filter.is_empty() {

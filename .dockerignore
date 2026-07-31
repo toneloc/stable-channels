@@ -1,0 +1,12 @@
+.git
+.github
+target
+android
+ios
+docs
+wiki
+data
+**/.DS_Store
+**/*.log
+**/*.rs.bk
+umbrel/test/store-server/store-repo
