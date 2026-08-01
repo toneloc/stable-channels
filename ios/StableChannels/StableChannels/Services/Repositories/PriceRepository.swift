@@ -113,6 +113,6 @@ final class PriceRepository {
 
     func getOldestDailyPriceDate() throws -> String? {
         let rows = try rawSQL.query("SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1", params: [])
-        return rows.first?[0] as? String
+        return rows.first?.optString(0)
     }
 }

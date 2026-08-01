@@ -2363,7 +2363,7 @@ class AppState {
                 let paymentId = "onchain_receive_\(txid)"
 
                 do {
-                    try db.paymentRepo.recordPayment(
+                    let recorded = try db.paymentRepo.recordPayment(
                         paymentId: paymentId,
                         paymentType: "onchain",
                         direction: "received",
@@ -2375,11 +2375,13 @@ class AppState {
                         txid: txid,
                         address: target
                     )
-                    AuditService.log(
-                        "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
-                        data: ["txid": txid, "sats": "\(amountSats)"]
-                    )
-                    paymentFlash.toggle()
+                    if recorded {
+                        AuditService.log(
+                            "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                            data: ["txid": txid, "sats": "\(amountSats)"]
+                        )
+                        paymentFlash.toggle()
+                    }
                 } catch {
                     AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
                 }

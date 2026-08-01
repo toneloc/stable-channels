@@ -49,37 +49,6 @@ final class SpliceRepository {
     }
 
     @discardableResult
-    func completeLatestSplice(txid: String?) -> Bool {
-        do {
-            if let txid, !txid.isEmpty {
-                try rawSQL.execute(
-                    """
-                    UPDATE payments
-                    SET status = 'completed'
-                    WHERE payment_type IN ('splice_in', 'splice_out')
-                      AND txid = ?
-                      AND status IN ('pending', 'failed')
-                    """,
-                    params: [.text(txid)]
-                )
-            } else {
-                try rawSQL.execute(
-                    """
-                    UPDATE payments
-                    SET status = 'completed'
-                    WHERE payment_type IN ('splice_in', 'splice_out')
-                      AND status IN ('pending', 'failed')
-                    ORDER BY id DESC LIMIT 1
-                    """
-                )
-            }
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    @discardableResult
     func completeSplice(txid: String) -> Bool {
         do {
             try rawSQL.execute(
