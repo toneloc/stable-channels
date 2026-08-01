@@ -73,11 +73,16 @@ enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
  * photo-picker URIs. Returns null if the URI could not be opened or decoded.
  */
 private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
+    val resolver = context.contentResolver
+
+    // inJustDecodeBounds only fills outWidth/outHeight and always returns a null bitmap, so
+    // detect success from the stream opening and the resulting dimensions, not the return value.
     val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    val hasBounds = context.contentResolver.openInputStream(uri)?.use { stream ->
+    val opened = resolver.openInputStream(uri)?.use { stream ->
         BitmapFactory.decodeStream(stream, null, boundsOptions)
-    } != null
-    if (!hasBounds) return null
+        true
+    } ?: false
+    if (!opened || boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
 
     var sampleSize = 1
     val width = boundsOptions.outWidth
@@ -91,7 +96,7 @@ private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): 
     }
 
     val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-    return context.contentResolver.openInputStream(uri)?.use { stream ->
+    return resolver.openInputStream(uri)?.use { stream ->
         BitmapFactory.decodeStream(stream, null, decodeOptions)
     }
 }
@@ -222,6 +227,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
+        appState.isPickingMedia = false
         if (uri == null) return@rememberLauncherForActivityResult
 
         isExtractingQR = true
@@ -349,6 +355,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     // Photo library button
                     IconButton(
                         onClick = {
+                            appState.isPickingMedia = true
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )

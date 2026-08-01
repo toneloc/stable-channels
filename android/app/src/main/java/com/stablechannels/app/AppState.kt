@@ -66,6 +66,11 @@ class AppState(private val context: Context) : ViewModel() {
     @Volatile
     var isWaitingForPayment = false
 
+    // Set while an in-app system picker (e.g. photo picker) is open, so the transient onPause
+    // it triggers doesn't tear down and resync the LDK node.
+    @Volatile
+    var isPickingMedia = false
+
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
 
@@ -385,9 +390,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun stopNodeForBackground() {
+        if (isPickingMedia) {
+            Log.d("AppState", "Skipping node stop — in-app media picker is open")
+            return
+        }
         if (!isWaitingForPayment) {
             Log.d("AppState", "Stopping node immediately (no active payment request)")
-            performBackgroundStop()
+            // node.stop() is a blocking native call; run it off the main thread so onPause()
+            // returns immediately and Android doesn't ANR-kill us on the focus-change timeout.
+            backgroundStopJob?.cancel()
+            backgroundStopJob = viewModelScope.launch(Dispatchers.IO) {
+                performBackgroundStop()
+            }
             return
         }
 
