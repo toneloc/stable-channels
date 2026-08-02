@@ -521,7 +521,7 @@ struct HomeView: View {
     }
 
     private func openPaymentDetail() {
-        guard let payment = appState.databaseService?.latestReceivedPayment() else { return }
+        guard let payment = appState.databaseService?.paymentRepo.latestReceivedPayment() else { return }
         paymentCoordinator.open(payment)
     }
 }

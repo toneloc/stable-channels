@@ -60,7 +60,7 @@ struct OnchainTxidResolver {
                 // databaseService is non-Sendable; hop to MainActor for the DB
                 // call so the closure stays Sendable-safe.
                 let updated = await MainActor.run {
-                    databaseService.updateOnchainReceiveResolution(id: resolutionId, txid: txid)
+                    databaseService.onchainRepo.updateOnchainReceiveResolution(id: resolutionId, txid: txid)
                 }
                 if updated {
                     await onResolved(workId, txid)

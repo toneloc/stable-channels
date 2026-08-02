@@ -80,6 +80,14 @@
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
 		49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */; };
 		49DAFB3C2FDB6587003BE0EB /* FeeRateServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */; };
+		49DDB0012FF0000100000001 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0012FF0000200000001 /* Models.swift */; };
+		49DDB0022FF0000100000001 /* ChannelRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0022FF0000200000001 /* ChannelRepository.swift */; };
+		49DDB0032FF0000100000001 /* PaymentRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0032FF0000200000001 /* PaymentRepository.swift */; };
+		49DDB0042FF0000100000001 /* OnchainReceiveRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0042FF0000200000001 /* OnchainReceiveRepository.swift */; };
+		49DDB0052FF0000100000001 /* PriceRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0052FF0000200000001 /* PriceRepository.swift */; };
+		49DDB0062FF0000100000001 /* SpliceRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0062FF0000200000001 /* SpliceRepository.swift */; };
+		49DDB0072FF0000100000001 /* StabilitySendRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0072FF0000200000001 /* StabilitySendRepository.swift */; };
+		49DDB0082FF0000100000001 /* PendingOperationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0082FF0000200000001 /* PendingOperationRepository.swift */; };
 		49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3080E30080B78009B0014 /* TransactionLinkService.swift */; };
 		49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3081030080F3C009B0014 /* TxidResolutionService.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
@@ -236,6 +244,14 @@
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
 		49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateService.swift; sourceTree = "<group>"; };
 		49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateServiceTests.swift; sourceTree = "<group>"; };
+		49DDB0012FF0000200000001 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		49DDB0022FF0000200000001 /* ChannelRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelRepository.swift; sourceTree = "<group>"; };
+		49DDB0032FF0000200000001 /* PaymentRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentRepository.swift; sourceTree = "<group>"; };
+		49DDB0042FF0000200000001 /* OnchainReceiveRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainReceiveRepository.swift; sourceTree = "<group>"; };
+		49DDB0052FF0000200000001 /* PriceRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceRepository.swift; sourceTree = "<group>"; };
+		49DDB0062FF0000200000001 /* SpliceRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceRepository.swift; sourceTree = "<group>"; };
+		49DDB0072FF0000200000001 /* StabilitySendRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilitySendRepository.swift; sourceTree = "<group>"; };
+		49DDB0082FF0000200000001 /* PendingOperationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingOperationRepository.swift; sourceTree = "<group>"; };
 		49E3080E30080B78009B0014 /* TransactionLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLinkService.swift; sourceTree = "<group>"; };
 		49E3081030080F3C009B0014 /* TxidResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidResolutionService.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
@@ -452,6 +468,21 @@
 			path = Components;
 			sourceTree = "<group>";
 		};
+		49DDB0002FF0000000000001 /* Repositories */ = {
+			isa = PBXGroup;
+			children = (
+				49DDB0022FF0000200000001 /* ChannelRepository.swift */,
+				49DDB0012FF0000200000001 /* Models.swift */,
+				49DDB0042FF0000200000001 /* OnchainReceiveRepository.swift */,
+				49DDB0032FF0000200000001 /* PaymentRepository.swift */,
+				49DDB0082FF0000200000001 /* PendingOperationRepository.swift */,
+				49DDB0052FF0000200000001 /* PriceRepository.swift */,
+				49DDB0062FF0000200000001 /* SpliceRepository.swift */,
+				49DDB0072FF0000200000001 /* StabilitySendRepository.swift */,
+			);
+			path = Repositories;
+			sourceTree = "<group>";
+		};
 		49FC3EEB2FDC8A9E0054CD38 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -546,6 +577,7 @@
 				492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
+				49DDB0002FF0000000000001 /* Repositories */,
 				495CB4013017917400560837 /* WebSocket */,
 			);
 			path = Services;
@@ -827,6 +859,14 @@
 				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
 				49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
+				49DDB0012FF0000100000001 /* Models.swift in Sources */,
+				49DDB0022FF0000100000001 /* ChannelRepository.swift in Sources */,
+				49DDB0032FF0000100000001 /* PaymentRepository.swift in Sources */,
+				49DDB0062FF0000100000001 /* SpliceRepository.swift in Sources */,
+				49DDB0072FF0000100000001 /* StabilitySendRepository.swift in Sources */,
+				49DDB0082FF0000100000001 /* PendingOperationRepository.swift in Sources */,
+				49DDB0042FF0000100000001 /* OnchainReceiveRepository.swift in Sources */,
+				49DDB0052FF0000100000001 /* PriceRepository.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,

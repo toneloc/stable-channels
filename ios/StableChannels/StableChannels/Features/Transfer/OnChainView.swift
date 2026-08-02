@@ -345,7 +345,7 @@ struct OnChainSendView: View {
                 txid = result
                 let price = appState.btcPrice
                 let onchainSats = appState.onchainBalanceSats
-                _ = try? appState.databaseService?.recordPayment(
+                _ = try? appState.databaseService?.paymentRepo.recordPayment(
                     paymentId: result,
                     paymentType: "onchain",
                     direction: "sent",
@@ -361,7 +361,7 @@ struct OnChainSendView: View {
                 let result = try appState.nodeService.sendOnchain(address: address, amountSats: sats)
                 txid = result
                 let price = appState.btcPrice
-                _ = try? appState.databaseService?.recordPayment(
+                _ = try? appState.databaseService?.paymentRepo.recordPayment(
                     paymentId: result,
                     paymentType: "onchain",
                     direction: "sent",

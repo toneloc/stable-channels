@@ -349,7 +349,7 @@ class NodeService: NodeServiceProtocol {
 
         // Persist intent + snapshot first: resolver reads from this row at resolve time
         let opId = "close-\(userChannelId)"
-        databaseService?.insertPendingOperation(
+        databaseService?.pendingOpRepo.insertPendingOperation(
             opId: opId,
             opType: "channel_close",
             fundingOutpointTxid: fundingOutpointTxid,
@@ -371,7 +371,7 @@ class NodeService: NodeServiceProtocol {
                 counterpartyNodeId: counterpartyNodeId
             )
         } catch {
-            databaseService?.updatePendingOperation(
+            databaseService?.pendingOpRepo.updatePendingOperation(
                 opId: opId,
                 closingTxid: "",
                 status: "failed"
