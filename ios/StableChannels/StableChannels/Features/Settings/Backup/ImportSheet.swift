@@ -64,16 +64,23 @@ struct ImportSheet: View {
                     .disabled(!isImportValid || isProcessing)
                 }
                 .animation(.easeInOut(duration: 0.3), value: selectedFileURL != nil)
+                .padding(20)
             }
-            .padding(20)
-        }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle(String(localized: "import_backup", defaultValue: "Import Backup"))
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
-                    .foregroundStyle(.secondary)
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle(String(localized: "import_backup", defaultValue: "Import Backup"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .fileImporter(
+                isPresented: $showingFilePicker,
+                allowedContentTypes: [.stableBackup],
+                allowsMultipleSelection: false
+            ) { result in
+                handleFileSelection(result)
             }
         }
     }
