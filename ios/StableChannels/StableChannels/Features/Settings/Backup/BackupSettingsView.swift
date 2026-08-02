@@ -128,10 +128,10 @@ struct BackupSettingsView: View {
             }
         }
         .sheet(isPresented: $showingExportSheet) {
-            ExportImportSheet(mode: .export)
+            ExportSheet()
         }
         .sheet(isPresented: $showingImportSheet) {
-            ExportImportSheet(mode: .importFile) { mnemonic in
+            ImportSheet { mnemonic in
                 importMnemonic(mnemonic)
             }
         }

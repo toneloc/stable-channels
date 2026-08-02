@@ -12,7 +12,16 @@ struct SettingsView: View {
             List {
                 // MARK: - Custody Disclaimer
 
-                disclaimerBanner
+                SettingsBanner(
+                    icon: "shield.lefthalf.filled.badge.checkmark",
+                    iconColor: .green,
+                    title: String(localized: "disclaimer_custody_title", defaultValue: "Your keys, your coins."),
+                    bodyText: String(
+                        localized: "disclaimer_custody_body",
+                        defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
+                    ),
+                    borderColor: .green
+                )
 
                 // MARK: - Wallet
 
@@ -217,142 +226,5 @@ struct SettingsView: View {
                 .foregroundStyle(.primary)
         }
         .padding(.vertical, 2)
-    }
-
-    private var disclaimerBanner: some View {
-        HStack(spacing: 14) {
-            iconBadge
-            textContent
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.green, lineWidth: 1)
-                )
-        )
-    }
-
-    private var iconBadge: some View {
-        ZStack {
-            Circle()
-                .fill(.green)
-                .frame(width: 44, height: 44)
-                .shadow(color: .green.opacity(0.3), radius: 8, x: 0, y: 4)
-            Image(systemName: "shield.lefthalf.filled.badge.checkmark")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white)
-        }
-    }
-
-    private var textContent: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(String(localized: "disclaimer_custody_title", defaultValue: "Your keys, your coins."))
-                .font(.subheadline)
-                .fontWeight(.bold)
-                .foregroundStyle(.primary)
-            Text(String(
-                localized: "disclaimer_custody_body",
-                defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
-            ))
-            .font(.caption)
-            .foregroundStyle(Color(uiColor: .label).opacity(0.7))
-        }
-    }
-}
-
-struct DiagnosticsSettingsView: View {
-    @State private var isExporting = false
-    @State private var logDocument: LogTextDocument? = nil
-
-    var body: some View {
-        List {
-            Section {
-                let logUrls = Constants.exportableLogURLs()
-                if !logUrls.isEmpty {
-                    ShareLink(items: logUrls) {
-                        HStack {
-                            Image(systemName: "square.and.arrow.up")
-                                .foregroundStyle(.green)
-                            Text("Share the logs")
-                                .foregroundStyle(.primary)
-                        }
-                    }
-                    Button {
-                        var allLogs = ""
-                        for url in logUrls {
-                            if let content = try? String(contentsOf: url) {
-                                allLogs += "=== \(url.lastPathComponent) ===\n\(content)\n\n"
-                            }
-                        }
-                        logDocument = LogTextDocument(text: allLogs)
-                        isExporting = true
-                    } label: {
-                        HStack {
-                            Image(systemName: "arrow.down.doc")
-                                .foregroundStyle(.green)
-                            Text("Download logs")
-                                .foregroundStyle(.primary)
-                        }
-                    }
-                } else {
-                    Button {} label: {
-                        HStack {
-                            Image(systemName: "square.and.arrow.up")
-                            Text("Share the logs")
-                        }
-                        .foregroundStyle(.gray)
-                    }.disabled(true)
-                    Button {} label: {
-                        HStack {
-                            Image(systemName: "arrow.down.doc")
-                            Text("Download logs")
-                        }
-                        .foregroundStyle(.gray)
-                    }.disabled(true)
-                }
-            } footer: {
-                Text("Save app logs to a file for debugging and support.")
-            }
-        }
-        .navigationTitle("Logs & Diagnostics")
-        .navigationBarTitleDisplayMode(.inline)
-        .fileExporter(
-            isPresented: $isExporting,
-            document: logDocument,
-            contentType: .plainText,
-            defaultFilename: "stable_channels_logs.txt"
-        ) { result in
-            switch result {
-            case .success(let url):
-                print("Saved to \(url)")
-            case .failure(let error):
-                print("Failed to save: \(error.localizedDescription)")
-            }
-        }
-    }
-}
-
-struct LogTextDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.plainText] }
-    var text: String
-
-    init(text: String) { self.text = text }
-    init(configuration: ReadConfiguration) throws {
-        if let data = configuration.file.regularFileContents {
-            text = String(decoding: data, as: UTF8.self)
-        } else {
-            text = ""
-        }
-    }
-
-    func fileWrapper(configuration _: WriteConfiguration) throws -> FileWrapper {
-        let data = Data(text.utf8)
-        return FileWrapper(regularFileWithContents: data)
     }
 }
