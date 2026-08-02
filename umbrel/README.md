@@ -10,7 +10,8 @@ daemon, and the operator web dashboard against Umbrel's Bitcoin app.
 - `sc-lsp` owns stable-channel accounting and talks to LDK Server over its
   authenticated TLS gRPC interface.
 - `gui` serves the WASM dashboard and proxies same-origin `/api/` requests to
-  `sc-lsp`. Umbrel's `app_proxy` protects the dashboard and setup key.
+  `sc-lsp`. Umbrel's `app_proxy` protects the dashboard; the GUI container
+  only serves `/setup` to requests coming through that proxy.
 - Lightning P2P port `19735` is published for wallet connections (`9735` is
   already reserved by Umbrel's LND app). Operators
   still need a reachable IP/domain or Tor endpoint for off-LAN wallets.

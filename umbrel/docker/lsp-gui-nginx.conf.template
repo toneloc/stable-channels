@@ -1,5 +1,6 @@
 # Serves the lsp-server-gui wasm bundle, reverse-proxies the SC daemon REST,
 # and provisions the GUI API key at /setup (written by 40-provision-gui-api-key.sh).
+# /setup is restricted to Umbrel's app_proxy by /etc/nginx/setup-key-allow.conf.
 # ${SC_LSP_UPSTREAM} is substituted at container start by the stock nginx
 # envsubst entrypoint (only defined env vars are substituted; $uri survives).
 server {
@@ -12,6 +13,15 @@ server {
 
     root /usr/share/nginx/html;
     index index.html;
+
+    location = /setup {
+        return 302 /setup/;
+    }
+
+    location /setup/ {
+        include /etc/nginx/setup-key-allow.conf;
+        try_files $uri $uri/ =404;
+    }
 
     location /api/ {
         # Resolve the upstream per-request via docker's embedded DNS: a static
