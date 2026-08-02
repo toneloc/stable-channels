@@ -51,6 +51,70 @@ final class ConfirmationPollingService {
         onUpdate?()
     }
 
+    /// Revalidates both pending payments and recently completed payments (last ~12 blocks)
+    /// against Esplora. Triggered during an offline gap or reorg event.
+    func revalidateRecentPayments(windowDepth: UInt32 = 12) async {
+        guard !isPolling else { return }
+        isPolling = true
+        defer { isPolling = false }
+
+        // Refresh authoritative chain tip from Esplora first
+        await blockHeightService.refresh()
+        let currentHeight = blockHeightService.currentHeight
+        guard currentHeight > 0 else { return }
+
+        // 1. Process pending payments
+        if let pending = try? databaseService.paymentRepo.paymentsNeedingConfirmation() {
+            for payment in pending {
+                guard !Task.isCancelled else { return }
+                await resolve(payment: payment, currentHeight: currentHeight)
+            }
+        }
+
+        // 2. Revalidate recently confirmed payments (last ~12 blocks)
+        let windowStart = currentHeight >= windowDepth ? currentHeight - windowDepth : 0
+        if let recentConfirmed = try? databaseService.paymentRepo
+            .recentConfirmedPayments(confirmedAfterHeight: windowStart) {
+            for payment in recentConfirmed {
+                guard !Task.isCancelled else { return }
+                let outcome = await confirmationService.resolve(
+                    payment: payment,
+                    currentBlockHeight: currentHeight,
+                    forceRecheck: true
+                )
+                switch outcome {
+                case .pending:
+                    // Esplora reports transaction is no longer confirmed — downgrade to pending
+                    do {
+                        try databaseService.paymentRepo.downgradePaymentToPending(paymentId: payment.id)
+                        logger
+                            .warning(
+                                "[Confirmation] Payment #\(payment.id) orphaned in reorg/gap — downgraded to pending."
+                            )
+                        AuditService.log("PAYMENT_REORG_DOWNGRADED", data: [
+                            "payment_id": "\(payment.id)",
+                            "txid": payment.txid ?? ""
+                        ])
+                    } catch {
+                        logger.error("Failed to downgrade payment: \(error.localizedDescription)")
+                    }
+                case .confirmed(let progress, let blockHeight):
+                    if blockHeight != payment.txBlockHeight || progress.display != payment.confirmations {
+                        try? databaseService.paymentRepo.updateConfirmations(
+                            paymentId: payment.id,
+                            txBlockHeight: blockHeight,
+                            currentBlockHeight: currentHeight
+                        )
+                    }
+                case .error, .noTxid:
+                    break
+                }
+            }
+        }
+
+        onUpdate?()
+    }
+
     private func resolve(payment: PaymentRecord, currentHeight: UInt32) async {
         let outcome = await confirmationService.resolve(
             payment: payment,

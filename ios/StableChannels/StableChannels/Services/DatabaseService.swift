@@ -1,14 +1,17 @@
+//
+//  DatabaseService.swift
+//  StableChannels
+//
+
 import Foundation
 import SQLite3
 
-/// SQLite database layer — port of src/db.rs
-/// Uses raw SQLite3 C API to avoid external dependencies initially.
-class DatabaseService {
-    private var db: OpaquePointer?
-
+final class DatabaseService {
     static let dbFilename = "stablechannels.db"
 
+    private(set) var db: OpaquePointer?
     let rawSQL: RawSQL
+
     let channelRepo: ChannelRepository
     let paymentRepo: PaymentRepository
     let spliceRepo: SpliceRepository
@@ -16,6 +19,7 @@ class DatabaseService {
     let pendingOpRepo: PendingOperationRepository
     let onchainRepo: OnchainReceiveRepository
     let priceRepo: PriceRepository
+    let headerRepo: HeaderRepository
 
     init(dataDir: URL) throws {
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
@@ -41,6 +45,7 @@ class DatabaseService {
         self.pendingOpRepo = PendingOperationRepository(rawSQL: sqlHelper)
         self.onchainRepo = OnchainReceiveRepository(rawSQL: sqlHelper)
         self.priceRepo = PriceRepository(rawSQL: sqlHelper)
+        self.headerRepo = HeaderRepository(rawSQL: sqlHelper)
 
         sqlHelper.getDB = { [weak self] in self?.db }
 
@@ -170,12 +175,21 @@ class DatabaseService {
                 resolved_at INTEGER
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS block_headers (
+                height INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)"
+            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)",
+            "CREATE INDEX IF NOT EXISTS idx_block_headers_hash ON block_headers(hash)"
         ]
 
         for sql in statements {
@@ -206,5 +220,32 @@ class DatabaseService {
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
+    }
+
+    // MARK: - Transaction & SPV Header Delegations
+
+    func inTransaction(mode: String = "IMMEDIATE", _ block: () throws -> Void) throws {
+        try rawSQL.inTransaction(mode: mode, block)
+    }
+
+    func fetchLatestHeader() throws -> BlockHeaderRecord? {
+        try headerRepo.fetchLatestHeader()
+    }
+
+    func storeBlockHeader(_ header: BlockHeaderRecord) throws {
+        try headerRepo.insertHeader(
+            height: header.height,
+            hash: header.hash,
+            prevHash: header.prevHash,
+            timestamp: header.timestamp
+        )
+    }
+
+    func rollbackHeadersAbove(height: UInt32) throws {
+        try headerRepo.rollbackHeadersAbove(height: height)
+    }
+
+    func pruneHeadersOlderThan(height: UInt32) throws {
+        try headerRepo.pruneOldHeaders(currentHeight: height)
     }
 }

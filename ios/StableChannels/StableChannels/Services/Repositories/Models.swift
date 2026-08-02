@@ -232,3 +232,10 @@ struct PendingOperation: Equatable {
     let createdAt: Int64
     let resolvedAt: Int64?
 }
+
+struct BlockHeaderRecord: Equatable {
+    let height: UInt32
+    let hash: String
+    let prevHash: String
+    let timestamp: UInt32
+}
