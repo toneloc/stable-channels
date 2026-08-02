@@ -138,12 +138,11 @@ final class StabilityServiceTests: XCTestCase {
 
     // MARK: - reconcileIncoming
 
-    func testIncomingResetsBackingToEquilibrium() {
+    func testIncomingPreservesBackingSats() {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 1_200_000)
         sc.backingSats = 600_000
         StabilityService.reconcileIncoming(&sc)
-        let expectedBacking = UInt64(500.0 / 100_000.0 * 100_000_000.0)
-        XCTAssertEqual(sc.backingSats, expectedBacking)
+        XCTAssertEqual(sc.backingSats, 600_000)
     }
 
     func testIncomingNoChangeWhenAtEquilibrium() {
@@ -245,7 +244,7 @@ final class StabilityServiceTests: XCTestCase {
         var sc = testSC(expectedUSD: 500.0, price: 100_000.0, receiverSats: 1_200_000)
         sc.backingSats = 600_000
         StabilityService.reconcileIncoming(&sc)
-        XCTAssertEqual(sc.nativeChannelBTC.sats, 1_200_000 - 500_000)
+        XCTAssertEqual(sc.nativeChannelBTC.sats, 1_200_000 - 600_000)
     }
 
     func testNativeUpdatedAfterApplyTrade() {

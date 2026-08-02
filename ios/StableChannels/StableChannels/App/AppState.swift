@@ -72,6 +72,7 @@ class AppState {
         provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
     )
     var confirmationPollingService: ConfirmationPollingService?
+    var spvHeaderChainService: SPVHeaderChainService?
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
@@ -217,14 +218,40 @@ class AppState {
         pollingService?.onUpdate = { [weak self] in
             self?.confirmationUpdateEpoch += 1
         }
-        blockHeightService.onHeightUpdated = { [weak pollingService] _ in
-            Task { @MainActor in
-                await pollingService?.pollOnce()
+        if let db = databaseService, let polling = pollingService {
+            let spvService = SPVHeaderChainService(
+                databaseService: db,
+                blockHeightService: blockHeightService,
+                confirmationPollingService: polling
+            )
+            spvHeaderChainService = spvService
+
+            // SPV path: advanceHeight() inside SPVHeaderChainService calls updateHeight(),
+            // which fires onHeightUpdated → pollOnce(). Wire onHeightUpdated here so the
+            // polling hook still runs for any height update that comes from HTTP polling
+            // (BlockHeightService.refresh) rather than from the WebSocket block header.
+            blockHeightService.onHeightUpdated = { [weak polling] _ in
+                Task { @MainActor in
+                    await polling?.pollOnce()
+                }
             }
-        }
-        mempoolWebSocketService.onBlockHeader = { [weak self] _ in
-            Task { @MainActor in
-                await self?.blockHeightService.refresh()
+
+            mempoolWebSocketService.onBlockHeader = { [weak spvService] block in
+                Task { @MainActor in
+                    await spvService?.processBlockHeader(block)
+                }
+            }
+        } else {
+            // Fallback when DB is unavailable: still advance height and poll via HTTP.
+            blockHeightService.onHeightUpdated = { [weak pollingService] _ in
+                Task { @MainActor in
+                    await pollingService?.pollOnce()
+                }
+            }
+            mempoolWebSocketService.onBlockHeader = { [weak self] _ in
+                Task { @MainActor in
+                    await self?.blockHeightService.refresh()
+                }
             }
         }
         mempoolWebSocketService.onTransactionDetected = { [weak self] event in

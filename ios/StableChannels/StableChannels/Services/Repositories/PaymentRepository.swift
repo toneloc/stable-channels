@@ -168,13 +168,13 @@ final class PaymentRepository {
         let required = ConfirmationPolicy.requiredConfirmations
         let rawConfs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
         let confs = min(rawConfs, required)
+        let status = confs >= required ? "completed" : "pending"
         try rawSQL.execute(
-            "UPDATE payments SET confirmations = ?, tx_block_height = ?, status = CASE WHEN ? >= ? THEN 'completed' ELSE status END WHERE id = ?",
+            "UPDATE payments SET confirmations = ?, tx_block_height = ?, status = ? WHERE id = ?",
             params: [
                 .integer(Int64(confs)),
                 .integer(Int64(txBlockHeight)),
-                .integer(Int64(confs)),
-                .integer(Int64(required)),
+                .text(status),
                 .integer(paymentId)
             ]
         )
@@ -297,6 +297,33 @@ final class PaymentRepository {
             )
         }
         return UInt64(value)
+    }
+
+    func recentConfirmedPayments(confirmedAfterHeight: UInt32) throws -> [PaymentRecord] {
+        let sql = """
+        SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd,
+               btc_price, counterparty, status, created_at, fee_msat, txid, address,
+               confirmations, tx_block_height
+        FROM payments
+        WHERE (txid IS NOT NULL OR address IS NOT NULL)
+          AND status = 'completed'
+          AND tx_block_height IS NOT NULL
+          AND tx_block_height >= ?
+        ORDER BY tx_block_height DESC;
+        """
+        let rows = try rawSQL.query(sql, params: [.integer(Int64(confirmedAfterHeight))])
+        return rows.map { row in
+            paymentRecord(from: row)
+        }
+    }
+
+    func downgradePaymentToPending(paymentId: Int64) throws {
+        let sql = """
+        UPDATE payments
+        SET status = 'pending', confirmations = 0, tx_block_height = NULL
+        WHERE id = ?;
+        """
+        try rawSQL.execute(sql, params: [.integer(paymentId)])
     }
 
     private func paymentRecord(from row: [Any?]) -> PaymentRecord {

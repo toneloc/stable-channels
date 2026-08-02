@@ -5,6 +5,9 @@ import os.log
 
 struct MempoolWSBlock: Decodable {
     let height: UInt32
+    let id: String?
+    let previousblockhash: String?
+    let timestamp: UInt32?
 }
 
 struct MempoolWSVout: Decodable {
@@ -109,7 +112,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
     /// Fired when a transaction is detected hitting a tracked address or txid outspend.
     var onTransactionDetected: ((WebSocketEvent) -> Void)?
     /// Fired when a new block header is mined.
-    var onBlockHeader: ((_ height: UInt32) -> Void)?
+    var onBlockHeader: ((MempoolWSBlock) -> Void)?
 
     // MARK: - Init
 
@@ -416,10 +419,9 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
 
         // 3. Check for block header / mempool-block payload
         if let block = msg.block ?? msg.blocks?.last {
-            let height = block.height
-            logger.info("Real-time block header received via WebSocket: \(height)")
-            AuditService.log("WEBSOCKET_BLOCK_TIP", data: ["height": "\(height)"])
-            onBlockHeader?(height)
+            logger.info("Real-time block header received via WebSocket: \(block.height)")
+            AuditService.log("WEBSOCKET_BLOCK_TIP", data: ["height": "\(block.height)"])
+            onBlockHeader?(block)
         }
 
         // 4. Handle outspends of tracked txids (channel closes)

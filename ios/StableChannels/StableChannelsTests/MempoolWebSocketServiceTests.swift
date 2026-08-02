@@ -116,8 +116,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         var capturedHeight: UInt32?
 
-        service.onBlockHeader = { height in
-            capturedHeight = height
+        service.onBlockHeader = { block in
+            capturedHeight = block.height
         }
 
         service.handleMessage(json)
@@ -187,8 +187,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             capturedTxid = txid
             capturedAmount = amount
         }
-        service.onBlockHeader = { height in
-            capturedHeight = height
+        service.onBlockHeader = { block in
+            capturedHeight = block.height
         }
 
         service.trackAddress("bc1qtestaddr")
@@ -653,8 +653,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         var capturedHeight: UInt32?
 
-        service.onBlockHeader = { height in
-            capturedHeight = height
+        service.onBlockHeader = { block in
+            capturedHeight = block.height
         }
 
         service.handleMessage(json)
@@ -752,8 +752,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         let json = "{ \"blocks\": [{ \"id\": \"block1\", \"height\": 900100 }, { \"id\": \"block2\", \"height\": 900101 }] }"
 
         var capturedHeight: UInt32?
-        service.onBlockHeader = { height in
-            capturedHeight = height
+        service.onBlockHeader = { block in
+            capturedHeight = block.height
         }
 
         service.handleMessage(json)
