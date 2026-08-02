@@ -593,4 +593,37 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(history.count, 1)
         XCTAssertEqual(history.first?.price, 60_000)
     }
+
+    // MARK: - Query Indexes & Deduplication Tests
+
+    func testCustomQueryIndexesAndUniquePaymentIdCreated() throws {
+        let indexRows = try service.rawSQL
+            .query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_payments_payment_id_unique';")
+        XCTAssertEqual(
+            indexRows.count,
+            1,
+            "Expected unique payment index idx_payments_payment_id_unique to exist"
+        )
+
+        let statusIndexRows = try service.rawSQL
+            .query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_payments_status';")
+        XCTAssertEqual(
+            statusIndexRows.count,
+            1,
+            "Expected payment status index idx_payments_status to exist"
+        )
+    }
+
+    func testUniquePaymentIdIndexEnforcesDeduplication() throws {
+        try service.rawSQL.execute(
+            "INSERT INTO payments (payment_id, direction, amount_msat, status) VALUES ('unique_pay_1', 'sent', 100000, 'completed')"
+        )
+
+        // Second insert with exact same payment_id should throw a unique constraint error
+        XCTAssertThrowsError(
+            try service.rawSQL.execute(
+                "INSERT INTO payments (payment_id, direction, amount_msat, status) VALUES ('unique_pay_1', 'sent', 100000, 'completed')"
+            )
+        )
+    }
 }
