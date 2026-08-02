@@ -258,11 +258,28 @@ async fn dispatch(
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
             let mut settlement_handled = false;
             if let Some(payment_id) = payment_id.as_deref() {
-                let known_settlement = state
-                    .db
-                    .settlement_exists(payment_id)
-                    .ok()
-                    .unwrap_or(false);
+                match state.db.mark_trade_response_succeeded(payment_id) {
+                    Ok(true) => {
+                        settlement_handled = true;
+                        stable_channels::audit::audit_event(
+                            "TRADE_RESPONSE_SUCCEEDED",
+                            serde_json::json!({ "response_payment_id": payment_id }),
+                        );
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "mark_trade_response_succeeded",
+                                "payment_id": payment_id,
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return DispatchOutcome::Reconnect;
+                    }
+                }
+                let known_settlement = state.db.settlement_exists(payment_id).ok().unwrap_or(false);
                 match state.db.mark_settlement_succeeded(
                     payment_id,
                     amount_msat,
@@ -301,10 +318,41 @@ async fn dispatch(
             let payment_id = e.payment.as_ref().map(|p| p.id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
-            let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
-            let rollback = payment_id
-                .as_deref()
-                .and_then(|payment_id| mgr.handle_failed_stability_payment(payment_id));
+            let direction = e.payment.as_ref().map(|p| {
+                if p.direction == 1 {
+                    "outbound"
+                } else {
+                    "inbound"
+                }
+            });
+            let trade_response_failed = if let Some(payment_id) = payment_id.as_deref() {
+                match state
+                    .db
+                    .mark_trade_response_payment_failed(payment_id, now_millis() as i64 / 1000)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "mark_trade_response_payment_failed",
+                                "payment_id": payment_id,
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return DispatchOutcome::Reconnect;
+                    }
+                }
+            } else {
+                false
+            };
+            let rollback = (!trade_response_failed)
+                .then(|| {
+                    payment_id
+                        .as_deref()
+                        .and_then(|payment_id| mgr.handle_failed_stability_payment(payment_id))
+                })
+                .flatten();
             let user_channel_id = rollback
                 .as_ref()
                 .map(|rollback| rollback.user_channel_id.clone())
@@ -321,6 +369,7 @@ async fn dispatch(
                     "direction": direction,
                     "user_channel_id": user_channel_id,
                     "stability_rollback_applied": rollback.map(|rollback| rollback.applied),
+                    "trade_response_retry_queued": trade_response_failed,
                 }),
             );
         },

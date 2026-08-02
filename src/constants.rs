@@ -71,6 +71,9 @@ pub const BALANCE_UPDATE_INTERVAL_SECS: u64 = 30;
 /// Stability check interval (in seconds)
 pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 60;
 
+/// Shared freshness and desktop expiry window for authenticated trades.
+pub const TRADE_ACCEPTANCE_WINDOW_SECS: u64 = 15 * 60;
+
 // ============================================================================
 // BUSINESS LOGIC CONSTANTS
 // ============================================================================

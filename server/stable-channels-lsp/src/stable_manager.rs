@@ -14,12 +14,19 @@ use ldk_server_client::ldk_server_grpc::api::{
     SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
-use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord};
+use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord, PaymentStatus};
 use stable_channels::db::Database;
+use stable_channels::db::PendingTradeResponse;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
 
-const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
+use crate::messages::TradeRejectionReason;
+
+const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 1.0;
+const LEGACY_TRADE_FEE_PRICE_SKEW_PERCENT: f64 = 0.5;
+// The exponential schedule reaches its one-hour cap after ten attempts; this leaves roughly
+// 6.6 days for an offline wallet to recover before the response is dead-lettered.
+const MAX_TRADE_RESPONSE_ATTEMPTS: u32 = 168;
 
 /// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
 /// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
@@ -86,9 +93,9 @@ fn trade_fee_tolerance_msat(expected_msat: u64, has_signed_quote: bool) -> u64 {
         return 1000;
     }
 
-    // Transitional legacy wallets did not sign their quote. Admit the same maximum price skew as
-    // signed trades, plus one sat for whole-sat rounding, while still rejecting material underpay.
-    ((expected_msat as f64 * MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0).ceil() as u64)
+    // Transitional legacy wallets did not sign their quote. Retain their existing price-skew
+    // allowance, plus one sat for whole-sat rounding, while still rejecting material underpay.
+    ((expected_msat as f64 * LEGACY_TRADE_FEE_PRICE_SKEW_PERCENT / 100.0).ceil() as u64)
         .max(1000)
 }
 
@@ -226,6 +233,285 @@ pub struct EditOutcome {
 impl StableChannelManager {
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    fn unix_time_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64
+    }
+
+    async fn send_pending_trade_response(
+        db: &Database,
+        ldk: &dyn LdkServerCalls,
+        response: &PendingTradeResponse,
+    ) -> bool {
+        let req = SpontaneousSendRequest {
+            amount_msat: response.response_amount_msat,
+            node_id: response.counterparty.clone(),
+            route_parameters: None,
+            custom_tlvs: vec![CustomTlvRecord {
+                type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+                value: response.response_envelope.clone().into_bytes().into(),
+            }],
+        };
+        match ldk.spontaneous_send(req).await {
+            Ok(sent) if !sent.payment_id.is_empty() => {
+                if let Err(error) = db
+                    .mark_trade_response_in_flight(&response.inbound_payment_id, &sent.payment_id)
+                {
+                    // The send has already happened. Leaving the persisted obligation pending can
+                    // produce a duplicate nominal control response after restart.
+                    stable_channels::audit::audit_event(
+                        "TRADE_RESPONSE_PAYMENT_ID_PERSIST_FAILED",
+                        serde_json::json!({
+                            "trade_payment_id": response.inbound_payment_id,
+                            "response_payment_id": sent.payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return false;
+                }
+                stable_channels::audit::audit_event(
+                    "TRADE_RESPONSE_SENT",
+                    serde_json::json!({
+                        "trade_payment_id": response.inbound_payment_id,
+                        "response_payment_id": sent.payment_id,
+                        "amount_msat": response.response_amount_msat,
+                        "attempt": response.attempts.saturating_add(1),
+                    }),
+                );
+                true
+            }
+            failed => {
+                let error = match failed {
+                    Ok(_) => "spontaneous send returned an empty payment id".to_owned(),
+                    Err(error) => error.to_string(),
+                };
+                if let Err(db_error) = db.mark_trade_response_send_failed(
+                    &response.inbound_payment_id,
+                    Self::unix_time_secs(),
+                ) {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({
+                            "op": "mark_trade_response_send_failed",
+                            "trade_payment_id": response.inbound_payment_id,
+                            "error": db_error.to_string(),
+                        }),
+                    );
+                }
+                stable_channels::audit::audit_event(
+                    "TRADE_RESPONSE_SEND_FAILED",
+                    serde_json::json!({
+                        "trade_payment_id": response.inbound_payment_id,
+                        "amount_msat": response.response_amount_msat,
+                        "error": error,
+                    }),
+                );
+                false
+            }
+        }
+    }
+
+    /// Retry all due accepted-sync and rejection responses. Backoff and the bounded attempt
+    /// budget are stored in SQLite, so restarts neither reset nor lose an obligation.
+    pub async fn retry_pending_trade_responses(db: &Database, ldk: &dyn LdkServerCalls) {
+        let in_flight = match db.in_flight_trade_response_payment_ids() {
+            Ok(payment_ids) => payment_ids,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "DB_READ_FAILED",
+                    serde_json::json!({
+                        "op": "in_flight_trade_response_payment_ids",
+                        "error": error.to_string(),
+                    }),
+                );
+                Vec::new()
+            }
+        };
+        for payment_id in in_flight {
+            let payment = match ldk
+                .get_payment_details(GetPaymentDetailsRequest {
+                    payment_id: payment_id.clone(),
+                })
+                .await
+            {
+                Ok(response) => response.payment,
+                Err(error) => {
+                    stable_channels::audit::audit_event(
+                        "TRADE_RESPONSE_RECONCILE_FAILED",
+                        serde_json::json!({
+                            "response_payment_id": payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    None
+                }
+            };
+            match payment.map(|payment| payment.status) {
+                Some(status) if status == PaymentStatus::Succeeded as i32 => {
+                    match db.mark_trade_response_succeeded(&payment_id) {
+                        Ok(true) => {}
+                        Ok(false) => stable_channels::audit::audit_event(
+                            "TRADE_RESPONSE_RECONCILE_MISMATCH",
+                            serde_json::json!({
+                                "response_payment_id": payment_id,
+                                "status": "succeeded",
+                            }),
+                        ),
+                        Err(error) => stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "mark_trade_response_succeeded",
+                                "response_payment_id": payment_id,
+                                "error": error.to_string(),
+                            }),
+                        ),
+                    }
+                }
+                Some(status) if status == PaymentStatus::Failed as i32 => {
+                    match db.mark_trade_response_payment_failed(
+                        &payment_id,
+                        Self::unix_time_secs(),
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => stable_channels::audit::audit_event(
+                            "TRADE_RESPONSE_RECONCILE_MISMATCH",
+                            serde_json::json!({
+                                "response_payment_id": payment_id,
+                                "status": "failed",
+                            }),
+                        ),
+                        Err(error) => stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "mark_trade_response_payment_failed",
+                                "response_payment_id": payment_id,
+                                "error": error.to_string(),
+                            }),
+                        ),
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let now = Self::unix_time_secs();
+        if let Err(error) = db.abandon_exhausted_trade_responses(
+            MAX_TRADE_RESPONSE_ATTEMPTS,
+            now,
+            32,
+        ) {
+            stable_channels::audit::audit_event(
+                "DB_WRITE_FAILED",
+                serde_json::json!({
+                    "op": "abandon_exhausted_trade_responses",
+                    "error": error.to_string(),
+                }),
+            );
+        }
+        let responses = match db.due_trade_responses(
+            now,
+            MAX_TRADE_RESPONSE_ATTEMPTS,
+            32,
+        ) {
+            Ok(responses) => responses,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "DB_READ_FAILED",
+                    serde_json::json!({
+                        "op": "due_trade_responses",
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        for response in responses {
+            Self::send_pending_trade_response(db, ldk, &response).await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reject_authenticated_trade(
+        &self,
+        ldk: &dyn LdkServerCalls,
+        inbound_payment_id: &str,
+        trade_id: Option<&str>,
+        channel_id: &str,
+        local_user_channel_id: &str,
+        remote_user_channel_id: Option<&str>,
+        counterparty: &str,
+        reason: TradeRejectionReason,
+        explanation: &str,
+    ) {
+        let response_user_channel_id = remote_user_channel_id.unwrap_or(local_user_channel_id);
+        let payload = crate::messages::build_trade_rejected_payload(
+            channel_id,
+            response_user_channel_id,
+            trade_id,
+            inbound_payment_id,
+            reason,
+            explanation,
+            Self::unix_time_secs() as u64,
+        );
+        let signature = match ldk
+            .sign_message(SignMessageRequest {
+                message: payload.as_bytes().to_vec().into(),
+            })
+            .await
+        {
+            Ok(response) => response.signature,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "TRADE_REJECTION_SIGN_FAILED",
+                    serde_json::json!({
+                        "trade_payment_id": inbound_payment_id,
+                        "reason_code": reason.as_str(),
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        let envelope = crate::messages::build_envelope(payload, signature);
+        match self.db.persist_trade_rejection(
+            inbound_payment_id,
+            trade_id,
+            channel_id,
+            local_user_channel_id,
+            remote_user_channel_id,
+            counterparty,
+            reason.as_str(),
+            explanation,
+            &envelope,
+        ) {
+            Ok(_) => {
+                stable_channels::audit::audit_event(
+                    "TRADE_REJECTION_QUEUED",
+                    serde_json::json!({
+                        "trade_id": trade_id,
+                        "trade_payment_id": inbound_payment_id,
+                        "channel_id": channel_id,
+                        "user_channel_id": local_user_channel_id,
+                        "remote_user_channel_id": remote_user_channel_id,
+                        "reason_code": reason.as_str(),
+                        "explanation": explanation,
+                    }),
+                );
+            }
+            Err(error) => stable_channels::audit::audit_event(
+                "DB_WRITE_FAILED",
+                serde_json::json!({
+                    "op": "persist_trade_rejection",
+                    "trade_payment_id": inbound_payment_id,
+                    "error": error.to_string(),
+                }),
+            ),
+        }
     }
 
     /// Consume an asynchronous failure for an outbound stability payment. The database performs
@@ -796,7 +1082,7 @@ impl StableChannelManager {
                         );
                     }
                 }
-                self.handle_trade_message(&raw, amount_msat, ldk, btc_price)
+                self.handle_trade_payment(&raw, payment_id.as_deref(), amount_msat, ldk, btc_price)
                     .await;
             } else {
                 if let Some(pid) = payment_id.as_deref() {
@@ -1674,11 +1960,13 @@ impl StableChannelManager {
         }
     }
 
-    /// Parse a TRADE_V1 envelope, verify it against the channel counterparty, validate against
-    /// balance, and apply the new USD target. Drops (with an audit line) on any failure.
-    pub async fn handle_trade_message(
+    /// Process one fee payment carrying TRADE_V1. Parsing, channel attribution, and signature
+    /// verification happen before any response is possible. Every later validation failure queues
+    /// a signed rejection as a nominal one-msat control payment.
+    pub async fn handle_trade_payment(
         &mut self,
         raw: &str,
+        inbound_payment_id: Option<&str>,
         amount_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
@@ -1694,160 +1982,274 @@ impl StableChannelManager {
         if payload.kind != stable_channels::constants::TRADE_MESSAGE_TYPE {
             stable_channels::audit::audit_event(
                 "TRADE_UNHANDLED_TYPE",
-                serde_json::json!({ "type": payload.kind, "user_channel_id": payload.user_channel_id.clone() }),
+                serde_json::json!({ "type": payload.kind }),
             );
             return;
         }
-        if payload.expected_usd < 0.0 || !payload.expected_usd.is_finite() {
-            stable_channels::audit::audit_event(
-                "TRADE_INVALID_AMOUNT",
-                serde_json::json!({ "expected_usd": payload.expected_usd, "user_channel_id": payload.user_channel_id.clone() }),
-            );
-            return;
-        }
-        stable_channels::audit::audit_event(
-            "TRADE_PARSED_PAYLOAD_OK",
-            serde_json::json!({
-                "expected_usd": payload.expected_usd,
-                "quote_price": payload.quote_price,
-                "backing_sats": payload.backing_sats,
-                "user_channel_id": payload.user_channel_id.clone(),
-                "channel_id": payload.channel_id.clone(),
-            }),
-        );
-
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
-            Ok(r) => r.channels,
-            Err(e) => {
-                error!("[trade] list_channels gRPC failed: {}", e);
+            Ok(response) => response.channels,
+            Err(error) => {
                 stable_channels::audit::audit_event(
                     "LDK_CALL_FAILED",
-                    serde_json::json!({ "op": "list_channels", "context": "handle_trade_message", "user_channel_id": payload.user_channel_id.clone(), "channel_id": payload.channel_id.clone(), "error": e.to_string() }),
+                    serde_json::json!({
+                        "op": "list_channels",
+                        "context": "handle_trade_payment",
+                        "error": error.to_string(),
+                    }),
                 );
                 return;
             }
         };
-        // channel_id is authoritative when present; user_channel_id is the fallback.
-        let chan = channels.into_iter().find(|c| {
-            if let Some(cid) = payload.channel_id.as_deref() {
-                if c.channel_id == cid {
-                    return true;
-                }
-            }
-            if let Some(ucid) = payload.user_channel_id.as_deref() {
-                let want = parse_user_channel_id(ucid);
-                if want.is_some() && want == parse_user_channel_id(&c.user_channel_id) {
-                    return true;
-                }
-            }
-            false
-        });
-        let Some(chan) = chan else {
+        // `user_channel_id` is local to each LDK node, so the wallet's value will normally differ
+        // from the LSP's. Bind new requests by the shared channel_id. The local-id fallback keeps
+        // accepting legacy requests that omitted channel_id and used the LSP-side identifier.
+        let chan = match payload.channel_id.as_deref() {
+            Some(channel_id) => channels
+                .iter()
+                .find(|channel| channel.channel_id == channel_id),
+            None => payload.user_channel_id.as_deref().and_then(|user_channel_id| {
+                let wanted = parse_user_channel_id(user_channel_id)?;
+                channels
+                    .iter()
+                    .find(|channel| parse_user_channel_id(&channel.user_channel_id) == Some(wanted))
+            }),
+        };
+        let Some(chan) = chan.cloned() else {
             stable_channels::audit::audit_event(
-                "TRADE_CHANNEL_NOT_FOUND",
+                "TRADE_CHANNEL_BINDING_INVALID",
                 serde_json::json!({
                     "channel_id": payload.channel_id,
-                    "user_channel_id": payload.user_channel_id,
+                    "remote_user_channel_id": payload.user_channel_id,
+                }),
+            );
+            return;
+        };
+        let remote_user_channel_id = payload.user_channel_id.as_deref();
+
+        let signature_valid = matches!(
+            ldk.verify_signature(VerifySignatureRequest {
+                message: envelope.payload.as_bytes().to_vec().into(),
+                signature: envelope.signature,
+                public_key: chan.counterparty_node_id.clone(),
+            })
+            .await,
+            Ok(response) if response.valid
+        );
+        if !signature_valid {
+            stable_channels::audit::audit_event(
+                "TRADE_SIGNATURE_INVALID",
+                serde_json::json!({
+                    "channel_id": chan.channel_id,
+                    "user_channel_id": chan.user_channel_id,
+                    "remote_user_channel_id": remote_user_channel_id,
+                }),
+            );
+            return;
+        }
+
+        // An event without either of these fields cannot be safely attributed or deduplicated.
+        let (Some(inbound_payment_id), Some(received_msat)) = (inbound_payment_id, amount_msat)
+        else {
+            stable_channels::audit::audit_event(
+                "TRADE_PAYMENT_UNATTRIBUTABLE",
+                serde_json::json!({
+                    "has_payment_id": inbound_payment_id.is_some(),
+                    "amount_msat": amount_msat,
+                    "channel_id": chan.channel_id,
+                    "user_channel_id": chan.user_channel_id,
+                    "remote_user_channel_id": remote_user_channel_id,
                 }),
             );
             return;
         };
 
-        let verify = ldk
-            .verify_signature(VerifySignatureRequest {
-                message: envelope.payload.as_bytes().to_vec().into(),
-                signature: envelope.signature.clone(),
-                public_key: chan.counterparty_node_id.clone(),
-            })
-            .await;
-        let valid = matches!(verify, Ok(ref r) if r.valid);
-        if !valid {
-            stable_channels::audit::audit_event(
-                "TRADE_SIGNATURE_INVALID",
-                serde_json::json!({ "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
-            );
-            return;
+        let supplied_trade_id = payload.trade_id.as_deref();
+        let trade_id = supplied_trade_id.filter(|trade_id| {
+            crate::messages::is_valid_trade_id(trade_id)
+        });
+        macro_rules! reject {
+            ($reason:expr, $explanation:expr) => {{
+                self.reject_authenticated_trade(
+                    ldk,
+                    inbound_payment_id,
+                    trade_id,
+                    &chan.channel_id,
+                    &chan.user_channel_id,
+                    remote_user_channel_id,
+                    &chan.counterparty_node_id,
+                    $reason,
+                    $explanation,
+                )
+                .await;
+                return;
+            }};
         }
-        stable_channels::audit::audit_event(
-            "TRADE_SIGNATURE_VALID",
-            serde_json::json!({ "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
-        );
 
-        // Replay protection: reject a signed trade with a stale `ts`; ts==0 means an un-upgraded wallet (no timestamp yet) — accepted until all wallets sign one.
-        const TRADE_SIG_WINDOW_SECS: u64 = 300;
+        if supplied_trade_id.is_some() && trade_id.is_none() {
+            stable_channels::audit::audit_event(
+                "TRADE_ID_INVALID",
+                serde_json::json!({ "trade_id": payload.trade_id }),
+            );
+            reject!(
+                TradeRejectionReason::InvalidAmount,
+                "trade_id must be 32 bytes encoded as lowercase hex"
+            );
+        }
+
+        match self.db.trade_decision_exists(inbound_payment_id) {
+            Ok(true) => {
+                let response_requeued = match self.db.requeue_abandoned_trade_response(
+                    inbound_payment_id,
+                    Self::unix_time_secs(),
+                ) {
+                    Ok(requeued) => requeued,
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "requeue_abandoned_trade_response",
+                                "trade_payment_id": inbound_payment_id,
+                                "error": error.to_string(),
+                            }),
+                        );
+                        false
+                    }
+                };
+                stable_channels::audit::audit_event(
+                    "TRADE_PAYMENT_REPLAYED",
+                    serde_json::json!({
+                        "trade_payment_id": inbound_payment_id,
+                        "response_requeued": response_requeued,
+                    }),
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "TRADE_DEDUP_READ_FAILED",
+                    serde_json::json!({
+                        "trade_payment_id": inbound_payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                reject!(
+                    TradeRejectionReason::InternalError,
+                    "could not check prior trade decisions"
+                );
+            }
+        }
+
+        if let Some(trade_id) = trade_id {
+            match self
+                .db
+                .trade_id_seen_on_other_payment(trade_id, inbound_payment_id)
+            {
+                Ok(true) => {
+                    match self.db.requeue_original_trade_response(
+                        trade_id,
+                        inbound_payment_id,
+                        Self::unix_time_secs(),
+                    ) {
+                        Ok(true) => stable_channels::audit::audit_event(
+                            "TRADE_ORIGINAL_RESPONSE_REQUEUED",
+                            serde_json::json!({
+                                "trade_id": trade_id,
+                                "duplicate_trade_payment_id": inbound_payment_id,
+                            }),
+                        ),
+                        Ok(false) => stable_channels::audit::audit_event(
+                            "TRADE_ORIGINAL_RESPONSE_NOT_FOUND",
+                            serde_json::json!({
+                                "trade_id": trade_id,
+                                "duplicate_trade_payment_id": inbound_payment_id,
+                            }),
+                        ),
+                        Err(error) => stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "requeue_original_trade_response",
+                                "trade_id": trade_id,
+                                "duplicate_trade_payment_id": inbound_payment_id,
+                                "error": error.to_string(),
+                            }),
+                        ),
+                    }
+                    reject!(
+                        TradeRejectionReason::DuplicateTrade,
+                        "trade_id was already used by another payment"
+                    );
+                }
+                Ok(false) => {}
+                Err(_) => reject!(
+                    TradeRejectionReason::InternalError,
+                    "could not check trade replay state"
+                ),
+            }
+        }
+        if payload.expected_usd < 0.0 || !payload.expected_usd.is_finite() {
+            reject!(
+                TradeRejectionReason::InvalidAmount,
+                "expected_usd must be finite and non-negative"
+            );
+        }
+
+        const TRADE_SIG_WINDOW_SECS: u64 =
+            stable_channels::constants::TRADE_ACCEPTANCE_WINDOW_SECS;
         if payload.ts != 0 {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now = Self::unix_time_secs() as u64;
             if now.abs_diff(payload.ts) > TRADE_SIG_WINDOW_SECS {
                 stable_channels::audit::audit_event(
                     "TRADE_STALE",
-                    serde_json::json!({ "ts": payload.ts, "now": now, "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
+                    serde_json::json!({
+                        "ts": payload.ts,
+                        "now": now,
+                        "channel_id": chan.channel_id,
+                        "user_channel_id": chan.user_channel_id,
+                    }),
                 );
-                return;
+                reject!(
+                    TradeRejectionReason::StaleRequest,
+                    "trade timestamp is outside the acceptance window"
+                );
             }
         }
 
         let Some(target_uid) = parse_user_channel_id(&chan.user_channel_id) else {
-            stable_channels::audit::audit_event("TRADE_CHANNEL_UID_UNPARSEABLE", serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": chan.user_channel_id.clone() }));
-            return;
+            reject!(
+                TradeRejectionReason::InternalError,
+                "channel user identifier is invalid"
+            );
         };
-        let Some(current_expected_usd) = self
+        let Some(channel_index) = self
             .stable_channels
             .iter()
-            .find(|sc| sc.user_channel_id == target_uid)
-            .map(|sc| sc.expected_usd.0)
+            .position(|stable| stable.user_channel_id == target_uid)
         else {
-            stable_channels::audit::audit_event(
-                "TRADE_STABLE_ENTRY_NOT_FOUND",
-                serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": format!("{}", target_uid) }),
+            reject!(
+                TradeRejectionReason::InternalError,
+                "stable channel state is unavailable"
             );
-            return;
         };
-
+        let current_expected_usd = self.stable_channels[channel_index].expected_usd.0;
         let fee_price = payload.quote_price.unwrap_or(btc_price);
-        let Some(expected_fee_msat) = expected_trade_fee_msat(
-            current_expected_usd,
-            payload.expected_usd,
-            fee_price,
-        ) else {
-            stable_channels::audit::audit_event(
-                "TRADE_FEE_INVALID",
-                serde_json::json!({
-                    "reason": "fee inputs are invalid",
-                    "old_expected_usd": current_expected_usd,
-                    "new_expected_usd": payload.expected_usd,
-                    "fee_price": fee_price,
-                    "amount_msat": amount_msat,
-                    "channel_id": chan.channel_id.clone(),
-                    "user_channel_id": chan.user_channel_id.clone(),
-                }),
+        let Some(expected_fee_msat) =
+            expected_trade_fee_msat(current_expected_usd, payload.expected_usd, fee_price)
+        else {
+            reject!(
+                TradeRejectionReason::InvalidFee,
+                "trade fee inputs are invalid"
             );
-            return;
         };
         let tolerance_msat =
             trade_fee_tolerance_msat(expected_fee_msat, payload.quote_price.is_some());
-        let fee_matches = amount_msat
-            .map(|actual| actual.abs_diff(expected_fee_msat) <= tolerance_msat)
-            .unwrap_or(false);
-        if !fee_matches {
-            stable_channels::audit::audit_event(
-                "TRADE_FEE_INVALID",
-                serde_json::json!({
-                    "reason": if amount_msat.is_some() { "incorrect amount" } else { "missing amount" },
-                    "actual_fee_msat": amount_msat,
-                    "expected_fee_msat": expected_fee_msat,
-                    "tolerance_msat": tolerance_msat,
-                    "old_expected_usd": current_expected_usd,
-                    "new_expected_usd": payload.expected_usd,
-                    "fee_price": fee_price,
-                    "channel_id": chan.channel_id.clone(),
-                    "user_channel_id": chan.user_channel_id.clone(),
-                }),
+        if received_msat.abs_diff(expected_fee_msat) > tolerance_msat {
+            reject!(
+                TradeRejectionReason::InvalidFee,
+                "received fee does not match the signed trade"
             );
-            return;
         }
+
         let (our_sats, their_sats) = channel_peer_balances(&chan);
         let new_expected = payload.expected_usd;
         let signed_allocation = match (payload.quote_price, payload.backing_sats) {
@@ -1858,38 +2260,18 @@ impl StableChannelManager {
                     || !btc_price.is_finite()
                     || btc_price <= 0.0
                 {
-                    stable_channels::audit::audit_event(
-                        "TRADE_INVALID_QUOTE",
-                        serde_json::json!({
-                            "quote_price": quote_price,
-                            "lsp_price": btc_price,
-                            "ts": payload.ts,
-                            "channel_id": chan.channel_id.clone(),
-                            "user_channel_id": chan.user_channel_id.clone(),
-                        }),
+                    reject!(
+                        TradeRejectionReason::InvalidQuote,
+                        "signed quote or timestamp is invalid"
                     );
-                    return;
                 }
-
-                // Both peers run their own price feed. Admit small observation-time differences,
-                // but reject a quote far enough away to change the economic trade materially.
-                let quote_deviation_percent =
-                    ((quote_price - btc_price) / btc_price * 100.0).abs();
+                let quote_deviation_percent = ((quote_price - btc_price) / btc_price * 100.0).abs();
                 if quote_deviation_percent > MAX_TRADE_QUOTE_DEVIATION_PERCENT {
-                    stable_channels::audit::audit_event(
-                        "TRADE_QUOTE_DEVIATION_EXCEEDED",
-                        serde_json::json!({
-                            "quote_price": quote_price,
-                            "lsp_price": btc_price,
-                            "deviation_percent": quote_deviation_percent,
-                            "maximum_percent": MAX_TRADE_QUOTE_DEVIATION_PERCENT,
-                            "channel_id": chan.channel_id.clone(),
-                            "user_channel_id": chan.user_channel_id.clone(),
-                        }),
+                    reject!(
+                        TradeRejectionReason::QuoteOutOfRange,
+                        "signed quote is outside the allowed market range"
                     );
-                    return;
                 }
-
                 let signed_backing_usd = backing_sats as f64 / 100_000_000.0 * quote_price;
                 let allocation_delta_usd = (signed_backing_usd - new_expected).abs();
                 let zero_allocation_is_consistent = if new_expected < 0.01 {
@@ -1902,132 +2284,124 @@ impl StableChannelManager {
                     || allocation_delta_usd
                         > stable_channels::constants::STABILITY_THRESHOLD_USD
                 {
-                    stable_channels::audit::audit_event(
-                        "TRADE_ALLOCATION_INVALID",
-                        serde_json::json!({
-                            "signed_backing_sats": backing_sats,
-                            "signed_backing_usd": signed_backing_usd,
-                            "allocation_delta_usd": allocation_delta_usd,
-                            "receiver_sats": their_sats,
-                            "quote_price": quote_price,
-                            "channel_id": chan.channel_id.clone(),
-                            "user_channel_id": chan.user_channel_id.clone(),
-                        }),
+                    reject!(
+                        TradeRejectionReason::InvalidAllocation,
+                        "signed backing allocation is inconsistent"
                     );
-                    return;
                 }
-
                 Some((quote_price, backing_sats, quote_deviation_percent))
             }
             (None, None) => None,
-            _ => {
-                stable_channels::audit::audit_event(
-                    "TRADE_ALLOCATION_INCOMPLETE",
-                    serde_json::json!({
-                        "quote_price": payload.quote_price,
-                        "backing_sats": payload.backing_sats,
-                        "channel_id": chan.channel_id.clone(),
-                        "user_channel_id": chan.user_channel_id.clone(),
-                    }),
-                );
-                return;
-            }
+            _ => reject!(
+                TradeRejectionReason::InvalidAllocation,
+                "quote_price and backing_sats must be supplied together"
+            ),
         };
 
         let validation_price = signed_allocation
             .map(|(quote_price, _, _)| quote_price)
             .unwrap_or(btc_price);
-        let receiver_usd =
-            USD::from_bitcoin(Bitcoin::from_sats(their_sats), validation_price).0;
-        // Epsilon absorbs f64 boundary rounding so a spend-driven push landing at ~receiver_usd is admitted; residual drift self-heals.
+        let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), validation_price).0;
         let ceiling = receiver_usd + stable_channels::constants::STABILITY_THRESHOLD_USD;
         if new_expected > ceiling {
-            stable_channels::audit::audit_event(
-                "TRADE_EXCEEDS_BALANCE",
-                serde_json::json!({ "requested_usd": new_expected, "receiver_usd": receiver_usd, "user_channel_id": format!("{}", target_uid), "channel_id": chan.channel_id.clone() }),
+            reject!(
+                TradeRejectionReason::InsufficientCapacity,
+                "requested stable allocation exceeds channel capacity"
             );
-            return;
         }
-        let channel_id_hex = chan.channel_id.clone();
 
-        let persisted = {
-            let Some(sc) = self
-                .stable_channels
-                .iter_mut()
-                .find(|sc| sc.user_channel_id == target_uid)
-            else {
-                stable_channels::audit::audit_event(
-                    "TRADE_STABLE_ENTRY_NOT_FOUND",
-                    serde_json::json!({ "channel_id": channel_id_hex, "user_channel_id": format!("{}", target_uid) }),
-                );
-                return;
-            };
-            sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
-            sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
-            sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, btc_price);
-            sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
-            sc.latest_price = btc_price;
-            if let Some((_, backing_sats, _)) = signed_allocation {
-                stable_channels::stable::apply_trade_allocation(
-                    sc,
-                    new_expected,
-                    backing_sats,
-                );
-            } else {
-                stable_channels::stable::apply_trade(sc, new_expected, btc_price);
-            }
-            (
-                format!("{}", sc.user_channel_id),
-                sc.expected_usd.0,
-                sc.backing_sats,
-                sc.native_sats,
-                sc.note.clone(),
-                sc.counterparty.to_string(),
-            )
+        // Compute on a clone. The live cache changes only after the allocation, version,
+        // decision, and signed response have committed in one SQLite transaction.
+        let mut accepted = self.stable_channels[channel_index].clone();
+        accepted.stable_provider_btc = Bitcoin::from_sats(our_sats);
+        accepted.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+        accepted.stable_provider_usd = USD::from_bitcoin(accepted.stable_provider_btc, btc_price);
+        accepted.stable_receiver_usd = USD::from_bitcoin(accepted.stable_receiver_btc, btc_price);
+        accepted.latest_price = btc_price;
+        if let Some((_, backing_sats, _)) = signed_allocation {
+            stable_channels::stable::apply_trade_allocation(
+                &mut accepted,
+                new_expected,
+                backing_sats,
+            );
+        } else {
+            stable_channels::stable::apply_trade(&mut accepted, new_expected, btc_price);
+        }
+
+        let sync_version = match self.db.candidate_sync_version(&chan.user_channel_id) {
+            Ok(version) => version,
+            Err(_) => reject!(
+                TradeRejectionReason::InternalError,
+                "could not reserve an acceptance version"
+            ),
         };
-
-        let (ucid_str, expected_usd_f, backing, native, note, counterparty) = persisted;
-        if let Err(e) = self.db.save_channel(
-            &channel_id_hex,
-            &ucid_str,
-            expected_usd_f,
-            backing,
-            native,
-            note.as_deref(),
-        ) {
-            error!("[trade] db.save_channel failed: {}", e);
-            stable_channels::audit::audit_event(
-                "DB_WRITE_FAILED",
-                serde_json::json!({ "op": "save_channel", "context": "handle_trade_message", "channel_id": channel_id_hex, "user_channel_id": ucid_str, "error": e.to_string() }),
-            );
-            return;
-        }
-        stable_channels::audit::audit_event(
-            "TRADE_APPLIED",
-            serde_json::json!({
-                "channel_id": channel_id_hex,
-                "user_channel_id": ucid_str,
-                "new_expected_usd": expected_usd_f,
-                "backing_sats": backing,
-                "native_sats": native,
-                "quote_price": signed_allocation.map(|(price, _, _)| price),
-                "lsp_price": btc_price,
-                "quote_deviation_percent": signed_allocation.map(|(_, _, deviation)| deviation),
-            }),
+        let response_user_channel_id = remote_user_channel_id.unwrap_or(&chan.user_channel_id);
+        let response_payload = crate::messages::build_trade_sync_payload(
+            &chan.channel_id,
+            response_user_channel_id,
+            accepted.expected_usd.0,
+            accepted.backing_sats,
+            sync_version,
+            trade_id,
+            inbound_payment_id,
         );
-        let sent = self
-            .send_sync_message(
-                ldk,
-                target_uid,
-                &channel_id_hex,
-                expected_usd_f,
-                backing,
-                &counterparty,
-            )
-            .await;
-        if !sent {
-            self.startup_sync_pending.insert(target_uid);
+        let response_signature = match ldk
+            .sign_message(SignMessageRequest {
+                message: response_payload.as_bytes().to_vec().into(),
+            })
+            .await
+        {
+            Ok(response) => response.signature,
+            Err(_) => reject!(
+                TradeRejectionReason::InternalError,
+                "could not sign the acceptance response"
+            ),
+        };
+        let response_envelope =
+            crate::messages::build_envelope(response_payload, response_signature);
+        match self.db.persist_trade_acceptance(
+            inbound_payment_id,
+            trade_id,
+            &chan.channel_id,
+            &chan.user_channel_id,
+            remote_user_channel_id,
+            &chan.counterparty_node_id,
+            accepted.expected_usd.0,
+            accepted.backing_sats,
+            accepted.native_sats,
+            signed_allocation.map(|(price, _, _)| price),
+            btc_price,
+            signed_allocation.map(|(_, _, deviation)| deviation),
+            sync_version,
+            &response_envelope,
+        ) {
+            Ok(true) => self.stable_channels[channel_index] = accepted.clone(),
+            Ok(false) => reject!(
+                TradeRejectionReason::InternalError,
+                "acceptance state changed before it could be committed"
+            ),
+            Err(_) => reject!(
+                TradeRejectionReason::InternalError,
+                "could not persist the accepted trade"
+            ),
         }
+
+    }
+
+    #[cfg(test)]
+    pub async fn handle_trade_message(
+        &mut self,
+        raw: &str,
+        amount_msat: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
+        let test_payment_id = crate::messages::parse_envelope(raw)
+            .map(|envelope| format!("test:{}", envelope.signature))
+            .unwrap_or_else(|| "test:malformed".to_owned());
+        self.handle_trade_payment(raw, Some(&test_payment_id), amount_msat, ldk, btc_price)
+            .await;
+        Self::retry_pending_trade_responses(self.db.as_ref(), ldk).await;
     }
 }
 
@@ -2625,10 +2999,7 @@ mod tests {
         assert!((mgr.stable_channels[0].expected_usd.0 - 8.0).abs() < 1e-6);
         assert_eq!(
             mgr.db.list_settlements().unwrap(),
-            vec![
-                ("pay_test_1".to_string(), "sync".to_string()),
-                ("fake-payment-id".to_string(), "sync".to_string()),
-            ]
+            vec![("pay_test_1".to_string(), "sync".to_string())]
         );
     }
 
@@ -3359,6 +3730,16 @@ mod tests {
         receiver_sats: u64,
         price: f64,
     ) {
+        mgr.db
+            .save_channel(
+                channel_id,
+                &user_channel_id.to_string(),
+                expected_usd,
+                backing_sats,
+                native_sats,
+                None,
+            )
+            .unwrap();
         mgr.stable_channels.push(StableChannel {
             channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes(
                 parse_channel_id_hex(channel_id),
@@ -3471,6 +3852,24 @@ mod tests {
         serde_json::json!({ "payload": payload, "signature": "wallet-sig" }).to_string()
     }
 
+    fn trade_envelope_with_id(
+        channel_id: &str,
+        user_channel_id: &str,
+        trade_id: &str,
+        expected_usd: f64,
+    ) -> String {
+        let payload = serde_json::json!({
+            "type": "TRADE_V1",
+            "channel_id": channel_id,
+            "user_channel_id": user_channel_id,
+            "trade_id": trade_id,
+            "expected_usd": expected_usd,
+            "ts": test_unix_now(),
+        })
+        .to_string();
+        serde_json::json!({ "payload": payload, "signature": "wallet-sig" }).to_string()
+    }
+
     fn test_unix_now() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3506,6 +3905,30 @@ mod tests {
         .unwrap();
         mgr.handle_trade_message(envelope, Some(fee_msat), ldk, lsp_price)
             .await;
+    }
+
+    async fn retry_trade_responses(
+        mgr: &StableChannelManager,
+        ldk: &dyn LdkServerCalls,
+    ) {
+        StableChannelManager::retry_pending_trade_responses(mgr.db.as_ref(), ldk).await;
+    }
+
+    fn rejection_from_only_send(
+        fake: &FakeLdkServer,
+    ) -> (u64, crate::messages::TradeRejectedPayload) {
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let send = &sends[0];
+        let record = send
+            .custom_tlvs
+            .iter()
+            .find(|record| record.type_num == stable_channels::constants::STABLE_CHANNEL_TLV_TYPE)
+            .unwrap();
+        let raw = std::str::from_utf8(record.value.as_ref()).unwrap();
+        let envelope = crate::messages::parse_envelope(raw).unwrap();
+        let rejection = serde_json::from_str(&envelope.payload).unwrap();
+        (send.amount_msat, rejection)
     }
 
     #[test]
@@ -3557,6 +3980,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trade_uses_shared_channel_id_and_echoes_wallet_local_id() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+        let trade_id = "abababababababababababababababababababababababababababababababab";
+        let wallet_user_channel_id = "55795660709841003592697616286364811722";
+        assert_ne!(wallet_user_channel_id, USER_CHANNEL_ID_DECIMAL);
+        let envelope = trade_envelope_with_id(
+            CHANNEL_ID_HEX,
+            wallet_user_channel_id,
+            trade_id,
+            8.0,
+        );
+        let fee_msat = expected_trade_fee_msat(0.0, 8.0, 100_000.0).unwrap();
+
+        mgr.handle_trade_payment(
+            &envelope,
+            Some("payment-one"),
+            Some(fee_msat),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        retry_trade_responses(&mgr, &fake).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 8.0);
+        {
+            let sends = fake.sends.lock().unwrap();
+            assert_eq!(sends.len(), 1);
+            let raw = std::str::from_utf8(sends[0].custom_tlvs[0].value.as_ref()).unwrap();
+            let envelope = crate::messages::parse_envelope(raw).unwrap();
+            let sync: serde_json::Value = serde_json::from_str(&envelope.payload).unwrap();
+            assert_eq!(sync["type"], "SYNC_V1");
+            assert_eq!(sync["channel_id"], CHANNEL_ID_HEX);
+            assert_eq!(sync["user_channel_id"], wallet_user_channel_id);
+            assert_eq!(sync["trade_id"], trade_id);
+            assert_eq!(sync["trade_payment_id"], "payment-one");
+        }
+
+        // Re-delivery of the same payment is a no-op, including its already in-flight response.
+        mgr.handle_trade_payment(
+            &envelope,
+            Some("payment-one"),
+            Some(fee_msat),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        retry_trade_responses(&mgr, &fake).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 8.0);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+
+        // A distinct payment reusing the trade id requeues the original acceptance before its
+        // own signed duplicate rejection, so the secondary outcome cannot replace the first.
+        mgr.handle_trade_payment(
+            &envelope,
+            Some("payment-two"),
+            Some(77_777),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        retry_trade_responses(&mgr, &fake).await;
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 3);
+        let original_raw = std::str::from_utf8(sends[1].custom_tlvs[0].value.as_ref()).unwrap();
+        let original_payload: serde_json::Value = serde_json::from_str(
+            &crate::messages::parse_envelope(original_raw).unwrap().payload,
+        )
+        .unwrap();
+        assert_eq!(original_payload["type"], "SYNC_V1");
+        assert_eq!(original_payload["trade_payment_id"], "payment-one");
+        assert_eq!(sends[2].amount_msat, 1);
+        let raw = std::str::from_utf8(sends[2].custom_tlvs[0].value.as_ref()).unwrap();
+        let rejection: crate::messages::TradeRejectedPayload =
+            serde_json::from_str(&crate::messages::parse_envelope(raw).unwrap().payload).unwrap();
+        assert_eq!(rejection.reason_code, TradeRejectionReason::DuplicateTrade);
+        assert_eq!(rejection.user_channel_id, wallet_user_channel_id);
+    }
+
+    #[tokio::test]
+    async fn exhausted_trade_response_is_dead_lettered_and_requeued_by_exact_replay() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+        let trade_id = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+        let envelope = trade_envelope_with_id(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            trade_id,
+            8.0,
+        );
+
+        mgr.handle_trade_payment(
+            &envelope,
+            Some("offline-wallet-payment"),
+            Some(1),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        for _ in 0..MAX_TRADE_RESPONSE_ATTEMPTS {
+            mgr.db
+                .mark_trade_response_send_failed("offline-wallet-payment", 0)
+                .unwrap();
+        }
+
+        retry_trade_responses(&mgr, &fake).await;
+        assert!(fake.sends.lock().unwrap().is_empty());
+        let dead_letters = mgr
+            .db
+            .list_ledger_events(&stable_channels::ledger::LedgerQuery {
+                identifier: Some("offline-wallet-payment".to_owned()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .filter(|event| event.event_type == "TRADE_RESPONSE_ABANDONED")
+            .count();
+        assert_eq!(dead_letters, 1);
+
+        mgr.handle_trade_payment(
+            &envelope,
+            Some("offline-wallet-payment"),
+            Some(1),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        retry_trade_responses(&mgr, &fake).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn trade_rejects_underpaid_signed_fee() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
@@ -3586,17 +4178,18 @@ mod tests {
             49_950,
         );
 
-        mgr.handle_trade_message(
-            &env,
-            Some(1),
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        mgr.handle_trade_payment(&env, None, Some(1), &fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
+        assert!(fake.sends.lock().unwrap().is_empty());
+
+        mgr.handle_trade_message(&env, Some(1), &fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 0);
-        assert!(fake.sends.lock().unwrap().is_empty());
+        let (response_msat, rejection) = rejection_from_only_send(&fake);
+        assert_eq!(response_msat, 1);
+        assert_eq!(rejection.reason_code, TradeRejectionReason::InvalidFee);
     }
 
     #[tokio::test]
@@ -3619,34 +4212,82 @@ mod tests {
             0,
             50_000,
             50_000,
-            100_500.0,
+            100_000.0,
         );
 
-        // At the wallet quote this is exactly 49,950 backing sats. Re-deriving at the LSP's
-        // slightly newer price would produce a different allocation.
+        // A quote at the one-percent boundary remains valid. At the wallet quote this is exactly
+        // 49,500 backing sats; re-deriving at the LSP's price would produce a different allocation.
         let env = trade_envelope_with_allocation(
             CHANNEL_ID_HEX,
             USER_CHANNEL_ID_DECIMAL,
-            49.95,
-            100_000.0,
-            49_950,
+            49.995,
+            101_000.0,
+            49_500,
         );
         handle_trade_with_valid_fee(
             &mut mgr,
             &env,
             &fake as &dyn LdkServerCalls,
-            100_500.0,
+            100_000.0,
         )
         .await;
 
-        assert_eq!(mgr.stable_channels[0].backing_sats, 49_950);
-        assert_eq!(mgr.stable_channels[0].native_sats, 50);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 49_500);
+        assert_eq!(mgr.stable_channels[0].native_sats, 500);
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1, "accepted allocation must be synced back");
         let raw = std::str::from_utf8(sends[0].custom_tlvs[0].value.as_ref()).unwrap();
         let sync = crate::messages::parse_envelope(raw).unwrap();
         let payload: serde_json::Value = serde_json::from_str(&sync.payload).unwrap();
-        assert_eq!(payload["backing_sats"], 49_950);
+        assert_eq!(payload["backing_sats"], 49_500);
+    }
+
+    #[tokio::test]
+    async fn trade_rejects_quote_over_one_percent_from_lsp_price() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+
+        let env = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            50.0445,
+            101_100.0,
+            49_500,
+        );
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+        let (response_msat, rejection) = rejection_from_only_send(&fake);
+        assert_eq!(response_msat, 1);
+        assert_eq!(
+            rejection.reason_code,
+            TradeRejectionReason::QuoteOutOfRange
+        );
     }
 
     #[tokio::test]
@@ -3734,7 +4375,12 @@ mod tests {
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 5.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 5_000);
-        assert!(fake.sends.lock().unwrap().is_empty());
+        let (response_msat, rejection) = rejection_from_only_send(&fake);
+        assert_eq!(response_msat, 1);
+        assert_eq!(
+            rejection.reason_code,
+            TradeRejectionReason::InvalidAllocation
+        );
     }
 
     #[tokio::test]
@@ -3755,6 +4401,50 @@ mod tests {
         .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 3.0).abs() < 1e-6); // unchanged
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authenticated_invalid_trade_id_gets_correlatable_rejection() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+        let env = trade_envelope_with_id(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            "NOT-CANONICAL",
+            10.0,
+        );
+
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        let (response_msat, rejection) = rejection_from_only_send(&fake);
+        assert_eq!(response_msat, 1);
+        assert_eq!(rejection.trade_id, None);
+        assert_eq!(rejection.reason_code, TradeRejectionReason::InvalidAmount);
     }
 
     #[tokio::test]
@@ -3846,6 +4536,47 @@ mod tests {
             "a stale signed trade must be rejected, got {}",
             mgr.stable_channels[0].expected_usd.0
         );
+    }
+
+    #[tokio::test]
+    async fn trade_accepts_within_shared_fifteen_minute_window() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
+        let within_window = test_unix_now() - 10 * 60;
+        let env = trade_envelope_with_ts(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            10.0,
+            within_window,
+        );
+
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 10.0);
     }
 
     #[tokio::test]

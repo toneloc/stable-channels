@@ -768,7 +768,8 @@ fn extract_refs(detail: &Value) -> Vec<LedgerRef> {
             Value::Object(map) => {
                 for (key, value) in map {
                     let role = match key.as_str() {
-                        "user_channel_id" | "user_channel_ids" | "prev_user_channel_id"
+                        "user_channel_id" | "user_channel_ids" | "remote_user_channel_id"
+                        | "remote_user_channel_ids" | "prev_user_channel_id"
                         | "next_user_channel_id" => Some("user_channel_id"),
                         "channel_id" | "channel_ids" | "prev_channel_id" | "next_channel_id" => {
                             Some("channel_id")
@@ -848,14 +849,15 @@ mod tests {
                 "payment_hash": "hash",
                 "user_channel_id": "stable-id",
                 "user_channel_ids": ["stable-a", "stable-b"],
+                "remote_user_channel_id": "wallet-stable-id",
                 "channel_id": "physical-id",
                 "txid": "tx",
                 "counterparty_node_id": "node",
                 "correlation_id": "corr"
             }),
         );
-        assert_eq!(draft.refs.len(), 9);
-        for value in ["stable-a", "stable-b"] {
+        assert_eq!(draft.refs.len(), 10);
+        for value in ["stable-a", "stable-b", "wallet-stable-id"] {
             assert!(draft.refs.contains(&LedgerRef::new("user_channel_id", value)));
         }
         let unassociated = LedgerEventDraft::from_audit_event(
