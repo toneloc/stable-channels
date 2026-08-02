@@ -91,7 +91,7 @@ final class SPVHeaderChainServiceTests: XCTestCase {
 
     func testOrphanedConfirmedPaymentDowngradedDuringGap() async throws {
         // Record a payment and mark it completed at block height 100
-        _ = try db.recordPayment(
+        _ = try db.paymentRepo.recordPayment(
             paymentId: "tx_orphaned_001",
             paymentType: "onchain",
             direction: "received",
@@ -102,15 +102,15 @@ final class SPVHeaderChainServiceTests: XCTestCase {
             status: "completed",
             txid: "tx_orphaned_001"
         )
-        let created = try XCTUnwrap(db.getRecentPayments(limit: 1).first)
-        try db.updateConfirmations(
+        let created = try XCTUnwrap(db.paymentRepo.getRecentPayments(limit: 1).first)
+        try db.paymentRepo.updateConfirmations(
             paymentId: created.id,
             txBlockHeight: 100,
             currentBlockHeight: 105
         )
 
         // Verify payment is completed in SQLite
-        var record = try db.getPayment(byId: created.id)
+        var record = try db.paymentRepo.getPayment(byId: created.id)
         XCTAssertEqual(record?.status, "completed")
         XCTAssertEqual(record?.confirmations, 6)
         XCTAssertEqual(record?.txBlockHeight, 100)
@@ -139,7 +139,7 @@ final class SPVHeaderChainServiceTests: XCTestCase {
         await spvService.processBlockHeader(gapBlock)
 
         // Verify that the orphaned payment was downgraded to 'pending' with 0 confirmations
-        record = try db.getPayment(byId: created.id)
+        record = try db.paymentRepo.getPayment(byId: created.id)
         XCTAssertEqual(record?.status, "pending")
         XCTAssertEqual(record?.confirmations, 0)
         XCTAssertNil(record?.txBlockHeight)

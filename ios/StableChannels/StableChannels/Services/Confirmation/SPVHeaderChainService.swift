@@ -44,8 +44,8 @@ final class SPVHeaderChainService {
         do {
             // Idempotency guard: if we already stored this exact height+hash, skip.
             // This covers the normal WebSocket reconnection scenario.
-            if try databaseService.headerExists(height: height, hash: hash) {
-                logger.info("[SPV] Header #\(height) already known — skipping duplicate.")
+            guard try !databaseService.headerRepo.headerExists(height: height, hash: hash) else {
+                logger.debug("[SPV] Header #\(height) already processed. Skipping.")
                 advanceHeight(to: height)
                 return
             }
@@ -62,17 +62,19 @@ final class SPVHeaderChainService {
                 )
             } else {
                 // Cold start: no headers stored yet — seed the chain at current tip.
-                try databaseService.insertHeader(
-                    height: height,
-                    hash: hash,
-                    prevHash: prevHash,
-                    timestamp: timestamp
+                try databaseService.storeBlockHeader(
+                    BlockHeaderRecord(
+                        height: height,
+                        hash: hash,
+                        prevHash: prevHash,
+                        timestamp: timestamp
+                    )
                 )
                 logger.info("[SPV] Header chain seeded at #\(height) (\(hash.prefix(8))…)")
             }
 
             // Prune entries older than one difficulty epoch (~2 weeks / 2016 blocks).
-            try databaseService.pruneOldHeaders(currentHeight: height)
+            try databaseService.pruneHeadersOlderThan(height: height)
 
         } catch {
             logger.error("[SPV] Header processing error: \(error.localizedDescription)")
@@ -92,11 +94,13 @@ final class SPVHeaderChainService {
     ) async throws {
         if incomingPrevHash == tip.hash {
             // prevHash links directly to our stored tip — normal chain growth.
-            try databaseService.insertHeader(
-                height: incomingHeight,
-                hash: incomingHash,
-                prevHash: incomingPrevHash,
-                timestamp: timestamp
+            try databaseService.storeBlockHeader(
+                BlockHeaderRecord(
+                    height: incomingHeight,
+                    hash: incomingHash,
+                    prevHash: incomingPrevHash,
+                    timestamp: timestamp
+                )
             )
             logger.info("[SPV] Appended header #\(incomingHeight) (\(incomingHash.prefix(8))…)")
             AuditService.log("SPV_HEADER_ADDED", data: ["height": "\(incomingHeight)"])
@@ -107,11 +111,13 @@ final class SPVHeaderChainService {
             logger.info(
                 "[SPV] Offline gap: tip=#\(tip.height), incoming=#\(incomingHeight). Refreshing Esplora & revalidating payments."
             )
-            try databaseService.insertHeader(
-                height: incomingHeight,
-                hash: incomingHash,
-                prevHash: incomingPrevHash,
-                timestamp: timestamp
+            try databaseService.storeBlockHeader(
+                BlockHeaderRecord(
+                    height: incomingHeight,
+                    hash: incomingHash,
+                    prevHash: incomingPrevHash,
+                    timestamp: timestamp
+                )
             )
             AuditService.log("SPV_GAP_SYNC", data: [
                 "prevTip": "\(tip.height)",
@@ -153,11 +159,12 @@ final class SPVHeaderChainService {
     ) throws {
         // Wrap header rollback + payment rollback + tip insert in one transaction.
         // If any step fails, all three are rolled back together.
-        try databaseService.inTransaction {
-            if let commonAncestorHeight = try databaseService.findCommonAncestorHeight(prevHash: incomingPrevHash) {
+        try databaseService.inTransaction(mode: "IMMEDIATE") {
+            if let commonAncestorHeight = try databaseService.headerRepo
+                .findCommonAncestorHeight(prevHash: incomingPrevHash) {
                 // Found the fork point — remove orphaned headers and revert payment statuses.
                 try databaseService.rollbackHeadersAbove(height: commonAncestorHeight)
-                try databaseService.rollbackPaymentsConfirmedAfter(height: commonAncestorHeight)
+                try databaseService.headerRepo.rollbackPaymentsConfirmedAfter(height: commonAncestorHeight)
                 logger.info("[SPV] Reorg rolled back to common ancestor #\(commonAncestorHeight)")
                 AuditService.log("SPV_REORG_ROLLED_BACK", data: ["commonAncestor": "\(commonAncestorHeight)"])
             } else {
@@ -165,15 +172,17 @@ final class SPVHeaderChainService {
                 let safeFloor = incomingHeight > 0 ? incomingHeight - 1 : 0
                 logger.warning("[SPV] Common ancestor not in window. Clearing headers above #\(safeFloor).")
                 try databaseService.rollbackHeadersAbove(height: safeFloor)
-                try databaseService.rollbackPaymentsConfirmedAfter(height: safeFloor)
+                try databaseService.headerRepo.rollbackPaymentsConfirmedAfter(height: safeFloor)
             }
 
             // Plant the new canonical tip on the clean chain.
-            try databaseService.insertHeader(
-                height: incomingHeight,
-                hash: incomingHash,
-                prevHash: incomingPrevHash,
-                timestamp: timestamp
+            try databaseService.storeBlockHeader(
+                BlockHeaderRecord(
+                    height: incomingHeight,
+                    hash: incomingHash,
+                    prevHash: incomingPrevHash,
+                    timestamp: timestamp
+                )
             )
         }
     }

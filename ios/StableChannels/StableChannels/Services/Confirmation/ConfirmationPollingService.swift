@@ -64,7 +64,7 @@ final class ConfirmationPollingService {
         guard currentHeight > 0 else { return }
 
         // 1. Process pending payments
-        if let pending = try? databaseService.paymentsNeedingConfirmation() {
+        if let pending = try? databaseService.paymentRepo.paymentsNeedingConfirmation() {
             for payment in pending {
                 guard !Task.isCancelled else { return }
                 await resolve(payment: payment, currentHeight: currentHeight)
@@ -73,7 +73,8 @@ final class ConfirmationPollingService {
 
         // 2. Revalidate recently confirmed payments (last ~12 blocks)
         let windowStart = currentHeight >= windowDepth ? currentHeight - windowDepth : 0
-        if let recentConfirmed = try? databaseService.recentConfirmedPayments(confirmedAfterHeight: windowStart) {
+        if let recentConfirmed = try? databaseService.paymentRepo
+            .recentConfirmedPayments(confirmedAfterHeight: windowStart) {
             for payment in recentConfirmed {
                 guard !Task.isCancelled else { return }
                 let outcome = await confirmationService.resolve(
@@ -85,7 +86,7 @@ final class ConfirmationPollingService {
                 case .pending:
                     // Esplora reports transaction is no longer confirmed — downgrade to pending
                     do {
-                        try databaseService.downgradePaymentToPending(paymentId: payment.id)
+                        try databaseService.paymentRepo.downgradePaymentToPending(paymentId: payment.id)
                         logger
                             .warning(
                                 "[Confirmation] Payment #\(payment.id) orphaned in reorg/gap — downgraded to pending."
@@ -99,7 +100,7 @@ final class ConfirmationPollingService {
                     }
                 case .confirmed(let progress, let blockHeight):
                     if blockHeight != payment.txBlockHeight || progress.display != payment.confirmations {
-                        try? databaseService.updateConfirmations(
+                        try? databaseService.paymentRepo.updateConfirmations(
                             paymentId: payment.id,
                             txBlockHeight: blockHeight,
                             currentBlockHeight: currentHeight
