@@ -90,6 +90,7 @@
 		49DDB0062FF0000100000001 /* SpliceRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0062FF0000200000001 /* SpliceRepository.swift */; };
 		49DDB0072FF0000100000001 /* StabilitySendRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0072FF0000200000001 /* StabilitySendRepository.swift */; };
 		49DDB0082FF0000100000001 /* PendingOperationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0082FF0000200000001 /* PendingOperationRepository.swift */; };
+		49DDB0092FF0000100000001 /* HeaderRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0092FF0000200000001 /* HeaderRepository.swift */; };
 		49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3080E30080B78009B0014 /* TransactionLinkService.swift */; };
 		49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3081030080F3C009B0014 /* TxidResolutionService.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
@@ -256,6 +257,7 @@
 		49DDB0062FF0000200000001 /* SpliceRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceRepository.swift; sourceTree = "<group>"; };
 		49DDB0072FF0000200000001 /* StabilitySendRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilitySendRepository.swift; sourceTree = "<group>"; };
 		49DDB0082FF0000200000001 /* PendingOperationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingOperationRepository.swift; sourceTree = "<group>"; };
+		49DDB0092FF0000200000001 /* HeaderRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderRepository.swift; sourceTree = "<group>"; };
 		49E3080E30080B78009B0014 /* TransactionLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLinkService.swift; sourceTree = "<group>"; };
 		49E3081030080F3C009B0014 /* TxidResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidResolutionService.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
@@ -498,6 +500,7 @@
 				49DDB0052FF0000200000001 /* PriceRepository.swift */,
 				49DDB0062FF0000200000001 /* SpliceRepository.swift */,
 				49DDB0072FF0000200000001 /* StabilitySendRepository.swift */,
+				49DDB0092FF0000200000001 /* HeaderRepository.swift */,
 			);
 			path = Repositories;
 			sourceTree = "<group>";
@@ -882,6 +885,7 @@
 				49DDB0082FF0000100000001 /* PendingOperationRepository.swift in Sources */,
 				49DDB0042FF0000100000001 /* OnchainReceiveRepository.swift in Sources */,
 				49DDB0052FF0000100000001 /* PriceRepository.swift in Sources */,
+				49DDB0092FF0000100000001 /* HeaderRepository.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
