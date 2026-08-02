@@ -180,12 +180,12 @@ final class SPVHeaderChainService {
 
     // MARK: - Height Update
 
-    /// Advances the in-memory block height counter.
-    /// `updateHeight()` fires `onHeightUpdated → pollOnce()` automatically;
-    /// no additional poll call is needed here.
-    private func advanceHeight(to height: UInt32) {
-        if height > blockHeightService.currentHeight {
-            blockHeightService.updateHeight(height)
+    /// Triggers an authoritative Esplora HTTP refresh when a WebSocket block event arrives.
+    /// `refresh()` verifies the tip height via HTTP and updates `blockHeightService.currentHeight`,
+    /// preventing unverified/inflated WebSocket values from driving fake confirmation counts.
+    private func advanceHeight(to _: UInt32) {
+        Task {
+            await blockHeightService.refresh()
         }
     }
 }

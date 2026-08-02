@@ -1429,16 +1429,11 @@ class DatabaseService {
         }
     }
 
-    /// Executes `block` inside a single SQLite BEGIN / COMMIT transaction.
+    /// Executes `block` inside a single SQLite BEGIN IMMEDIATE / COMMIT transaction.
     /// On any throw the transaction is rolled back before re-throwing.
     func inTransaction(_ block: () throws -> Void) throws {
-        try execute("BEGIN;")
-        do {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
             try block()
-            try execute("COMMIT;")
-        } catch {
-            try? execute("ROLLBACK;")
-            throw error
         }
     }
 
@@ -1470,24 +1465,6 @@ class DatabaseService {
     }
 }
 
-enum DatabaseError: LocalizedError {
-    case openFailed(String)
-    case prepareFailed(String)
-    case executeFailed(String)
-    /// No channels row exists for the given user_channel_id — recoverable by
-    /// recreating the row from in-memory state, unlike a plain execute failure.
-    case missingChannelRow(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .openFailed(let msg): return "Database open failed: \(msg)"
-        case .prepareFailed(let msg): return "SQL prepare failed: \(msg)"
-        case .executeFailed(let msg): return "SQL execute failed: \(msg)"
-        case .missingChannelRow(let ucid): return "No channel row for user_channel_id=\(ucid)"
->>>>>>> cff1ee82 (refactor(ios): atomize SPV reorg operations using database transactions and optimize height updates to prevent redundant polling)
-        }
-    }
-}
 // MARK: - Block Headers (SPV)
 
 extension DatabaseService {
@@ -1512,7 +1489,7 @@ extension DatabaseService {
     /// Returns true if we already have a header for this height+hash (idempotent guard).
     func headerExists(height: UInt32, hash: String) throws -> Bool {
         let sql = "SELECT 1 FROM block_headers WHERE height = ? AND hash = ? LIMIT 1;"
-        let rows = try query(sql, params: [.integer(Int64(height)), .text(hash)])
+        let rows = try rawSQL.query(sql, params: [.integer(Int64(height)), .text(hash)])
         return !rows.isEmpty
     }
 
@@ -1567,6 +1544,6 @@ extension DatabaseService {
         guard currentHeight >= Self.headerRetentionDepth else { return }
         let cutoff = currentHeight - Self.headerRetentionDepth
         let sql = "DELETE FROM block_headers WHERE height < ?;"
-        try execute(sql, params: [.integer(Int64(cutoff))])
+        try rawSQL.execute(sql, params: [.integer(Int64(cutoff))])
     }
 }
