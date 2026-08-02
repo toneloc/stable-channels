@@ -42,6 +42,8 @@ class DatabaseService {
         self.onchainRepo = OnchainReceiveRepository(rawSQL: sqlHelper)
         self.priceRepo = PriceRepository(rawSQL: sqlHelper)
 
+        sqlHelper.getDB = { [weak self] in self?.db }
+
         try initSchema()
     }
 
@@ -51,41 +53,7 @@ class DatabaseService {
 
     // MARK: - Schema
 
-    // MARK: - Schema & Migration Initialization
-
-    private let targetSchemaVersion: Int64 = 1
-
     private func initSchema() throws {
-        try configurePragmas()
-
-        let rows = try rawSQL.query("PRAGMA user_version")
-        let currentVersion = (rows.first?.first as? Int64) ?? 0
-
-        if currentVersion < targetSchemaVersion {
-            try createTablesAndIndexes()
-            try applyMigrations()
-            try rawSQL.execute("PRAGMA user_version = \(targetSchemaVersion);")
-        }
-
-        try pruneHistoricalData()
-    }
-
-    private func configurePragmas() throws {
-        let pragmas = [
-            "PRAGMA journal_mode = WAL;",
-            "PRAGMA synchronous = NORMAL;",
-            "PRAGMA temp_store = MEMORY;",
-            "PRAGMA cache_size = -8000;", // 8 MB page cache (vs default ~2 MB)
-            "PRAGMA mmap_size = 134217728;", // 128 MB memory-mapped I/O
-            "PRAGMA wal_autocheckpoint = 200;", // checkpoint every 200 pages (vs default 1000)
-            "PRAGMA foreign_keys = ON;"
-        ]
-        for sql in pragmas {
-            try rawSQL.execute(sql)
-        }
-    }
-
-    private func createTablesAndIndexes() throws {
         let statements = [
             """
             CREATE TABLE IF NOT EXISTS channels (
@@ -207,23 +175,14 @@ class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)",
-            "CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)",
-            "CREATE INDEX IF NOT EXISTS idx_payments_txid ON payments(txid) WHERE txid IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_pending_ops_funding_txid ON pending_operations(funding_outpoint_txid) WHERE funding_outpoint_txid IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_payments_resolution_id ON payments(resolution_id) WHERE resolution_id IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_payments_type_status ON payments(payment_type, status)",
-            "CREATE INDEX IF NOT EXISTS idx_trades_channel_id ON trades(channel_id)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id_unique ON payments(payment_id) WHERE payment_id IS NOT NULL",
-            "CREATE INDEX IF NOT EXISTS idx_payments_confirmation_scan ON payments(txid, payment_type, status, confirmations) WHERE txid IS NOT NULL"
+            "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)"
         ]
 
         for sql in statements {
             try rawSQL.execute(sql)
         }
-    }
 
-    private func applyMigrations() throws {
+        // Migrate: add receiver_sats and latest_price if missing
         let cols = try rawSQL.query("PRAGMA table_info(channels)")
         let colNames = cols.compactMap { $0[1] as? String }
         if !colNames.contains("receiver_sats") {
@@ -236,20 +195,16 @@ class DatabaseService {
             try rawSQL.execute("ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0")
         }
 
+        // Migrate: add tx_block_height to payments if missing (on-chain confirmation tracking)
         let paymentsCols = try rawSQL.query("PRAGMA table_info(payments)")
         let paymentsColNames = paymentsCols.compactMap { $0[1] as? String }
         if !paymentsColNames.contains("tx_block_height") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN tx_block_height INTEGER")
         }
+
+        // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
-    }
-
-    private func pruneHistoricalData() throws {
-        // Prune price_history rows older than 90 days to prevent unbounded growth
-        try rawSQL.execute(
-            "DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - 7776000"
-        )
     }
 }

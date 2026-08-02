@@ -40,11 +40,18 @@ final class PaymentRepository {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Bool {
-        // INSERT OR IGNORE is atomic: the partial unique index on payment_id
-        // (WHERE payment_id IS NOT NULL) enforces dedup at the DB level.
-        // rawSQL.changes == 0 means a duplicate was silently ignored.
+        if let pid = paymentId, !pid.isEmpty {
+            let existing = try rawSQL.query(
+                "SELECT id FROM payments WHERE payment_id = ?",
+                params: [.text(pid)]
+            )
+            if !existing.isEmpty {
+                return false
+            }
+        }
+
         let sql = """
-            INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+            INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         try rawSQL.execute(sql, params: [
@@ -57,7 +64,7 @@ final class PaymentRepository {
             txid.map { .text($0) } ?? .null,
             address.map { .text($0) } ?? .null
         ])
-        return rawSQL.changes > 0
+        return true
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
@@ -206,10 +213,22 @@ final class PaymentRepository {
         backingDeltaSats: Int64?
     ) throws -> PaymentPersistenceResult {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            // INSERT OR IGNORE: the partial unique index on payment_id enforces dedup atomically.
-            // changes == 0 means this payment_id was already recorded (duplicate LDK event).
+            if let pid = paymentId, !pid.isEmpty {
+                let existing = try rawSQL.query(
+                    "SELECT id FROM payments WHERE payment_id = ?",
+                    params: [.text(pid)]
+                )
+                if !existing.isEmpty {
+                    let backing = try authoritativeBacking(
+                        userChannelId: userChannelId,
+                        required: backingDeltaSats != nil
+                    )
+                    return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
+                }
+            }
+
             try rawSQL.execute(
-                "INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 params: [
                     paymentId.map { .text($0) } ?? .null,
                     .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
@@ -218,14 +237,6 @@ final class PaymentRepository {
                     .text(status)
                 ]
             )
-            if rawSQL.changes == 0 {
-                // Duplicate payment_id — already persisted
-                let backing = try authoritativeBacking(
-                    userChannelId: userChannelId,
-                    required: backingDeltaSats != nil
-                )
-                return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
-            }
             var resultingBacking: UInt64?
             if let delta = backingDeltaSats {
                 guard let ucid = userChannelId, !ucid.isEmpty else {

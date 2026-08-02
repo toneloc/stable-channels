@@ -483,8 +483,6 @@
 			path = Repositories;
 			sourceTree = "<group>";
 		};
-			sourceTree = "<group>";
-		};
 		49FC3EEB2FDC8A9E0054CD38 /* App */ = {
 			isa = PBXGroup;
 			children = (

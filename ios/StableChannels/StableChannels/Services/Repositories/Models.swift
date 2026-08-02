@@ -89,7 +89,7 @@ extension [Any?] {
 }
 
 final class RawSQL {
-    let getDB: () -> OpaquePointer?
+    var getDB: () -> OpaquePointer?
     private let queue = DispatchQueue(label: "com.stablechannels.rawsql", qos: .userInitiated)
 
     init(getDB: @escaping () -> OpaquePointer?) {
