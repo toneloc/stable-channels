@@ -11,7 +11,7 @@ ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler perl make && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -j "$CARGO_BUILD_JOBS" -p stable-channels-lsp \
+RUN cargo build --release -j "$CARGO_BUILD_JOBS" -p stable-channels-lsp \
     && cp /src/target/release/stable-channels-lsp /tmp/stable-channels-lsp
 
 FROM debian:bookworm-slim

@@ -18,7 +18,7 @@ RUN cargo install --locked trunk --version ^0.21 -j "$CARGO_BUILD_JOBS"
 WORKDIR /src
 COPY . .
 WORKDIR /src/server/lsp-server-gui
-RUN trunk build --release --locked
+RUN trunk build --release
 
 FROM nginx:alpine
 COPY --from=build /src/server/lsp-server-gui/dist /usr/share/nginx/html
