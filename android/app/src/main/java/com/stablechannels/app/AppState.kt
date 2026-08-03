@@ -394,10 +394,7 @@ class AppState(private val context: Context) : ViewModel() {
             Log.d("AppState", "Stopping node immediately (no active payment request)")
             // node.stop() is a blocking native call; run it off the main thread so onPause()
             // returns immediately and Android doesn't ANR-kill us on the focus-change timeout.
-            backgroundStopJob?.cancel()
-            backgroundStopJob = viewModelScope.launch(Dispatchers.IO) {
-                performBackgroundStop()
-            }
+            launchBackgroundStop()
             return
         }
 
@@ -415,10 +412,24 @@ class AppState(private val context: Context) : ViewModel() {
             Log.e("AppState", "Failed to start LdkBackgroundService", e)
         }
 
-        backgroundStopJob = viewModelScope.launch(Dispatchers.IO) {
-            delay(60000L) // 60 seconds delay
-            performBackgroundStop()
+        launchBackgroundStop(delayMs = 60000L)
+    }
+
+    private fun launchBackgroundStop(delayMs: Long = 0L) {
+        backgroundStopJob?.cancel()
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (delayMs > 0L) {
+                    delay(delayMs)
+                }
+                performBackgroundStop()
+            } finally {
+                if (backgroundStopJob === coroutineContext[Job]) {
+                    backgroundStopJob = null
+                }
+            }
         }
+        backgroundStopJob = job
     }
 
     fun cancelBackgroundStop() {
@@ -454,7 +465,6 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun performBackgroundStop() {
-        backgroundStopJob = null
         try {
             LdkBackgroundService.stop(context)
         } catch (e: Exception) {
