@@ -245,16 +245,16 @@ final class DatabaseService {
         ).isEmpty
         if !hasUniquePaymentIndex {
             try rawSQL.execute("""
-                DELETE FROM payments
-                WHERE payment_id IS NOT NULL AND payment_id != ''
-                  AND id NOT IN (SELECT MIN(id) FROM payments
-                                 WHERE payment_id IS NOT NULL AND payment_id != ''
-                                 GROUP BY payment_id)
-                """)
+            DELETE FROM payments
+            WHERE payment_id IS NOT NULL AND payment_id != ''
+              AND id NOT IN (SELECT MIN(id) FROM payments
+                             WHERE payment_id IS NOT NULL AND payment_id != ''
+                             GROUP BY payment_id)
+            """)
             try rawSQL.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id_unique
-                ON payments(payment_id) WHERE payment_id IS NOT NULL AND payment_id != ''
-                """)
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id_unique
+            ON payments(payment_id) WHERE payment_id IS NOT NULL AND payment_id != ''
+            """)
         }
 
         try pruneHistoricalData()
