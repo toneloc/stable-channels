@@ -567,4 +567,30 @@ final class DatabaseServiceTests: XCTestCase {
         // must not return nil.
         XCTAssertNotNil(second)
     }
+
+    // MARK: - Price History Pruning Tests
+
+    func testPruneHistoricalDataPurgesStalePriceHistory() throws {
+        let now = Int64(Date().timeIntervalSince1970)
+        let freshTimestamp = now - 3600 // 1 hour ago
+        let staleTimestamp = now - 10_000_000 // > 90 days ago (90 days = 7,776,000 sec)
+
+        // Insert fresh and stale price history records
+        try service.rawSQL.execute(
+            "INSERT INTO price_history (price, source, timestamp) VALUES (?, ?, ?)",
+            params: [.real(60_000), .text("test_fresh"), .integer(freshTimestamp)]
+        )
+        try service.rawSQL.execute(
+            "INSERT INTO price_history (price, source, timestamp) VALUES (?, ?, ?)",
+            params: [.real(50_000), .text("test_stale"), .integer(staleTimestamp)]
+        )
+
+        // Re-init DatabaseService to trigger pruneHistoricalData()
+        service = nil
+        let newService = try DatabaseService(dataDir: dataDir)
+
+        let history = try newService.priceRepo.getPriceHistory(hours: 24 * 365) // Query 1 year
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.first?.price, 60_000)
+    }
 }

@@ -220,6 +220,13 @@ final class DatabaseService {
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
         }
+
+        try pruneHistoricalData()
+    }
+
+    private func pruneHistoricalData() throws {
+        let cutoffSeconds = 90 * 86400
+        try rawSQL.execute("DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - \(cutoffSeconds)")
     }
 
     // MARK: - Transaction & SPV Header Delegations
