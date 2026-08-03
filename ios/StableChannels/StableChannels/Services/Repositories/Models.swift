@@ -133,6 +133,30 @@ final class RawSQL {
         }
     }
 
+    /// Executes a statement and returns how many rows it changed, atomically with
+    /// the statement itself (sqlite3_changes is per-connection, so reading it in a
+    /// separate call could observe another statement's count).
+    func executeReturningChanges(_ sql: String, params: [SQLValue] = []) throws -> Int {
+        try queue.sync {
+            guard let db = getDB() else {
+                throw DatabaseError.executeFailed("Database handle is nil")
+            }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw DatabaseError.prepareFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+
+            bindParams(stmt, params: params)
+
+            let result = sqlite3_step(stmt)
+            guard result == SQLITE_DONE || result == SQLITE_ROW else {
+                throw DatabaseError.executeFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            return Int(sqlite3_changes(db))
+        }
+    }
+
     func query(_ sql: String, params: [SQLValue] = []) throws -> [[Any?]] {
         try queue.sync {
             guard let db = getDB() else {

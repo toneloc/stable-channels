@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import StableChannels
 
@@ -612,6 +613,82 @@ final class DatabaseServiceTests: XCTestCase {
             1,
             "Expected payment status index idx_payments_status to exist"
         )
+    }
+
+    func testUpgradeFromLegacyDBWithDuplicatePaymentIdsSucceeds() throws {
+        // Build a pre-unique-index DB by hand: old payments schema containing
+        // duplicate payment_id rows (the pre-NodeDirLock multi-writer shape) plus
+        // legitimate empty-string payment_ids. Init must dedup then index, not throw.
+        let legacyDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_legacy_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: legacyDir) }
+
+        var legacyDB: OpaquePointer?
+        let path = legacyDir.appendingPathComponent(DatabaseService.dbFilename).path
+        XCTAssertEqual(sqlite3_open(path, &legacyDB), SQLITE_OK)
+        let legacySQL = """
+        CREATE TABLE payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_id TEXT,
+            payment_type TEXT NOT NULL DEFAULT 'manual',
+            direction TEXT NOT NULL,
+            amount_msat INTEGER NOT NULL,
+            amount_usd REAL,
+            btc_price REAL,
+            counterparty TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            fee_msat INTEGER NOT NULL DEFAULT 0,
+            txid TEXT,
+            address TEXT,
+            confirmations INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        INSERT INTO payments (payment_id, direction, amount_msat, status) VALUES ('dup_pay', 'received', 1000, 'pending');
+        INSERT INTO payments (payment_id, direction, amount_msat, status) VALUES ('dup_pay', 'received', 1000, 'completed');
+        INSERT INTO payments (payment_id, direction, amount_msat, status) VALUES ('', 'received', 1, 'completed');
+        INSERT INTO payments (payment_id, direction, amount_msat, status) VALUES ('', 'received', 2, 'completed');
+        """
+        XCTAssertEqual(sqlite3_exec(legacyDB, legacySQL, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(legacyDB)
+
+        let upgraded = try DatabaseService(dataDir: legacyDir)
+
+        // First-recorded row per payment_id survives.
+        let dupRows = try upgraded.rawSQL.query(
+            "SELECT status FROM payments WHERE payment_id = 'dup_pay'"
+        )
+        XCTAssertEqual(dupRows.count, 1)
+        XCTAssertEqual(dupRows.first?.first as? String, "pending")
+
+        // Empty-string payment_ids are outside the index predicate and untouched.
+        let emptyCount = try upgraded.rawSQL.query(
+            "SELECT COUNT(*) FROM payments WHERE payment_id = ''"
+        )
+        XCTAssertEqual(emptyCount.first?.first as? Int64, 2)
+
+        // The unique index exists and enforces from now on.
+        let indexRows = try upgraded.rawSQL.query(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_payment_id_unique'"
+        )
+        XCTAssertEqual(indexRows.count, 1)
+    }
+
+    func testRecordPaymentIgnoresConcurrentDuplicate() throws {
+        // Simulate losing the check-then-insert race: a row with the same
+        // payment_id already exists when recordPayment's INSERT runs.
+        XCTAssertTrue(try service.paymentRepo.recordPayment(
+            paymentId: "race_pay", paymentType: "lightning", direction: "received",
+            amountMsat: 5000, amountUSD: nil, btcPrice: nil, counterparty: nil, status: "completed"
+        ))
+        XCTAssertFalse(try service.paymentRepo.recordPayment(
+            paymentId: "race_pay", paymentType: "lightning", direction: "received",
+            amountMsat: 5000, amountUSD: nil, btcPrice: nil, counterparty: nil, status: "completed"
+        ))
+        let count = try service.rawSQL.query(
+            "SELECT COUNT(*) FROM payments WHERE payment_id = 'race_pay'"
+        )
+        XCTAssertEqual(count.first?.first as? Int64, 1)
     }
 
     func testUniquePaymentIdIndexEnforcesDeduplication() throws {
