@@ -95,6 +95,9 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         if (!::appState.isInitialized) return
+        // Defensive reset: whatever caused the last pause (picker or otherwise) has resolved by
+        // the time we're resumed, so isPickingMedia can never get stuck true across a full cycle.
+        appState.isPickingMedia = false
         val quickReturnFromShare = AppState.suppressNextBackgroundCycle
         pendingBackgroundStopJob?.cancel()
         pendingBackgroundStopJob = null
