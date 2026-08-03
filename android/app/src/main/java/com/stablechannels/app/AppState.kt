@@ -12,6 +12,7 @@ import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -957,7 +958,8 @@ class AppState(private val context: Context) : ViewModel() {
                 }
             }
             saveChannelToDB(preserveBacking = true)
-            val successMsg = if (displayVal != null) "Payment sent: $displayVal" else "Payment sent"
+            val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
+            val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
             _statusMessage.value = successMsg
             _lastPaymentResult.value = successMsg
         }
