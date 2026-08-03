@@ -390,11 +390,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun stopNodeForBackground() {
-        if (isPickingMedia) {
-            Log.d("AppState", "Skipping node stop — in-app media picker is open")
-            return
-        }
-        if (!isWaitingForPayment) {
+        if (!isWaitingForPayment && !isPickingMedia) {
             Log.d("AppState", "Stopping node immediately (no active payment request)")
             // node.stop() is a blocking native call; run it off the main thread so onPause()
             // returns immediately and Android doesn't ANR-kill us on the focus-change timeout.
@@ -405,6 +401,10 @@ class AppState(private val context: Context) : ViewModel() {
             return
         }
 
+        // A payment wait or an open in-app picker both route through the existing bounded 60s
+        // grace path rather than skipping the stop outright — so a stuck-true isPickingMedia
+        // (e.g. launch() threw, or the composition was disposed) degrades to "stop after 60s"
+        // instead of "never stop the node again".
         Log.d("AppState", "Scheduling node stop after 60s grace period")
         backgroundStopJob?.cancel()
 
@@ -427,6 +427,25 @@ class AppState(private val context: Context) : ViewModel() {
             backgroundStopJob = null
             Log.d("AppState", "Cancelled pending background stop")
         }
+        try {
+            LdkBackgroundService.stop(context)
+        } catch (e: Exception) {
+            Log.e("AppState", "Failed to stop LdkBackgroundService", e)
+        }
+    }
+
+    /**
+     * Cancels any pending background-stop job and *waits* for it to actually finish — including
+     * an in-flight, non-cancellable performBackgroundStop() blocked on the native node.stop()
+     * call — before returning. Callers can then trust nodeService.isRunning immediately after.
+     * Plain cancel() alone doesn't suffice: it can't interrupt the blocking native call, so a
+     * caller checking isRunning right after cancel() can race the stop finishing moments later.
+     */
+    private suspend fun cancelBackgroundStopAndAwait() {
+        val job = backgroundStopJob
+        backgroundStopJob = null
+        job?.cancelAndJoin()
+        Log.d("AppState", "Cancelled pending background stop")
         try {
             LdkBackgroundService.stop(context)
         } catch (e: Exception) {
@@ -465,7 +484,7 @@ class AppState(private val context: Context) : ViewModel() {
                 start()
                 return@launch
             }
-            cancelBackgroundStop()
+            cancelBackgroundStopAndAwait()
             if (nodeService.isRunning) {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
                 loadChannelFromDB()

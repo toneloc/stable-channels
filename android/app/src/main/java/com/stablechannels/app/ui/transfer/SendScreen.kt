@@ -223,6 +223,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         }
     }
 
+    // Defensive reset: if the screen is disposed while isPickingMedia is still true (e.g. the
+    // picker result callback never fires), don't leave the flag stuck for the process lifetime.
+    DisposableEffect(Unit) {
+        onDispose { appState.isPickingMedia = false }
+    }
+
     // Photo picker launcher for QR extraction (Task 7.4)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -355,10 +361,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     // Photo library button
                     IconButton(
                         onClick = {
-                            appState.isPickingMedia = true
+                            // Set the flag only after launch() returns, so a thrown exception
+                            // (e.g. launcher unregistered) never leaves it stuck true.
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
+                            appState.isPickingMedia = true
                         },
                         modifier = Modifier.size(36.dp)
                     ) {
