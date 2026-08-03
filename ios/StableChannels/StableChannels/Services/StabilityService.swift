@@ -201,8 +201,9 @@ enum StabilityService {
             sc.userChannelId = channel.userChannelId
             sc.channelId = channel.channelId
         }
-        // Always keep channelId current (it changes on splice)
+        // Always keep channelId & counterparty current
         sc.channelId = channel.channelId
+        sc.counterparty = channel.counterpartyNodeId
 
         // Skip balance update if channel is not ready yet — during ChannelPending,
         // outbound_capacity_msat is 0, which produces a misleading near-zero balance.

@@ -42,11 +42,11 @@ final class KnownAddressDepositRecorder: DepositRecorder {
 
     func record(deposit: DepositRecordInput, address: String?) -> Bool {
         guard let address, !address.isEmpty else { return false }
-        guard let resolutionId = databaseService?.insertOnchainReceiveResolution(address: address) else {
+        guard let resolutionId = databaseService?.onchainRepo.insertOnchainReceiveResolution(address: address) else {
             AuditService.log("ONCHAIN_RECEIVE_RES_INSERT_FAILED", data: ["address": address])
             return false
         }
-        let ok = databaseService?.recordOnchainPaymentWithResolution(
+        let ok = databaseService?.onchainRepo.recordOnchainPaymentWithResolution(
             paymentId: deposit.depositId,
             amountMsat: Int64(deposit.depositSats) * 1000,
             amountUSD: deposit.amountUSD,
@@ -54,7 +54,7 @@ final class KnownAddressDepositRecorder: DepositRecorder {
             resolutionId: resolutionId
         ) ?? false
         if !ok {
-            _ = databaseService?.deleteOnchainReceiveResolution(id: resolutionId)
+            _ = databaseService?.onchainRepo.deleteOnchainReceiveResolution(id: resolutionId)
             return false
         }
         onLaunchResolver(resolutionId, address)
@@ -78,7 +78,7 @@ final class UnknownAddressDepositRecorder: DepositRecorder {
     func record(deposit: DepositRecordInput, address _: String?) -> Bool {
         guard let databaseService else { return false }
         do {
-            try databaseService.recordPayment(
+            try databaseService.paymentRepo.recordPayment(
                 paymentId: deposit.depositId,
                 paymentType: "onchain",
                 direction: "received",

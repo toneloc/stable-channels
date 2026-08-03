@@ -63,7 +63,7 @@ struct CloseTxidResolver {
     func resolve(opId: String, databaseService: DatabaseService) async {
         // Snapshot from DB on caller's actor; check happens before any Sendable hop.
         let snapshot: (String, UInt32)? = await MainActor.run {
-            guard let op = databaseService.fetchPendingOperation(opId: opId),
+            guard let op = databaseService.pendingOpRepo.fetchPendingOperation(opId: opId),
                   op.status == "pending",
                   let fundingTxid = op.fundingOutpointTxid,
                   let vout = op.fundingOutpointVout
@@ -91,7 +91,7 @@ struct CloseTxidResolver {
             onResolved: { txid in
                 // databaseService is non-Sendable; hop to MainActor for the DB write.
                 await MainActor.run {
-                    databaseService.updatePendingOperation(
+                    databaseService.pendingOpRepo.updatePendingOperation(
                         opId: opId,
                         closingTxid: txid,
                         status: "resolved"

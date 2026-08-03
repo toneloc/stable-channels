@@ -46,6 +46,89 @@
         }
     </style>
     <link data-trunk rel="rust" data-wasm-opt="2" data-cargo-features="web" data-cargo-no-default-features />
+    <script>
+        // Clipboard.writeText is unavailable on Umbrel's normal HTTP origin.
+        // eframe 0.29 assumes it exists, which can trap the WASM app on copy.
+        // Preserve the native API on secure origins and provide an event-safe
+        // fallback for local HTTP installations.
+        (() => {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+                return;
+            }
+
+            let activeCopyEvent = null;
+            let pendingCopyText = null;
+
+            document.addEventListener("copy", (event) => {
+                activeCopyEvent = event;
+
+                // A button-driven copy reaches this listener through
+                // execCommand. Complete it here and keep eframe from handling
+                // the synthetic event recursively.
+                if (pendingCopyText !== null && event.clipboardData) {
+                    event.clipboardData.setData("text/plain", pendingCopyText);
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                }
+
+                queueMicrotask(() => {
+                    if (activeCopyEvent === event) {
+                        activeCopyEvent = null;
+                    }
+                });
+            }, true);
+
+            const clipboardFallback = {
+                writeText(text) {
+                    text = String(text);
+
+                    // Ctrl+C is already running inside a browser copy event.
+                    if (activeCopyEvent && activeCopyEvent.clipboardData) {
+                        activeCopyEvent.clipboardData.setData("text/plain", text);
+                        activeCopyEvent.preventDefault();
+                        return Promise.resolve();
+                    }
+
+                    // Copy buttons are handled with a temporary native text
+                    // control so the browser performs the clipboard write.
+                    return new Promise((resolve, reject) => {
+                        const previousFocus = document.activeElement;
+                        const textarea = document.createElement("textarea");
+                        textarea.value = text;
+                        textarea.setAttribute("readonly", "");
+                        textarea.style.position = "fixed";
+                        textarea.style.left = "-10000px";
+                        textarea.style.top = "0";
+                        document.body.appendChild(textarea);
+                        textarea.select();
+
+                        pendingCopyText = text;
+                        let copied = false;
+                        try {
+                            copied = document.execCommand("copy");
+                        } finally {
+                            pendingCopyText = null;
+                            textarea.remove();
+                            if (previousFocus && typeof previousFocus.focus === "function") {
+                                previousFocus.focus();
+                            }
+                        }
+
+                        if (copied) {
+                            resolve();
+                        } else {
+                            reject(new Error("Browser refused the clipboard copy"));
+                        }
+                    });
+                }
+            };
+
+            Object.defineProperty(navigator, "clipboard", {
+                configurable: true,
+                value: clipboardFallback
+            });
+        })();
+    </script>
 </head>
 <body>
     <div id="loading_text">

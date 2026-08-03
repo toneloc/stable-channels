@@ -100,8 +100,8 @@ struct HistoryView: View {
     }
 
     private func loadHistory() {
-        trades = (try? appState.databaseService?.getRecentTrades(limit: 50)) ?? []
-        payments = (try? appState.databaseService?.getRecentPayments(limit: 50)) ?? []
+        trades = (try? appState.databaseService?.channelRepo.getRecentTrades(limit: 50)) ?? []
+        payments = (try? appState.databaseService?.paymentRepo.getRecentPayments(limit: 50)) ?? []
     }
 }
 

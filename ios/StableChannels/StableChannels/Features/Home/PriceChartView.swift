@@ -274,10 +274,11 @@ struct PriceChartView: View {
     private func loadAllData() {
         guard !dataLoaded else { return }
         // Load all hourly data (up to 30 days)
-        hourlyPrices = (try? appState.databaseService?.getPriceHistory(hours: 24 * 30)) ?? []
+        hourlyPrices = (try? appState.databaseService?.priceRepo.getPriceHistory(hours: 24 * 30)) ?? []
 
         // Load all daily data
-        let dailyPrices = (try? appState.databaseService?.getDailyPrices(days: 99999)) ?? []
+        let dailyPrices: [DailyPriceRecord] = (try? appState.databaseService?.priceRepo.getDailyPrices(days: 99999)) ??
+            []
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         allDailyPrices = dailyPrices.compactMap { daily in

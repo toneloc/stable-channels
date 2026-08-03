@@ -1,6 +1,11 @@
 package com.stablechannels.app.ui.transfer
 
+import android.content.Context
 import android.content.ContextWrapper
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -47,11 +52,54 @@ import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.lightningdevkit.ldknode.Bolt11Invoice
 import org.lightningdevkit.ldknode.Offer
 
+private const val TAG = "SendScreen"
+
+// Cap the longest side of a decoded photo-picker image to avoid OutOfMemoryError
+// on very large photos before handing it to ML Kit.
+private const val MAX_QR_DECODE_DIMENSION_PX = 2000
+
 enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
+
+/**
+ * Decodes a [Bitmap] from a picked image [Uri], downsampling it so its longest side does not
+ * exceed [maxDimension]. Avoids OutOfMemoryError on very large photos and avoids relying on
+ * [InputImage.fromFilePath], which opens the content URI stream twice (once for bounds/EXIF,
+ * once for pixel data) and can throw FileNotFoundException on some OEM content providers for
+ * photo-picker URIs. Returns null if the URI could not be opened or decoded.
+ */
+private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
+    val resolver = context.contentResolver
+
+    // inJustDecodeBounds only fills outWidth/outHeight and always returns a null bitmap, so
+    // detect success from the stream opening and the resulting dimensions, not the return value.
+    val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    val opened = resolver.openInputStream(uri)?.use { stream ->
+        BitmapFactory.decodeStream(stream, null, boundsOptions)
+        true
+    } ?: false
+    if (!opened || boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
+
+    var sampleSize = 1
+    val width = boundsOptions.outWidth
+    val height = boundsOptions.outHeight
+    if (width > maxDimension || height > maxDimension) {
+        val halfWidth = width / 2
+        val halfHeight = height / 2
+        while ((halfWidth / sampleSize) >= maxDimension || (halfHeight / sampleSize) >= maxDimension) {
+            sampleSize *= 2
+        }
+    }
+
+    val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    return resolver.openInputStream(uri)?.use { stream ->
+        BitmapFactory.decodeStream(stream, null, decodeOptions)
+    }
+}
 
 @Composable
 fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
@@ -177,54 +225,70 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         }
     }
 
+    // Defensive reset: if the screen is disposed while isPickingMedia is still true (e.g. the
+    // picker result callback never fires), don't leave the flag stuck for the process lifetime.
+    DisposableEffect(Unit) {
+        onDispose { appState.isPickingMedia = false }
+    }
+
     // Photo picker launcher for QR extraction (Task 7.4)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
+        appState.isPickingMedia = false
         if (uri == null) return@rememberLauncherForActivityResult
 
         isExtractingQR = true
-        try {
-            val inputImage = InputImage.fromFilePath(context, uri)
-            val options = BarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                .build()
-            val scanner = BarcodeScanning.getClient(options)
-
-            scanner.process(inputImage)
-                .addOnSuccessListener { barcodes ->
-                    isExtractingQR = false
-                    // Find first valid payment string
-                    val validPayload = barcodes
-                        .mapNotNull { it.rawValue }
-                        .map { QRCodeUtils.stripUriPrefix(it) }
-                        .firstOrNull { QRCodeUtils.isValidPaymentString(it) }
-
-                    if (validPayload != null) {
-                        input = validPayload
-                    } else {
-                        Toast.makeText(
-                            context,
-                            "No Lightning invoice or Bitcoin address QR code was found",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
+        scope.launch {
+            try {
+                val bitmap = withContext(Dispatchers.IO) {
+                    decodeSampledBitmap(context, uri, MAX_QR_DECODE_DIMENSION_PX)
                 }
-                .addOnFailureListener {
-                    isExtractingQR = false
-                    Toast.makeText(
+                if (bitmap == null) {
+                    Log.w(TAG, "Could not decode a bitmap from picked image URI: $uri")
+                    Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                val inputImage = InputImage.fromBitmap(bitmap, 0)
+                val options = BarcodeScannerOptions.Builder()
+                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                    .build()
+                val scanner = BarcodeScanning.getClient(options)
+
+                val barcodes = try {
+                    scanner.process(inputImage).await()
+                } catch (e: Exception) {
+                    Log.w(TAG, "QR barcode scan failed: ${e.message}", e)
+                    Toast.makeText(context, "No QR code was found in that image", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                // Find first valid payment string
+                val validPayload = barcodes
+                    .mapNotNull { it.rawValue }
+                    .map { QRCodeUtils.stripUriPrefix(it) }
+                    .firstOrNull { QRCodeUtils.isValidPaymentString(it) }
+
+                when {
+                    validPayload != null -> input = validPayload
+                    barcodes.isNotEmpty() -> Toast.makeText(
                         context,
-                        "No Lightning invoice or Bitcoin address QR code was found",
+                        "QR code found, but it's not a Lightning invoice or Bitcoin address",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    else -> Toast.makeText(
+                        context,
+                        "No QR code was found in that image",
                         Toast.LENGTH_LONG
                     ).show()
                 }
-        } catch (_: Exception) {
-            isExtractingQR = false
-            Toast.makeText(
-                context,
-                "No Lightning invoice or Bitcoin address QR code was found",
-                Toast.LENGTH_LONG
-            ).show()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to read image for QR extraction: ${e.message}", e)
+                Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG).show()
+            } finally {
+                isExtractingQR = false
+            }
         }
     }
 
@@ -299,9 +363,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     // Photo library button
                     IconButton(
                         onClick = {
+                            // Set the flag only after launch() returns, so a thrown exception
+                            // (e.g. launcher unregistered) never leaves it stuck true.
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                             )
+                            appState.isPickingMedia = true
                         },
                         modifier = Modifier.size(36.dp)
                     ) {

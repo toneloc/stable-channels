@@ -431,7 +431,9 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> Result<ServerConfig, Stri
 		.with_no_client_auth()
 		.with_single_cert(certs, key)
 		.map_err(|e| format!("Failed to build TLS server config: {e}"))?;
-	config.alpn_protocols = vec![b"h2".to_vec()];
+	// Browser-facing reverse proxies (including Trunk and Umbrel's nginx)
+	// connect to the REST API over HTTP/1.1, while native clients use HTTP/2.
+	config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 	Ok(config)
 }
 
@@ -509,8 +511,12 @@ mod tests {
 		assert!(key_path.exists());
 
 		// Load config
-		let res = load_tls_config(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
-		assert!(res.is_ok());
+		let config =
+			load_tls_config(cert_path.to_str().unwrap(), key_path.to_str().unwrap()).unwrap();
+		assert_eq!(
+			config.alpn_protocols,
+			vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+		);
 
 		// Clean up
 		let _ = fs::remove_file(&cert_path);

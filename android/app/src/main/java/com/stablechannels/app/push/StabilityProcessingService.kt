@@ -11,6 +11,7 @@ import com.stablechannels.app.StableChannelsApp
 import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.TradeService
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.LspPreferencesManager
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
@@ -66,7 +67,7 @@ class StabilityProcessingService : Service() {
                 !it.value.contentEquals(byteArrayOf(1))
         } ?: return false
 
-        val parsed = TradeService.parseIncomingTLV(tlv.value, Constants.DEFAULT_LSP_PUBKEY) { msg, sig, pk ->
+        val parsed = TradeService.parseIncomingTLV(tlv.value, LspPreferencesManager.getLspPubkey(this)) { msg, sig, pk ->
             node.verifySignature(msg.map { it.toUByte() }, sig, pk)
         } ?: return false
 
@@ -177,9 +178,12 @@ class StabilityProcessingService : Service() {
             // The service doesn't need gossip (it only routes to the LSP, a direct peer).
             stripGossipFromDB(dataDir)
 
+            val lspPubkey = LspPreferencesManager.getLspPubkey(this)
+            val lspAddress = LspPreferencesManager.getLspAddress(this)
+
             // Build lightweight LDK node (no RGS, no LSPS2)
             val anchorConfig = AnchorChannelsConfig(
-                trustedPeersNoReserve = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                trustedPeersNoReserve = listOf(lspPubkey),
                 perChannelReserveSats = 25_000UL
             )
 
@@ -189,7 +193,7 @@ class StabilityProcessingService : Service() {
                 listeningAddresses = null,
                 announcementAddresses = null,
                 nodeAlias = null,
-                trustedPeers0conf = listOf(Constants.DEFAULT_LSP_PUBKEY),
+                trustedPeers0conf = listOf(lspPubkey),
                 probingLiquidityLimitMultiplier = 3UL,
                 anchorChannelsConfig = anchorConfig,
                 routeParameters = null,
@@ -223,7 +227,7 @@ class StabilityProcessingService : Service() {
 
             // Connect to LSP
             try {
-                startedNode.connect(Constants.DEFAULT_LSP_PUBKEY, Constants.DEFAULT_LSP_ADDRESS, true)
+                startedNode.connect(lspPubkey, lspAddress, true)
             } catch (e: Exception) {
                 Log.w(TAG, "LSP connect: ${e.message}")
             }
@@ -577,7 +581,7 @@ class StabilityProcessingService : Service() {
             val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1))
             val paymentId = node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),
-                Constants.DEFAULT_LSP_PUBKEY,
+                LspPreferencesManager.getLspPubkey(this),
                 null,
                 listOf(tlv)
             )

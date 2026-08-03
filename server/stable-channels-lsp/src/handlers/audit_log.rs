@@ -3,6 +3,8 @@
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::Response;
+use std::io::ErrorKind;
+use std::path::Path;
 
 use sc_protos::stable::{LogRequest, LogResponse};
 
@@ -32,6 +34,16 @@ pub(crate) fn filter_tail(content: &str, filter: &str, max_lines: usize, full: b
     lines[start..].join("\n")
 }
 
+fn read_audit_log(path: &Path, filter: &str, max_lines: usize, full: bool) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(content) => filter_tail(&content, filter, max_lines, full),
+        // A fresh node has no audit file until its first auditable event. Treat
+        // that as an empty log instead of presenting a filesystem error.
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => format!("Error reading {}: {}", path.display(), e),
+    }
+}
+
 pub async fn audit_log(State(state): State<AppState>, body: Bytes) -> Response {
     let req: LogRequest = match decode_body(&body) {
         Ok(r) => r,
@@ -44,10 +56,7 @@ pub async fn audit_log(State(state): State<AppState>, body: Bytes) -> Response {
     };
 
     let path = state.data_dir.join("audit_log.txt");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(s) => filter_tail(&s, &req.filter, max_lines, req.full),
-        Err(e) => format!("Error reading {}: {}", path.display(), e),
-    };
+    let content = read_audit_log(&path, &req.filter, max_lines, req.full);
 
     ok_response(LogResponse { content })
 }
@@ -73,6 +82,13 @@ mod tests {
     #[test]
     fn filter_no_match_is_empty() {
         assert_eq!(filter_tail("a\nb", "zzz", 5, false), "");
+    }
+
+    #[test]
+    fn missing_audit_file_is_an_empty_fresh_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit_log.txt");
+        assert_eq!(read_audit_log(&path, "", 200, false), "");
     }
 
     #[test]

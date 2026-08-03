@@ -113,52 +113,16 @@ struct BackupPromptView: View {
     }
 
     private var enableBackupWarning: some View {
-        HStack(spacing: 14) {
-            supportIconBadge
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Important")
-                    .font(.subheadline)
-                    .fontWeight(.bold)
-                    .foregroundStyle(.primary)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("This backup contains your seed phrase. Lightning channel state is NOT included.")
-                        + Text(" ")
-                        + Text("Please email")
-                        + Text(" ")
-                        + Text("support@stablechannels.com")
-                        .foregroundStyle(.blue)
-                        .underline()
-                        + Text(" ")
-                        + Text("for questions or assistance.")
-                }
-                .font(.caption)
-                .foregroundStyle(Color(uiColor: .label).opacity(0.7))
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.red, lineWidth: 1)
-                )
+        SettingsBanner(
+            icon: "exclamationmark.triangle.fill",
+            iconColor: .red,
+            title: String(localized: "backup_warning_title", defaultValue: "Important"),
+            bodyText: String(
+                localized: "backup_warning_body",
+                defaultValue: "This backup contains your seed phrase. Lightning channel state is NOT included. Please email support@stablechannels.com for questions or assistance."
+            ),
+            borderColor: .red
         )
-    }
-
-    private var supportIconBadge: some View {
-        ZStack {
-            Circle()
-                .fill(.red)
-                .frame(width: 44, height: 44)
-                .shadow(color: .red.opacity(0.3), radius: 8, x: 0, y: 4)
-            Image(systemName: "questionmark.circle.fill")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white)
-        }
     }
 
     private func handleEnableTap() async {
