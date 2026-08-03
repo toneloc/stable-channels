@@ -100,6 +100,12 @@ fun SettingsHub(appState: AppState, navController: NavController) {
                 onClick = { navController.navigate(SettingsRoute.Node.route) }
             )
             SettingsNavLink(
+                icon = Icons.Default.Router,
+                iconBackground = Color(0xFF3B82F6),
+                label = "LSP",
+                onClick = { navController.navigate(SettingsRoute.Lsp.route) }
+            )
+            SettingsNavLink(
                 icon = Icons.Default.Cloud,
                 iconBackground = Color(0xFF3B82F6),
                 label = "Push Connectivity",

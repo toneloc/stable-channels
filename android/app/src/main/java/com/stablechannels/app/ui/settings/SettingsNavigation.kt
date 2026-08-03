@@ -24,6 +24,7 @@ sealed class SettingsRoute(val route: String) {
     object Appearance : SettingsRoute("settings_appearance")
     object Notifications : SettingsRoute("settings_notifications")
     object Node : SettingsRoute("settings_node")
+    object Lsp : SettingsRoute("settings_lsp")
     object PushConnectivity : SettingsRoute("settings_push_connectivity")
     object AppAccess : SettingsRoute("settings_app_access")
     object Logs : SettingsRoute("settings_logs")
@@ -83,6 +84,11 @@ fun SettingsNavHost(appState: AppState, onShowBottomBar: (Boolean) -> Unit, modi
         composable(SettingsRoute.Node.route) {
             SettingsSubViewScaffold(title = "Node", navController = navController) {
                 NodeView(appState = appState)
+            }
+        }
+        composable(SettingsRoute.Lsp.route) {
+            SettingsSubViewScaffold(title = "LSP", navController = navController) {
+                LspSettingsView(appState = appState)
             }
         }
         composable(SettingsRoute.PushConnectivity.route) {
