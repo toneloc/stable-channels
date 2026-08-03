@@ -45,7 +45,7 @@ class NodeService(private val context: Context) {
     private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Boolean>>>(Channel.RENDEZVOUS)
     val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Boolean>>> = _eventChannel
 
-    fun start(network: Network, esploraURL: String, mnemonic: String?) {
+    fun start(network: Network, esploraURL: String, mnemonic: String?, strictLspConnect: Boolean = false) {
         if (node != null || _isRunning.value) {
             throw IllegalStateException("LDK node already running")
         }
@@ -140,15 +140,14 @@ class NodeService(private val context: Context) {
             _isRunning.value = true
             nodeId = startedNode.nodeId()
 
-            // Connect to LSP — for a custom (non-default) LSP, propagate the failure so
-            // AppState.switchLsp()/performLspNodeRestart() sees it and rolls back to the
-            // previously-working config instead of silently saving an unreachable LSP as
-            // "successful" (mirrors NodeService.swift's connect handling).
+            // Connect to LSP. Only the LSP-switch restart path (strictLspConnect) treats a
+            // failed connect as fatal so it can roll back; ordinary starts log-and-continue so a
+            // transient LSP outage at cold start / foreground resume doesn't brick the node.
             try {
                 startedNode.connect(lspPubkey, lspAddress, true)
             } catch (e: Exception) {
                 Log.w("NodeService", "LSP connect failed: ${e.message}")
-                if (LspPreferencesManager.hasCustomLsp(context)) {
+                if (strictLspConnect) {
                     throw e
                 }
             }

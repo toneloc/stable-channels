@@ -234,6 +234,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
     }
 
+    /** Persisted second source of truth for the LSP-switch gate: true if any channel row exists. */
+    fun hasAnyChannel(): Boolean {
+        val cursor = readableDatabase.rawQuery("SELECT 1 FROM channels LIMIT 1", null)
+        return cursor.use { it.moveToFirst() }
+    }
+
     // --- Trades ---
 
     fun recordTrade(

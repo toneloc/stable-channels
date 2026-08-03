@@ -506,11 +506,7 @@ class AppState(private val context: Context) : ViewModel() {
      */
     fun switchLsp(pubkey: String, address: String, onComplete: (String?) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            nodeService.refreshChannels()
-            if (nodeService.channels.isNotEmpty()) {
-                onComplete("Close all channels before switching LSPs.")
-                return@launch
-            }
+            lspChangeBlockedReason()?.let { onComplete(it); return@launch }
             // Check this *before* touching prefs — if the background stability service currently
             // owns the LDK node, nodeService.start() would throw for a reason unrelated to the new
             // LSP being invalid, and we don't want to misattribute that as a bad config and roll back.
@@ -555,11 +551,7 @@ class AppState(private val context: Context) : ViewModel() {
     /** Clears any custom LSP override and restarts the node against the default (stablechannels.com). */
     fun resetLspToDefault(onComplete: (String?) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
-            nodeService.refreshChannels()
-            if (nodeService.channels.isNotEmpty()) {
-                onComplete("Close all channels before switching LSPs.")
-                return@launch
-            }
+            lspChangeBlockedReason()?.let { onComplete(it); return@launch }
             if (!waitForBackgroundService()) {
                 onComplete("Background sync is in progress — try again in a moment.")
                 return@launch
@@ -591,6 +583,17 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    /** Gate for changing the LSP. A stopped/mid-restart node reports an empty channel list, so
+     *  require the node running (making listChannels authoritative) and cross-check persisted
+     *  channel state. Returns a user-facing reason to block, or null if the change is allowed. */
+    private fun lspChangeBlockedReason(): String? {
+        if (!nodeService.isRunning) return "Start the wallet before changing the LSP."
+        nodeService.refreshChannels()
+        val hasChannel = nodeService.channels.isNotEmpty() || (databaseService?.hasAnyChannel() ?: false)
+        if (hasChannel) return "Close all channels before switching LSPs."
+        return null
+    }
+
     /** Stops and rebuilds the LDK node in-place so it picks up the current LSP prefs.
      *  Callers must confirm there are no open channels before invoking this. */
     private suspend fun performLspNodeRestart() {
@@ -603,12 +606,10 @@ class AppState(private val context: Context) : ViewModel() {
         if (nodeService.isRunning) {
             nodeService.stop()
         }
-        nodeService.start(Network.BITCOIN, chainUrl, null)
-        // The in-memory StableChannel's `counterparty` is only ever set from the LSP pubkey
-        // active at construction time and is never otherwise refreshed — without this, a switch
-        // would silently leave trades/keysends targeting the *previous* LSP's pubkey until a
-        // channel is opened and reloaded from the DB. Only safe to overwrite when there's no
-        // channel yet (which switchLsp/resetLspToDefault already require).
+        nodeService.start(Network.BITCOIN, chainUrl, null, strictLspConnect = true)
+        // Refresh the in-memory counterparty from the new LSP pubkey. Only safe to overwrite when
+        // there's no channel yet (which switchLsp/resetLspToDefault already require); an open
+        // channel's counterparty is derived from the live channel in refreshBalances() instead.
         val sc = _stableChannel.value
         if (sc.channelId.isEmpty() && sc.userChannelId.isEmpty()) {
             _stableChannel.value = sc.copy(counterparty = LspPreferencesManager.getLspPubkey(context))
