@@ -189,7 +189,12 @@ final class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_daily_prices_date ON daily_prices(date DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_onchain_receive_txids_status ON onchain_receive_txids(status)",
-            "CREATE INDEX IF NOT EXISTS idx_block_headers_hash ON block_headers(hash)"
+            "CREATE INDEX IF NOT EXISTS idx_block_headers_hash ON block_headers(hash)",
+            "CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)",
+            "CREATE INDEX IF NOT EXISTS idx_pending_ops_funding_txid ON pending_operations(funding_outpoint_txid) WHERE funding_outpoint_txid IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_payments_type_status ON payments(payment_type, status)",
+            "CREATE INDEX IF NOT EXISTS idx_trades_channel_id ON trades(channel_id)",
+            "CREATE INDEX IF NOT EXISTS idx_payments_confirmation_scan ON payments(txid, payment_type, status, confirmations) WHERE txid IS NOT NULL"
         ]
 
         for sql in statements {
@@ -219,6 +224,37 @@ final class DatabaseService {
         // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
+        }
+
+        // Must come after the resolution_id ALTER above — on legacy DBs the column
+        // doesn't exist yet when the main statements array runs, and indexing a
+        // missing column would abort init.
+        try rawSQL.execute(
+            "CREATE INDEX IF NOT EXISTS idx_payments_resolution_id ON payments(resolution_id) WHERE resolution_id IS NOT NULL"
+        )
+
+        // Unique payment_id index: the engine-level backstop for PaymentRepository's
+        // check-then-insert dedup. Existing installs may hold duplicate rows from the
+        // pre-NodeDirLock multi-writer era, and building the index over them would
+        // fail and abort init — so dedup must run first, keeping the first-recorded
+        // row per payment_id (the outcome check-then-insert always intended).
+        // Empty-string payment_ids are excluded from the index just like NULLs,
+        // matching the `!pid.isEmpty` guard on the app's dedup check.
+        let hasUniquePaymentIndex = try !rawSQL.query(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_payment_id_unique'"
+        ).isEmpty
+        if !hasUniquePaymentIndex {
+            try rawSQL.execute("""
+            DELETE FROM payments
+            WHERE payment_id IS NOT NULL AND payment_id != ''
+              AND id NOT IN (SELECT MIN(id) FROM payments
+                             WHERE payment_id IS NOT NULL AND payment_id != ''
+                             GROUP BY payment_id)
+            """)
+            try rawSQL.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id_unique
+            ON payments(payment_id) WHERE payment_id IS NOT NULL AND payment_id != ''
+            """)
         }
 
         try pruneHistoricalData()

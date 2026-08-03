@@ -50,11 +50,14 @@ final class PaymentRepository {
             }
         }
 
+        // OR IGNORE: this path is not transactional, so the existence check above
+        // can race the NSE. The unique payment_id index turns the losing insert
+        // into a no-op instead of a duplicate row (or, without it, an error).
         let sql = """
-            INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+            INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        try rawSQL.execute(sql, params: [
+        let inserted = try rawSQL.executeReturningChanges(sql, params: [
             paymentId.map { .text($0) } ?? .null,
             .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
             amountUSD.map { .real($0) } ?? .null,
@@ -64,7 +67,7 @@ final class PaymentRepository {
             txid.map { .text($0) } ?? .null,
             address.map { .text($0) } ?? .null
         ])
-        return true
+        return inserted > 0
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
