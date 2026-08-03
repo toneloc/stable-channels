@@ -542,6 +542,7 @@ class AppState(private val context: Context) : ViewModel() {
                     performLspNodeRestart()
                 } catch (rollbackError: Exception) {
                     Log.e("AppState", "Rollback restart also failed", rollbackError)
+                    if (!nodeService.isRunning) scheduleNodeStartRetry()
                 }
                 onComplete("Invalid LSP — reverted to previous settings. (${e.message})")
             }
@@ -578,6 +579,7 @@ class AppState(private val context: Context) : ViewModel() {
                         Log.e("AppState", "Rollback restart also failed", rollbackError)
                     }
                 }
+                if (!nodeService.isRunning) scheduleNodeStartRetry()
                 onComplete("Failed to reset LSP — reverted to previous settings. (${e.message})")
             }
         }
