@@ -43,7 +43,7 @@ final class BiometricToggleCoordinator {
 
     // MARK: - Disable Flow
 
-    /// Authenticates before disabling a toggle, falling back to passcode.
+    /// Authenticates before disabling a toggle, falling back to passcode unless biometrics are cancelled.
     func disableToggle(_ key: String, reason: String) async -> Bool {
         do {
             let success = try await auth.authenticate(reason: reason)
@@ -51,6 +51,8 @@ final class BiometricToggleCoordinator {
                 UserDefaults.standard.set(false, forKey: key)
                 return true
             }
+        } catch let error as BiometricError where error == .cancelled {
+            return false
         } catch {
             let passcodeOk = await (try? auth.authenticateWithPasscode(reason: reason)) ?? false
             if passcodeOk {
