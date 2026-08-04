@@ -35,14 +35,41 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
     func authenticate(reason: String) async throws -> Bool {
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
-        ctx.localizedFallbackTitle = ""
 
+        print("[Bio] BiometricService.authenticate() evaluating policy (.deviceOwnerAuthentication)")
         do {
-            return try await ctx.evaluatePolicy(
+            let result = try await ctx.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: reason
+            )
+            print("[Bio] BiometricService.authenticate() evaluatePolicy success: \(result)")
+            return result
+        } catch {
+            print("[Bio] BiometricService.authenticate() evaluatePolicy failed with error: \(error)")
+            if let laError = error as? LAError, laError.code == .userCancel {
+                throw BiometricError.cancelled
+            }
+            throw BiometricError.passcodeFailed
+        }
+    }
+
+    @MainActor
+    func authenticateWithBiometrics(reason: String) async throws -> Bool {
+        let ctx = LAContext()
+        ctx.localizedCancelTitle = "Cancel"
+
+        print(
+            "[Bio] BiometricService.authenticateWithBiometrics() evaluating policy (.deviceOwnerAuthenticationWithBiometrics)"
+        )
+        do {
+            let result = try await ctx.evaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
                 localizedReason: reason
             )
+            print("[Bio] BiometricService.authenticateWithBiometrics() evaluatePolicy success: \(result)")
+            return result
         } catch {
+            print("[Bio] BiometricService.authenticateWithBiometrics() evaluatePolicy failed with error: \(error)")
             throw Self.classifyLAError(error)
         }
     }
@@ -52,12 +79,16 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
 
+        print("[Bio] BiometricService.authenticateWithPasscode() evaluating policy (.deviceOwnerAuthentication)")
         do {
-            return try await ctx.evaluatePolicy(
+            let result = try await ctx.evaluatePolicy(
                 .deviceOwnerAuthentication,
                 localizedReason: reason
             )
+            print("[Bio] BiometricService.authenticateWithPasscode() evaluatePolicy success: \(result)")
+            return result
         } catch {
+            print("[Bio] BiometricService.authenticateWithPasscode() evaluatePolicy failed with error: \(error)")
             if let laError = error as? LAError, laError.code == .userCancel {
                 throw BiometricError.cancelled
             }

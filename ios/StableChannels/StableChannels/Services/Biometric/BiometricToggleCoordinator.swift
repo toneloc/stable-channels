@@ -27,7 +27,7 @@ final class BiometricToggleCoordinator {
         defer { isEnabling = false }
 
         do {
-            let success = try await auth.authenticate(reason: reason)
+            let success = try await auth.authenticateWithBiometrics(reason: reason)
             if success {
                 UserDefaults.standard.set(true, forKey: key)
             }
@@ -45,16 +45,24 @@ final class BiometricToggleCoordinator {
 
     /// Authenticates before disabling a toggle, falling back to passcode unless biometrics are cancelled.
     func disableToggle(_ key: String, reason: String) async -> Bool {
+        print("[Bio] BiometricToggleCoordinator.disableToggle() start")
         do {
             let success = try await auth.authenticate(reason: reason)
+            print("[Bio] BiometricToggleCoordinator.disableToggle() biometric auth success: \(success)")
             if success {
                 UserDefaults.standard.set(false, forKey: key)
                 return true
             }
         } catch let error as BiometricError where error == .cancelled {
+            print("[Bio] BiometricToggleCoordinator.disableToggle() biometric auth cancelled by user")
             return false
         } catch {
+            print(
+                "[Bio] BiometricToggleCoordinator.disableToggle() biometric auth error: \(error), trying passcode fallback"
+            )
+            try? await Task.sleep(nanoseconds: 300_000_000)
             let passcodeOk = await (try? auth.authenticateWithPasscode(reason: reason)) ?? false
+            print("[Bio] BiometricToggleCoordinator.disableToggle() passcode auth result: \(passcodeOk)")
             if passcodeOk {
                 UserDefaults.standard.set(false, forKey: key)
                 return true

@@ -45,34 +45,53 @@ class AppState {
         defer { isAuthenticating = false }
         authError = nil
 
+        print("[Bio] AppState.authenticate() start")
         let success: Bool
         do {
+            print("[Bio] AppState.authenticate() triggering biometric/passcode auth")
             success = try await biometricAuth.authenticate(reason: reason)
+            print("[Bio] AppState.authenticate() auth result: \(success)")
         } catch let error as BiometricError {
-            // Fallback to passcode unless user explicitly cancelled
+            print("[Bio] AppState.authenticate() caught BiometricError: \(error)")
             if error == .cancelled {
-                authError = nil
-                success = false
+                print("[Bio] AppState.authenticate() cancelled by user")
             } else {
-                let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
-                if !passcodeOk {
-                    authError = error.errorDescription
-                }
-                success = passcodeOk
+                authError = error.errorDescription
             }
+            success = false
         } catch {
-            let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
-            if !passcodeOk {
-                authError = "Authentication failed. Please try again."
-            }
-            success = passcodeOk
+            print("[Bio] AppState.authenticate() caught unexpected error: \(error)")
+            authError = "Authentication failed. Please try again."
+            success = false
         }
 
         if success {
+            print("[Bio] AppState.authenticate() success, unlocking")
             isUnlocked = true
+        } else {
+            print("[Bio] AppState.authenticate() failed, stays locked. authError: \(String(describing: authError))")
         }
 
         return success
+    }
+
+    func authenticateWithPasscode(reason: String = "Authenticate with Stable Channels") async -> Bool {
+        guard !isAuthenticating else { return false }
+        isAuthenticating = true
+        defer { isAuthenticating = false }
+        authError = nil
+
+        print("[Bio] AppState.authenticateWithPasscode() start")
+        let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
+        print("[Bio] AppState.authenticateWithPasscode() result: \(passcodeOk)")
+
+        if passcodeOk {
+            print("[Bio] AppState.authenticateWithPasscode() success, unlocking")
+            isUnlocked = true
+        } else {
+            print("[Bio] AppState.authenticateWithPasscode() failed/cancelled")
+        }
+        return passcodeOk
     }
 
     // MARK: - Services
