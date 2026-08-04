@@ -20,6 +20,10 @@ class AppState {
 
     // MARK: - Authentication
 
+    /// Injected biometric authenticator — defaults to `BiometricService.shared`.
+    /// Depend on the `BiometricAuthenticating` protocol, not the concrete type (DI).
+    let biometricAuth: BiometricAuthenticating = BiometricService.shared
+
     /// Whether user has passed biometric/passcode auth this session.
     /// Reset to false on app termination (no persistence = no bypass on restart).
     var isUnlocked: Bool = false
@@ -37,20 +41,20 @@ class AppState {
         authError = nil
 
         do {
-            return try await BiometricService.authenticate(reason: reason)
+            return try await biometricAuth.authenticate(reason: reason)
         } catch let error as BiometricError {
             // Fallback to passcode unless user explicitly cancelled
             if error == .cancelled {
                 authError = nil
                 return false
             }
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
             if !passcodeOk {
                 authError = error.errorDescription
             }
             return passcodeOk
         } catch {
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
+            let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
             if !passcodeOk {
                 authError = "Authentication failed. Please try again."
             }

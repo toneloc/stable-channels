@@ -37,6 +37,8 @@
 		496A44442FCD4F75005AF12F /* QRCodeExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */; };
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
 		4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */; };
+		498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A83022712F0086BDB6 /* BiometricProtocols.swift */; };
+		498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */; };
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
 		499127782FFEB4FB00D9C81F /* PaymentDirection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127772FFEB4FB00D9C81F /* PaymentDirection.swift */; };
 		499127802FFEB50B00D9C81F /* IncomingPaymentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */; };
@@ -58,7 +60,6 @@
 		499DBE722FD2DACF003E89F9 /* StaggeredTaskLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */; };
 		499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */; };
 		499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */; };
-		D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */; };
 		499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */; };
 		499DBE7B2FD2F06F003E89F9 /* TxidLinkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */; };
 		499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */; };
@@ -140,6 +141,7 @@
 		C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */; };
 		C6F3CDD0424F8A1BC7C7A1C9 /* LDKNode in Frameworks */ = {isa = PBXBuildFile; productRef = 74AB91D77B62D8BA24840317 /* LDKNode */; };
 		CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B3E864653E657FB0FCA3D2 /* Trade.swift */; };
+		D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
 		E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B46630309755AE15EF291D4 /* HistoricalPrices.swift */; };
 		E8C9430FF8920728747EF550 /* SendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0FAABBD08BCBF20220C850 /* SendView.swift */; };
@@ -204,6 +206,8 @@
 		496A44422FCD4F75005AF12F /* QRInputToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRInputToolbar.swift; sourceTree = "<group>"; };
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
 		4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheetPresenter.swift; sourceTree = "<group>"; };
+		498244A83022712F0086BDB6 /* BiometricProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricProtocols.swift; sourceTree = "<group>"; };
+		498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricToggleCoordinator.swift; sourceTree = "<group>"; };
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
 		499127772FFEB4FB00D9C81F /* PaymentDirection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDirection.swift; sourceTree = "<group>"; };
 		499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingPaymentHandler.swift; sourceTree = "<group>"; };
@@ -225,7 +229,6 @@
 		499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncher.swift; sourceTree = "<group>"; };
 		499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainTxidResolverTests.swift; sourceTree = "<group>"; };
 		499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResilientEsploraClientTests.swift; sourceTree = "<group>"; };
-		D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPVHeaderChainServiceTests.swift; sourceTree = "<group>"; };
 		499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaggeredTaskLauncherTests.swift; sourceTree = "<group>"; };
 		499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepositRecorder.swift; sourceTree = "<group>"; };
 		499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidLinkStore.swift; sourceTree = "<group>"; };
@@ -308,6 +311,7 @@
 		C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RateLimitService.swift; sourceTree = "<group>"; };
 		CB7BB840EC5C451056C5C21D /* CryptoService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CryptoService.swift; sourceTree = "<group>"; };
 		CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditService.swift; sourceTree = "<group>"; };
+		D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPVHeaderChainServiceTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D62A82EA774DC10F10A6574A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
@@ -400,6 +404,16 @@
 				492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */,
 			);
 			path = Confirmation;
+			sourceTree = "<group>";
+		};
+		498244AC3022718B0086BDB6 /* Biometric */ = {
+			isa = PBXGroup;
+			children = (
+				498244A83022712F0086BDB6 /* BiometricProtocols.swift */,
+				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
+				498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */,
+			);
+			path = Biometric;
 			sourceTree = "<group>";
 		};
 		499127742FFEB4BF00D9C81F /* Services */ = {
@@ -569,9 +583,8 @@
 			isa = PBXGroup;
 			children = (
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
-				49E4D8A02FED848F002AF338 /* BackupError.swift */,
 				49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */,
-				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
+				49E4D8A02FED848F002AF338 /* BackupError.swift */,
 				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */,
 				CB7BB840EC5C451056C5C21D /* CryptoService.swift */,
@@ -592,8 +605,9 @@
 				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
-				49DDB0002FF0000000000001 /* Repositories */,
+				498244AC3022718B0086BDB6 /* Biometric */,
 				495CB4023017AD1800560837 /* Confirmation */,
+				49DDB0002FF0000000000001 /* Repositories */,
 				495CB4013017917400560837 /* WebSocket */,
 			);
 			path = Services;
@@ -951,6 +965,8 @@
 				495CB4003017724E00560837 /* ProcessedTxStore.swift in Sources */,
 				1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */,
 				A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */,
+				498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */,
+				498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */,
 				7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */,
 				495CB4023017918000560837 /* SPVHeaderChainService.swift in Sources */,
 			);

@@ -1,21 +1,12 @@
 import LocalAuthentication
 
-/// Concrete implementation of biometric capability checking and authentication.
-///
-/// Conforms to both `BiometricCapabilityChecking` and `BiometricAuthenticating`
-/// so callers can depend on whichever slice they need (Interface Segregation).
-/// Instantiated as a singleton via `shared`; injected through protocols for testability.
 final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticating {
-    // MARK: - Singleton
-
     static let shared = BiometricService()
 
-    // MARK: - BiometricCapabilityChecking
+    // MARK: - Capability
 
-    /// Returns the device's biometric hardware type.
-    /// Uses `.deviceOwnerAuthentication` to populate `biometryType` even when
-    /// the user has revoked Face ID permission in iOS Settings — that policy
-    /// succeeds whenever a passcode is set and still reports the hardware.
+    /// Uses `.deviceOwnerAuthentication` so `biometryType` reflects hardware
+    /// even when Face ID permission is revoked in iOS Settings.
     var biometricType: BiometricType {
         let ctx = LAContext()
         _ = ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil)
@@ -38,7 +29,7 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
         return ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error)
     }
 
-    // MARK: - BiometricAuthenticating
+    // MARK: - Authentication
 
     @MainActor
     func authenticate(reason: String) async throws -> Bool {
@@ -46,9 +37,6 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
         ctx.localizedCancelTitle = "Cancel"
         ctx.localizedFallbackTitle = ""
 
-        // No canUseBiometrics guard — let evaluatePolicy run so iOS can
-        // show the "Allow Face ID" permission dialog when the user has
-        // previously denied or revoked permission in Settings.
         do {
             return try await ctx.evaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
@@ -79,7 +67,6 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
 
     // MARK: - Private
 
-    /// Classifies LAError code into BiometricError for user-facing feedback.
     private static func classifyLAError(_ error: Error) -> BiometricError {
         guard let laError = error as? LAError else {
             return .biometryFailed
