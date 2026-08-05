@@ -40,6 +40,8 @@ struct AppAccessSettingsView: View {
     // MARK: - State
 
     @State private var disableTarget: AuthTarget?
+    @State private var appUnlockEnabled = false
+    @State private var transactionEnabled = false
 
     init(
         capability: BiometricCapabilityChecking = BiometricService.shared,
@@ -57,13 +59,16 @@ struct AppAccessSettingsView: View {
         List {
             Section(String(localized: "section_wallet_security", defaultValue: "Wallet Security")) {
                 Toggle(isOn: Binding(
-                    get: { isEnabled(.appUnlock) },
+                    get: { appUnlockEnabled },
                     set: { newValue in
                         if newValue {
-                            Task { await coordinator.enableToggle(
-                                AuthTarget.appUnlock.rawValue,
-                                reason: AuthTarget.appUnlock.enableReason
-                            ) }
+                            Task {
+                                let success = await coordinator.enableToggle(
+                                    AuthTarget.appUnlock.rawValue,
+                                    reason: AuthTarget.appUnlock.enableReason
+                                )
+                                appUnlockEnabled = success
+                            }
                         } else {
                             disableTarget = .appUnlock
                         }
@@ -75,13 +80,16 @@ struct AppAccessSettingsView: View {
                 .disabled(capability.biometricType == .none || coordinator.isEnabling)
 
                 Toggle(isOn: Binding(
-                    get: { isEnabled(.transaction) },
+                    get: { transactionEnabled },
                     set: { newValue in
                         if newValue {
-                            Task { await coordinator.enableToggle(
-                                AuthTarget.transaction.rawValue,
-                                reason: AuthTarget.transaction.enableReason
-                            ) }
+                            Task {
+                                let success = await coordinator.enableToggle(
+                                    AuthTarget.transaction.rawValue,
+                                    reason: AuthTarget.transaction.enableReason
+                                )
+                                transactionEnabled = success
+                            }
                         } else {
                             disableTarget = .transaction
                         }
@@ -97,7 +105,14 @@ struct AppAccessSettingsView: View {
         }
         .navigationTitle(String(localized: "title_app_access", defaultValue: "App Access"))
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $disableTarget) { target in
+        .onAppear {
+            appUnlockEnabled = isEnabled(.appUnlock)
+            transactionEnabled = isEnabled(.transaction)
+        }
+        .sheet(item: $disableTarget, onDismiss: {
+            appUnlockEnabled = isEnabled(.appUnlock)
+            transactionEnabled = isEnabled(.transaction)
+        }) { target in
             ToggleAuthSheet(target: target, coordinator: coordinator)
         }
         .alert(
