@@ -45,31 +45,21 @@ class AppState {
         defer { isAuthenticating = false }
         authError = nil
 
-        print("[Bio] AppState.authenticate() start")
         let success: Bool
         do {
-            print("[Bio] AppState.authenticate() triggering biometric/passcode auth")
             success = try await biometricAuth.authenticate(reason: reason)
-            print("[Bio] AppState.authenticate() auth result: \(success)")
         } catch let error as BiometricError {
-            print("[Bio] AppState.authenticate() caught BiometricError: \(error)")
-            if error == .cancelled {
-                print("[Bio] AppState.authenticate() cancelled by user")
-            } else {
+            if error != .cancelled {
                 authError = error.errorDescription
             }
             success = false
         } catch {
-            print("[Bio] AppState.authenticate() caught unexpected error: \(error)")
             authError = "Authentication failed. Please try again."
             success = false
         }
 
         if success {
-            print("[Bio] AppState.authenticate() success, unlocking")
             isUnlocked = true
-        } else {
-            print("[Bio] AppState.authenticate() failed, stays locked. authError: \(String(describing: authError))")
         }
 
         return success

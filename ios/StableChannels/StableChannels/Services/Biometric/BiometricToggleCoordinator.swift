@@ -34,7 +34,6 @@ final class BiometricToggleCoordinator {
             requiresSettingsRedirect = true
             return false
         } catch {
-            print("[Bio] Enable auth failed: \(error.localizedDescription)")
             return false
         }
     }
@@ -50,9 +49,7 @@ final class BiometricToggleCoordinator {
             }
         } catch let error as BiometricError where error == .cancelled {
             return false
-        } catch {
-            print("[Bio] Disable auth failed: \(error.localizedDescription)")
-        }
+        } catch {}
         return false
     }
 }
