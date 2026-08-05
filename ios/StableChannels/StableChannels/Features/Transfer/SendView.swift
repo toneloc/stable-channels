@@ -401,14 +401,12 @@ struct SendView: View {
 
         let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
 
-        // Auth gate: on-chain always requires auth. Lightning sends require auth only when Payment Confirmation is
-        // enabled.
         let requiresAuth: Bool
         let reason: String
 
         switch detectedType {
         case .onchain:
-            requiresAuth = true
+            requiresAuth = transactionAuth
             reason = "Confirm onchain withdrawal of all funds"
         case .bolt11, .bolt12:
             requiresAuth = transactionAuth
