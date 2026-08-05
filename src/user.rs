@@ -3036,10 +3036,13 @@ impl UserApp {
                                 break 'control true;
                             };
 
+                            let correlated = sync_is_correlated(&sync);
                             let mut sc = self.stable_channel.lock().unwrap();
-                            if sync.channel_id != wallet_channel_id
-                                || sync.user_channel_id != wallet_user_channel_id
-                            {
+                            if !sync_channel_binding_matches(
+                                &sync,
+                                &wallet_channel_id,
+                                &wallet_user_channel_id,
+                            ) {
                                 audit_event(
                                     "SYNC_V1_CHANNEL_MISMATCH",
                                     json!({
@@ -3049,6 +3052,7 @@ impl UserApp {
                                         "wallet_channel_id": wallet_channel_id,
                                         "wallet_user_channel_id": wallet_user_channel_id,
                                         "sync_version": sync.sync_version,
+                                        "correlated": correlated,
                                     }),
                                 );
                                 break 'control true;
@@ -3058,7 +3062,6 @@ impl UserApp {
                             let price = sc.latest_price;
                             let old_expected = sc.expected_usd.0;
                             let live_receiver_sats = sc.stable_receiver_btc.sats;
-                            let correlated = sync.trade_id.is_some() || sync.trade_payment_id.is_some();
                             let pending_trade_result = if correlated {
                                 self.db.get_trade_by_protocol_ids(
                                     sync.trade_id.as_deref(),
@@ -7993,14 +7996,7 @@ impl UserApp {
                 row(ui, "Date", &Self::format_timestamp(trade.created_at));
 
                 if let Some(ref reason) = trade.failure_reason {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Reason").size(11.0).color(Color32::GRAY));
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(reason).size(12.0).color(Color32::DARK_GRAY),
-                        )
-                        .wrap(),
-                    );
+                    row(ui, "Reason", reason);
                 }
                 if let Some(ref trade_id) = trade.trade_id {
                     ui.add_space(4.0);
@@ -10933,6 +10929,21 @@ fn is_protocol_trade_id(trade_id: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn sync_is_correlated(sync: &IncomingSync) -> bool {
+    sync.trade_id.is_some() || sync.trade_payment_id.is_some()
+}
+
+/// Ordinary syncs are signed by the counterparty and bind to the shared channel id. Only a
+/// correlated trade response can know and must echo this wallet's node-local user_channel_id.
+fn sync_channel_binding_matches(
+    sync: &IncomingSync,
+    wallet_channel_id: &str,
+    wallet_user_channel_id: &str,
+) -> bool {
+    sync.channel_id == wallet_channel_id
+        && (!sync_is_correlated(sync) || sync.user_channel_id == wallet_user_channel_id)
+}
+
 fn sync_trade_identifiers_match(
     trade: &db::PendingTradeRow,
     sync: &IncomingSync,
@@ -11067,8 +11078,9 @@ mod tests {
         rejection_resolves_trade,
         restrict_secret_file_permissions,
         sats_for_usd_cents, splice_in_overlap_sats, splice_reconcile_action,
-        sync_trade_identifiers_match, validate_incoming_sync_allocation, write_secret_file,
-        IncomingSync, PendingSplice, SpliceReconcileAction, UserApp,
+        sync_channel_binding_matches, sync_trade_identifiers_match,
+        validate_incoming_sync_allocation, write_secret_file, IncomingSync, PendingSplice,
+        SpliceReconcileAction, UserApp,
     };
     use stable_channels::db::PendingTradeRow;
 
@@ -11356,6 +11368,45 @@ mod tests {
             "sync_version": 5,
         });
         assert_eq!(parse_incoming_sync(&malformed_channel), None);
+    }
+
+    #[test]
+    fn ordinary_sync_uses_shared_channel_while_trade_response_echoes_wallet_local_id() {
+        let channel_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let wallet_user_channel_id = "wallet-local-id";
+        let ordinary_payload = serde_json::json!({
+            "type": "SYNC_V1",
+            "channel_id": channel_id,
+            "user_channel_id": "lsp-local-id",
+            "expected_usd": 25.0,
+            "backing_sats": 31_250,
+            "sync_version": 4,
+        });
+        let ordinary_sync = parse_incoming_sync(&ordinary_payload).unwrap();
+        assert!(sync_channel_binding_matches(
+            &ordinary_sync,
+            channel_id,
+            wallet_user_channel_id,
+        ));
+
+        let trade_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut correlated_payload = ordinary_payload;
+        correlated_payload["trade_id"] = serde_json::json!(trade_id);
+        correlated_payload["trade_payment_id"] = serde_json::json!("payment");
+        let wrong_local_id = parse_incoming_sync(&correlated_payload).unwrap();
+        assert!(!sync_channel_binding_matches(
+            &wrong_local_id,
+            channel_id,
+            wallet_user_channel_id,
+        ));
+
+        correlated_payload["user_channel_id"] = serde_json::json!(wallet_user_channel_id);
+        let wallet_bound = parse_incoming_sync(&correlated_payload).unwrap();
+        assert!(sync_channel_binding_matches(
+            &wallet_bound,
+            channel_id,
+            wallet_user_channel_id,
+        ));
     }
 
     #[test]

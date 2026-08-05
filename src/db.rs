@@ -1346,36 +1346,41 @@ impl Database {
         base.saturating_add(jitter).min(60 * 60)
     }
 
-    pub fn mark_trade_response_send_failed(
+    /// Durably consume one delivery attempt and schedule its retry before any network send.
+    /// The expected-attempt CAS prevents two workers from reserving the same due response.
+    pub fn reserve_trade_response_attempt(
         &self,
         inbound_payment_id: &str,
+        expected_attempts: u32,
+        max_attempts: u32,
         now: i64,
-    ) -> SqliteResult<()> {
-        let conn = self.conn.lock().unwrap();
-        let attempts: i64 = conn.query_row(
-            "SELECT response_attempts FROM trade_decisions
-             WHERE inbound_payment_id = ?1 AND response_status = 'pending'",
-            params![inbound_payment_id],
-            |row| row.get(0),
-        )?;
-        let next_attempt = attempts.saturating_add(1).max(1) as u32;
+    ) -> SqliteResult<bool> {
+        if expected_attempts >= max_attempts {
+            return Ok(false);
+        }
+        let next_attempt = expected_attempts.saturating_add(1);
         let delay = Self::trade_response_delay_secs(next_attempt, inbound_payment_id);
+        let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE trade_decisions
-             SET response_status = 'pending', response_attempts = ?2,
-                 next_response_attempt_at = ?3
-             WHERE inbound_payment_id = ?1 AND response_status = 'pending'",
-            params![inbound_payment_id, next_attempt, now.saturating_add(delay)],
+             SET response_attempts = ?2, next_response_attempt_at = ?3
+             WHERE inbound_payment_id = ?1 AND response_status = 'pending'
+                   AND response_attempts = ?4 AND response_attempts < ?5
+                   AND next_response_attempt_at <= ?6",
+            params![
+                inbound_payment_id,
+                next_attempt,
+                now.saturating_add(delay),
+                expected_attempts,
+                max_attempts,
+                now,
+            ],
         )?;
-        if updated == 1 {
-            Ok(())
-        } else {
-            Err(rusqlite::Error::QueryReturnedNoRows)
-        }
+        Ok(updated == 1)
     }
 
-    /// Store the generated outbound id immediately after LDK accepts the control send. A process
-    /// crash in the preceding gap can produce a duplicate nominal response after restart.
+    /// Attach the generated outbound id after LDK accepts the control send. The attempt and its
+    /// backoff were already persisted, so a failure here cannot cause an immediate retry.
     pub fn mark_trade_response_in_flight(
         &self,
         inbound_payment_id: &str,
@@ -1384,8 +1389,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE trade_decisions
-             SET response_status = 'in_flight', response_payment_id = ?2,
-                 response_attempts = response_attempts + 1
+             SET response_status = 'in_flight', response_payment_id = ?2
              WHERE inbound_payment_id = ?1 AND response_status = 'pending'",
             params![inbound_payment_id, response_payment_id],
         )?;
@@ -4542,9 +4546,39 @@ mod tests {
             .unwrap());
         assert_eq!(db.load_channel("user").unwrap().unwrap().expected_usd, 20.0);
 
-        let due = db.due_trade_responses(i64::MAX, u32::MAX, 10).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE trade_decisions SET next_response_attempt_at = 100
+                 WHERE inbound_payment_id = 'inbound-payment'",
+                [],
+            )
+            .unwrap();
+        let due = db.due_trade_responses(100, u32::MAX, 10).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].response_amount_msat, 1);
+        assert!(db
+            .reserve_trade_response_attempt(
+                "inbound-payment",
+                due[0].attempts,
+                u32::MAX,
+                100,
+            )
+            .unwrap());
+        assert!(!db
+            .reserve_trade_response_attempt("inbound-payment", 0, u32::MAX, 100)
+            .unwrap());
+        assert!(db
+            .due_trade_responses(104, u32::MAX, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.due_trade_responses(105, u32::MAX, 10)
+                .unwrap()[0]
+                .attempts,
+            1
+        );
         db.mark_trade_response_in_flight("inbound-payment", "response-payment")
             .unwrap();
         assert!(matches!(
@@ -4560,18 +4594,15 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(db
-            .mark_trade_response_payment_failed("response-payment", 100)
+            .mark_trade_response_payment_failed("response-payment", 200)
             .unwrap());
         assert!(db
-            .due_trade_responses(104, u32::MAX, 10)
+            .due_trade_responses(204, u32::MAX, 10)
             .unwrap()
             .is_empty());
-        assert_eq!(
-            db.due_trade_responses(105, u32::MAX, 10)
-                .unwrap()
-                .len(),
-            1
-        );
+        let retry = db.due_trade_responses(205, u32::MAX, 10).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].attempts, 1);
         assert_eq!(Database::trade_response_delay_secs(1, "response-a"), 5);
         assert!((10..=12).contains(&Database::trade_response_delay_secs(2, "response-a")));
         assert_eq!(
@@ -4717,10 +4748,9 @@ mod tests {
             .expect("abandoned response and dead-letter event must commit together");
         assert_eq!(dead_letter.status, "failed");
         assert_eq!(dead_letter.detail["response_attempts"], 3);
-        assert!(matches!(
-            db.mark_trade_response_send_failed("exhausted-payment", 200),
-            Err(rusqlite::Error::QueryReturnedNoRows)
-        ));
+        assert!(!db
+            .reserve_trade_response_attempt("exhausted-payment", 3, MAX_ATTEMPTS, 200)
+            .unwrap());
 
         assert!(db
             .requeue_abandoned_trade_response("exhausted-payment", 456)

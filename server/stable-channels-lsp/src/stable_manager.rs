@@ -248,6 +248,37 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         response: &PendingTradeResponse,
     ) -> bool {
+        let attempt = response.attempts.saturating_add(1);
+        match db.reserve_trade_response_attempt(
+            &response.inbound_payment_id,
+            response.attempts,
+            MAX_TRADE_RESPONSE_ATTEMPTS,
+            Self::unix_time_secs(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                stable_channels::audit::audit_event(
+                    "TRADE_RESPONSE_RESERVATION_SKIPPED",
+                    serde_json::json!({
+                        "trade_payment_id": response.inbound_payment_id,
+                        "expected_attempts": response.attempts,
+                    }),
+                );
+                return false;
+            }
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "DB_WRITE_FAILED",
+                    serde_json::json!({
+                        "op": "reserve_trade_response_attempt",
+                        "trade_payment_id": response.inbound_payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return false;
+            }
+        }
+
         let req = SpontaneousSendRequest {
             amount_msat: response.response_amount_msat,
             node_id: response.counterparty.clone(),
@@ -262,8 +293,9 @@ impl StableChannelManager {
                 if let Err(error) = db
                     .mark_trade_response_in_flight(&response.inbound_payment_id, &sent.payment_id)
                 {
-                    // The send has already happened. Leaving the persisted obligation pending can
-                    // produce a duplicate nominal control response after restart.
+                    // The send has already happened, but its attempt and next backoff were
+                    // persisted first. A later retry can duplicate this nominal response, but it
+                    // cannot retry immediately or bypass the bounded attempt budget.
                     stable_channels::audit::audit_event(
                         "TRADE_RESPONSE_PAYMENT_ID_PERSIST_FAILED",
                         serde_json::json!({
@@ -280,7 +312,7 @@ impl StableChannelManager {
                         "trade_payment_id": response.inbound_payment_id,
                         "response_payment_id": sent.payment_id,
                         "amount_msat": response.response_amount_msat,
-                        "attempt": response.attempts.saturating_add(1),
+                        "attempt": attempt,
                     }),
                 );
                 true
@@ -290,24 +322,12 @@ impl StableChannelManager {
                     Ok(_) => "spontaneous send returned an empty payment id".to_owned(),
                     Err(error) => error.to_string(),
                 };
-                if let Err(db_error) = db.mark_trade_response_send_failed(
-                    &response.inbound_payment_id,
-                    Self::unix_time_secs(),
-                ) {
-                    stable_channels::audit::audit_event(
-                        "DB_WRITE_FAILED",
-                        serde_json::json!({
-                            "op": "mark_trade_response_send_failed",
-                            "trade_payment_id": response.inbound_payment_id,
-                            "error": db_error.to_string(),
-                        }),
-                    );
-                }
                 stable_channels::audit::audit_event(
                     "TRADE_RESPONSE_SEND_FAILED",
                     serde_json::json!({
                         "trade_payment_id": response.inbound_payment_id,
                         "amount_msat": response.response_amount_msat,
+                        "attempt": attempt,
                         "error": error,
                     }),
                 );
@@ -4114,10 +4134,16 @@ mod tests {
             100_000.0,
         )
         .await;
-        for _ in 0..MAX_TRADE_RESPONSE_ATTEMPTS {
-            mgr.db
-                .mark_trade_response_send_failed("offline-wallet-payment", 0)
-                .unwrap();
+        for attempt in 0..MAX_TRADE_RESPONSE_ATTEMPTS {
+            assert!(mgr
+                .db
+                .reserve_trade_response_attempt(
+                    "offline-wallet-payment",
+                    attempt,
+                    MAX_TRADE_RESPONSE_ATTEMPTS,
+                    i64::MAX,
+                )
+                .unwrap());
         }
 
         retry_trade_responses(&mgr, &fake).await;
@@ -4146,6 +4172,108 @@ mod tests {
         .await;
         retry_trade_responses(&mgr, &fake).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn response_payment_id_persist_failure_keeps_reserved_backoff() {
+        let mgr = make_manager();
+        assert!(mgr
+            .db
+            .persist_trade_rejection(
+                "persist-failure-payment",
+                None,
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                None,
+                COUNTERPARTY_HEX,
+                "internal_error",
+                "temporary failure",
+                "signed-rejection",
+            )
+            .unwrap());
+        let conn = rusqlite::Connection::open(
+            mgr.data_dir()
+                .join(stable_channels::db::DB_FILENAME),
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_response_payment_id_persist
+             BEFORE UPDATE OF response_status, response_payment_id ON trade_decisions
+             WHEN NEW.response_status = 'in_flight'
+             BEGIN
+                SELECT RAISE(ABORT, 'injected payment-id persistence failure');
+             END;",
+        )
+        .unwrap();
+        drop(conn);
+        let fake = FakeLdkServer::new(vec![]);
+        let before = StableChannelManager::unix_time_secs();
+
+        retry_trade_responses(&mgr, &fake).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+        let conn = rusqlite::Connection::open(
+            mgr.data_dir()
+                .join(stable_channels::db::DB_FILENAME),
+        )
+        .unwrap();
+        let state: (String, i64, i64) = conn
+            .query_row(
+                "SELECT response_status, response_attempts, next_response_attempt_at
+                 FROM trade_decisions
+                 WHERE inbound_payment_id = 'persist-failure-payment'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, "pending");
+        assert_eq!(state.1, 1);
+        assert!(state.2 >= before + 5);
+        drop(conn);
+
+        retry_trade_responses(&mgr, &fake).await;
+        assert_eq!(
+            fake.sends.lock().unwrap().len(),
+            1,
+            "the persisted backoff must prevent an immediate duplicate keysend",
+        );
+    }
+
+    #[tokio::test]
+    async fn response_attempt_reservation_failure_sends_nothing() {
+        let mgr = make_manager();
+        assert!(mgr
+            .db
+            .persist_trade_rejection(
+                "reservation-failure-payment",
+                None,
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                None,
+                COUNTERPARTY_HEX,
+                "internal_error",
+                "temporary failure",
+                "signed-rejection",
+            )
+            .unwrap());
+        let conn = rusqlite::Connection::open(
+            mgr.data_dir()
+                .join(stable_channels::db::DB_FILENAME),
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_response_attempt_reservation
+             BEFORE UPDATE OF response_attempts ON trade_decisions
+             WHEN NEW.response_attempts > OLD.response_attempts
+             BEGIN
+                SELECT RAISE(ABORT, 'injected attempt reservation failure');
+             END;",
+        )
+        .unwrap();
+        drop(conn);
+        let fake = FakeLdkServer::new(vec![]);
+
+        retry_trade_responses(&mgr, &fake).await;
+        assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
