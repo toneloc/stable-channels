@@ -82,6 +82,7 @@ class AppState {
         authError = nil
 
         print("[Bio] AppState.authenticateWithPasscode() start")
+        try? await Task.sleep(nanoseconds: 300_000_000)
         let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
         print("[Bio] AppState.authenticateWithPasscode() result: \(passcodeOk)")
 

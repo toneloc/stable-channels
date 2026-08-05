@@ -73,7 +73,7 @@ struct ContentView: View {
                 Task { @MainActor in
                     // 200ms delay lets .inactive from app switcher/Face ID fully settle first
                     try? await Task.sleep(nanoseconds: 200_000_000)
-                    if !appState.isUnlocked && biometricEnabled && scenePhase == .active {
+                    if !appState.isUnlocked && biometricEnabled && !authFailed && scenePhase == .active {
                         await runAuth()
                     }
                 }

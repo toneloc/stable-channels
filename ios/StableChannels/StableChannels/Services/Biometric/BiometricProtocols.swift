@@ -26,20 +26,17 @@ enum BiometricError: Error, LocalizedError, Equatable {
     }
 }
 
-// MARK: - Capability Checking
+// MARK: - Capability Checking (Interface Segregation)
 
-/// Hardware detection + availability checking protocol.
 protocol BiometricCapabilityChecking: Sendable {
     var biometricType: BiometricType { get }
     var canUseBiometrics: Bool { get }
     var canUseDevicePasscode: Bool { get }
 }
 
-// MARK: - Authentication
+// MARK: - Authentication (Interface Segregation)
 
-/// Biometric + passcode authentication protocol.
 protocol BiometricAuthenticating: Sendable {
     @MainActor func authenticate(reason: String) async throws -> Bool
-    @MainActor func authenticateWithBiometrics(reason: String) async throws -> Bool
     @MainActor func authenticateWithPasscode(reason: String) async throws -> Bool
 }
