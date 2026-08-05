@@ -38,5 +38,4 @@ protocol BiometricCapabilityChecking: Sendable {
 
 protocol BiometricAuthenticating: Sendable {
     @MainActor func authenticate(reason: String) async throws -> Bool
-    @MainActor func authenticateWithPasscode(reason: String) async throws -> Bool
 }

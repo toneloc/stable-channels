@@ -75,26 +75,6 @@ class AppState {
         return success
     }
 
-    func authenticateWithPasscode(reason: String = "Authenticate with Stable Channels") async -> Bool {
-        guard !isAuthenticating else { return false }
-        isAuthenticating = true
-        defer { isAuthenticating = false }
-        authError = nil
-
-        print("[Bio] AppState.authenticateWithPasscode() start")
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        let passcodeOk = await (try? biometricAuth.authenticateWithPasscode(reason: reason)) ?? false
-        print("[Bio] AppState.authenticateWithPasscode() result: \(passcodeOk)")
-
-        if passcodeOk {
-            print("[Bio] AppState.authenticateWithPasscode() success, unlocking")
-            isUnlocked = true
-        } else {
-            print("[Bio] AppState.authenticateWithPasscode() failed/cancelled")
-        }
-        return passcodeOk
-    }
-
     // MARK: - Services
 
     let nodeService = NodeService.shared

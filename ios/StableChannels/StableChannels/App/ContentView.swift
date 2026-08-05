@@ -130,13 +130,6 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Button(String(localized: "use_passcode", defaultValue: "Enter Passcode")) {
-                Task { await runPasscodeAuth() }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .foregroundStyle(.white)
-
             Button(String(localized: "button_cancel", defaultValue: "Cancel")) { }
                 .foregroundStyle(.white.opacity(0.6))
         }
@@ -158,30 +151,6 @@ struct ContentView: View {
         authFailed = false
 
         let success = await appState.authenticate()
-
-        authInProgress = false
-        if !success {
-            authFailed = true
-        } else {
-            appState.authError = nil
-        }
-    }
-
-    private func runPasscodeAuth() async {
-        guard !appState.isUnlocked else { return }
-        guard !authInProgress else { return }
-
-        UIApplication.shared.sendAction(
-            Selector(("resignFirstResponder")),
-            to: nil,
-            from: nil,
-            for: nil
-        )
-
-        authInProgress = true
-        authFailed = false
-
-        let success = await appState.authenticateWithPasscode()
 
         authInProgress = false
         if !success {

@@ -48,24 +48,6 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
         }
     }
 
-    @MainActor
-    func authenticateWithPasscode(reason: String) async throws -> Bool {
-        let ctx = LAContext()
-        ctx.localizedCancelTitle = "Cancel"
-
-        do {
-            return try await ctx.evaluatePolicy(
-                .deviceOwnerAuthentication,
-                localizedReason: reason
-            )
-        } catch {
-            if let laError = error as? LAError, laError.code == .userCancel {
-                throw BiometricError.cancelled
-            }
-            throw BiometricError.passcodeFailed
-        }
-    }
-
     // MARK: - Private
 
     private static func classifyLAError(_ error: Error) -> BiometricError {
