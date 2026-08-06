@@ -18,8 +18,8 @@ android {
         applicationId = "com.stablechannels.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.9.3"
+        versionCode = 5
+        versionName = "0.9.4"
     }
 
     // Play upload signing. Reads STABLECHANNELS_UPLOAD_* Gradle properties
