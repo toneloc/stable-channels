@@ -1522,7 +1522,7 @@ impl Database {
                     },
                 )
                 .optional()?;
-            let Some((stored_payment_id, stored_expected_usd, stored_backing_sats, trade_id)) =
+            let Some((stored_payment_id, stored_expected_usd, _stored_backing_sats, trade_id)) =
                 stored_intent
             else {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1534,9 +1534,12 @@ impl Database {
                     return Ok(false);
                 }
             }
+            // backing_sats is derived per-peer and not compared; expected_usd is the contract this gate protects.
             if trade_id.is_some()
-                && ((stored_expected_usd - expected_usd).abs() > 0.000000001
-                    || stored_backing_sats != Some(backing_sats as i64))
+                && !crate::trade::answered_target_honours_request(
+                    stored_expected_usd,
+                    expected_usd,
+                )
             {
                 return Ok(false);
             }
@@ -4934,6 +4937,84 @@ mod tests {
         assert_eq!(completed.failure_code, None);
         assert_eq!(completed.failure_reason, None);
         assert_eq!(db.load_channel("user").unwrap().unwrap().expected_usd, 15.0);
+    }
+
+    #[test]
+    fn desktop_correlated_sync_tolerates_repriced_backing_and_a_capacity_clamp() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel", "user", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        let repriced_trade_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let repriced_row_id = db
+            .record_prepared_trade(
+                "channel", repriced_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05, 50_000, 5.0,
+                5_000, 100,
+            )
+            .unwrap();
+
+        // Same agreed target ($5), repriced backing_sats (each side derives at its own price) — accepted.
+        assert!(db
+            .apply_correlated_sync_if_newer_and_complete_trade(
+                "user",
+                1,
+                5.0,
+                5_100,
+                4_900,
+                Some(repriced_row_id),
+                Some("fee-payment"),
+            )
+            .unwrap());
+        assert_eq!(
+            db.get_recent_trades(1).unwrap().pop().unwrap().status,
+            "completed"
+        );
+
+        let changed_target_trade_id =
+            "2222222222222222222222222222222222222222222222222222222222222222";
+        let changed_target_row_id = db
+            .record_prepared_trade(
+                "channel", changed_target_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05, 50_000,
+                5.0, 5_000, 100,
+            )
+            .unwrap();
+
+        // A target ABOVE the request is not a capacity clamp and must still be refused.
+        assert!(!db
+            .apply_correlated_sync_if_newer_and_complete_trade(
+                "user",
+                2,
+                6.0,
+                5_100,
+                4_900,
+                Some(changed_target_row_id),
+                Some("fee-payment-2"),
+            )
+            .unwrap());
+
+        // A target clamped DOWN to what the LSP could back is the same contract honoured, so this
+        // gate has to admit it too — a stricter copy here strands the trade the sync confirms.
+        let clamped_trade_id =
+            "3333333333333333333333333333333333333333333333333333333333333333";
+        let clamped_row_id = db
+            .record_prepared_trade(
+                "channel", clamped_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05, 50_000, 5.0,
+                5_000, 100,
+            )
+            .unwrap();
+        let clamped =
+            5.0 * (1.0 - crate::constants::MAX_PEER_VALUATION_SPREAD_PERCENT / 100.0 / 2.0);
+        assert!(db
+            .apply_correlated_sync_if_newer_and_complete_trade(
+                "user",
+                3,
+                clamped,
+                5_000,
+                5_000,
+                Some(clamped_row_id),
+                Some("fee-payment-3"),
+            )
+            .unwrap());
+        assert_eq!(db.load_channel("user").unwrap().unwrap().expected_usd, clamped);
     }
 
     #[test]

@@ -7,4 +7,5 @@ pub mod historical_prices;
 pub mod ledger;
 pub mod price_feeds;
 pub mod stable;
+pub mod trade;
 pub mod types;

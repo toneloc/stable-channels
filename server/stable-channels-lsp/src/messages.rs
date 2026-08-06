@@ -37,36 +37,8 @@ pub struct TradePayload {
     pub ts: u64,
 }
 
-/// Stable machine-readable rejection reasons carried by `TRADE_REJECTED_V1`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TradeRejectionReason {
-    InvalidAmount,
-    StaleRequest,
-    InvalidFee,
-    InvalidQuote,
-    QuoteOutOfRange,
-    InvalidAllocation,
-    InsufficientCapacity,
-    DuplicateTrade,
-    InternalError,
-}
-
-impl TradeRejectionReason {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidAmount => "invalid_amount",
-            Self::StaleRequest => "stale_request",
-            Self::InvalidFee => "invalid_fee",
-            Self::InvalidQuote => "invalid_quote",
-            Self::QuoteOutOfRange => "quote_out_of_range",
-            Self::InvalidAllocation => "invalid_allocation",
-            Self::InsufficientCapacity => "insufficient_capacity",
-            Self::DuplicateTrade => "duplicate_trade",
-            Self::InternalError => "internal_error",
-        }
-    }
-}
+/// Rejection reasons live in the shared crate so the wallet validates against this same list.
+pub use stable_channels::trade::TradeRejectionReason;
 
 /// LSP-signed rejection returned as a nominal control keysend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,18 +259,7 @@ mod tests {
 
     #[test]
     fn rejection_payload_round_trips_all_stable_reason_codes() {
-        let reasons = [
-            TradeRejectionReason::InvalidAmount,
-            TradeRejectionReason::StaleRequest,
-            TradeRejectionReason::InvalidFee,
-            TradeRejectionReason::InvalidQuote,
-            TradeRejectionReason::QuoteOutOfRange,
-            TradeRejectionReason::InvalidAllocation,
-            TradeRejectionReason::InsufficientCapacity,
-            TradeRejectionReason::DuplicateTrade,
-            TradeRejectionReason::InternalError,
-        ];
-        for reason in reasons {
+        for reason in TradeRejectionReason::ALL.iter().copied() {
             let payload = build_trade_rejected_payload(
                 "channel", "7", None, "payment", reason, "rejected", 123,
             );

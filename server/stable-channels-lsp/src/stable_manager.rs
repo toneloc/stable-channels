@@ -22,7 +22,14 @@ use tracing::{error, info};
 
 use crate::messages::TradeRejectionReason;
 
-const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 1.0;
+/// A client quote is the wallet's slippage veto, never an accounting input: the target is clamped to
+/// what this side can actually back, so a quote can no longer reach a payout and the bound only has
+/// to admit honest feed spread.
+const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 =
+    stable_channels::constants::MAX_PEER_VALUATION_SPREAD_PERCENT;
+
+/// Sat tolerance before a client's allocation checksum is treated as a real divergence.
+const TRADE_ALLOCATION_CHECKSUM_TOLERANCE_SATS: u64 = 2;
 const LEGACY_TRADE_FEE_PRICE_SKEW_PERCENT: f64 = 0.5;
 // The exponential schedule reaches its one-hour cap after ten attempts; this leaves roughly
 // 6.6 days for an offline wallet to recover before the response is dead-lettered.
@@ -83,6 +90,18 @@ fn expected_trade_fee_msat(
     }
 
     Some((fee_sats as u64).saturating_mul(1000).max(1))
+}
+
+/// How far a trade moves the stable target, in whole cents. Targets are cent-denominated but arrive
+/// as f64, where the smallest real move measures 0.0099 once a sell is netted of its fee and
+/// 0.00999999999999 once a buy is rounded to binary. Comparing the move at cent granularity keeps
+/// those trades distinguishable from a target that genuinely does not move.
+fn trade_target_move_cents(old_expected_usd: f64, new_expected_usd: f64) -> u64 {
+    let move_cents = (new_expected_usd - old_expected_usd).abs() * 100.0;
+    if !move_cents.is_finite() {
+        return 0;
+    }
+    move_cents.round() as u64
 }
 
 fn trade_fee_tolerance_msat(expected_msat: u64, has_signed_quote: bool) -> u64 {
@@ -1211,10 +1230,14 @@ impl StableChannelManager {
         sc.latest_price = btc_price;
         sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
-        // Equilibrium reset, clamped so backing can never exceed the live balance
-        // (which would immediately re-trigger the backstop we're protecting against).
+        // Equilibrium reset, clamped to the live balance, with residue absorbed so a full peg survives.
         let equilibrium = ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
-        sc.backing_sats = equilibrium.min(their_sats);
+        sc.backing_sats = stable_channels::stable::normalize_backing_sats(
+            their_sats,
+            equilibrium.min(their_sats),
+            sc.expected_usd.0,
+            btc_price,
+        );
         sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
         stable_channels::stable::recompute_native(sc);
         // The drop is settled; make sure the backstop forgets any ticks it counted.
@@ -1421,8 +1444,15 @@ impl StableChannelManager {
                     let expected_usd_for_db = sc.expected_usd.0;
                     let note_for_db = sc.note.clone();
                     let backing_before = sc.backing_sats;
-                    let backing_after =
-                        ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+                    // Normalise against the post-payment balance — the live one has not updated yet.
+                    let post_payment_sats = their_sats.saturating_add(amount_sats);
+                    let backing_after = stable_channels::stable::normalize_backing_sats(
+                        post_payment_sats,
+                        (((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64)
+                            .min(post_payment_sats),
+                        sc.expected_usd.0,
+                        btc_price,
+                    );
                     let native_before = sc.native_sats;
                     let last_stability_payment_before = sc.last_stability_payment;
                     let counterparty_for_db = sc.counterparty.to_string();
@@ -2252,6 +2282,13 @@ impl StableChannelManager {
             );
         };
         let current_expected_usd = self.stable_channels[channel_index].expected_usd.0;
+        // A target that does not move is not a trade, just a near-free way to re-book.
+        if trade_target_move_cents(current_expected_usd, payload.expected_usd) == 0 {
+            reject!(
+                TradeRejectionReason::NoOpTrade,
+                "trade does not change the stable target"
+            );
+        }
         let fee_price = payload.quote_price.unwrap_or(btc_price);
         let Some(expected_fee_msat) =
             expected_trade_fee_msat(current_expected_usd, payload.expected_usd, fee_price)
@@ -2271,7 +2308,7 @@ impl StableChannelManager {
         }
 
         let (our_sats, their_sats) = channel_peer_balances(&chan);
-        let new_expected = payload.expected_usd;
+        let requested_expected = payload.expected_usd;
         let signed_allocation = match (payload.quote_price, payload.backing_sats) {
             (Some(quote_price), Some(backing_sats)) => {
                 if payload.ts == 0
@@ -2292,18 +2329,13 @@ impl StableChannelManager {
                         "signed quote is outside the allowed market range"
                     );
                 }
-                let signed_backing_usd = backing_sats as f64 / 100_000_000.0 * quote_price;
-                let allocation_delta_usd = (signed_backing_usd - new_expected).abs();
-                let zero_allocation_is_consistent = if new_expected < 0.01 {
+                // Structural sanity only — the pair is no longer an accounting input.
+                let zero_allocation_is_consistent = if requested_expected < 0.01 {
                     backing_sats == 0
                 } else {
                     backing_sats > 0
                 };
-                if backing_sats > their_sats
-                    || !zero_allocation_is_consistent
-                    || allocation_delta_usd
-                        > stable_channels::constants::STABILITY_THRESHOLD_USD
-                {
+                if backing_sats > their_sats || !zero_allocation_is_consistent {
                     reject!(
                         TradeRejectionReason::InvalidAllocation,
                         "signed backing allocation is inconsistent"
@@ -2318,15 +2350,41 @@ impl StableChannelManager {
             ),
         };
 
-        let validation_price = signed_allocation
-            .map(|(quote_price, _, _)| quote_price)
-            .unwrap_or(btc_price);
-        let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), validation_price).0;
-        let ceiling = receiver_usd + stable_channels::constants::STABILITY_THRESHOLD_USD;
-        if new_expected > ceiling {
+        // Value the capacity at the LSP's own price: a client quote must never reach a payout.
+        let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price).0;
+        let spread_ceiling = receiver_usd
+            * (1.0 + stable_channels::constants::MAX_PEER_VALUATION_SPREAD_PERCENT / 100.0);
+        if requested_expected > spread_ceiling {
             reject!(
                 TradeRejectionReason::InsufficientCapacity,
                 "requested stable allocation exceeds channel capacity"
+            );
+        }
+        // Booking a target this side cannot back would clamp the allocation and leave the difference
+        // as drift the tick pays out, so book the largest backable target instead of funding the gap.
+        let new_expected = if requested_expected > receiver_usd {
+            stable_channels::audit::audit_event(
+                "TRADE_TARGET_CLAMPED_TO_CAPACITY",
+                serde_json::json!({
+                    "channel_id": chan.channel_id,
+                    "user_channel_id": chan.user_channel_id,
+                    "trade_id": trade_id,
+                    "requested_usd": requested_expected,
+                    "booked_usd": receiver_usd,
+                    "their_sats": their_sats,
+                    "lsp_price": btc_price,
+                }),
+            );
+            receiver_usd
+        } else {
+            requested_expected
+        };
+        // The clamp can absorb the whole move; charging for a target that did not change is the
+        // no-op case again, and the client needs to hear that it is already fully allocated.
+        if trade_target_move_cents(current_expected_usd, new_expected) == 0 {
+            reject!(
+                TradeRejectionReason::InsufficientCapacity,
+                "stable target is already at the channel's backable capacity"
             );
         }
 
@@ -2338,14 +2396,32 @@ impl StableChannelManager {
         accepted.stable_provider_usd = USD::from_bitcoin(accepted.stable_provider_btc, btc_price);
         accepted.stable_receiver_usd = USD::from_bitcoin(accepted.stable_receiver_btc, btc_price);
         accepted.latest_price = btc_price;
-        if let Some((_, backing_sats, _)) = signed_allocation {
-            stable_channels::stable::apply_trade_allocation(
-                &mut accepted,
-                new_expected,
-                backing_sats,
+        stable_channels::stable::apply_trade(&mut accepted, new_expected, btc_price);
+        if let Some((quote_price, client_backing_sats, _)) = signed_allocation {
+            // Telemetry, never a gate — re-run the client's own arithmetic at its own quoted price
+            // and its own target, which is what it derived from before any clamp here.
+            let client_self_consistent_sats = stable_channels::stable::trade_backing_sats(
+                their_sats,
+                requested_expected,
+                quote_price,
             );
-        } else {
-            stable_channels::stable::apply_trade(&mut accepted, new_expected, btc_price);
+            if client_self_consistent_sats.abs_diff(client_backing_sats)
+                > TRADE_ALLOCATION_CHECKSUM_TOLERANCE_SATS
+            {
+                stable_channels::audit::audit_event(
+                    "TRADE_ALLOCATION_CHECKSUM_MISMATCH",
+                    serde_json::json!({
+                        "channel_id": chan.channel_id,
+                        "user_channel_id": chan.user_channel_id,
+                        "trade_id": trade_id,
+                        "client_backing_sats": client_backing_sats,
+                        "client_self_consistent_sats": client_self_consistent_sats,
+                        "lsp_backing_sats": accepted.backing_sats,
+                        "client_quote_price": quote_price,
+                        "lsp_price": btc_price,
+                    }),
+                );
+            }
         }
 
         let sync_version = match self.db.candidate_sync_version(&chan.user_channel_id) {
@@ -4321,101 +4397,205 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trade_applies_signed_allocation_without_lsp_repricing() {
+    async fn trade_reprices_client_allocation_and_creates_no_drift() {
         let mut mgr = make_manager();
-        let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_DECIMAL,
-            COUNTERPARTY_HEX,
-            100_000,
-            50_000_000,
-            true,
-        )]);
+        let uid = 189476124653200987495269098788434301048u128;
+        // Half-pegged: 50_000 of the user's 100_000 sats back $50 at the LSP's $100_000 price.
         seed_channel(
-            &mut mgr,
-            189476124653200987495269098788434301048u128,
-            COUNTERPARTY_HEX,
-            CHANNEL_ID_HEX,
-            0.0,
-            0,
-            50_000,
-            50_000,
-            100_000.0,
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            50.0, 50_000, 50_000, 100_000, 100_000.0,
         );
-
-        // A quote at the one-percent boundary remains valid. At the wallet quote this is exactly
-        // 49,500 backing sats; re-deriving at the LSP's price would produce a different allocation.
+        // 200k channel: 100k LSP-side payout liquidity, 100k user-side.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+        // Peg the rest at +0.04% (inside the consent bound): 99_960 sats is $100 at the wallet's quote but $99.96 at the LSP's price.
         let env = trade_envelope_with_allocation(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_DECIMAL,
-            49.995,
-            101_000.0,
-            49_500,
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.0, 100_040.0, 99_960,
         );
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
-        assert_eq!(mgr.stable_channels[0].backing_sats, 49_500);
-        assert_eq!(mgr.stable_channels[0].native_sats, 500);
-        let sends = fake.sends.lock().unwrap();
-        assert_eq!(sends.len(), 1, "accepted allocation must be synced back");
-        let raw = std::str::from_utf8(sends[0].custom_tlvs[0].value.as_ref()).unwrap();
-        let sync = crate::messages::parse_envelope(raw).unwrap();
-        let payload: serde_json::Value = serde_json::from_str(&sync.payload).unwrap();
-        assert_eq!(payload["backing_sats"], 49_500);
+        // Booked at the LSP's own price, not stored as sent.
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 100.0);
+        assert_eq!(
+            mgr.stable_channels[0].backing_sats, 100_000,
+            "LSP must derive the allocation at its own price",
+        );
+        assert_eq!(mgr.stable_channels[0].native_sats, 0);
+
+        // Drift-neutral by construction: a trade alone can never move funds.
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        let stability = stability_payment_sats(&fake);
+        assert!(stability.is_empty(), "a trade must not trigger a payout, got {:?}", stability);
+    }
+
+    #[test]
+    fn capacity_clamp_leaves_no_payable_residue() {
+        // The clamp is what keeps a trade drift-neutral, so the quote bound is free to admit honest
+        // feed spread. Walk position sizes: a target booked at the ceiling must never be payable.
+        for their_sats in [1_000u64, 50_000, 500_000, 5_000_000] {
+            let price = 100_000.0;
+            let receiver_usd = their_sats as f64 / 100_000_000.0 * price;
+            let booked = receiver_usd
+                * (1.0 + stable_channels::constants::MAX_PEER_VALUATION_SPREAD_PERCENT / 100.0);
+            let booked = booked.min(receiver_usd);
+            let backing = stable_channels::stable::trade_backing_sats(their_sats, booked, price);
+            let value = backing as f64 / 100_000_000.0 * price;
+            let pct = (((value - booked) / booked) * 100.0).abs();
+            let usd = (value - booked).abs();
+            assert!(
+                pct < stable_channels::constants::STABILITY_THRESHOLD_PERCENT
+                    || usd < stable_channels::constants::STABILITY_THRESHOLD_USD,
+                "clamped trade booked payable drift at {their_sats} sats: {pct}% / ${usd}",
+            );
+        }
     }
 
     #[tokio::test]
-    async fn trade_rejects_quote_over_one_percent_from_lsp_price() {
+    async fn trade_rejects_quote_beyond_consent_bound() {
         let mut mgr = make_manager();
-        let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_DECIMAL,
-            COUNTERPARTY_HEX,
-            100_000,
-            50_000_000,
-            true,
-        )]);
+        let uid = 189476124653200987495269098788434301048u128;
         seed_channel(
-            &mut mgr,
-            189476124653200987495269098788434301048u128,
-            COUNTERPARTY_HEX,
-            CHANNEL_ID_HEX,
-            0.0,
-            0,
-            50_000,
-            50_000,
-            100_000.0,
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            50.0, 50_000, 50_000, 100_000, 100_000.0,
         );
-
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+        // +0.6% is outside the consent bound; the allocation is self-consistent at that quote.
         let env = trade_envelope_with_allocation(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_DECIMAL,
-            50.0445,
-            101_100.0,
-            49_500,
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.0, 100_600.0, 99_403,
         );
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
-        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
-        assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0, "rejected trade must not apply");
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
         let (response_msat, rejection) = rejection_from_only_send(&fake);
         assert_eq!(response_msat, 1);
-        assert_eq!(
-            rejection.reason_code,
-            TradeRejectionReason::QuoteOutOfRange
+        assert_eq!(rejection.reason_code, TradeRejectionReason::QuoteOutOfRange);
+    }
+
+    #[tokio::test]
+    async fn trade_rejects_no_op_target() {
+        let mut mgr = make_manager();
+        let uid = 189476124653200987495269098788434301048u128;
+        // At par: 100_000 sats back $100 at $100_000.
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            100.0, 100_000, 0, 100_000, 100_000.0,
         );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+        // Same target, so nothing changes — the historical zero-cost repeat trigger.
+        let env = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.0, 100_000.0, 100_000,
+        );
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 100.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 100_000);
+        let (response_msat, rejection) = rejection_from_only_send(&fake);
+        assert_eq!(response_msat, 1);
+        assert_eq!(rejection.reason_code, TradeRejectionReason::NoOpTrade);
+    }
+
+    #[test]
+    fn one_cent_trades_measure_as_a_move_and_a_repeat_does_not() {
+        // A one-cent buy: 10.61 - 10.60 is 0.009999999999999787 in f64, which a raw < 0.01 test rejects.
+        assert_eq!(trade_target_move_cents(10.61, 10.60), 1);
+        // A one-cent sell is netted of its 1% fee, so it only ever moves the target by 0.0099.
+        assert_eq!(trade_target_move_cents(10.61, 10.61 + 0.0099), 1);
+        // An unchanged target is the no-op this guard exists for.
+        assert_eq!(trade_target_move_cents(100.0, 100.0), 0);
+        assert_eq!(trade_target_move_cents(10.61, 10.6130), 0);
+    }
+
+    #[tokio::test]
+    async fn trade_accepts_a_one_cent_target_move() {
+        let mut mgr = make_manager();
+        let uid = 189476124653200987495269098788434301048u128;
+        // $10.61 of a 100_000-sat balance is 10_610 sats at $100_000.
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            10.61, 10_610, 89_390, 100_000, 100_000.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+        // The smallest real buy the wallet can send, and the one f64 subtraction mis-measures.
+        let env = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.60, 100_000.0, 10_600,
+        );
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert_eq!(
+            mgr.stable_channels[0].expected_usd.0, 10.60,
+            "a one-cent trade must not be rejected as a no-op",
+        );
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_600);
+        assert_eq!(mgr.stable_channels[0].native_sats, 89_400);
+    }
+
+    #[tokio::test]
+    async fn trade_audits_a_client_allocation_that_contradicts_its_own_quote() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let uid = 189476124653200987495269098788434301048u128;
+
+        // Self-consistent: 999_600 sats is $1000 at $100_040; the $1000 scale keeps the residue clear of Task 3's future dust-snap threshold.
+        let mut mgr = make_manager();
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            500.0, 500_000, 500_000, 1_000_000, 100_000.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            2_000_000, 1_000_000_000, true,
+        )]);
+        let consistent = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 1000.0, 100_040.0, 999_600,
+        );
+        stable_channels::audit::enable_test_capture();
+        handle_trade_with_valid_fee(&mut mgr, &consistent, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(
+            !events.iter().any(|(e, _)| e == "TRADE_ALLOCATION_CHECKSUM_MISMATCH"),
+            "feed spread alone must never be flagged",
+        );
+        assert_eq!(mgr.stable_channels[0].backing_sats, 1_000_000);
+
+        // Contradicts itself: 900_000 sats is not $1000 at $100_040 under any rounding.
+        let mut mgr = make_manager();
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            500.0, 500_000, 500_000, 1_000_000, 100_000.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            2_000_000, 1_000_000_000, true,
+        )]);
+        let inconsistent = trade_envelope_with_allocation(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 1000.0, 100_040.0, 900_000,
+        );
+        stable_channels::audit::enable_test_capture();
+        handle_trade_with_valid_fee(&mut mgr, &inconsistent, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(
+            events.iter().any(|(e, _)| e == "TRADE_ALLOCATION_CHECKSUM_MISMATCH"),
+            "a client disagreeing with its own quote must be audited",
+        );
+        // Audited, never gated: the trade still applies, booked at the LSP's own price.
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 1000.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 1_000_000);
     }
 
     #[tokio::test]
@@ -4441,8 +4621,7 @@ mod tests {
             100_000.0,
         );
 
-        // The wallet signed against a receiver balance five sats below the LSP's post-settlement
-        // observation. The pair is still fully collateralized and differs by only half a cent.
+        // The wallet's self-consistent allocation is five sats off the LSP's own derivation, which the LSP ignores.
         let env = trade_envelope_with_allocation(
             CHANNEL_ID_HEX,
             USER_CHANNEL_ID_DECIMAL,
@@ -4458,13 +4637,15 @@ mod tests {
         )
         .await;
 
+        // Booked at the LSP's own derivation (all 50_000 receiver sats), not the client's 49_995.
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
-        assert_eq!(mgr.stable_channels[0].backing_sats, 49_995);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
+        assert_eq!(mgr.stable_channels[0].native_sats, 0);
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn trade_rejects_allocation_not_derived_from_signed_quote() {
+    async fn trade_reprices_allocation_not_derived_from_signed_quote() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX,
@@ -4489,7 +4670,7 @@ mod tests {
         let env = trade_envelope_with_allocation(
             CHANNEL_ID_HEX,
             USER_CHANNEL_ID_DECIMAL,
-            49.95,
+            49.5,
             100_000.0,
             49_000,
         );
@@ -4501,13 +4682,17 @@ mod tests {
         )
         .await;
 
-        assert_eq!(mgr.stable_channels[0].expected_usd.0, 5.0);
-        assert_eq!(mgr.stable_channels[0].backing_sats, 5_000);
-        let (response_msat, rejection) = rejection_from_only_send(&fake);
-        assert_eq!(response_msat, 1);
+        // A mismatched client allocation is inert: the LSP still applies the trade at its own derivation.
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 49.5);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 49_500);
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let raw = std::str::from_utf8(sends[0].custom_tlvs[0].value.as_ref()).unwrap();
+        let sync = crate::messages::parse_envelope(raw).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&sync.payload).unwrap();
         assert_eq!(
-            rejection.reason_code,
-            TradeRejectionReason::InvalidAllocation
+            payload["type"], stable_channels::constants::SYNC_MESSAGE_TYPE,
+            "a mismatched allocation is audited, not rejected"
         );
     }
 
@@ -4596,7 +4781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trade_admits_at_balance_boundary_within_epsilon() {
+    async fn trade_over_capacity_books_the_backable_target() {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
@@ -4604,7 +4789,7 @@ mod tests {
         )]);
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
 
-        // A wallet-push lands at receiver_usd plus a sub-epsilon overshoot (independent f64 paths).
+        // A peer valuing the same sats higher asks past this side's capacity: admitted, not funded.
         let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD / 2.0;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
         handle_trade_with_valid_fee(
@@ -4616,10 +4801,45 @@ mod tests {
         .await;
 
         assert!(
-            (mgr.stable_channels[0].expected_usd.0 - target).abs() < 1e-6,
-            "a target within epsilon of the balance must be admitted, got {}",
+            (mgr.stable_channels[0].expected_usd.0 - 50.0).abs() < 1e-6,
+            "target must be clamped to backable capacity, got {}",
             mgr.stable_channels[0].expected_usd.0
         );
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000, "whole side backs the peg");
+    }
+
+    #[tokio::test]
+    async fn trade_over_capacity_leaves_nothing_for_the_tick_to_pay() {
+        // The drain was: ask past capacity, let the tick settle the gap, repeat on the larger side.
+        // One request clamps and one is past the spread ceiling entirely; neither may draw a payout.
+        for target in [
+            50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD * 0.8,
+            50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD,
+        ] {
+            let mut mgr = make_manager();
+            let fake = FakeLdkServer::new(vec![make_channel(
+                CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            )]);
+            seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+
+            let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
+            handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+            assert!(
+                mgr.stable_channels[0].expected_usd.0 <= 50.0,
+                "booked target {} must not exceed backable capacity",
+                mgr.stable_channels[0].expected_usd.0
+            );
+
+            let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+            ));
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+            assert!(
+                stability_payment_sats(&fake).is_empty(),
+                "a ${target} request must not draw a payout, got {:?}",
+                stability_payment_sats(&fake)
+            );
+        }
     }
 
     #[tokio::test]
@@ -5152,6 +5372,17 @@ mod tests {
         }
     }
 
+    /// Sat amounts of the stability payments in `fake.sends`, ignoring control keysends.
+    fn stability_payment_sats(fake: &FakeLdkServer) -> Vec<u64> {
+        fake.sends.lock().unwrap().iter()
+            .filter(|s| s.custom_tlvs.iter().any(|t| {
+                t.type_num == stable_channels::constants::STABLE_CHANNEL_TLV_TYPE
+                    && t.value.as_ref() == &[1u8][..]
+            }))
+            .map(|s| s.amount_msat / 1000)
+            .collect()
+    }
+
     #[tokio::test]
     async fn incoming_stability_payment_resets_backing_and_preserves_native() {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
@@ -5189,6 +5420,37 @@ mod tests {
         // Native must absorb only rounding, never the settlement: 49_091 - 9_090 = 40_001.
         assert_eq!(sc.native_sats, 40_001, "native sats must be preserved across the settlement");
         assert!(sc.backing_sats <= sc.stable_receiver_btc.sats, "backing may never exceed live balance");
+    }
+
+    #[tokio::test]
+    async fn incoming_stability_reset_absorbs_residue() {
+        let mut mgr = make_manager();
+        let uid = 189476124653200987495269098788434301048u128;
+        // Fully pegged after absorption: 100_040 sats back a $100.00 target booked slightly below par, leaving a 40-sat ($0.04) feed-spread residue at equilibrium.
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            100.0, 100_040, 0, 100_040, 100_000.0,
+        );
+        // The user paid the LSP 40 sats, so their side is now 100_000.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+
+        mgr.reconcile_incoming_stability(
+            Some("payment-1"),
+            Some(40 * 1000),
+            &fake as &dyn LdkServerCalls,
+            100_040.0,
+        )
+        .await;
+
+        // Equilibrium is 99_960 sats, leaving 40 sats ($0.04) of residue — absorb it.
+        assert_eq!(
+            mgr.stable_channels[0].backing_sats, 100_000,
+            "settlement reset must absorb sub-threshold residue, not recreate it",
+        );
+        assert_eq!(mgr.stable_channels[0].native_sats, 0);
     }
 
     #[tokio::test]
@@ -5271,4 +5533,53 @@ mod tests {
             "the miss must be audited with the candidate count"
         );
     }
+
+    #[tokio::test]
+    async fn legacy_trade_without_quote_still_books_at_lsp_price() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let uid = 189476124653200987495269098788434301048u128;
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            50.0, 50_000, 50_000, 100_000, 100_000.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+        // Android's payload shape: expected_usd only, no quote_price/backing_sats/ts.
+        let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.0);
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 100.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 100_000);
+        assert_eq!(mgr.stable_channels[0].native_sats, 0);
+    }
+
+    #[tokio::test]
+    async fn allocation_divergence_within_feed_spread_moves_no_funds() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let uid = 189476124653200987495269098788434301048u128;
+        // LSP holds all 100_000 sats behind $99.96 at $100_000; a wallet reading $100_040 derives 99_920 — 80 sats apart.
+        seed_channel(
+            &mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX,
+            99.96, 100_000, 0, 100_000, 100_000.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            200_000, 100_000_000, true,
+        )]);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+
+        let stability = stability_payment_sats(&fake);
+        assert!(
+            stability.is_empty(),
+            "feed-spread divergence must stay inside the deadband, got {:?}", stability,
+        );
+    }
 }
+

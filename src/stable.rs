@@ -303,9 +303,10 @@ pub fn reconcile_incoming(sc: &mut StableChannel) {
     recompute_native(sc);
 }
 
-/// Stable/native allocation residue smaller than one cent is not useful to the user and cannot be
-/// entered precisely in the two-decimal trade UI. Absorb it into the stable side so a full
-/// BTC-to-USD trade produces an exact all-stable allocation.
+/// Stable/native allocation residue too small to be a balance the user cares about is absorbed into
+/// the stable side, so a full BTC-to-USD trade produces an exact all-stable allocation. The bound is
+/// a fraction of the stability deadband: large enough to swallow price-feed spread between peers,
+/// small enough that absorbing it cannot consume meaningful headroom before a payout fires.
 pub fn normalize_backing_sats(
     receiver_sats: u64,
     backing_sats: u64,
@@ -321,9 +322,10 @@ pub fn normalize_backing_sats(
         return backing_sats;
     }
 
+    let absorb_below_usd = crate::constants::STABILITY_THRESHOLD_USD / 5.0;
     let native_sats = receiver_sats - backing_sats;
     let native_usd = native_sats as f64 / SATS_IN_BTC as f64 * price;
-    if native_usd < 0.01 {
+    if native_usd < absorb_below_usd {
         receiver_sats
     } else {
         backing_sats
@@ -332,8 +334,9 @@ pub fn normalize_backing_sats(
 
 /// Derive the stable backing allocation for a trade at the signed quote price.
 ///
-/// The result is clamped to the receiver's post-settlement balance. Sub-cent native residue is
-/// absorbed into the stable side so a full BTC-to-USD trade has no floating native remainder.
+/// The result is clamped to the receiver's post-settlement balance. Native residue worth less than
+/// `STABILITY_THRESHOLD_USD / 5` is absorbed into the stable side so a full BTC-to-USD trade has no
+/// floating native remainder; see `normalize_backing_sats` for why the bound tracks the deadband.
 pub fn trade_backing_sats(
     receiver_sats: u64,
     new_expected_usd: f64,
@@ -357,11 +360,12 @@ pub fn trade_backing_sats(
     )
 }
 
-/// Apply a previously agreed trade allocation without repricing it.
+/// Apply an already-derived trade allocation without repricing it.
 ///
-/// `backing_sats` is part of the signed trade intent. A peer may validate that intent against its
-/// own price and live LDK balance first, but once accepted it must not derive a different allocation
-/// from a later price snapshot.
+/// `expected_usd` is the agreed contract; `backing_sats` is not. Each peer derives its own
+/// allocation from its own price and its own live LDK balance, so the two books legitimately differ
+/// by feed spread and neither may adopt the other's number. This applies the allocation the caller
+/// has already derived — it is not a licence to book a peer-supplied one.
 pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, backing_sats: u64) {
     sc.expected_usd = USD::from_f64(new_expected_usd);
     sc.backing_sats = backing_sats;
@@ -1249,17 +1253,18 @@ mod tests {
 
     #[test]
     fn signed_trade_allocation_is_not_repriced_by_the_applying_peer() {
+        // 100 sats ($0.10) is a real native residue above the absorption bound, so it survives to prove no repricing happened.
         let receiver_sats = 50_000;
         let quote_price = 100_000.0;
-        let backing_sats = trade_backing_sats(receiver_sats, 49.95, quote_price);
-        assert_eq!(backing_sats, 49_950);
+        let backing_sats = trade_backing_sats(receiver_sats, 49.9, quote_price);
+        assert_eq!(backing_sats, 49_900);
 
         let mut sc = test_sc(0.0, 100_500.0, receiver_sats);
-        apply_trade_allocation(&mut sc, 49.95, backing_sats);
+        apply_trade_allocation(&mut sc, 49.9, backing_sats);
 
-        assert_eq!(sc.expected_usd.0, 49.95);
-        assert_eq!(sc.backing_sats, 49_950);
-        assert_eq!(sc.native_sats, 50);
+        assert_eq!(sc.expected_usd.0, 49.9);
+        assert_eq!(sc.backing_sats, 49_900);
+        assert_eq!(sc.native_sats, 100);
     }
 
     #[test]
@@ -1271,6 +1276,26 @@ mod tests {
         apply_trade_allocation(&mut sc, 38.055025828575, backing_sats);
         assert_eq!(sc.backing_sats, 57_444);
         assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn native_residue_below_deadband_fraction_is_absorbed() {
+        // 40 sats of residue is $0.04 at $100k — feed-spread noise, not a balance the user wants.
+        assert_eq!(
+            normalize_backing_sats(100_000, 99_960, 100.0, 100_000.0),
+            100_000,
+            "sub-threshold residue must be absorbed into the stable side",
+        );
+    }
+
+    #[test]
+    fn native_residue_above_deadband_fraction_is_kept() {
+        // 200 sats is $0.20 — a real native balance, must not be silently pegged.
+        assert_eq!(
+            normalize_backing_sats(100_000, 99_800, 100.0, 100_000.0),
+            99_800,
+            "a meaningful native balance must be preserved",
+        );
     }
 
     // ================================================================
