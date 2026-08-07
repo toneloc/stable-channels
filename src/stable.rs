@@ -6,6 +6,7 @@ use crate::constants::{
 use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
+use rand::RngCore;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use ureq::Agent;
@@ -332,11 +333,10 @@ pub fn normalize_backing_sats(
     }
 }
 
-/// Derive the stable backing allocation for a trade at the signed quote price.
+/// Derive an initial stable backing allocation at a local price.
 ///
-/// The result is clamped to the receiver's post-settlement balance. Native residue worth less than
-/// `STABILITY_THRESHOLD_USD / 5` is absorbed into the stable side so a full BTC-to-USD trade has no
-/// floating native remainder; see `normalize_backing_sats` for why the bound tracks the deadband.
+/// This is retained for initialization and normalization tests. Live trade processing uses
+/// `trade_backing_after_delta` so a trade cannot reprice the whole existing peg or erase drift.
 pub fn trade_backing_sats(
     receiver_sats: u64,
     new_expected_usd: f64,
@@ -360,6 +360,50 @@ pub fn trade_backing_sats(
     )
 }
 
+/// Apply only a trade's target delta to an existing stable allocation.
+///
+/// Repricing the entire target at trade time erases any pre-existing price drift: a one-cent trade
+/// can otherwise turn a large outstanding stability obligation into native sats. This helper
+/// preserves that drift and converts only the USD amount the trade actually changes.
+pub fn trade_backing_after_delta(
+    receiver_sats: u64,
+    current_backing_sats: u64,
+    current_expected_usd: f64,
+    new_expected_usd: f64,
+    price: f64,
+) -> Option<u64> {
+    if !current_expected_usd.is_finite()
+        || current_expected_usd < 0.0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+    {
+        return None;
+    }
+    if new_expected_usd < 0.01 {
+        return Some(0);
+    }
+
+    let delta_usd = (new_expected_usd - current_expected_usd).abs();
+    let delta_sats_f = delta_usd / price * SATS_IN_BTC as f64;
+    if !delta_sats_f.is_finite() || delta_sats_f > u64::MAX as f64 {
+        return None;
+    }
+    let nearest_sat = delta_sats_f.round();
+    let delta_sats = if (delta_sats_f - nearest_sat).abs() < 0.000_000_001 {
+        nearest_sat as u64
+    } else {
+        delta_sats_f.floor() as u64
+    };
+    let backing = if new_expected_usd > current_expected_usd {
+        current_backing_sats.checked_add(delta_sats)?
+    } else {
+        current_backing_sats.checked_sub(delta_sats)?
+    };
+    (backing <= receiver_sats).then_some(backing)
+}
+
 /// Apply an already-derived trade allocation without repricing it.
 ///
 /// `expected_usd` is the agreed contract; `backing_sats` is not. Each peer derives its own
@@ -373,25 +417,20 @@ pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, bac
     recompute_native(sc);
 }
 
-/// Apply a trade — set new expected_usd and recalculate backing_sats + native_sats.
+/// Apply a trade by converting only its target delta at this peer's local price.
 ///
-/// Used after buy/sell trades and when the LSP processes a trade message.
-/// Sets `expected_usd` to the new value and recalculates `backing_sats`
-/// at the current price. Updates `native_sats` (the invariant that stays
-/// fixed between stability payments).
+/// Existing backing is deliberately not repriced: any stability debt that existed before the trade
+/// remains visible. Invalid or over-capacity deltas leave the allocation unchanged.
 pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
-    sc.expected_usd = USD::from_f64(new_expected_usd);
-    if price > 0.0 {
-        let receiver_sats = sc.stable_receiver_btc.sats;
-        sc.backing_sats = if receiver_sats > 0 {
-            trade_backing_sats(receiver_sats, new_expected_usd, price)
-        } else {
-            (new_expected_usd / price * SATS_IN_BTC as f64) as u64
-        };
+    if let Some(backing_sats) = trade_backing_after_delta(
+        sc.stable_receiver_btc.sats,
+        sc.backing_sats,
+        sc.expected_usd.0,
+        new_expected_usd,
+        price,
+    ) {
+        apply_trade_allocation(sc, new_expected_usd, backing_sats);
     }
-    // native_sats is everything NOT backing the stable position
-    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
-    recompute_native(sc);
 }
 
 /// Get the current BTC/USD price, preferring cached value when available
@@ -520,6 +559,7 @@ pub fn update_balances<'update_balance_lifetime>(
 /// Information about a stability payment that was sent
 #[derive(Debug, Clone)]
 pub struct StabilityPaymentInfo {
+    pub settlement_id: String,
     pub payment_id: String,
     pub amount_msat: u64,
     pub counterparty: String,
@@ -539,6 +579,17 @@ pub fn check_stability(
     node: &Node,
     sc: &mut StableChannel,
     price: f64,
+) -> Option<StabilityPaymentInfo> {
+    check_stability_with_version(node, sc, price, 0)
+}
+
+/// Version-aware production entry point. The version is correlation metadata only: an exact
+/// received-sat delta remains valid if a later allocation update wins the race.
+pub fn check_stability_with_version(
+    node: &Node,
+    sc: &mut StableChannel,
+    price: f64,
+    allocation_version: u64,
 ) -> Option<StabilityPaymentInfo> {
     if !price.is_finite() || price <= 0.0 {
         audit_event(
@@ -719,27 +770,57 @@ pub fn check_stability(
         return None;
     }
 
-    let amt = USD::to_msats(dollars_from_par, sc.latest_price);
-    let marker = ldk_node::CustomTlvRecord {
+    // Stable allocation is sat-denominated, so send whole sats and sign that exact amount.
+    let amt = (USD::to_msats(dollars_from_par, sc.latest_price) / 1000) * 1000;
+    if amt == 0 {
+        return None;
+    }
+    let mut settlement_bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut settlement_bytes);
+    let settlement_id = hex::encode(settlement_bytes);
+    let payload = json!({
+        "type": "STABILITY_PAYMENT_V1",
+        "settlement_id": &settlement_id,
+        "channel_id": sc.channel_id.to_string(),
+        "user_channel_id": format!("{}", sc.user_channel_id),
+        "amount_msat": amt,
+        "allocation_version": allocation_version,
+        "ts": now as u64,
+    })
+    .to_string();
+    let signature = node.sign_message(payload.as_bytes());
+    let envelope = json!({
+        "payload": payload,
+        "signature": signature,
+    })
+    .to_string();
+    let legacy_marker = ldk_node::CustomTlvRecord {
         type_num: crate::constants::STABLE_CHANNEL_TLV_TYPE,
         value: vec![1u8],
     };
-    match node.spontaneous_payment().send_with_custom_tlvs(amt, sc.counterparty, None, vec![marker]) {
+    let signed_payment = ldk_node::CustomTlvRecord {
+        type_num: crate::constants::SIGNED_STABILITY_TLV_TYPE,
+        value: envelope.into_bytes(),
+    };
+    match node.spontaneous_payment().send_with_custom_tlvs(
+        amt,
+        sc.counterparty,
+        None,
+        vec![legacy_marker, signed_payment],
+    ) {
         Ok(payment_id) => {
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // Reset backing_sats to equilibrium at current price.
-            // This accounts the payment against the stable pool, not native BTC.
-            // Don't recompute native_sats here — receiver balance hasn't updated yet
-            // (HTLC still in flight). Native will be recomputed on next balance refresh.
+            // Apply only the sats sent. Any residual price drift remains outstanding.
             let previous_backing = sc.backing_sats;
-            let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
+            let new_backing = previous_backing.saturating_sub(amt / 1000);
             sc.backing_sats = new_backing;
 
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
             Some(StabilityPaymentInfo {
+                settlement_id,
                 payment_id: payment_id_str,
                 amount_msat: amt,
                 counterparty: counterparty_str,
@@ -1198,19 +1279,17 @@ mod tests {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         let backing_before = sc.backing_sats;
         apply_trade(&mut sc, 700.0, 0.0);
-        assert_eq!(sc.expected_usd.0, 700.0); // usd updated
-        assert_eq!(sc.backing_sats, backing_before); // backing unchanged
+        assert_eq!(sc.expected_usd.0, 500.0);
+        assert_eq!(sc.backing_sats, backing_before);
     }
 
     #[test]
-    fn trade_at_different_price() {
-        // Same $500 stable, but price doubled to $200k
-        // backing should be half the sats
+    fn no_op_trade_cannot_reprice_existing_backing() {
+        // Re-submitting the same target at a new price must not erase its outstanding drift.
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
+        let backing_before = sc.backing_sats;
         apply_trade(&mut sc, 500.0, 200_000.0);
-        let expected_backing = (500.0 / 200_000.0 * 100_000_000.0) as u64; // 250k
-        assert_eq!(sc.backing_sats, expected_backing);
-        assert_eq!(expected_backing, 250_000);
+        assert_eq!(sc.backing_sats, backing_before);
     }
 
     #[test]
@@ -1223,13 +1302,13 @@ mod tests {
     }
 
     #[test]
-    fn trade_full_balance_absorbs_sub_cent_native_dust() {
+    fn trade_preserves_sub_cent_native_dust_without_clamping() {
         let mut sc = test_sc(0.0, 66_250.21, 57_444);
         apply_trade(&mut sc, 38.055025828575, 66_250.21);
 
-        assert_eq!(sc.backing_sats, 57_444);
-        assert_eq!(sc.native_sats, 0);
-        assert_eq!(sc.native_channel_btc.sats, 0);
+        assert_eq!(sc.backing_sats, 57_441);
+        assert_eq!(sc.native_sats, 3);
+        assert_eq!(sc.native_channel_btc.sats, 3);
     }
 
     #[test]
@@ -1243,12 +1322,27 @@ mod tests {
     }
 
     #[test]
-    fn trade_backing_never_exceeds_live_balance() {
+    fn trade_over_live_balance_is_not_partially_applied() {
         let mut sc = test_sc(0.0, 100_000.0, 95_000);
         apply_trade(&mut sc, 100.0, 100_000.0);
 
-        assert_eq!(sc.backing_sats, 95_000);
-        assert_eq!(sc.native_sats, 0);
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+        assert_eq!(sc.native_sats, 95_000);
+    }
+
+    #[test]
+    fn tiny_trade_preserves_preexisting_stability_debt() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+        assert_eq!(sc.backing_sats, 100_000);
+
+        // At $110k the original backing is worth $110 and owes a stability payment. A one-cent
+        // target increase adds only that one-cent delta; it must not re-anchor all $100.01.
+        apply_trade(&mut sc, 100.01, 110_000.0);
+
+        assert_eq!(sc.backing_sats, 100_009);
+        let value = sc.backing_sats as f64 / SATS_IN_BTC as f64 * 110_000.0;
+        assert!(value - sc.expected_usd.0 > 9.99);
     }
 
     #[test]

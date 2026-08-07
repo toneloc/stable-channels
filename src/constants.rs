@@ -8,6 +8,11 @@ pub const SATS_IN_BTC: u64 = 100_000_000;
 /// Custom TLV type for stable channel messages
 pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 
+/// Signed stability-payment metadata. Payments also carry the legacy `[1]` record above so
+/// unchanged mobile wallets can categorize the transfer; upgraded peers always prefer this
+/// authenticated record and apply only the amount actually received.
+pub const SIGNED_STABILITY_TLV_TYPE: u64 = 13377333;
+
 /// Trade message type identifier
 pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
@@ -85,15 +90,12 @@ pub const MAX_RISK_LEVEL: i32 = 100;
 pub const STABILITY_THRESHOLD_PERCENT: f64 = 0.1; // 0.1% from par
 pub const STABILITY_THRESHOLD_USD: f64 = 0.25; // minimum $0.25 drift to trigger payment
 
-/// How far the two peers may legitimately disagree about what one channel side is worth.
+/// Maximum honest price-feed spread between peers.
 ///
-/// Each peer prices independently (median of the same feeds, refreshed every few seconds) and reads
-/// its own LDK balance view, so the same sats value out slightly differently on each side. This
-/// bounds a trade's quoted price against the LSP's own, how far above its valuation of the peer's
-/// balance a target may be before the request is treated as a mistake rather than spread, and how
-/// far below the request a wallet will accept the LSP's answer. It is a plausibility bound only —
-/// no accounting reads across it, so it does not need to sit inside the stability deadband.
-pub const MAX_PEER_VALUATION_SPREAD_PERCENT: f64 = 0.5;
+/// Each peer prices independently, so a small difference is expected. Keep this strictly inside
+/// the percentage stability deadband: independently derived backing must not make one peer see a
+/// payable drift immediately after their feeds converge.
+pub const MAX_PEER_VALUATION_SPREAD_PERCENT: f64 = 0.05;
 
 /// Minimum seconds between stability payments on the same channel (cooldown)
 pub const STABILITY_PAYMENT_COOLDOWN_SECS: u64 = 120;

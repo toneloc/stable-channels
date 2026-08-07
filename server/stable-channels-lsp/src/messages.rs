@@ -55,6 +55,23 @@ pub struct TradeRejectedPayload {
     pub ts: u64,
 }
 
+/// Signed metadata carried by the stability-payment keysend itself.
+///
+/// The Lightning event's amount remains authoritative. `amount_msat` is signed only so the
+/// receiver can prove that the payer intended this exact transfer to alter stable bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StabilityPaymentPayload {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub settlement_id: String,
+    pub channel_id: String,
+    /// The sender's node-local channel id. It is audit metadata, not a cross-peer channel key.
+    pub user_channel_id: String,
+    pub amount_msat: u64,
+    pub allocation_version: u64,
+    pub ts: u64,
+}
+
 /// RegisterPush signed body. Field declaration order IS the canonical serialization order;
 /// the wallet must serialize an identical struct so the daemon can reconstruct the signed bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,12 +150,37 @@ pub fn build_trade_rejected_payload(
     .unwrap_or_default()
 }
 
+pub fn build_stability_payment_payload(
+    settlement_id: &str,
+    channel_id: &str,
+    user_channel_id: &str,
+    amount_msat: u64,
+    allocation_version: u64,
+    ts: u64,
+) -> String {
+    serde_json::to_string(&StabilityPaymentPayload {
+        kind: "STABILITY_PAYMENT_V1".to_owned(),
+        settlement_id: settlement_id.to_owned(),
+        channel_id: channel_id.to_owned(),
+        user_channel_id: user_channel_id.to_owned(),
+        amount_msat,
+        allocation_version,
+        ts,
+    })
+    .unwrap_or_default()
+}
+
 /// A v1 trade id is deliberately strict so alternative spellings cannot bypass deduplication.
 pub fn is_valid_trade_id(trade_id: &str) -> bool {
     trade_id.len() == 64
         && trade_id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Settlement ids use the same canonical 256-bit lowercase-hex representation as trade ids.
+pub fn is_valid_settlement_id(settlement_id: &str) -> bool {
+    is_valid_trade_id(settlement_id)
 }
 
 /// Wrap a signed payload string + signature into the envelope JSON string.
@@ -154,6 +196,10 @@ pub fn parse_envelope(raw: &str) -> Option<SignedEnvelope> {
 /// Parse the inner TRADE payload from the envelope's payload string.
 pub fn parse_trade_payload(payload: &str) -> Option<TradePayload> {
     serde_json::from_str::<TradePayload>(payload).ok()
+}
+
+pub fn parse_stability_payment_payload(payload: &str) -> Option<StabilityPaymentPayload> {
+    serde_json::from_str::<StabilityPaymentPayload>(payload).ok()
 }
 
 /// Canonical RegisterPush signed bytes. Must match the wallet's serialization exactly.
@@ -255,6 +301,26 @@ mod tests {
             value["trade_id"],
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
+    }
+
+    #[test]
+    fn stability_payment_payload_round_trips() {
+        let settlement_id =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let payload = build_stability_payment_payload(
+            settlement_id,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "7",
+            42_000,
+            9,
+            123,
+        );
+        let parsed = parse_stability_payment_payload(&payload).unwrap();
+        assert_eq!(parsed.kind, "STABILITY_PAYMENT_V1");
+        assert_eq!(parsed.settlement_id, settlement_id);
+        assert_eq!(parsed.amount_msat, 42_000);
+        assert_eq!(parsed.allocation_version, 9);
+        assert_eq!(parsed.ts, 123);
     }
 
     #[test]

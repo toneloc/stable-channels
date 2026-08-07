@@ -200,6 +200,7 @@ impl Database {
                 new_expected_usd REAL NOT NULL DEFAULT 0.0,
                 new_backing_sats INTEGER,
                 payment_id TEXT,
+                settlement_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )",
@@ -355,6 +356,12 @@ impl Database {
             "ALTER TABLE payments ADD COLUMN stable_reconciled INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        let _ = conn.execute("ALTER TABLE payments ADD COLUMN settlement_id TEXT", []);
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_settlement_id
+             ON payments(settlement_id) WHERE settlement_id IS NOT NULL",
+            [],
+        )?;
 
         // Create index for faster payment queries
         conn.execute(
@@ -423,7 +430,7 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN user_channel_id TEXT",
             [],
         ); // Ignore error if column already exists
-        // Outbound stability sends optimistically move backing to equilibrium. Persist the exact
+        // Outbound stability sends optimistically move backing by the exact sent sats. Persist the
         // transition so a later asynchronous PaymentFailed can undo it without guessing or
         // overwriting a newer trade/sync allocation.
         let _ = conn.execute(
@@ -450,6 +457,15 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN settlement_id TEXT",
+            [],
+        );
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_payments_settlement_id
+             ON settlement_payments(settlement_id) WHERE settlement_id IS NOT NULL",
+            [],
+        )?;
 
         // Authenticated TRADE_V1 decisions and their durable response obligations. `trade_id` is
         // intentionally not UNIQUE: a second payment reusing one must itself be persisted as a
@@ -1534,9 +1550,9 @@ impl Database {
                     return Ok(false);
                 }
             }
-            // backing_sats is derived per-peer and not compared; expected_usd is the contract this gate protects.
+            // backing_sats is derived per-peer and not compared; expected_usd is the exact contract.
             if trade_id.is_some()
-                && !crate::trade::answered_target_honours_request(
+                && !crate::trade::answered_target_matches_request(
                     stored_expected_usd,
                     expected_usd,
                 )
@@ -1629,6 +1645,154 @@ impl Database {
                 "live_receiver_sats": backing_sats.saturating_add(native_sats),
             }),
             refs: vec![LedgerRef::new("user_channel_id", user_channel_id)],
+        };
+        let outcome = ledger::append_on_connection(&tx, &draft)?;
+        tx.commit()?;
+        if outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, outcome.event_id);
+        }
+        Ok(true)
+    }
+
+    /// Resolve a correlated trade acceptance whose allocation version has already been superseded.
+    ///
+    /// A newer channel snapshot is authoritative for accounting, but it must not erase the signed
+    /// answer to an older pending trade. This transaction validates the stored trade intent and
+    /// payment correlation, marks only the trade complete, and deliberately leaves the newer
+    /// channel allocation and sync version untouched.
+    pub fn complete_trade_from_stale_correlated_sync(
+        &self,
+        user_channel_id: &str,
+        response_sync_version: u64,
+        expected_usd: f64,
+        trade_db_id: i64,
+        trade_payment_id: Option<&str>,
+    ) -> SqliteResult<bool> {
+        if response_sync_version == 0
+            || response_sync_version > i64::MAX as u64
+            || !expected_usd.is_finite()
+            || expected_usd < 0.0
+        {
+            return Ok(false);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let channel = tx
+            .query_row(
+                "SELECT channel_id, expected_usd, stable_sats, native_sats, sync_version
+                 FROM channels WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((channel_id, current_expected, current_backing, current_native, current_version)) =
+            channel
+        else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        if current_version < response_sync_version as i64 {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        let trade = tx
+            .query_row(
+                "SELECT payment_id, new_expected_usd, trade_id, status
+                 FROM trades WHERE id = ?1",
+                params![trade_db_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((stored_payment_id, stored_expected, trade_id, status)) = trade else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        if status == "completed"
+            || stored_payment_id
+                .as_deref()
+                .zip(trade_payment_id)
+                .is_some_and(|(stored, received)| stored != received)
+            || (trade_id.is_some()
+                && !crate::trade::answered_target_matches_request(
+                    stored_expected,
+                    expected_usd,
+                ))
+        {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        let completed = tx.execute(
+            "UPDATE trades
+             SET status = 'completed', fee_status = 'paid',
+                 payment_id = COALESCE(payment_id, ?2),
+                 failure_code = NULL, failure_reason = NULL,
+                 resolved_at = strftime('%s', 'now')
+             WHERE id = ?1 AND status != 'completed'
+               AND (?2 IS NULL OR payment_id IS NULL OR payment_id = ?2)",
+            params![trade_db_id, trade_payment_id],
+        )?;
+        if completed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+
+        let snapshot = AccountingSnapshot {
+            expected_usd: Some(current_expected),
+            backing_sats: u64::try_from(current_backing).ok(),
+            native_sats: u64::try_from(current_native).ok(),
+            live_receiver_sats: u64::try_from(current_backing.saturating_add(current_native)).ok(),
+            ..Default::default()
+        };
+        let mut refs = vec![
+            LedgerRef::new("channel_id", &channel_id),
+            LedgerRef::new("user_channel_id", user_channel_id),
+        ];
+        if let Some(trade_id) = trade_id.as_deref() {
+            refs.push(LedgerRef::new("trade_id", trade_id));
+        }
+        if let Some(payment_id) = trade_payment_id.or(stored_payment_id.as_deref()) {
+            refs.push(LedgerRef::new("payment_id", payment_id));
+        }
+        let draft = LedgerEventDraft {
+            event_type: "TRADE_ACCEPTANCE_CONFIRMED_AFTER_NEWER_SYNC".to_owned(),
+            category: "trade".to_owned(),
+            severity: "info".to_owned(),
+            status: "completed".to_owned(),
+            source: "signed_sync".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!(
+                "signed-sync:stale-trade-acceptance:{trade_db_id}:{response_sync_version}"
+            )),
+            before: Some(snapshot.clone()),
+            after: Some(snapshot),
+            detail: serde_json::json!({
+                "channel_id": channel_id,
+                "user_channel_id": user_channel_id,
+                "trade_db_id": trade_db_id,
+                "trade_id": trade_id,
+                "trade_payment_id": trade_payment_id.or(stored_payment_id.as_deref()),
+                "trade_expected_usd": expected_usd,
+                "response_sync_version": response_sync_version,
+                "current_sync_version": current_version,
+                "allocation_applied": false,
+            }),
+            refs,
         };
         let outcome = ledger::append_on_connection(&tx, &draft)?;
         tx.commit()?;
@@ -2629,6 +2793,7 @@ impl Database {
     pub fn record_pending_stability_payment(
         &self,
         payment_id: &str,
+        settlement_id: &str,
         amount_msat: u64,
         amount_usd: Option<f64>,
         btc_price: f64,
@@ -2656,12 +2821,13 @@ impl Database {
 
             conn.execute(
                 "INSERT INTO payments
-                    (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+                    (payment_id, settlement_id, payment_type, direction, amount_msat, amount_usd, btc_price,
                      counterparty, status, user_channel_id, backing_sats_before,
                      backing_sats_after)
-                 VALUES (?1, 'stability', 'sent', ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)",
+                 VALUES (?1, ?2, 'stability', 'sent', ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9)",
                 params![
                     payment_id,
+                    settlement_id,
                     amount,
                     amount_usd,
                     btc_price,
@@ -2723,6 +2889,7 @@ impl Database {
                 after: Some(after_snapshot),
                 detail: serde_json::json!({
                     "payment_id": payment_id,
+                    "settlement_id": settlement_id,
                     "channel_id": channel_id,
                     "user_channel_id": user_channel_id,
                     "counterparty_node_id": counterparty,
@@ -3030,6 +3197,7 @@ impl Database {
     pub fn record_payment_and_maybe_update_backing(
         &self,
         payment_id: Option<&str>,
+        settlement_id: Option<&str>,
         payment_type: &str,
         direction: &str,
         amount_msat: u64,
@@ -3060,12 +3228,37 @@ impl Database {
                     });
                 }
             }
+            if let Some(settlement_id) = settlement_id {
+                let exists: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM payments WHERE settlement_id = ?1 LIMIT 1",
+                        params![settlement_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if exists.is_some() {
+                    return Ok(PaymentPersistence {
+                        is_new: false,
+                        new_backing: None,
+                        clamped: false,
+                    });
+                }
+            }
             conn.execute(
-                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO payments
+                    (payment_id, settlement_id, payment_type, direction, amount_msat, amount_usd,
+                     btc_price, status, user_channel_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    payment_id, payment_type, direction,
-                    amount_msat as i64, amount_usd, btc_price, status
+                    payment_id,
+                    settlement_id,
+                    payment_type,
+                    direction,
+                    amount_msat as i64,
+                    amount_usd,
+                    btc_price,
+                    status,
+                    user_channel_id,
                 ],
             )?;
             let payment_row_id = conn.last_insert_rowid();
@@ -3153,6 +3346,7 @@ impl Database {
                 after: after_snapshot,
                 detail: serde_json::json!({
                     "payment_id": payment_id,
+                    "settlement_id": settlement_id,
                     "payment_type": payment_type,
                     "direction": direction,
                     "amount_msat": amount_msat,
@@ -3571,6 +3765,7 @@ impl Database {
     pub fn record_stability_settlement_with_rollback(
         &self,
         payment_id: &str,
+        settlement_id: &str,
         user_channel_id: &str,
         channel_id: &str,
         backing_sats_before: u64,
@@ -3605,12 +3800,13 @@ impl Database {
                 .optional()?;
             let inserted = conn.execute(
                 "INSERT OR IGNORE INTO settlement_payments
-                    (payment_id, kind, user_channel_id, backing_sats_before,
+                    (payment_id, settlement_id, kind, user_channel_id, backing_sats_before,
                      backing_sats_after, native_sats_before, expected_usd,
                      last_stability_payment_before)
-                 VALUES (?1, 'stability', ?2, ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (?1, ?2, 'stability', ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     payment_id,
+                    settlement_id,
                     user_channel_id,
                     backing_sats_before as i64,
                     backing_sats_after as i64,
@@ -3696,6 +3892,7 @@ impl Database {
                 after: Some(after_snapshot),
                 detail: serde_json::json!({
                     "payment_id": payment_id,
+                    "settlement_id": settlement_id,
                     "channel_id": channel_id,
                     "user_channel_id": user_channel_id,
                     "counterparty_node_id": counterparty,
@@ -4173,7 +4370,7 @@ mod tests {
             .unwrap();
         assert!(db
             .record_stability_settlement_with_rollback(
-                "payment", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 17,
+                "payment", "settlement-1", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 17,
                 12_500_000, "lsp_to_user", "counterparty", None,
             )
             .unwrap());
@@ -4203,7 +4400,7 @@ mod tests {
         db.save_channel("channel", "user-channel", 50.0, 50_000, 50_000, None)
             .unwrap();
         db.record_stability_settlement_with_rollback(
-            "payment", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 0,
+            "payment", "settlement-1", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 0,
             12_500_000, "lsp_to_user", "counterparty", None,
         )
         .unwrap();
@@ -4226,7 +4423,7 @@ mod tests {
         db.save_channel("channel", "user-channel", 50.0, 62_500, 50_000, None)
             .unwrap();
         db.record_stability_settlement_with_rollback(
-            "payment", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 0,
+            "payment", "settlement-1", "user-channel", "channel", 50_000, 62_500, 50_000, 50.0, 0,
             12_500_000, "lsp_to_user", "counterparty", None,
         )
         .unwrap();
@@ -4465,6 +4662,109 @@ mod tests {
         assert_eq!(channel.backing_sats, 20_000);
         assert_eq!(channel.native_sats, 4_000);
         assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+    }
+
+    #[test]
+    fn stale_correlated_acceptance_completes_trade_without_reverting_newer_state() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel-1", "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        let trade_id = "abababababababababababababababababababababababababababababababab";
+        let trade_db_id = db
+            .record_prepared_trade(
+                "channel-1",
+                trade_id,
+                "sell",
+                5.0,
+                0.00005,
+                100_000.0,
+                0.05,
+                50_000,
+                15.0,
+                15_000,
+                100,
+            )
+            .unwrap();
+        assert!(db
+            .attach_trade_payment_id(trade_db_id, "fee-payment")
+            .unwrap());
+
+        // Version 2 overtakes the delayed version-1 trade response.
+        assert!(db
+            .apply_sync_if_newer("user-channel-1", 2, 20.0, 20_000, 4_000)
+            .unwrap());
+        assert!(!db
+            .complete_trade_from_stale_correlated_sync(
+                "user-channel-1",
+                3,
+                15.0,
+                trade_db_id,
+                Some("fee-payment"),
+            )
+            .unwrap());
+        assert!(!db
+            .complete_trade_from_stale_correlated_sync(
+                "user-channel-1",
+                1,
+                16.0,
+                trade_db_id,
+                Some("fee-payment"),
+            )
+            .unwrap());
+        assert!(!db
+            .complete_trade_from_stale_correlated_sync(
+                "user-channel-1",
+                1,
+                15.0,
+                trade_db_id,
+                Some("wrong-payment"),
+            )
+            .unwrap());
+        assert!(db
+            .complete_trade_from_stale_correlated_sync(
+                "user-channel-1",
+                1,
+                15.0,
+                trade_db_id,
+                Some("fee-payment"),
+            )
+            .unwrap());
+
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 20.0);
+        assert_eq!(channel.backing_sats, 20_000);
+        assert_eq!(channel.native_sats, 4_000);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+        let trade = db.get_recent_trades(1).unwrap().pop().unwrap();
+        assert_eq!(trade.status, "completed");
+        assert_eq!(trade.payment_id.as_deref(), Some("fee-payment"));
+        assert!(!db
+            .complete_trade_from_stale_correlated_sync(
+                "user-channel-1",
+                1,
+                15.0,
+                trade_db_id,
+                Some("fee-payment"),
+            )
+            .unwrap());
+
+        let events = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some(trade_id.to_owned()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap()
+            .events;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "TRADE_ACCEPTANCE_CONFIRMED_AFTER_NEWER_SYNC"
+                })
+                .count(),
+            1,
+        );
     }
 
     #[test]
@@ -4940,19 +5240,19 @@ mod tests {
     }
 
     #[test]
-    fn desktop_correlated_sync_tolerates_repriced_backing_and_a_capacity_clamp() {
+    fn desktop_correlated_sync_tolerates_peer_backing_but_not_a_changed_target() {
         let db = Database::open_in_memory().unwrap();
         db.save_channel("channel", "user", 10.0, 10_000, 5_000, None)
             .unwrap();
-        let repriced_trade_id = "1111111111111111111111111111111111111111111111111111111111111111";
-        let repriced_row_id = db
+        let correlated_trade_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let correlated_row_id = db
             .record_prepared_trade(
-                "channel", repriced_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05, 50_000, 5.0,
+                "channel", correlated_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05, 50_000, 5.0,
                 5_000, 100,
             )
             .unwrap();
 
-        // Same agreed target ($5), repriced backing_sats (each side derives at its own price) — accepted.
+        // Same agreed target ($5), different peer-local backing_sats — accepted.
         assert!(db
             .apply_correlated_sync_if_newer_and_complete_trade(
                 "user",
@@ -4960,7 +5260,7 @@ mod tests {
                 5.0,
                 5_100,
                 4_900,
-                Some(repriced_row_id),
+                Some(correlated_row_id),
                 Some("fee-payment"),
             )
             .unwrap());
@@ -4978,7 +5278,7 @@ mod tests {
             )
             .unwrap();
 
-        // A target ABOVE the request is not a capacity clamp and must still be refused.
+        // Any changed target is a different trade and must be refused.
         assert!(!db
             .apply_correlated_sync_if_newer_and_complete_trade(
                 "user",
@@ -4991,30 +5291,25 @@ mod tests {
             )
             .unwrap());
 
-        // A target clamped DOWN to what the LSP could back is the same contract honoured, so this
-        // gate has to admit it too — a stricter copy here strands the trade the sync confirms.
-        let clamped_trade_id =
+        let lower_target_trade_id =
             "3333333333333333333333333333333333333333333333333333333333333333";
-        let clamped_row_id = db
+        let lower_target_row_id = db
             .record_prepared_trade(
-                "channel", clamped_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05, 50_000, 5.0,
-                5_000, 100,
+                "channel", lower_target_trade_id, "buy", 5.0, 0.00005, 100_000.0, 0.05,
+                50_000, 5.0, 5_000, 100,
             )
             .unwrap();
-        let clamped =
-            5.0 * (1.0 - crate::constants::MAX_PEER_VALUATION_SPREAD_PERCENT / 100.0 / 2.0);
-        assert!(db
+        assert!(!db
             .apply_correlated_sync_if_newer_and_complete_trade(
                 "user",
                 3,
-                clamped,
-                5_000,
-                5_000,
-                Some(clamped_row_id),
+                4.99,
+                4_990,
+                5_010,
+                Some(lower_target_row_id),
                 Some("fee-payment-3"),
             )
             .unwrap());
-        assert_eq!(db.load_channel("user").unwrap().unwrap().expected_usd, clamped);
     }
 
     #[test]
@@ -5070,6 +5365,7 @@ mod tests {
         let first = db
             .record_payment_and_maybe_update_backing(
                 Some("payment-1"),
+                Some("settlement-1"),
                 "stability",
                 "received",
                 100_000,
@@ -5094,6 +5390,7 @@ mod tests {
         let duplicate = db
             .record_payment_and_maybe_update_backing(
                 Some("payment-1"),
+                Some("settlement-1"),
                 "stability",
                 "received",
                 100_000,
@@ -5114,9 +5411,34 @@ mod tests {
             1_100
         );
 
+        let settlement_replay = db
+            .record_payment_and_maybe_update_backing(
+                Some("payment-replay"),
+                Some("settlement-1"),
+                "stability",
+                "received",
+                100_000,
+                Some(1.0),
+                Some(100_000.0),
+                "completed",
+                Some("user-channel-1"),
+                Some(100),
+            )
+            .unwrap();
+        assert!(!settlement_replay.is_new);
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            1_100,
+            "a new payment id cannot replay an already-applied settlement id",
+        );
+
         let second = db
             .record_payment_and_maybe_update_backing(
                 Some("payment-2"),
+                Some("settlement-2"),
                 "stability",
                 "received",
                 50_000,
@@ -5147,6 +5469,7 @@ mod tests {
         let result = db
             .record_payment_and_maybe_update_backing(
                 Some("payment-neg"),
+                None,
                 "stability",
                 "sent",
                 100_000,
@@ -5176,6 +5499,7 @@ mod tests {
             .unwrap();
         db.record_pending_stability_payment(
             "stability-1",
+            "settlement-1",
             20_000_000,
             Some(20.0),
             100_000.0,
@@ -5225,6 +5549,7 @@ mod tests {
             .unwrap();
         db.record_pending_stability_payment(
             "stability-1",
+            "settlement-1",
             20_000_000,
             Some(20.0),
             100_000.0,
@@ -5258,6 +5583,7 @@ mod tests {
         let err = db
             .record_payment_and_maybe_update_backing(
                 Some("payment-orphan"),
+                None,
                 "stability",
                 "received",
                 100_000,
@@ -6082,7 +6408,7 @@ mod tests {
 
         assert!(db
             .record_pending_stability_payment(
-                "payment", 1_000_000, Some(1.0), 100_000.0, "counterparty", "physical",
+                "payment", "settlement-payment", 1_000_000, Some(1.0), 100_000.0, "counterparty", "physical",
                 "stable", 10.0, 10_000, 9_000, 5_000, None,
             )
             .is_err());
@@ -6096,7 +6422,7 @@ mod tests {
         db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
             .unwrap();
         db.record_stability_settlement_with_rollback(
-            "payment", "stable", "physical", 10_000, 9_000, 5_000, 10.0, 0,
+            "payment", "settlement-payment", "stable", "physical", 10_000, 9_000, 5_000, 10.0, 0,
             1_000_000, "lsp_to_user", "counterparty", None,
         )
         .unwrap();
@@ -6238,6 +6564,7 @@ mod tests {
             .unwrap();
         db.record_pending_stability_payment(
             "payment",
+            "settlement-payment",
             1_000_000,
             Some(1.0),
             100_000.0,
@@ -6288,6 +6615,7 @@ mod tests {
             .unwrap();
         db.record_pending_stability_payment(
             "desktop-payment",
+            "settlement-desktop",
             1_000_000,
             Some(1.0),
             100_000.0,
@@ -6303,6 +6631,7 @@ mod tests {
         .unwrap();
         db.record_stability_settlement_with_rollback(
             "lsp-payment",
+            "settlement-lsp",
             "stable",
             "physical",
             9_000,
@@ -6391,6 +6720,7 @@ mod tests {
         assert!(db
             .record_payment_and_maybe_update_backing(
                 Some("stability-payment"),
+                Some("settlement-payment"),
                 "stability",
                 "received",
                 1_000_000,

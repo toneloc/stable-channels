@@ -51,23 +51,15 @@ impl TradeRejectionReason {
     }
 }
 
-/// Whether the target an LSP answered with honours the target the wallet signed.
+/// Whether the LSP answered with the exact target the wallet signed.
 ///
-/// Equal is the ordinary case. Lower means the LSP booked what its own valuation of the wallet's
-/// channel side can actually back, rather than funding the shortfall out of its own liquidity;
-/// accept that as far as the two sides could honestly disagree about the value of those sats.
-/// Higher is not a clamp and is never accepted.
-///
-/// Both the sync handler and the database's own trade-completion gate have to agree on this, so the
-/// rule lives here rather than being spelled out twice — a stricter copy in either place strands the
-/// trade it was meant to confirm.
-pub fn answered_target_honours_request(requested_usd: f64, answered_usd: f64) -> bool {
-    if (requested_usd - answered_usd).abs() <= 0.000000001 {
-        return true;
-    }
-    let clamp_floor =
-        requested_usd * (1.0 - crate::constants::MAX_PEER_VALUATION_SPREAD_PERCENT / 100.0);
-    answered_usd < requested_usd && answered_usd >= clamp_floor
+/// Backing is derived per-peer, but the USD target is the trade contract. Accepting a lower target
+/// would create an implicit partial fill and can even reverse a trade when the channel is already
+/// under-backed. Keep this shared so the sync handler and the transactional DB gate cannot disagree.
+pub fn answered_target_matches_request(requested_usd: f64, answered_usd: f64) -> bool {
+    requested_usd.is_finite()
+        && answered_usd.is_finite()
+        && (requested_usd - answered_usd).abs() <= 0.000000001
 }
 
 #[cfg(test)]
@@ -91,15 +83,12 @@ mod tests {
     }
 
     #[test]
-    fn answered_target_accepts_a_capacity_clamp_but_nothing_above_the_request() {
-        let spread = crate::constants::MAX_PEER_VALUATION_SPREAD_PERCENT / 100.0;
-        assert!(answered_target_honours_request(100.0, 100.0));
-        assert!(answered_target_honours_request(100.0, 100.0 * (1.0 - spread / 2.0)));
-        assert!(answered_target_honours_request(100.0, 100.0 * (1.0 - spread)));
-        assert!(!answered_target_honours_request(100.0, 100.0 * (1.0 - spread) - 0.01));
-        assert!(!answered_target_honours_request(100.0, 100.01));
-        // Closing a peg answers zero for zero, which is equality rather than a clamp.
-        assert!(answered_target_honours_request(0.0, 0.0));
-        assert!(!answered_target_honours_request(0.0, 1.0));
+    fn answered_target_requires_the_signed_target_exactly() {
+        assert!(answered_target_matches_request(100.0, 100.0));
+        assert!(!answered_target_matches_request(100.0, 99.99));
+        assert!(!answered_target_matches_request(100.0, 100.01));
+        assert!(answered_target_matches_request(0.0, 0.0));
+        assert!(!answered_target_matches_request(0.0, 1.0));
+        assert!(!answered_target_matches_request(f64::NAN, 100.0));
     }
 }

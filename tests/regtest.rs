@@ -776,8 +776,6 @@ async fn test_outgoing_payment_deducts_from_stable() {
     for _ in 0..5 {
         match lsp_node.next_event() {
             Some(ldk_node::Event::PaymentForwarded {
-                prev_channel_id,
-                next_channel_id,
                 outbound_amount_forwarded_msat,
                 total_fee_earned_msat,
                 ..
@@ -785,8 +783,8 @@ async fn test_outgoing_payment_deducts_from_stable() {
                 forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
                 let fee_msat = total_fee_earned_msat.unwrap_or(0);
                 println!(
-                    "[event] LSP: PaymentForwarded {} msats (fee {} msats) prev={} next={}",
-                    forwarded_msat, fee_msat, prev_channel_id, next_channel_id
+                    "[event] LSP: PaymentForwarded {} msats (fee {} msats)",
+                    forwarded_msat, fee_msat
                 );
                 lsp_node.event_handled().unwrap();
                 break;
