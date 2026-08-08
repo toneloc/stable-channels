@@ -61,6 +61,7 @@ import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,6 +79,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val isSyncing by appState.isSyncing.collectAsState()
     val isFlashing by appState.paymentFlash.collectAsState()
+    val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
@@ -88,6 +90,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showSell by remember { mutableStateOf(false) }
     var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
     var showBTC by remember { mutableStateOf(false) }
+    var latestPendingOnchainReceive by remember { mutableStateOf<PaymentRecord?>(null) }
+
+    LaunchedEffect(isFlashing, confirmationUpdateEpoch, onchainSats, spendableOnchainSats) {
+        latestPendingOnchainReceive = withContext(Dispatchers.IO) {
+            appState.databaseService?.latestPendingOnchainReceive()
+        }
+    }
 
     // Auto-dismiss receive sheet when payment arrives
     val scrollState = rememberScrollState()
@@ -336,6 +345,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        val pendingReceiveTxid = latestPendingOnchainReceive?.txid
+                        val hasPendingOnchainReceive = latestPendingOnchainReceive != null
                         if (isSweeping) {
                             // 1. Splice-in in progress
                             Spacer(Modifier.height(4.dp))
@@ -364,19 +375,27 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     Text("Move", fontSize = 13.sp)
                                 }
                             }
+                            if (hasPendingOnchainReceive) {
+                                Spacer(Modifier.height(6.dp))
+                                PendingRow("Receiving onchain...", pendingReceiveTxid, context)
+                            }
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(8.dp))
                             val pendingCloseId = appState.pendingClosePaymentId
                             // Prefer close txid if known — pendingClosePaymentId may already be
                             // cleared by detectOnchainDeposit even while funds are still unconfirmed
-                            val effectiveTxid = lastCloseTxid ?: lastRxTxid
+                            val effectiveTxid = if (lastCloseTxid != null) {
+                                lastCloseTxid
+                            } else {
+                                pendingReceiveTxid ?: lastRxTxid
+                            }
                             val isClosePending = pendingCloseId != null || lastCloseTxid != null
-                            // Use short text when txid is known (button fits on same row, matches iOS)
-                            // Use longer text when no txid yet (shown as two-line subtitle)
+                            // Use a receive-specific label when we have an explicit pending onchain row.
                             val text = when {
                                 isClosePending && effectiveTxid != null -> "Channel closing\u2026"
                                 isClosePending -> "Channel closed"
+                                hasPendingOnchainReceive -> "Receiving onchain..."
                                 else -> "Deposit confirming..."
                             }
                             PendingRow(text, effectiveTxid, context)

@@ -32,6 +32,9 @@ import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 
+private const val REQUIRED_CONFIRMATIONS = 6
+private const val SPLICE_REQUIRED_CONFIRMATIONS = 1
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
@@ -41,13 +44,30 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
     var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
     val currentPrice by appState.priceService.currentPrice.collectAsState()
+    val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
+    val isFlashing by appState.paymentFlash.collectAsState()
 
     fun loadHistory() {
         trades = appState.databaseService?.getRecentTrades() ?: emptyList()
         payments = appState.databaseService?.getRecentPayments() ?: emptyList()
+        selectedTrade = selectedTrade?.let { selected ->
+            trades.firstOrNull { it.id == selected.id } ?: selected
+        }
+        selectedPayment = selectedPayment?.let { selected ->
+            payments.firstOrNull { it.id == selected.id } ?: selected
+        }
     }
 
-    LaunchedEffect(Unit) { loadHistory() }
+    LaunchedEffect(Unit) {
+        loadHistory()
+        appState.triggerConfirmationRefresh()
+    }
+    LaunchedEffect(confirmationUpdateEpoch) { loadHistory() }
+    LaunchedEffect(isFlashing) {
+        if (isFlashing) {
+            loadHistory()
+        }
+    }
 
     Column(
         modifier = modifier
@@ -283,25 +303,68 @@ private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: ()
                 fontWeight = FontWeight.Medium,
                 color = if (isIncoming) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface
             )
-            StatusBadge(payment.status)
+            val statusLabel = payment.historyStatusLabel()
+            val statusColor = payment.historyStatusColor()
+            StatusBadge(statusLabel, statusColor)
         }
     }
 }
 
 @Composable
-private fun StatusBadge(status: String) {
-    val color = when (status) {
+private fun StatusBadge(status: String, color: Color? = null) {
+    val resolvedColor = color ?: when (status.lowercase()) {
         "completed" -> Color(0xFF10B981)
         "pending" -> Color(0xFFF59E0B)
         "failed" -> Color(0xFFEF4444)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Text(
-        text = status.replaceFirstChar { it.uppercase() },
+        text = status,
         style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Medium,
-        color = color
+        color = resolvedColor
     )
+}
+
+private fun PaymentRecord.shouldShowConfirmationProgress(): Boolean {
+    val onchainTypes = setOf("onchain", "channel_close", "splice_in", "splice_out")
+    val hasProgressSignal = status == "pending" || confirmations > 0
+    return paymentType in onchainTypes && hasProgressSignal
+}
+
+private fun PaymentRecord.historyStatusLabel(): String {
+    if (!shouldShowConfirmationProgress()) {
+        return status.replaceFirstChar { it.uppercase() }
+    }
+    val required = requiredConfirmationsForDisplay()
+    return if (confirmations >= required) {
+        "Confirmed"
+    } else {
+        "${confirmations}/${required} confirmed"
+    }
+}
+
+private fun PaymentRecord.historyStatusColor(): Color {
+    if (!shouldShowConfirmationProgress()) {
+        return when (status) {
+            "completed" -> Color(0xFF10B981)
+            "pending" -> Color(0xFFF59E0B)
+            "failed" -> Color(0xFFEF4444)
+            else -> Color(0xFF6B7280)
+        }
+    }
+    return when {
+        confirmations >= requiredConfirmationsForDisplay() -> Color(0xFF10B981)
+        confirmations > 0 -> Color(0xFF3B82F6)
+        else -> Color(0xFFF59E0B)
+    }
+}
+
+private fun PaymentRecord.requiredConfirmationsForDisplay(): Int {
+    return when (paymentType) {
+        "splice_in", "splice_out" -> SPLICE_REQUIRED_CONFIRMATIONS
+        else -> REQUIRED_CONFIRMATIONS
+    }
 }
 
 @Composable
