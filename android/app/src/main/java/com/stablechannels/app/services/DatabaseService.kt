@@ -598,12 +598,21 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     private data class PendingPlaceholder(val id: Long, val amountMsat: Long)
 
     /** The newest txid-less pending receive placeholder for an address — the row the
-     *  balance-delta path writes before the txid is known. */
-    private fun findPendingPlaceholder(db: SQLiteDatabase, address: String): PendingPlaceholder? =
-        db.rawQuery(
-            "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-            arrayOf(address)
+     *  balance-delta path writes before the txid is known. When `amountMsat` is given, only a
+     *  placeholder with exactly that amount matches: several deposits to the same (reused)
+     *  address can be pending at once, and amount is what tells their placeholders apart. */
+    private fun findPendingPlaceholder(
+        db: SQLiteDatabase,
+        address: String,
+        amountMsat: Long? = null
+    ): PendingPlaceholder? {
+        val amountFilter = if (amountMsat != null) "AND amount_msat = ? " else ""
+        val args = if (amountMsat != null) arrayOf(address, amountMsat.toString()) else arrayOf(address)
+        return db.rawQuery(
+            "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' " + amountFilter + "ORDER BY created_at DESC LIMIT 1",
+            args
         ).use { c -> if (c.moveToFirst()) PendingPlaceholder(c.getLong(0), c.getLong(1)) else null }
+    }
 
     /** Record a websocket-detected receive unless its txid is already tracked. Check and write
      *  run in one transaction so a concurrent balance-delta detection can't double-insert. If the
@@ -633,9 +642,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             // Adopt only on an exact amount match: for a single deposit the balance delta
             // equals the vout sum, so a placeholder with a different amount is a DIFFERENT
             // deposit still awaiting its own txid — adopting it would erase that deposit
-            // from history. Amount-mismatched pairs converge via reconcileResolvedReceiveTxid.
-            val placeholder = findPendingPlaceholder(db, address)
-                ?.takeIf { it.amountMsat == amountMsat }
+            // from history. The amount is part of the lookup (not a post-check on the newest
+            // row) so the right placeholder is found even when several are pending.
+            val placeholder = findPendingPlaceholder(db, address, amountMsat)
 
             val rowId: Long
             if (placeholder != null) {
@@ -684,16 +693,21 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 arrayOf(txid)
             ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
 
-            val placeholder = findPendingPlaceholder(db, address)
-            val changed = when {
-                placeholder == null -> false
-                websocketRowAmountMsat == null -> {
+            val changed = if (websocketRowAmountMsat != null) {
+                // The websocket already recorded this deposit; only the placeholder with the
+                // SAME amount is its duplicate — a different-amount placeholder belongs to
+                // another deposit and must survive.
+                findPendingPlaceholder(db, address, websocketRowAmountMsat)?.let {
+                    db.delete("payments", "id = ?", arrayOf(it.id.toString())) > 0
+                } ?: false
+            } else {
+                // No amount to disambiguate by (the resolver returns only a txid), so this
+                // attaches to the newest placeholder — with several deposits pending it can
+                // pick the wrong one. Making the resolver return per-tx vout sums would fix it.
+                findPendingPlaceholder(db, address)?.let {
                     val cv = ContentValues().apply { put("txid", txid) }
-                    db.update("payments", cv, "id = ?", arrayOf(placeholder.id.toString())) > 0
-                }
-                websocketRowAmountMsat == placeholder.amountMsat ->
-                    db.delete("payments", "id = ?", arrayOf(placeholder.id.toString())) > 0
-                else -> false
+                    db.update("payments", cv, "id = ?", arrayOf(it.id.toString())) > 0
+                } ?: false
             }
             db.setTransactionSuccessful()
             return changed
