@@ -483,6 +483,95 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    fun latestPendingOnchainReceive(): PaymentRecord? {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+            FROM payments
+            WHERE payment_type = 'onchain'
+              AND direction = 'received'
+              AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """.trimIndent(),
+            null
+        )
+        return cursor.use { c ->
+            if (!c.moveToFirst()) return@use null
+            PaymentRecord(
+                id = c.getLong(0), paymentId = c.getStringOrNull(1),
+                paymentType = c.getString(2), direction = c.getString(3),
+                amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+                btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
+                status = c.getString(8), createdAt = c.getLong(9),
+                feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+                address = c.getStringOrNull(12), confirmations = c.getInt(13)
+            )
+        }
+    }
+
+    fun getPaymentsNeedingConfirmation(limit: Int = 50): List<PaymentRecord> {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+            FROM payments
+            WHERE txid IS NOT NULL AND txid != ''
+              AND payment_type IN ('onchain', 'channel_close', 'splice_in', 'splice_out')
+              AND status != 'failed'
+              AND (
+                    (payment_type IN ('onchain', 'channel_close') AND confirmations < 6)
+                    OR
+                    (payment_type IN ('splice_in', 'splice_out') AND confirmations < 1)
+                  )
+            ORDER BY created_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        )
+        return cursor.use { c ->
+            val list = mutableListOf<PaymentRecord>()
+            while (c.moveToNext()) {
+                list.add(PaymentRecord(
+                    id = c.getLong(0), paymentId = c.getStringOrNull(1),
+                    paymentType = c.getString(2), direction = c.getString(3),
+                    amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+                    btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
+                    status = c.getString(8), createdAt = c.getLong(9),
+                    feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+                    address = c.getStringOrNull(12), confirmations = c.getInt(13)
+                ))
+            }
+            list
+        }
+    }
+
+    fun updatePaymentConfirmationState(paymentRowId: Long, confirmations: Int, status: String): Boolean {
+        val cv = ContentValues().apply {
+            put("confirmations", confirmations)
+            put("status", status)
+        }
+        return writableDatabase.update(
+            "payments",
+            cv,
+            "id = ?",
+            arrayOf(paymentRowId.toString())
+        ) > 0
+    }
+
+    fun clearPaymentTxidForRow(paymentRowId: Long): Boolean {
+        val cv = ContentValues().apply {
+            putNull("txid")
+            put("confirmations", 0)
+            put("status", "pending")
+        }
+        return writableDatabase.update(
+            "payments",
+            cv,
+            "id = ?",
+            arrayOf(paymentRowId.toString())
+        ) > 0
+    }
+
     fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
         val cv = ContentValues().apply {
             put("status", status)
@@ -504,6 +593,134 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             put("txid", txid)
         }
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+    }
+
+    private data class PendingPlaceholder(val id: Long, val amountMsat: Long)
+
+    /** The newest txid-less pending receive placeholder for an address — the row the
+     *  balance-delta path writes before the txid is known. When `amountMsat` is given, only a
+     *  placeholder with exactly that amount matches: several deposits to the same (reused)
+     *  address can be pending at once, and amount is what tells their placeholders apart. */
+    private fun findPendingPlaceholder(
+        db: SQLiteDatabase,
+        address: String,
+        amountMsat: Long? = null
+    ): PendingPlaceholder? {
+        val amountFilter = if (amountMsat != null) "AND amount_msat = ? " else ""
+        val args = if (amountMsat != null) arrayOf(address, amountMsat.toString()) else arrayOf(address)
+        return db.rawQuery(
+            "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' " + amountFilter + "ORDER BY created_at DESC LIMIT 1",
+            args
+        ).use { c -> if (c.moveToFirst()) PendingPlaceholder(c.getLong(0), c.getLong(1)) else null }
+    }
+
+    /** Record a websocket-detected receive unless its txid is already tracked. Check and write
+     *  run in one transaction so a concurrent balance-delta detection can't double-insert. If the
+     *  balance-delta path already wrote a txid-less placeholder for this address, that row is
+     *  adopted (txid + exact websocket amount attached) instead of inserting a second row.
+     *  Returns the row id, or -1 when the txid is already on any row. */
+    fun recordWebSocketReceive(
+        paymentId: String,
+        amountMsat: Long,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        txid: String,
+        address: String
+    ): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val alreadyTracked = db.rawQuery(
+                "SELECT 1 FROM payments WHERE txid = ? OR payment_id = ? LIMIT 1",
+                arrayOf(txid, paymentId)
+            ).use { it.moveToFirst() }
+            if (alreadyTracked) {
+                db.setTransactionSuccessful()
+                return -1L
+            }
+
+            // Adopt only on an exact amount match: for a single deposit the balance delta
+            // equals the vout sum, so a placeholder with a different amount is a DIFFERENT
+            // deposit still awaiting its own txid — adopting it would erase that deposit
+            // from history. The amount is part of the lookup (not a post-check on the newest
+            // row) so the right placeholder is found even when several are pending.
+            val placeholder = findPendingPlaceholder(db, address, amountMsat)
+
+            val rowId: Long
+            if (placeholder != null) {
+                val cv = ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("txid", txid)
+                    put("amount_msat", amountMsat)
+                    amountUSD?.let { put("amount_usd", it) }
+                    btcPrice?.let { put("btc_price", it) }
+                }
+                db.update("payments", cv, "id = ?", arrayOf(placeholder.id.toString()))
+                rowId = placeholder.id
+            } else {
+                val cv = ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("payment_type", "onchain")
+                    put("direction", "received")
+                    put("amount_msat", amountMsat)
+                    put("amount_usd", amountUSD)
+                    put("btc_price", btcPrice)
+                    put("status", "pending")
+                    put("txid", txid)
+                    put("address", address)
+                }
+                rowId = db.insert("payments", null, cv)
+            }
+            db.setTransactionSuccessful()
+            return rowId
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction.
+     *  If a row already carries the txid AND its amount matches the placeholder's, the websocket
+     *  recorded this same deposit first — the placeholder is a duplicate, delete it. On an amount
+     *  mismatch the placeholder is a different deposit whose txid the resolver couldn't tell
+     *  apart (the resolver looks up by address, not per-deposit), so it is left alone rather
+     *  than deleted or mislabeled. With no websocket row, attach the txid to the placeholder. */
+    fun reconcileResolvedReceiveTxid(txid: String, address: String): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val websocketRowAmountMsat = db.rawQuery(
+                "SELECT amount_msat FROM payments WHERE txid = ? LIMIT 1",
+                arrayOf(txid)
+            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+
+            val changed = if (websocketRowAmountMsat != null) {
+                // The websocket already recorded this deposit; only the placeholder with the
+                // SAME amount is its duplicate — a different-amount placeholder belongs to
+                // another deposit and must survive.
+                findPendingPlaceholder(db, address, websocketRowAmountMsat)?.let {
+                    db.delete("payments", "id = ?", arrayOf(it.id.toString())) > 0
+                } ?: false
+            } else {
+                // No amount to disambiguate by (the resolver returns only a txid), so this
+                // attaches to the newest placeholder — with several deposits pending it can
+                // pick the wrong one. Making the resolver return per-tx vout sums would fix it.
+                findPendingPlaceholder(db, address)?.let {
+                    val cv = ContentValues().apply { put("txid", txid) }
+                    db.update("payments", cv, "id = ?", arrayOf(it.id.toString())) > 0
+                } ?: false
+            }
+            db.setTransactionSuccessful()
+            return changed
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun failPaymentByTxid(txid: String) {
+        writableDatabase.execSQL(
+            "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
+            arrayOf(txid)
+        )
     }
 
     fun getPendingChannelClosePaymentId(): String? {

@@ -19,6 +19,10 @@ import androidx.compose.ui.platform.LocalContext
 import android.content.Intent
 import android.net.Uri
 
+private const val REQUIRED_CONFIRMATIONS = 6
+private const val SPLICE_REQUIRED_CONFIRMATIONS = 1
+private val TXID_REGEX = Regex("^[0-9a-fA-F]{64}$")
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0, onDismiss: () -> Unit) {
@@ -111,7 +115,7 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0,
                     }
                     
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    DetailRow("Status", payment.status.replaceFirstChar { it.uppercase() })
+                    DetailRow("Status", payment.detailStatusLabel())
                     
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     DetailRow("Date", payment.date.shortString())
@@ -122,7 +126,7 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0,
                         CopyableDetailRow("Payment ID", displayPid, pid)
                     }
                     
-                    payment.txid?.let { txid ->
+                    payment.explorerTxid()?.let { txid ->
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         val displayTxid = if (txid.length > 16) txid.take(8) + "..." + txid.takeLast(8) else txid
                         CopyableDetailRow("TXID", displayTxid, txid)
@@ -148,9 +152,15 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0,
                         CopyableDetailRow("Address", displayAddr, addr)
                     }
                     
-                    if (payment.confirmations > 0) {
+                    if (payment.shouldShowConfirmationProgress() || payment.confirmations > 0) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        DetailRow("Confirmations", payment.confirmations.toString())
+                        val required = payment.requiredConfirmationsForDisplay()
+                        val confirmationsLabel = if (payment.confirmations >= required) {
+                            "${payment.confirmations} (confirmed)"
+                        } else {
+                            "${payment.confirmations}/${required}"
+                        }
+                        DetailRow("Confirmations", confirmationsLabel)
                     }
                 }
             }
@@ -167,4 +177,47 @@ fun PaymentDetailBottomSheet(payment: PaymentRecord, currentPrice: Double = 0.0,
             }
         }
     }
+}
+
+private fun PaymentRecord.shouldShowConfirmationProgress(): Boolean {
+    val onchainTypes = setOf("onchain", "channel_close", "splice_in", "splice_out")
+    val hasProgressSignal = status == "pending" || confirmations > 0
+    return paymentType in onchainTypes && hasProgressSignal
+}
+
+private fun PaymentRecord.detailStatusLabel(): String {
+    if (!shouldShowConfirmationProgress()) {
+        return status.replaceFirstChar { it.uppercase() }
+    }
+    val required = requiredConfirmationsForDisplay()
+    return if (confirmations >= required) {
+        "Confirmed"
+    } else {
+        "${confirmations}/${required} confirmed"
+    }
+}
+
+private fun PaymentRecord.requiredConfirmationsForDisplay(): Int {
+    return when (paymentType) {
+        "splice_in", "splice_out" -> SPLICE_REQUIRED_CONFIRMATIONS
+        else -> REQUIRED_CONFIRMATIONS
+    }
+}
+
+private fun PaymentRecord.explorerTxid(): String? {
+    val fromTxid = txid?.substringBefore(":")?.trim()
+    if (!fromTxid.isNullOrEmpty() && TXID_REGEX.matches(fromTxid)) {
+        return fromTxid
+    }
+
+    if (paymentType == "onchain") {
+        val fromPaymentId = paymentId
+            ?.removePrefix("onchain_receive_")
+            ?.trim()
+        if (!fromPaymentId.isNullOrEmpty() && TXID_REGEX.matches(fromPaymentId)) {
+            return fromPaymentId
+        }
+    }
+
+    return null
 }

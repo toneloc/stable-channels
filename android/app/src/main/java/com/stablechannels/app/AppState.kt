@@ -10,6 +10,9 @@ import com.stablechannels.app.push.FCMService
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.*
+import com.stablechannels.app.services.websocket.MempoolWebSocketClient
+import com.stablechannels.app.services.websocket.MempoolWebSocketService
+import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.satsFormatted
@@ -26,6 +29,8 @@ import org.json.JSONObject
 import org.lightningdevkit.ldknode.*
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToLong
 
 enum class Phase {
@@ -55,6 +60,7 @@ class AppState(private val context: Context) : ViewModel() {
         private set
     var tradeService: TradeService? = null
         private set
+    private val mempoolWebSocketService: MempoolWebSocketClient = MempoolWebSocketService()
 
     private val _phase = MutableStateFlow(Phase.LOADING)
     val phase: StateFlow<Phase> = _phase
@@ -106,6 +112,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _lastReceiveTxid = MutableStateFlow<String?>(null)
     val lastReceiveTxid: StateFlow<String?> get() = _lastReceiveTxid
+    private var lastReceiveTxidAddress: String? = null
 
     private val _lastCloseTxid = MutableStateFlow<String?>(null)
     val lastCloseTxid: StateFlow<String?> get() = _lastCloseTxid
@@ -119,6 +126,25 @@ class AppState(private val context: Context) : ViewModel() {
         } else {
             editor.remove("last_close_txid")
             editor.remove("last_close_txid_at")
+        }
+        editor.apply()
+    }
+
+    private fun setLastReceiveTxid(txid: String?, address: String?) {
+        _lastReceiveTxid.value = txid
+        lastReceiveTxidAddress = address
+
+        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        if (txid.isNullOrBlank()) {
+            editor.remove("last_receive_txid")
+            editor.remove("last_receive_txid_address")
+        } else {
+            editor.putString("last_receive_txid", txid)
+            if (!address.isNullOrBlank()) {
+                editor.putString("last_receive_txid_address", address)
+            } else {
+                editor.remove("last_receive_txid_address")
+            }
         }
         editor.apply()
     }
@@ -142,6 +168,7 @@ class AppState(private val context: Context) : ViewModel() {
                 _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
         _onchainReceiveAddress.value = prefs.getString("onchain_receive_address", null)
         _lastReceiveTxid.value = prefs.getString("last_receive_txid", null)
+        lastReceiveTxidAddress = prefs.getString("last_receive_txid_address", null)
 
         val closeAt = prefs.getLong("last_close_txid_at", 0L)
         if (System.currentTimeMillis() - closeAt < 7 * 86400 * 1000L) {
@@ -164,6 +191,29 @@ class AppState(private val context: Context) : ViewModel() {
                 userChannelId = cachedUserChannelId,
                 expectedUSD = USD(cachedExpectedUsd.toDouble())
             )
+        }
+
+        configureMempoolWebSocket()
+    }
+
+    private fun configureMempoolWebSocket() {
+        mempoolWebSocketService.onBlockHeader = {
+            viewModelScope.launch(Dispatchers.IO) {
+                refreshBalances()
+                pollPaymentConfirmations(force = true)
+            }
+        }
+        mempoolWebSocketService.onTransactionDetected = { event ->
+            viewModelScope.launch(Dispatchers.IO) {
+                handleWebSocketTransactionDetected(event)
+            }
+        }
+    }
+
+    private fun connectMempoolWebSocket() {
+        mempoolWebSocketService.connect()
+        _onchainReceiveAddress.value?.takeIf { it.isNotBlank() }?.let {
+            mempoolWebSocketService.trackAddress(it)
         }
     }
 
@@ -189,6 +239,7 @@ class AppState(private val context: Context) : ViewModel() {
             }
         }
     var pendingClosePaymentId: String? = null
+    private var trackedClosingFundingTxid: String? = null
     var spliceTxid: String? = null
     var fundingTxid: String? = null
         set(value) {
@@ -199,6 +250,9 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
+
+    private val _confirmationUpdateEpoch = MutableStateFlow(0)
+    val confirmationUpdateEpoch: StateFlow<Int> = _confirmationUpdateEpoch
 
 
     private val _isSpliceInFlight = MutableStateFlow(false)
@@ -217,8 +271,13 @@ class AppState(private val context: Context) : ViewModel() {
     private var pendingDepositJob: Job? = null
     private var channelCloseJob: Job? = null
     private var nodeStartRetryJob: Job? = null
+    private var nodeStartRetryAttempts: Int = 0
     private var spliceConfirmationJob: Job? = null
     private var monitoredSpliceTxid: String? = null
+    @Volatile
+    private var isConfirmationPolling = false
+    @Volatile
+    private var lastConfirmationPollAtMs = 0L
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
         private set
@@ -285,11 +344,14 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     loadChannelFromDB()  // reload — SPS may have incremented backingSats while we waited
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    resetNodeStartRetryState()
                     nodeStartRetryJob?.cancel()
                     nodeStartRetryJob = null
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
                     refreshBalances()
+                    pollPaymentConfirmations(force = true)
+                    connectMempoolWebSocket()
                     // Restore fundingTxid
                     fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
                         .getString("funding_txid", null)
@@ -307,11 +369,15 @@ class AppState(private val context: Context) : ViewModel() {
                                 // Resume background resolver if it hasn't found the TX yet
                                 val closeFundingTxid = fundingTxid
                                 if (closeFundingTxid != null && databaseService != null) {
+                                    trackedClosingFundingTxid = closeFundingTxid
+                                    mempoolWebSocketService.trackTx(closeFundingTxid)
                                     val resolver = CloseTxidResolver(
                                         chainURLs = listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL),
                                         onResolved = { _, txid ->
                                             Log.d("AppState", "Close TX resolved on restart: $txid")
                                             setLastCloseTxid(txid)
+                                            mempoolWebSocketService.untrackTx(closeFundingTxid)
+                                            trackedClosingFundingTxid = null
                                         }
                                     )
                                     viewModelScope.launch(Dispatchers.IO) {
@@ -345,8 +411,11 @@ class AppState(private val context: Context) : ViewModel() {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    resetNodeStartRetryState()
                     _phase.value = Phase.WALLET
                     refreshBalances()
+                    pollPaymentConfirmations(force = true)
+                    connectMempoolWebSocket()
                     reregisterPushTokenIfNeeded()
                     startStabilityTimer()
                     viewModelScope.launch(Dispatchers.IO) {
@@ -355,8 +424,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 }
             } catch (e: Exception) {
-                _errorMessage.value = e.message ?: "Unknown error"
-                _phase.value = Phase.ERROR
+                handleNodeStartFailure(e, "Unknown error")
             }
         }
     }
@@ -366,13 +434,15 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 _phase.value = Phase.SYNCING
                 nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+                resetNodeStartRetryState()
                 _phase.value = Phase.WALLET
                 refreshBalances()
+                pollPaymentConfirmations(force = true)
+                connectMempoolWebSocket()
                 reregisterPushTokenIfNeeded()
                 startStabilityTimer()
             } catch (e: Exception) {
-                _errorMessage.value = e.message ?: "Failed to create wallet"
-                _phase.value = Phase.ERROR
+                handleNodeStartFailure(e, "Failed to create wallet")
             }
         }
     }
@@ -388,6 +458,7 @@ class AppState(private val context: Context) : ViewModel() {
         spliceConfirmationJob = null
         monitoredSpliceTxid = null
         priceService.stopAutoRefresh()
+        mempoolWebSocketService.disconnect()
         nodeService.stop()
     }
 
@@ -483,6 +554,7 @@ class AppState(private val context: Context) : ViewModel() {
         spliceConfirmationJob?.cancel()
         spliceConfirmationJob = null
         monitoredSpliceTxid = null
+        mempoolWebSocketService.disconnect()
         if (!nodeService.isRunning) return
         Log.d("AppState", "Stopping node for background")
         nodeService.stop()
@@ -502,6 +574,8 @@ class AppState(private val context: Context) : ViewModel() {
                 loadChannelFromDB()
                 ensureLSPConnected()
                 refreshBalances()
+                pollPaymentConfirmations(force = true)
+                connectMempoolWebSocket()
                 updateStableBalances()
                 resumePendingSpliceConfirmation()
                 return@launch
@@ -515,10 +589,13 @@ class AppState(private val context: Context) : ViewModel() {
                 loadChannelFromDB()
                 _phase.value = Phase.SYNCING
                 nodeService.start(Network.BITCOIN, chainUrl, null)
+                resetNodeStartRetryState()
                 nodeStartRetryJob?.cancel()
                 nodeStartRetryJob = null
                 _phase.value = Phase.WALLET
                 refreshBalances()
+                pollPaymentConfirmations(force = true)
+                connectMempoolWebSocket()
                 updateStableBalances()
                 val sc = StabilityService.reconcileIncoming(_stableChannel.value)
                 _stableChannel.value = sc
@@ -528,10 +605,46 @@ class AppState(private val context: Context) : ViewModel() {
                 startStabilityTimer()
             } catch (e: Exception) {
                 Log.e("AppState", "Node restart failed", e)
-                _phase.value = Phase.ERROR
-                _errorMessage.value = e.message ?: "Restart failed"
+                handleNodeStartFailure(e, "Restart failed")
             }
         }
+    }
+
+    private fun handleNodeStartFailure(e: Exception, fallbackMessage: String) {
+        if (isRetryableNodeStartFailure(e)) {
+            _phase.value = Phase.SYNCING
+            _errorMessage.value = ""
+            _statusMessage.value = "Network unstable. Retrying wallet sync..."
+            scheduleNodeStartRetry()
+            return
+        }
+
+        _errorMessage.value = e.message ?: fallbackMessage
+        _phase.value = Phase.ERROR
+    }
+
+    // Matched by exception type (not message text) since LDK's Display strings aren't a stable
+    // contract across ldk-node versions — only these variants indicate a transient chain-source
+    // issue that a retry can plausibly fix.
+    private fun isRetryableNodeStartFailure(e: Exception): Boolean {
+        if (e is NodeException) {
+            return e is NodeException.FeerateEstimationUpdateFailed ||
+                e is NodeException.FeerateEstimationUpdateTimeout ||
+                e is NodeException.TxSyncFailed ||
+                e is NodeException.TxSyncTimeout ||
+                e is NodeException.GossipUpdateFailed ||
+                e is NodeException.GossipUpdateTimeout ||
+                e is NodeException.WalletOperationFailed ||
+                e is NodeException.WalletOperationTimeout ||
+                e is NodeException.LiquiditySourceUnavailable ||
+                e is NodeException.ConnectionFailed
+        }
+        val msg = e.message?.lowercase() ?: return false
+        return msg.contains("fee rate estimates") ||
+            msg.contains("timed out") ||
+            msg.contains("network is unreachable") ||
+            msg.contains("dns") ||
+            msg.contains("connection refused")
     }
 
     /**
@@ -1239,6 +1352,8 @@ class AppState(private val context: Context) : ViewModel() {
                 ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                     .getString("closing_funding_txid", null)
             if (closeFundingTxid != null && databaseService != null) {
+                trackedClosingFundingTxid = closeFundingTxid
+                mempoolWebSocketService.trackTx(closeFundingTxid)
                 // Clear the pref now that we've consumed it
                 context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                     .edit().remove("closing_funding_txid").apply()
@@ -1247,6 +1362,8 @@ class AppState(private val context: Context) : ViewModel() {
                     onResolved = { _, txid ->
                         Log.d("AppState", "Close TX resolved: $txid")
                         setLastCloseTxid(txid)
+                        mempoolWebSocketService.untrackTx(closeFundingTxid)
+                        trackedClosingFundingTxid = null
                     }
                 )
                 viewModelScope.launch(Dispatchers.IO) {
@@ -1292,7 +1409,178 @@ class AppState(private val context: Context) : ViewModel() {
                 recordCurrentPrice()
                 runStabilityCheck()
                 detectOnchainDeposit()
+                pollPaymentConfirmations()
             }
+        }
+    }
+
+    fun triggerConfirmationRefresh() {
+        viewModelScope.launch(Dispatchers.IO) {
+            pollPaymentConfirmations(force = true)
+        }
+    }
+
+    private fun requiredConfirmationsForType(paymentType: String): Int {
+        return when (paymentType) {
+            "splice_in", "splice_out" -> 1
+            else -> 6
+        }
+    }
+
+    private data class TxConfirmationStatus(
+        val confirmed: Boolean,
+        val blockHeight: Int?
+    )
+
+    private fun fetchChainTipHeight(): Int? {
+        val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        for (baseUrl in urls) {
+            try {
+                val request = Request.Builder()
+                    .url("${baseUrl.trimEnd('/')}/blocks/tip/height")
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = response.body?.string()?.trim() ?: return@use
+                    body.toIntOrNull()?.let { return it }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private fun fetchTxConfirmationStatus(txid: String): TxConfirmationStatus? {
+        val normalizedTxid = txid.substringBefore(":").trim()
+        if (normalizedTxid.isEmpty()) return null
+
+        val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        for (baseUrl in urls) {
+            try {
+                val request = Request.Builder()
+                    .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = response.body?.string() ?: return@use
+                    val json = JSONObject(body)
+                    val confirmed = json.optBoolean("confirmed", false)
+                    val blockHeight = if (json.has("block_height") && !json.isNull("block_height")) {
+                        json.optInt("block_height", 0).takeIf { it > 0 }
+                    } else {
+                        null
+                    }
+                    return TxConfirmationStatus(confirmed = confirmed, blockHeight = blockHeight)
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
+        val normalizedTxid = txid.substringBefore(":").trim()
+        if (normalizedTxid.isEmpty() || address.isBlank()) return null
+
+        val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        for (baseUrl in urls) {
+            try {
+                val request = Request.Builder()
+                    .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid")
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val body = response.body?.string() ?: return@use
+                    val txJson = JSONObject(body)
+                    val vouts = txJson.optJSONArray("vout") ?: return@use
+                    for (i in 0 until vouts.length()) {
+                        val vout = vouts.optJSONObject(i) ?: continue
+                        if (vout.optString("scriptpubkey_address", "") == address) {
+                            return true
+                        }
+                    }
+                    return false
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private suspend fun pollPaymentConfirmations(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && (now - lastConfirmationPollAtMs) < 15_000) {
+            return
+        }
+        if (isConfirmationPolling) {
+            return
+        }
+
+        val db = databaseService ?: return
+        isConfirmationPolling = true
+        try {
+            val tipHeight = fetchChainTipHeight() ?: return
+            val pending = db.getPaymentsNeedingConfirmation(limit = 100)
+            var anyUpdated = false
+
+            pending.forEach { payment ->
+                val txid = payment.txid ?: return@forEach
+
+                if (payment.paymentType == "onchain" && payment.direction == "received") {
+                    val expectedAddress = payment.address?.trim().orEmpty()
+                    if (expectedAddress.isNotEmpty()) {
+                        when (fetchTxPaysToAddress(txid, expectedAddress)) {
+                            false -> {
+                                val cleared = db.clearPaymentTxidForRow(payment.id)
+                                anyUpdated = anyUpdated || cleared
+                                if (_lastReceiveTxid.value == txid) {
+                                    setLastReceiveTxid(null, null)
+                                }
+                                AuditService.log("ONCHAIN_TXID_ADDRESS_MISMATCH", mapOf(
+                                    "payment_id" to payment.id,
+                                    "txid" to txid,
+                                    "address" to expectedAddress
+                                ))
+                                return@forEach
+                            }
+                            null -> return@forEach
+                            true -> {
+                            }
+                        }
+                    }
+                }
+
+                val txStatus = fetchTxConfirmationStatus(txid) ?: return@forEach
+                val required = requiredConfirmationsForType(payment.paymentType)
+
+                val (newConfirmations, newStatus) = if (!txStatus.confirmed) {
+                    0 to "pending"
+                } else {
+                    val blockHeight = txStatus.blockHeight
+                    val confs = if (blockHeight != null) {
+                        (tipHeight - blockHeight + 1).coerceAtLeast(0).coerceAtMost(required)
+                    } else {
+                        payment.confirmations.coerceAtLeast(1).coerceAtMost(required)
+                    }
+                    confs to if (confs >= required) "completed" else "pending"
+                }
+
+                if (payment.confirmations != newConfirmations || payment.status != newStatus) {
+                    val updated = db.updatePaymentConfirmationState(
+                        paymentRowId = payment.id,
+                        confirmations = newConfirmations,
+                        status = newStatus
+                    )
+                    anyUpdated = anyUpdated || updated
+                }
+            }
+
+            if (anyUpdated) {
+                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+            }
+            lastConfirmationPollAtMs = now
+        } finally {
+            isConfirmationPolling = false
         }
     }
 
@@ -1401,6 +1689,12 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    private fun clearOnchainDepositStatusIfNeeded() {
+        if (_statusMessage.value.startsWith("Onchain deposit detected", ignoreCase = true)) {
+            _statusMessage.value = ""
+        }
+    }
+
     private fun reconcilePendingOutgoingStabilityPayment(): Boolean {
         val db = databaseService ?: return false
         val pending = try { db.loadPendingSend() } catch (_: Exception) { return false } ?: return true
@@ -1493,6 +1787,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     internal fun detectOnchainDeposit() {
+        val db = databaseService
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
         if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
@@ -1505,24 +1800,60 @@ class AppState(private val context: Context) : ViewModel() {
 
             // Check for pending channel close (in-memory or DB) to avoid duplicate entries
             val closeId = pendingClosePaymentId
-                ?: databaseService?.getPendingChannelClosePaymentId()
+                ?: db?.getPendingChannelClosePaymentId()
             if (closeId != null) {
-                databaseService?.updatePaymentStatus(closeId, "completed")
+                val knownCloseTxid = db?.getPaymentTxid(closeId) ?: _lastCloseTxid.value
+                if (!knownCloseTxid.isNullOrBlank()) {
+                    db?.updatePaymentTxid(closeId, knownCloseTxid)
+                }
+                db?.updatePaymentStatus(closeId, "completed")
                 pendingClosePaymentId = null
+                trackedClosingFundingTxid?.let { mempoolWebSocketService.untrackTx(it) }
+                trackedClosingFundingTxid = null
                 isChannelClosing = false
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
-                // No pending close — record as new on-chain deposit
-                val dedupId = "${System.currentTimeMillis() / 1000}_$depositSats"
-                databaseService?.recordPayment(
-                    paymentId = dedupId, paymentType = "onchain", direction = "received",
+                val receiveAddress = _onchainReceiveAddress.value
+                val resolvedTxid = _lastReceiveTxid.value?.takeIf {
+                    !it.isNullOrBlank() &&
+                        !receiveAddress.isNullOrBlank() &&
+                        lastReceiveTxidAddress == receiveAddress
+                }
+
+                // Always record the deposit, mirroring iOS. When the websocket and this
+                // balance-delta path both see the same deposit, the pair is reconciled at
+                // txid time instead of skipped up front: recordWebSocketReceive adopts a
+                // txid-less placeholder, and reconcileResolvedReceiveTxid deletes it when
+                // the websocket row already exists. A skip heuristic here silently omits a
+                // second deposit arriving while any earlier receive is still confirming.
+                val dedupId = if (!resolvedTxid.isNullOrBlank()) {
+                    "onchain_receive_$resolvedTxid"
+                } else {
+                    "onchain_deposit_${java.util.UUID.randomUUID()}"
+                }
+                val rowId = db?.recordPayment(
+                    paymentId = dedupId,
+                    paymentType = "onchain",
+                    direction = "received",
                     amountMsat = depositSats * 1000,
                     amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
-                    btcPrice = price
+                    btcPrice = price,
+                    status = "pending",
+                    txid = resolvedTxid,
+                    address = receiveAddress
                 )
-                AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf("sats" to depositSats))
+
+                if (rowId != null && rowId != -1L) {
+                    triggerPaymentFlash()
+                    AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf(
+                        "sats" to depositSats,
+                        "status" to "pending",
+                        "txid_known" to (!resolvedTxid.isNullOrBlank())
+                    ))
+                }
             }
-            // Start faster polling until deposit confirms
+            // Home card now carries pending receive state; remove stale capsule text.
+            clearOnchainDepositStatusIfNeeded()
             startPendingDepositPolling()
         }
         prevOnchainSats = currentSats
@@ -1534,15 +1865,16 @@ class AppState(private val context: Context) : ViewModel() {
         pendingDepositJob = viewModelScope.launch(Dispatchers.IO) {
             // Attempt to resolve txid if we have an address but no txid yet (handles app restarts)
             val address = _onchainReceiveAddress.value
-            if (address != null && _lastReceiveTxid.value == null) {
+            val shouldResolveTxid = address != null &&
+                (_lastReceiveTxid.value == null || lastReceiveTxidAddress != address)
+            if (shouldResolveTxid) {
                 // Run txid resolution in the background so it doesn't block the polling loop
                 launch {
                     val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
                     val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
                     if (txid != null) {
-                        _lastReceiveTxid.value = txid
-                        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-                            .putString("last_receive_txid", txid).apply()
+                        setLastReceiveTxid(txid, address)
+                        databaseService?.reconcileResolvedReceiveTxid(txid, address)
                     }
                 }
             }
@@ -1554,12 +1886,8 @@ class AppState(private val context: Context) : ViewModel() {
             
             // Deposit confirmed — aggressively clear stale txid and address from state and cache
             if (isActive && _spendableOnchainSats.value > 0L) {
-                _lastReceiveTxid.value = null
-                _onchainReceiveAddress.value = null
-                context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-                    .remove("last_receive_txid")
-                    .remove("onchain_receive_address")
-                    .apply()
+                setLastReceiveTxid(null, null)
+                setOnchainReceiveAddress(null)
             }
         }
     }
@@ -1697,19 +2025,134 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun setOnchainReceiveAddress(address: String?) {
-        if (address == null) return
+        val oldAddress = _onchainReceiveAddress.value
         _onchainReceiveAddress.value = address
-        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-            .putString("onchain_receive_address", address).apply()
+        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        if (address == null) {
+            editor.remove("onchain_receive_address")
+        } else {
+            editor.putString("onchain_receive_address", address)
+        }
+        editor.apply()
+
+        if (!oldAddress.isNullOrBlank() && oldAddress != address) {
+            mempoolWebSocketService.untrackAddress(oldAddress)
+        }
+
+        if (!address.isNullOrBlank() && oldAddress != address) {
+            // New receive request: drop stale txid from previous address/session.
+            setLastReceiveTxid(null, null)
+        }
+
+        if (address == null) {
+            return
+        }
+
+        mempoolWebSocketService.trackAddress(address)
         
         // Start polling for this address to be hit
         viewModelScope.launch {
             val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
             val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
             if (txid != null) {
-                _lastReceiveTxid.value = txid
-                context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-                    .putString("last_receive_txid", txid).apply()
+                setLastReceiveTxid(txid, address)
+                databaseService?.reconcileResolvedReceiveTxid(txid, address)
+            }
+        }
+    }
+
+    fun prepareChannelCloseTracking(userChannelId: String) {
+        setLastCloseTxid(null)
+        val liveTxid = nodeService.channels
+            .firstOrNull { it.userChannelId == userChannelId || it.isChannelReady }
+            ?.fundingTxo?.txid
+
+        if (!liveTxid.isNullOrBlank()) {
+            fundingTxid = liveTxid
+            trackedClosingFundingTxid = liveTxid
+            mempoolWebSocketService.trackTx(liveTxid)
+            context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                .edit().putString("closing_funding_txid", liveTxid).apply()
+        }
+    }
+
+    private fun handleWebSocketTransactionDetected(event: WebSocketEvent) {
+        val db = databaseService ?: return
+
+        when (event) {
+            is WebSocketEvent.Receive -> {
+                if (isChannelClosing || isSweeping || pendingSplice != null) {
+                    return
+                }
+                if (event.amountSats < 1000) {
+                    return
+                }
+
+                val price = priceService.currentPrice.value
+                val amountUsd = if (price > 0) {
+                    (event.amountSats.toDouble() / Constants.SATS_IN_BTC) * price
+                } else {
+                    null
+                }
+
+                val paymentId = "onchain_receive_${event.txid}"
+                val rowId = db.recordWebSocketReceive(
+                    paymentId = paymentId,
+                    amountMsat = event.amountSats * 1000,
+                    amountUSD = amountUsd,
+                    btcPrice = price.takeIf { it > 0 },
+                    txid = event.txid,
+                    address = event.target
+                )
+
+                if (rowId != -1L) {
+                    setLastReceiveTxid(event.txid, event.target)
+                    clearOnchainDepositStatusIfNeeded()
+                    triggerPaymentFlash()
+                    AuditService.log(
+                        "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                        mapOf("txid" to event.txid, "sats" to event.amountSats)
+                    )
+                }
+            }
+
+            is WebSocketEvent.Removed -> {
+                try {
+                    db.failPaymentByTxid(event.txid)
+                    AuditService.log(
+                        "WEBSOCKET_RBF_FAILED_PAYMENT",
+                        mapOf("target" to event.target, "txid" to event.txid)
+                    )
+                } catch (e: Exception) {
+                    AuditService.log(
+                        "WEBSOCKET_RBF_FAIL_FAILED",
+                        mapOf("txid" to event.txid, "error" to (e.message ?: ""))
+                    )
+                }
+            }
+
+            is WebSocketEvent.TrackedOutspend -> {
+                if (!isChannelClosing) {
+                    return
+                }
+
+                val expectedFundingTxid = trackedClosingFundingTxid
+                    ?: fundingTxid
+                    ?: context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                        .getString("closing_funding_txid", null)
+
+                if (!expectedFundingTxid.isNullOrBlank() && expectedFundingTxid != event.trackedTxid) {
+                    return
+                }
+
+                val closeId = pendingClosePaymentId ?: db.getPendingChannelClosePaymentId()
+                if (!closeId.isNullOrBlank()) {
+                    db.updatePaymentTxid(closeId, event.spendingTxid)
+                    setLastCloseTxid(event.spendingTxid)
+                }
+
+                mempoolWebSocketService.untrackTx(event.trackedTxid)
+                trackedClosingFundingTxid = null
             }
         }
     }
@@ -1728,7 +2171,7 @@ class AppState(private val context: Context) : ViewModel() {
             val txo = channel.fundingTxo
             if (txo != null) {
                 val currentTxid = txo.txid
-                if (currentTxid != null && currentTxid != fundingTxid) {
+                if (currentTxid != fundingTxid) {
                     fundingTxid = currentTxid
                 }
             }
@@ -1898,15 +2341,25 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun scheduleNodeStartRetry() {
         if (nodeStartRetryJob?.isActive == true) return
+        val delayMs = min((2.0.pow(nodeStartRetryAttempts.toDouble()) * 1000.0).toLong(), 60_000L)
+        nodeStartRetryAttempts = min(nodeStartRetryAttempts + 1, 6)
         nodeStartRetryJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(delayMs)
             while (isActive && backgroundServiceOwnsLdk()) {
                 delay(1_000)
             }
             if (!isActive || nodeService.isRunning) return@launch
-            Log.d("AppState", "Retrying node start after LDK owner released")
+            // Re-check primary/fallback health so a retry doesn't keep hammering the same
+            // degraded esplora endpoint that just failed the fee-rate/chain-sync fetch.
+            chainUrl = resolveChainUrl()
+            Log.d("AppState", "Retrying node start after LDK owner released (chainUrl=$chainUrl)")
             _statusMessage.value = "Syncing wallet..."
             restartNodeFromForeground()
         }
+    }
+
+    private fun resetNodeStartRetryState() {
+        nodeStartRetryAttempts = 0
     }
 
     private fun reregisterPushTokenIfNeeded() {
