@@ -321,6 +321,16 @@
         }
       }
     },
+    "%lld/%lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld/%2$lld"
+          }
+        }
+      }
+    },
     "%lld%% USD  %lld%% BTC" : {
       "localizations" : {
         "ar" : {
@@ -2290,6 +2300,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关闭通道"
+          }
+        }
+      }
+    },
+    "button_confirm_order" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirm Order"
           }
         }
       }
@@ -4790,6 +4811,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "确认您的密码"
+          }
+        }
+      }
+    },
+    "confirmations_complete" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirmed"
           }
         }
       }
@@ -10290,6 +10322,17 @@
         }
       }
     },
+    "info_fee_estimating" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Estimating network fee..."
+          }
+        }
+      }
+    },
     "info_first_payment" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -10428,6 +10471,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "资金将在 1 个链上确认后到达"
+          }
+        }
+      }
+    },
+    "info_lightning_lsp_fee_estimate" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "~%@ BTC"
+          }
+        }
+      }
+    },
+    "info_lightning_lsp_fee_estimate_with_usd" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "~%1$@ (%2$@ BTC)"
+          }
+        }
+      }
+    },
+    "info_lightning_lsp_fee_none" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No fee expected"
           }
         }
       }
@@ -10641,6 +10717,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用通知以接收付款提醒"
+          }
+        }
+      }
+    },
+    "info_onchain_fee_estimate_sentence" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Expected network fee: ~%1$@ BTC (%2$llu sat/vB)"
+          }
+        }
+      }
+    },
+    "info_onchain_fee_estimate_value" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "~%1$@ BTC (%2$llu sat/vB)"
           }
         }
       }
@@ -18321,6 +18419,28 @@
         }
       }
     },
+    "payment_detail_error_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Could not load payment details."
+          }
+        }
+      }
+    },
+    "payment_detail_error_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Error"
+          }
+        }
+      }
+    },
     "payment_received" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -22684,6 +22804,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在收集价格数据..."
+          }
+        }
+      }
+    },
+    "status_confirmed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirmed"
           }
         }
       }

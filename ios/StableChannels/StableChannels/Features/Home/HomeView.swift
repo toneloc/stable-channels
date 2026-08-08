@@ -223,6 +223,17 @@ struct HomeView: View {
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
+                // The animated Text can't carry the accessibility exposure:
+                // .contentTransition(.numericText()) leaves its derived label
+                // frozen at the launch-time value even with an explicit
+                // .accessibilityLabel attached to it (VoiceOver reads a stale
+                // balance; E2E copyTextFrom reads "$0.00" forever). Expose the
+                // container as a single synthesized element instead — with
+                // children ignored there is no derived text to go stale, and
+                // the explicit label re-evaluates on every balance change.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(appState.totalBalanceUSD.usdFormatted)
+                .accessibilityIdentifier("home_total_balance_usd")
 
                 Text("\(displaySats.btcSpacedFormatted) BTC")
                     .font(.caption)

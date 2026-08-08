@@ -3,6 +3,9 @@ name = "stable-channels-lsp"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+e2e = ["stable-channels/e2e"]
+
 [dependencies]
 # Workspace crates
 stable-channels   = { path = "../..", default-features = false }

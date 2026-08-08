@@ -11,6 +11,9 @@ use egui::{Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
 use image::{GrayImage, Luma};
 use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
+// `PaymentStatus` is only referenced by the debug-only Mac E2E harness.
+#[cfg(debug_assertions)]
+use ldk_node::payment::PaymentStatus;
 use qrcode::QrCode;
 use serde_json::json;
 use std::collections::HashMap;
@@ -26,11 +29,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use stable_channels::audit::*;
 use stable_channels::constants::*;
 use stable_channels::db::{self, DailyPriceRecord, Database, PaymentRecord, TradeRecord};
+use stable_channels::desktop_config::{
+    load_desktop_runtime_config, mac_e2e_overrides_enabled, DesktopRuntimeConfig,
+};
 use stable_channels::historical_prices::get_seed_prices;
 use stable_channels::price_feeds::{get_cached_price_no_fetch, get_fresh_cached_price_no_fetch};
 use stable_channels::stable;
 use stable_channels::stable::update_balances;
 use stable_channels::types::*;
+
+// Mac desktop E2E test + demo harness. Child module (not sibling) so it reaches
+// `UserApp`'s privates via `use super::*;` — see src/user/mac_e2e.rs.
+#[cfg(debug_assertions)]
+mod mac_e2e;
+#[cfg(debug_assertions)]
+pub use mac_e2e::run_mac_flows;
+#[cfg(debug_assertions)]
+use mac_e2e::{mac_demo_enabled, MacDemoController};
 
 // ============================================================================
 // UI Theme — semantic palette, radii, spacing. Use these constants everywhere
@@ -301,6 +316,7 @@ fn splice_reconcile_action(
 
 pub struct UserApp {
     pub node: Arc<Node>,
+    runtime_config: DesktopRuntimeConfig,
     pub status_message: String,
     pub btc_price: f64,
     show_onboarding: bool,
@@ -450,6 +466,9 @@ pub struct UserApp {
 
     // Three-step trade flow: Some(action) = show success screen
     trade_success: Option<TradeAction>,
+
+    #[cfg(debug_assertions)]
+    mac_demo: Option<MacDemoController>,
 }
 
 /// Renders a single-line amount text field with iOS-style rounded, light-gray styling.
@@ -480,7 +499,13 @@ impl UserApp {
     pub fn new() -> Result<Self, String> {
         println!("Initializing user node...");
 
-        let data_dir = get_user_data_dir();
+        let runtime_config = load_desktop_runtime_config()
+            .map_err(|e| format!("Invalid desktop runtime config: {e}"))?;
+
+        let data_dir = runtime_config
+            .user_data_dir
+            .clone()
+            .unwrap_or_else(get_user_data_dir);
         std::fs::create_dir_all(&data_dir).map_err(|e| {
             format!(
                 "Failed to create user data directory {}: {}",
@@ -489,11 +514,15 @@ impl UserApp {
             )
         })?;
 
-        let lsp_pubkey = DEFAULT_LSP_PUBKEY
+        let lsp_pubkey = runtime_config
+            .lsp_pubkey
             .parse::<PublicKey>()
             .map_err(|e| format!("Invalid LSP pubkey: {}", e))?;
 
-        let audit_log_path = audit_log_path_for("user");
+        let audit_log_path = data_dir
+            .join("audit_log.txt")
+            .to_string_lossy()
+            .into_owned();
         set_audit_log_path(&audit_log_path);
 
         // Trust the LSP peer so no onchain anchor reserve is held for their channel
@@ -507,9 +536,10 @@ impl UserApp {
 
         let mut builder = Builder::from_config(config);
 
-        let network = match DEFAULT_NETWORK.to_lowercase().as_str() {
+        let network = match runtime_config.network.to_lowercase().as_str() {
             "signet" => Network::Signet,
             "testnet" => Network::Testnet,
+            "regtest" => Network::Regtest,
             "bitcoin" => Network::Bitcoin,
             _ => {
                 println!("Warning: Unknown network in config, defaulting to Bitcoin");
@@ -529,19 +559,24 @@ impl UserApp {
             ..Default::default()
         };
 
-        builder.set_chain_source_esplora(DEFAULT_CHAIN_URL.to_string(), Some(esplora_cfg));
         builder
-            .set_gossip_source_rgs("https://rapidsync.lightningdevkit.org/snapshot/".to_string());
+            .set_chain_source_esplora(runtime_config.primary_chain_url.clone(), Some(esplora_cfg));
+        if network != Network::Regtest {
+            builder.set_gossip_source_rgs(
+                "https://rapidsync.lightningdevkit.org/snapshot/".to_string(),
+            );
+        }
         builder.set_storage_dir_path(data_dir.to_string_lossy().into_owned());
         builder
-            .set_listening_addresses(vec![format!("127.0.0.1:{}", DEFAULT_USER_PORT)
+            .set_listening_addresses(vec![format!("127.0.0.1:{}", runtime_config.user_port)
                 .parse()
                 .unwrap()])
             .unwrap();
         let _ = builder.set_node_alias(DEFAULT_USER_ALIAS.to_string());
 
         // Let's set up our LSP
-        let lsp_address = DEFAULT_LSP_ADDRESS
+        let lsp_address = runtime_config
+            .lsp_address
             .parse::<SocketAddress>()
             .map_err(|e| format!("Invalid LSP address: {}", e))?;
 
@@ -609,7 +644,7 @@ impl UserApp {
         println!("User node started: {}", node.node_id());
 
         // And the LSP
-        if let Ok(socket_addr) = SocketAddress::from_str(DEFAULT_LSP_ADDRESS) {
+        if let Ok(socket_addr) = SocketAddress::from_str(&runtime_config.lsp_address) {
             if let Err(e) = node.connect(lsp_pubkey, socket_addr, true) {
                 println!("Failed to connect to LSP node: {}", e);
             }
@@ -664,6 +699,7 @@ impl UserApp {
 
         let mut app = Self {
             node: Arc::clone(&node),
+            runtime_config,
             status_message: String::new(),
             invoice_result: String::new(),
             show_onboarding,
@@ -776,11 +812,19 @@ impl UserApp {
             payment_flash_at: None,
             last_known_total_sats: 0,
             trade_success: None,
+            #[cfg(debug_assertions)]
+            mac_demo: if mac_demo_enabled() {
+                Some(MacDemoController::new())
+            } else {
+                None
+            },
         };
 
-        // Backfill historical + intraday prices from Kraken on a background thread so a
-        // slow/hung feed can't block startup before the first frame.
-        app.start_historical_backfill();
+        if !mac_e2e_overrides_enabled() {
+            // Backfill historical + intraday prices from Kraken on a background thread so a
+            // slow/hung feed can't block startup before the first frame.
+            app.start_historical_backfill();
+        }
 
         // Load whatever is already in the DB immediately (non-blocking); the chart
         // refreshes when the backfill thread completes.
@@ -797,6 +841,13 @@ impl UserApp {
         // Background thread is started via start_background_if_needed() in the update loop
 
         Ok(app)
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.runtime_config
+            .user_data_dir
+            .clone()
+            .unwrap_or_else(get_user_data_dir)
     }
 
     fn start_background_if_needed(&mut self) {
@@ -2168,7 +2219,7 @@ impl UserApp {
 
     /// Migrate data from legacy stablechannels.json to SQLite
     fn migrate_from_json(&mut self) {
-        let file_path = get_user_data_dir().join("stablechannels.json");
+        let file_path = self.data_dir().join("stablechannels.json");
 
         if !file_path.exists() {
             return;
@@ -3486,8 +3537,10 @@ impl UserApp {
                             // poll_pending_splice_deduction() when the result lands (never blocks).
                             let (tx, rx) = std::sync::mpsc::channel();
                             let txid_for_lookup = txid_str.clone();
+                            let esplora_url = self.runtime_config.primary_chain_url.clone();
                             std::thread::spawn(move || {
                                 let _ = tx.send(Self::lookup_funding_output_sats_esplora(
+                                    &esplora_url,
                                     &txid_for_lookup,
                                     vout,
                                 ));
@@ -3726,8 +3779,8 @@ impl UserApp {
     /// Works for both confirmed and mempool transactions.
     ///
     /// Returns None if the lookup fails (tx not found, network error, etc.)
-    fn lookup_funding_output_sats_esplora(txid: &str, vout: u32) -> Option<u64> {
-        let url = format!("{}/tx/{}", DEFAULT_CHAIN_URL, txid);
+    fn lookup_funding_output_sats_esplora(esplora_url: &str, txid: &str, vout: u32) -> Option<u64> {
+        let url = format!("{}/tx/{}", esplora_url, txid);
 
         let response = stable_channels::price_feeds::bounded_agent().get(&url).call().ok()?;
 
@@ -9565,7 +9618,7 @@ impl UserApp {
                     self.restore_error = format!("Invalid seed phrase: {}", e);
                 }
                 Ok(_) => {
-                    let data_dir = get_user_data_dir();
+                    let data_dir = self.data_dir();
                     let _ = self.node.stop();
                     for name in [
                         "ldk_node_data.sqlite",
@@ -9597,9 +9650,13 @@ impl UserApp {
         let (tx, rx) = std::sync::mpsc::channel();
         self.fee_rate_receiver = Some(rx);
 
+        let esplora_url = self.runtime_config.primary_chain_url.clone();
+
         std::thread::spawn(move || {
+            // Merge: bounded agent (network-timeouts fix, PR #175) + the
+            // runtime-config chain URL (E2E override, desktop_config).
             let agent = stable_channels::price_feeds::bounded_agent();
-            let url = format!("{}/fee-estimates", DEFAULT_CHAIN_URL);
+            let url = format!("{}/fee-estimates", esplora_url);
             if let Ok(response) = agent.get(&url).call() {
                 if let Ok(json) = response.into_json::<serde_json::Value>() {
                     if let Some(fee) = json.get("6").and_then(|v| v.as_f64()) {
@@ -10060,8 +10117,18 @@ impl App for UserApp {
             self.load_chart_data();
         }
 
-        // Update daily price data periodically (rate-limited internally)
-        self.update_daily_prices();
+        // Update daily price data periodically (rate-limited internally).
+        // E2E/demo runs should stay on local regtest services only.
+        if !mac_e2e_overrides_enabled() {
+            self.update_daily_prices();
+        }
+
+        #[cfg(debug_assertions)]
+        if self.mac_demo.is_some() {
+            let mut demo = self.mac_demo.take().unwrap();
+            demo.tick(self, ctx);
+            self.mac_demo = Some(demo);
+        }
 
         // Handle trigger_fund_wallet flag from "Fund Your Wallet" button
         if self.trigger_fund_wallet {
@@ -10155,10 +10222,24 @@ impl App for UserApp {
         // Render toast notifications on top
         self.render_toasts(ctx);
 
+        #[cfg(debug_assertions)]
+        if let Some(demo) = self.mac_demo.as_ref() {
+            demo.render(ctx);
+        }
+
+        #[cfg(debug_assertions)]
+        let demo_active = self
+            .mac_demo
+            .as_ref()
+            .is_some_and(|demo| demo.needs_fast_repaint());
+        #[cfg(not(debug_assertions))]
+        let demo_active = false;
+
         // Keep the fast cadence only while something animates or polls for
         // completion; when idle, 1s is enough (prices refresh every few
         // seconds, and input events trigger immediate repaints regardless).
         let needs_fast_repaint = self.is_syncing
+            || demo_active
             || self.waiting_for_payment
             || self.jit_choice_open
             || self.show_transfer_modal
@@ -10242,6 +10323,7 @@ pub fn run() {
             .with_min_inner_size([460.0, 600.0])
             .with_decorations(true)
             .with_transparent(false)
+            .with_active(true)
             .with_icon(std::sync::Arc::new(icon_data)),
         ..Default::default()
     };

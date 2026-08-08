@@ -1,0 +1,59 @@
+# Step 2 — BTC -> USD
+# "User converts BTC into USD exposure."
+# Selectors verified against HomeScreen.kt / SellScreen.kt.
+appId: com.stablechannels.app
+tags: [android, ios, trade]
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "BTC → USD"      # disabled until channel ready
+    timeout: 30000
+
+# Exercise the allocation slider itself. The first slow, outward gesture stays
+# clamped at the left edge so the demo visibly holds on "0% USD  100% BTC"
+# without opening a trade. The second gesture sells $75 of the $85 balance:
+# target = barStart + (75 / 85) * barWidth.
+- runFlow:
+    when:
+      platform: Android
+    file: helpers/drag_btc_to_usd_android.yaml
+- runFlow:
+    when:
+      platform: iOS
+    file: helpers/hold_btc_slider_ios.yaml
+- runFlow:
+    when:
+      platform: iOS
+    file: helpers/drag_btc_to_usd_ios.yaml
+
+- assertVisible: "How much BTC to convert to USD\\?"
+- tapOn: "Continue"
+
+- assertVisible: "Review BTC -> USD"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - assertVisible: "\\$76\\.07"
+      - assertVisible: "\\$0\\.76"
+      - assertVisible: "\\$75\\.31( USD)?"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - assertVisible: "\\$74\\.97"
+      - assertVisible: "\\$0\\.75"
+      - assertVisible: "\\$74\\.22( USD)?"
+# Confirm button is now "Confirm Order" on both platforms (iOS button was
+# relabeled from "BTC → USD" in the copy-changes PR).
+- tapOn: "Confirm Order"
+
+# SellScreen success step (SellScreen.kt:~255)
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 30000
+- tapOn: "Done"
+
+# Back on Home
+- assertVisible: "USD → BTC"

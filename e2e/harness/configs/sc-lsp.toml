@@ -1,0 +1,17 @@
+# stable-channels-lsp (front daemon) — regtest E2E config.
+# Derived from server/stable-channels-lsp/example-config.toml.
+
+[node]
+rest_service_address = "0.0.0.0:3002"
+network = "regtest"
+
+[storage.disk]
+dir_path = "/data/stable-channels-lsp"
+
+[ldk_server]
+config_path = "/etc/ldk-server/config.toml"   # not mounted here; overrides below win
+grpc_address = "ldk-server:3536"
+cert_path    = "/data/ldk-server/tls.crt"
+api_key_path = "/data/ldk-server/regtest/api_key"
+
+# No [push] section: push senders disabled, RegisterPush still accepts.
