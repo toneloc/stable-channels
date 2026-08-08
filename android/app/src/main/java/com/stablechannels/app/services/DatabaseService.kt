@@ -595,25 +595,101 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
     }
 
-    fun attachTxidToLatestOnchainReceive(txid: String, address: String): Boolean {
-        val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') ORDER BY created_at DESC LIMIT 1)"
-        )
-        stmt.bindString(1, txid)
-        stmt.bindString(2, address)
-        return stmt.executeUpdateDelete() > 0
+    /** The newest txid-less pending receive placeholder for an address — the row the
+     *  balance-delta path writes before the txid is known. */
+    private fun findPendingPlaceholderId(db: SQLiteDatabase, address: String): Long? = db.rawQuery(
+        "SELECT id FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        arrayOf(address)
+    ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+
+    /** Record a websocket-detected receive unless its txid is already tracked. Check and write
+     *  run in one transaction so a concurrent balance-delta detection can't double-insert. If the
+     *  balance-delta path already wrote a txid-less placeholder for this address, that row is
+     *  adopted (txid + exact websocket amount attached) instead of inserting a second row.
+     *  Returns the row id, or -1 when the txid is already on any row. */
+    fun recordWebSocketReceive(
+        paymentId: String,
+        amountMsat: Long,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        txid: String,
+        address: String
+    ): Long {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val alreadyTracked = db.rawQuery(
+                "SELECT 1 FROM payments WHERE txid = ? OR payment_id = ? LIMIT 1",
+                arrayOf(txid, paymentId)
+            ).use { it.moveToFirst() }
+            if (alreadyTracked) {
+                db.setTransactionSuccessful()
+                return -1L
+            }
+
+            val placeholderId = findPendingPlaceholderId(db, address)
+
+            val rowId: Long
+            if (placeholderId != null) {
+                // The websocket amount is the exact output sum; it supersedes the
+                // balance-delta estimate the placeholder was created with.
+                val cv = ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("txid", txid)
+                    put("amount_msat", amountMsat)
+                    amountUSD?.let { put("amount_usd", it) }
+                    btcPrice?.let { put("btc_price", it) }
+                }
+                db.update("payments", cv, "id = ?", arrayOf(placeholderId.toString()))
+                rowId = placeholderId
+            } else {
+                val cv = ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("payment_type", "onchain")
+                    put("direction", "received")
+                    put("amount_msat", amountMsat)
+                    put("amount_usd", amountUSD)
+                    put("btc_price", btcPrice)
+                    put("status", "pending")
+                    put("txid", txid)
+                    put("address", address)
+                }
+                rowId = db.insert("payments", null, cv)
+            }
+            db.setTransactionSuccessful()
+            return rowId
+        } finally {
+            db.endTransaction()
+        }
     }
 
-    fun paymentExists(txid: String, excludePaymentId: String): Boolean {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT 1 FROM payments WHERE txid = ? AND payment_id != ? LIMIT 1",
-            arrayOf(txid, excludePaymentId)
-        )
-        return cursor.use { it.moveToFirst() }
-    }
+    /** Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction.
+     *  If any row already carries the txid, the websocket recorded this deposit first and the
+     *  txid-less placeholder for this address is a duplicate — delete it. Otherwise attach the
+     *  txid to that placeholder. */
+    fun reconcileResolvedReceiveTxid(txid: String, address: String): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val websocketRowExists = db.rawQuery(
+                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
+                arrayOf(txid)
+            ).use { it.moveToFirst() }
 
-    fun deletePayment(paymentId: String) {
-        writableDatabase.delete("payments", "payment_id = ?", arrayOf(paymentId))
+            val placeholderId = findPendingPlaceholderId(db, address)
+            val changed = if (placeholderId == null) {
+                false
+            } else if (websocketRowExists) {
+                db.delete("payments", "id = ?", arrayOf(placeholderId.toString())) > 0
+            } else {
+                val cv = ContentValues().apply { put("txid", txid) }
+                db.update("payments", cv, "id = ?", arrayOf(placeholderId.toString())) > 0
+            }
+            db.setTransactionSuccessful()
+            return changed
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun failPaymentByTxid(txid: String) {
@@ -621,14 +697,6 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
             arrayOf(txid)
         )
-    }
-
-    fun completePaymentByTxid(txid: String): Boolean {
-        val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET status = 'completed' WHERE txid = ? AND status = 'pending'"
-        )
-        stmt.bindString(1, txid)
-        return stmt.executeUpdateDelete() > 0
     }
 
     fun getPendingChannelClosePaymentId(): String? {
