@@ -1161,22 +1161,19 @@ impl Database {
         .optional()
     }
 
-    /// Match a signed allocation acknowledgment to a trade authored by this wallet. The LSP can
-    /// deliver SYNC_V1 before or after LDK reports the trade-fee payment as successful, so the
-    /// allocation itself is the stable correlation key.
-    pub fn get_pending_trade_by_allocation(
+    /// Match an acknowledgment to a trade authored by this wallet. Backing is deliberately not a
+    /// correlation key because each peer derives it independently from its own price.
+    pub fn get_pending_trade_by_expected_usd(
         &self,
         new_expected_usd: f64,
-        new_backing_sats: u64,
     ) -> SqliteResult<Option<PendingTradeRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, new_expected_usd, btc_price, new_backing_sats, action FROM trades
              WHERE status = 'pending'
-               AND new_backing_sats = ?1
-               AND ABS(new_expected_usd - ?2) <= 0.000000001
+               AND ABS(new_expected_usd - ?1) <= 0.000000001
              ORDER BY id DESC LIMIT 1",
-            params![new_backing_sats, new_expected_usd],
+            params![new_expected_usd],
             |row| {
                 Ok(PendingTradeRow {
                     id: row.get(0)?,
@@ -4020,7 +4017,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_trade_matches_signed_allocation_and_payment_id_remains_classified() {
+    fn pending_trade_matches_expected_target_and_payment_id_remains_classified() {
         let db = Database::open_in_memory().unwrap();
         let trade_id = db
             .record_trade(
@@ -4038,12 +4035,12 @@ mod tests {
             .unwrap();
 
         let matched = db
-            .get_pending_trade_by_allocation(60.0, 60_000)
+            .get_pending_trade_by_expected_usd(60.0)
             .unwrap()
-            .expect("exact wallet-authored allocation must match");
+            .expect("wallet-authored target must match even when peer backing differs");
         assert_eq!(matched.id, trade_id);
         assert!(db
-            .get_pending_trade_by_allocation(60.01, 60_000)
+            .get_pending_trade_by_expected_usd(60.01)
             .unwrap()
             .is_none());
         assert!(db.is_trade_payment("trade-payment").unwrap());
@@ -4051,7 +4048,7 @@ mod tests {
         db.update_trade_status(trade_id, "completed").unwrap();
         assert!(db.is_trade_payment("trade-payment").unwrap());
         assert!(db
-            .get_pending_trade_by_allocation(60.0, 60_000)
+            .get_pending_trade_by_expected_usd(60.0)
             .unwrap()
             .is_none());
     }

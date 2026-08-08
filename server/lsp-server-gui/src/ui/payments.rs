@@ -11,7 +11,7 @@ use crate::ui::widgets;
 
 const HELP_PAYMENT_ID: &str =
 	"The server-side identifier for this payment record. It is distinct from a payment hash or on-chain transaction id.";
-const HELP_PAYMENT_TYPE: &str = "The payment protocol or kind, such as on-chain, BOLT11, BOLT12 offer, BOLT12 refund, spontaneous, stability, or sync.";
+const HELP_PAYMENT_TYPE: &str = "The payment protocol or kind, such as on-chain, BOLT11, BOLT12 offer, BOLT12 refund, spontaneous, trade, stability, or sync.";
 const HELP_PAYMENT_AMOUNT: &str =
 	"The payment amount recorded for this payment. Any fee paid by this node is shown separately when known.";
 const HELP_PAYMENT_FEE: &str =
@@ -462,6 +462,7 @@ fn payment_type_label_str(
 ) -> String {
 	match settlement {
 		Some(crate::state::SettlementKind::Stability) => "Stability".to_string(),
+		Some(crate::state::SettlementKind::Trade) => "Trade".to_string(),
 		Some(crate::state::SettlementKind::Sync) => "Sync".to_string(),
 		None => type_label.to_string(),
 	}
@@ -830,7 +831,11 @@ mod tests {
             "Stability"
         );
         assert_eq!(
-            payment_type_label_str("Spontaneous", Some(SettlementKind::Sync)),
+            payment_type_label_str("Spontaneous", Some(SettlementKind::Trade)),
+            "Trade"
+        );
+		assert_eq!(
+			payment_type_label_str("Spontaneous", Some(SettlementKind::Sync)),
             "Sync"
         );
 	}

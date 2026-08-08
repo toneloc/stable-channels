@@ -330,7 +330,7 @@ pub fn normalize_backing_sats(
     }
 }
 
-/// Derive the stable backing allocation for a trade at the signed quote price.
+/// Derive this peer's stable backing allocation for a trade at its local price.
 ///
 /// The result is clamped to the receiver's post-settlement balance. Sub-cent native residue is
 /// absorbed into the stable side so a full BTC-to-USD trade has no floating native remainder.
@@ -357,11 +357,10 @@ pub fn trade_backing_sats(
     )
 }
 
-/// Apply a previously agreed trade allocation without repricing it.
+/// Apply an allocation already derived by this peer.
 ///
-/// `backing_sats` is part of the signed trade intent. A peer may validate that intent against its
-/// own price and live LDK balance first, but once accepted it must not derive a different allocation
-/// from a later price snapshot.
+/// Callers must not pass a counterparty-supplied `backing_sats` value here. The shared contract is
+/// `expected_usd`; each peer derives and persists its own backing using its own price.
 pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, backing_sats: u64) {
     sc.expected_usd = USD::from_f64(new_expected_usd);
     sc.backing_sats = backing_sats;

@@ -22,12 +22,9 @@ pub struct TradePayload {
     #[serde(default)]
     pub user_channel_id: Option<String>,
     pub expected_usd: f64,
-    /// BTC/USD quote used by the wallet to derive the signed sat allocation.
+    /// Wallet BTC/USD quote. The LSP uses it only for slippage and fee validation.
     #[serde(default)]
     pub quote_price: Option<f64>,
-    /// Exact stable backing allocation after the trade-fee payment settles.
-    #[serde(default)]
-    pub backing_sats: Option<u64>,
     /// Unix seconds the wallet signed at; 0 if absent (un-upgraded wallet). Drives replay freshness.
     #[serde(default)]
     pub ts: u64,
@@ -73,6 +70,22 @@ pub fn parse_envelope(raw: &str) -> Option<SignedEnvelope> {
     serde_json::from_str::<SignedEnvelope>(raw).ok()
 }
 
+/// Return true when a signed envelope declares an inner `TRADE_V1` message.
+///
+/// This only classifies the payment carrier. The trade handler still parses the complete
+/// payload and verifies its signature and channel binding before applying anything.
+pub fn is_trade_v1(envelope: &SignedEnvelope) -> bool {
+    serde_json::from_str::<serde_json::Value>(&envelope.payload)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|kind| kind == stable_channels::constants::TRADE_MESSAGE_TYPE)
+        })
+        .unwrap_or(false)
+}
+
 /// Parse the inner TRADE payload from the envelope's payload string.
 pub fn parse_trade_payload(payload: &str) -> Option<TradePayload> {
     serde_json::from_str::<TradePayload>(payload).ok()
@@ -115,6 +128,21 @@ mod tests {
     }
 
     #[test]
+    fn trade_v1_is_classified_by_inner_message_type() {
+        let trade = SignedEnvelope {
+            payload: r#"{"type":"TRADE_V1","expected_usd":12.5}"#.to_string(),
+            signature: "sig".to_string(),
+        };
+        let sync = SignedEnvelope {
+            payload: r#"{"type":"SYNC_V1","expected_usd":12.5}"#.to_string(),
+            signature: "sig".to_string(),
+        };
+
+        assert!(is_trade_v1(&trade));
+        assert!(!is_trade_v1(&sync));
+    }
+
+    #[test]
     fn trade_payload_parses_wallet_shape() {
         let payload = r#"{"type":"TRADE_V1","channel_id":"abcd","user_channel_id":"189476124653200987495269098788434301048","expected_usd":12.5}"#;
         let t = parse_trade_payload(payload).unwrap();
@@ -126,15 +154,13 @@ mod tests {
         );
         assert_eq!(t.expected_usd, 12.5);
         assert_eq!(t.quote_price, None);
-        assert_eq!(t.backing_sats, None);
     }
 
     #[test]
-    fn trade_payload_parses_signed_allocation() {
+    fn trade_payload_ignores_legacy_backing_allocation() {
         let payload = r#"{"type":"TRADE_V1","user_channel_id":"7","expected_usd":25.0,"quote_price":80000.0,"backing_sats":31250,"ts":123}"#;
         let t = parse_trade_payload(payload).unwrap();
         assert_eq!(t.quote_price, Some(80_000.0));
-        assert_eq!(t.backing_sats, Some(31_250));
         assert_eq!(t.ts, 123);
     }
 
