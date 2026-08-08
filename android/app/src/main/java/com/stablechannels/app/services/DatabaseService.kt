@@ -595,12 +595,15 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
     }
 
+    private data class PendingPlaceholder(val id: Long, val amountMsat: Long)
+
     /** The newest txid-less pending receive placeholder for an address — the row the
      *  balance-delta path writes before the txid is known. */
-    private fun findPendingPlaceholderId(db: SQLiteDatabase, address: String): Long? = db.rawQuery(
-        "SELECT id FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-        arrayOf(address)
-    ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+    private fun findPendingPlaceholder(db: SQLiteDatabase, address: String): PendingPlaceholder? =
+        db.rawQuery(
+            "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+            arrayOf(address)
+        ).use { c -> if (c.moveToFirst()) PendingPlaceholder(c.getLong(0), c.getLong(1)) else null }
 
     /** Record a websocket-detected receive unless its txid is already tracked. Check and write
      *  run in one transaction so a concurrent balance-delta detection can't double-insert. If the
@@ -627,12 +630,15 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 return -1L
             }
 
-            val placeholderId = findPendingPlaceholderId(db, address)
+            // Adopt only on an exact amount match: for a single deposit the balance delta
+            // equals the vout sum, so a placeholder with a different amount is a DIFFERENT
+            // deposit still awaiting its own txid — adopting it would erase that deposit
+            // from history. Amount-mismatched pairs converge via reconcileResolvedReceiveTxid.
+            val placeholder = findPendingPlaceholder(db, address)
+                ?.takeIf { it.amountMsat == amountMsat }
 
             val rowId: Long
-            if (placeholderId != null) {
-                // The websocket amount is the exact output sum; it supersedes the
-                // balance-delta estimate the placeholder was created with.
+            if (placeholder != null) {
                 val cv = ContentValues().apply {
                     put("payment_id", paymentId)
                     put("txid", txid)
@@ -640,8 +646,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     amountUSD?.let { put("amount_usd", it) }
                     btcPrice?.let { put("btc_price", it) }
                 }
-                db.update("payments", cv, "id = ?", arrayOf(placeholderId.toString()))
-                rowId = placeholderId
+                db.update("payments", cv, "id = ?", arrayOf(placeholder.id.toString()))
+                rowId = placeholder.id
             } else {
                 val cv = ContentValues().apply {
                     put("payment_id", paymentId)
@@ -664,26 +670,30 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     /** Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction.
-     *  If any row already carries the txid, the websocket recorded this deposit first and the
-     *  txid-less placeholder for this address is a duplicate — delete it. Otherwise attach the
-     *  txid to that placeholder. */
+     *  If a row already carries the txid AND its amount matches the placeholder's, the websocket
+     *  recorded this same deposit first — the placeholder is a duplicate, delete it. On an amount
+     *  mismatch the placeholder is a different deposit whose txid the resolver couldn't tell
+     *  apart (the resolver looks up by address, not per-deposit), so it is left alone rather
+     *  than deleted or mislabeled. With no websocket row, attach the txid to the placeholder. */
     fun reconcileResolvedReceiveTxid(txid: String, address: String): Boolean {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val websocketRowExists = db.rawQuery(
-                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
+            val websocketRowAmountMsat = db.rawQuery(
+                "SELECT amount_msat FROM payments WHERE txid = ? LIMIT 1",
                 arrayOf(txid)
-            ).use { it.moveToFirst() }
+            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
 
-            val placeholderId = findPendingPlaceholderId(db, address)
-            val changed = if (placeholderId == null) {
-                false
-            } else if (websocketRowExists) {
-                db.delete("payments", "id = ?", arrayOf(placeholderId.toString())) > 0
-            } else {
-                val cv = ContentValues().apply { put("txid", txid) }
-                db.update("payments", cv, "id = ?", arrayOf(placeholderId.toString())) > 0
+            val placeholder = findPendingPlaceholder(db, address)
+            val changed = when {
+                placeholder == null -> false
+                websocketRowAmountMsat == null -> {
+                    val cv = ContentValues().apply { put("txid", txid) }
+                    db.update("payments", cv, "id = ?", arrayOf(placeholder.id.toString())) > 0
+                }
+                websocketRowAmountMsat == placeholder.amountMsat ->
+                    db.delete("payments", "id = ?", arrayOf(placeholder.id.toString())) > 0
+                else -> false
             }
             db.setTransactionSuccessful()
             return changed
