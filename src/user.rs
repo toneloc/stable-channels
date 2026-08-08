@@ -2881,6 +2881,8 @@ impl UserApp {
                                 &sync,
                                 live_receiver_sats,
                                 price,
+                                old_expected,
+                                sc.backing_sats,
                                 pending_trade.as_ref(),
                             ) {
                                 Ok(backing_sats) => backing_sats,
@@ -10555,11 +10557,17 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
 
 /// Derive the allocation this wallet will commit for an authenticated sync. The peer's
 /// `backing_sats` is intentionally not an input: a pending trade uses the allocation this wallet
-/// stored when it created the trade, while recovery syncs are priced from the wallet's own feed.
+/// stored when it created the trade; other syncs preserve the wallet's existing allocation
+/// (unchanged target) or shift it by the target delta valued at the wallet's own price. The full
+/// position is never repriced, so accrued-but-unsettled stability drift survives a sync, and a
+/// target at the capacity boundary clamps instead of rejecting — a fully-stabilized channel sits
+/// exactly on that boundary whenever the two feeds disagree by a hair.
 fn local_sync_backing_sats(
     sync: &IncomingSync,
     live_receiver_sats: u64,
     current_price: f64,
+    current_expected_usd: f64,
+    current_backing_sats: u64,
     pending_trade: Option<&db::PendingTradeRow>,
 ) -> Result<u64, &'static str> {
     if sync.expected_usd < 0.01 {
@@ -10572,18 +10580,21 @@ fn local_sync_backing_sats(
             Err("stored trade allocation exceeds the live balance")
         };
     }
+    let target_delta_usd = sync.expected_usd - current_expected_usd;
+    if current_backing_sats > 0 && target_delta_usd.abs() < 0.01 {
+        return Ok(current_backing_sats.min(live_receiver_sats));
+    }
     if !current_price.is_finite() || current_price <= 0.0 {
         return Err("no trusted wallet price available");
     }
-    let receiver_usd = live_receiver_sats as f64 / SATS_IN_BTC as f64 * current_price;
-    if sync.expected_usd > receiver_usd {
-        return Err("stable target exceeds the wallet's local channel capacity");
-    }
-    let backing_sats = stable::trade_backing_sats(
-        live_receiver_sats,
-        sync.expected_usd,
-        current_price,
-    );
+    let backing_sats = if current_backing_sats > 0 {
+        let delta_sats = (target_delta_usd / current_price * SATS_IN_BTC as f64).round() as i64;
+        let shifted = current_backing_sats as i64 + delta_sats;
+        (shifted.max(0) as u64).min(live_receiver_sats)
+    } else {
+        // No local allocation to preserve (fresh restore): derive one at the wallet's price.
+        stable::trade_backing_sats(live_receiver_sats, sync.expected_usd, current_price)
+    };
     (backing_sats > 0)
         .then_some(backing_sats)
         .ok_or("nonzero peg has no locally derived backing")
@@ -10716,7 +10727,7 @@ mod tests {
     }
 
     #[test]
-    fn incoming_sync_uses_wallet_allocation_and_capacity() {
+    fn incoming_sync_preserves_or_shifts_wallet_allocation() {
         let sync = IncomingSync {
             channel_id: "00".repeat(32),
             expected_usd: 60.0,
@@ -10724,9 +10735,27 @@ mod tests {
             sync_version: 1,
         };
         assert_eq!(
-            local_sync_backing_sats(&sync, 100_000, 100_000.0, None),
+            local_sync_backing_sats(&sync, 100_000, 100_000.0, 0.0, 0, None),
             Ok(59_999),
-            "a recovery sync is priced by the wallet, not by the peer",
+            "a restore with no local allocation derives at the wallet's price, not the peer's",
+        );
+
+        assert_eq!(
+            local_sync_backing_sats(&sync, 100_000, 0.0, 60.0, 55_000, None),
+            Ok(55_000),
+            "an unchanged-target sync preserves the existing allocation and needs no price",
+        );
+
+        assert_eq!(
+            local_sync_backing_sats(&sync, 100_000, 100_000.0, 70.0, 65_000, None),
+            Ok(55_000),
+            "a target change moves backing by the delta at the wallet's price, never the whole position",
+        );
+
+        assert_eq!(
+            local_sync_backing_sats(&sync, 58_000, 100_000.0, 50.0, 55_000, None),
+            Ok(58_000),
+            "a delta past the live balance clamps instead of rejecting",
         );
 
         let pending = PendingTradeRow {
@@ -10737,7 +10766,7 @@ mod tests {
             action: "sell".to_owned(),
         };
         assert_eq!(
-            local_sync_backing_sats(&sync, 100_000, 0.0, Some(&pending)),
+            local_sync_backing_sats(&sync, 100_000, 0.0, 50.0, 50_000, Some(&pending)),
             Ok(59_701),
             "a trade acknowledgment uses the wallet's stored trade-time allocation",
         );
@@ -10746,14 +10775,18 @@ mod tests {
             expected_usd: 100.01,
             ..sync.clone()
         };
-        assert!(local_sync_backing_sats(&over_capacity, 100_000, 100_000.0, None).is_err());
+        assert_eq!(
+            local_sync_backing_sats(&over_capacity, 100_000, 100_000.0, 0.0, 0, None),
+            Ok(100_000),
+            "a restore at the capacity boundary clamps to all-stable instead of rejecting",
+        );
 
         let closed = IncomingSync {
             expected_usd: 0.0,
             ..sync
         };
         assert_eq!(
-            local_sync_backing_sats(&closed, 100_000, 0.0, None),
+            local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 60_000, None),
             Ok(0),
         );
     }
