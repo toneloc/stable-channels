@@ -1710,7 +1710,6 @@ impl StableChannelManager {
             serde_json::json!({
                 "expected_usd": payload.expected_usd,
                 "quote_price": payload.quote_price,
-                "backing_sats": payload.backing_sats,
                 "user_channel_id": payload.user_channel_id.clone(),
                 "channel_id": payload.channel_id.clone(),
             }),
@@ -1850,8 +1849,8 @@ impl StableChannelManager {
         }
         let (our_sats, their_sats) = channel_peer_balances(&chan);
         let new_expected = payload.expected_usd;
-        let signed_allocation = match (payload.quote_price, payload.backing_sats) {
-            (Some(quote_price), Some(backing_sats)) => {
+        let quoted_trade = match payload.quote_price {
+            Some(quote_price) => {
                 if payload.ts == 0
                     || !quote_price.is_finite()
                     || quote_price <= 0.0
@@ -1889,59 +1888,14 @@ impl StableChannelManager {
                     );
                     return;
                 }
-
-                let signed_backing_usd = backing_sats as f64 / 100_000_000.0 * quote_price;
-                let allocation_delta_usd = (signed_backing_usd - new_expected).abs();
-                let zero_allocation_is_consistent = if new_expected < 0.01 {
-                    backing_sats == 0
-                } else {
-                    backing_sats > 0
-                };
-                if backing_sats > their_sats
-                    || !zero_allocation_is_consistent
-                    || allocation_delta_usd
-                        > stable_channels::constants::STABILITY_THRESHOLD_USD
-                {
-                    stable_channels::audit::audit_event(
-                        "TRADE_ALLOCATION_INVALID",
-                        serde_json::json!({
-                            "signed_backing_sats": backing_sats,
-                            "signed_backing_usd": signed_backing_usd,
-                            "allocation_delta_usd": allocation_delta_usd,
-                            "receiver_sats": their_sats,
-                            "quote_price": quote_price,
-                            "channel_id": chan.channel_id.clone(),
-                            "user_channel_id": chan.user_channel_id.clone(),
-                        }),
-                    );
-                    return;
-                }
-
-                Some((quote_price, backing_sats, quote_deviation_percent))
+                Some((quote_price, quote_deviation_percent))
             }
-            (None, None) => None,
-            _ => {
-                stable_channels::audit::audit_event(
-                    "TRADE_ALLOCATION_INCOMPLETE",
-                    serde_json::json!({
-                        "quote_price": payload.quote_price,
-                        "backing_sats": payload.backing_sats,
-                        "channel_id": chan.channel_id.clone(),
-                        "user_channel_id": chan.user_channel_id.clone(),
-                    }),
-                );
-                return;
-            }
+            None => None,
         };
 
-        let validation_price = signed_allocation
-            .map(|(quote_price, _, _)| quote_price)
-            .unwrap_or(btc_price);
-        let receiver_usd =
-            USD::from_bitcoin(Bitcoin::from_sats(their_sats), validation_price).0;
-        // Epsilon absorbs f64 boundary rounding so a spend-driven push landing at ~receiver_usd is admitted; residual drift self-heals.
-        let ceiling = receiver_usd + stable_channels::constants::STABILITY_THRESHOLD_USD;
-        if new_expected > ceiling {
+        // The quote is a consent bound only. Capacity and allocation always use the LSP's price.
+        let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price).0;
+        if new_expected > receiver_usd {
             stable_channels::audit::audit_event(
                 "TRADE_EXCEEDS_BALANCE",
                 serde_json::json!({ "requested_usd": new_expected, "receiver_usd": receiver_usd, "user_channel_id": format!("{}", target_uid), "channel_id": chan.channel_id.clone() }),
@@ -1967,15 +1921,7 @@ impl StableChannelManager {
             sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, btc_price);
             sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
             sc.latest_price = btc_price;
-            if let Some((_, backing_sats, _)) = signed_allocation {
-                stable_channels::stable::apply_trade_allocation(
-                    sc,
-                    new_expected,
-                    backing_sats,
-                );
-            } else {
-                stable_channels::stable::apply_trade(sc, new_expected, btc_price);
-            }
+            stable_channels::stable::apply_trade(sc, new_expected, btc_price);
             (
                 format!("{}", sc.user_channel_id),
                 sc.expected_usd.0,
@@ -2010,9 +1956,9 @@ impl StableChannelManager {
                 "new_expected_usd": expected_usd_f,
                 "backing_sats": backing,
                 "native_sats": native,
-                "quote_price": signed_allocation.map(|(price, _, _)| price),
+                "quote_price": quoted_trade.map(|(price, _)| price),
                 "lsp_price": btc_price,
-                "quote_deviation_percent": signed_allocation.map(|(_, _, deviation)| deviation),
+                "quote_deviation_percent": quoted_trade.map(|(_, deviation)| deviation),
             }),
         );
         let sent = self
@@ -3600,7 +3546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trade_applies_signed_allocation_without_lsp_repricing() {
+    async fn trade_uses_lsp_price_instead_of_client_allocation() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX,
@@ -3619,34 +3565,34 @@ mod tests {
             0,
             50_000,
             50_000,
-            100_500.0,
+            100_000.0,
         );
 
-        // At the wallet quote this is exactly 49,950 backing sats. Re-deriving at the LSP's
-        // slightly newer price would produce a different allocation.
+        // The client reports a 0.4% higher price and therefore fewer backing sats. The quote is
+        // inside the slippage bound, but neither it nor the legacy backing field controls the LSP.
         let env = trade_envelope_with_allocation(
             CHANNEL_ID_HEX,
             USER_CHANNEL_ID_DECIMAL,
-            49.95,
-            100_000.0,
-            49_950,
+            49.75,
+            100_400.0,
+            49_551,
         );
         handle_trade_with_valid_fee(
             &mut mgr,
             &env,
             &fake as &dyn LdkServerCalls,
-            100_500.0,
+            100_000.0,
         )
         .await;
 
-        assert_eq!(mgr.stable_channels[0].backing_sats, 49_950);
-        assert_eq!(mgr.stable_channels[0].native_sats, 50);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 49_750);
+        assert_eq!(mgr.stable_channels[0].native_sats, 250);
         let sends = fake.sends.lock().unwrap();
-        assert_eq!(sends.len(), 1, "accepted allocation must be synced back");
+        assert_eq!(sends.len(), 1, "the LSP must sync its own allocation");
         let raw = std::str::from_utf8(sends[0].custom_tlvs[0].value.as_ref()).unwrap();
         let sync = crate::messages::parse_envelope(raw).unwrap();
         let payload: serde_json::Value = serde_json::from_str(&sync.payload).unwrap();
-        assert_eq!(payload["backing_sats"], 49_950);
+        assert_eq!(payload["backing_sats"], 49_750);
     }
 
     #[tokio::test]
@@ -3690,12 +3636,12 @@ mod tests {
         .await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
-        assert_eq!(mgr.stable_channels[0].backing_sats, 49_995);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn trade_rejects_allocation_not_derived_from_signed_quote() {
+    async fn trade_ignores_legacy_allocation_not_derived_from_quote() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX,
@@ -3732,9 +3678,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(mgr.stable_channels[0].expected_usd.0, 5.0);
-        assert_eq!(mgr.stable_channels[0].backing_sats, 5_000);
-        assert!(fake.sends.lock().unwrap().is_empty());
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 49.95);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 49_950);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -3778,7 +3724,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trade_admits_at_balance_boundary_within_epsilon() {
+    async fn trade_rejects_target_above_lsp_valued_capacity() {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
@@ -3797,11 +3743,9 @@ mod tests {
         )
         .await;
 
-        assert!(
-            (mgr.stable_channels[0].expected_usd.0 - target).abs() < 1e-6,
-            "a target within epsilon of the balance must be admitted, got {}",
-            mgr.stable_channels[0].expected_usd.0
-        );
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
