@@ -595,11 +595,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
     }
 
-    fun attachTxidToLatestOnchainReceive(txid: String): Boolean {
+    fun attachTxidToLatestOnchainReceive(txid: String, address: String): Boolean {
         val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND (txid IS NULL OR txid = '') ORDER BY created_at DESC LIMIT 1)"
+            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') ORDER BY created_at DESC LIMIT 1)"
         )
         stmt.bindString(1, txid)
+        stmt.bindString(2, address)
         return stmt.executeUpdateDelete() > 0
     }
 

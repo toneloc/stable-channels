@@ -1819,31 +1819,44 @@ class AppState(private val context: Context) : ViewModel() {
                         !receiveAddress.isNullOrBlank() &&
                         lastReceiveTxidAddress == receiveAddress
                 }
-                // No pending close — record as new on-chain deposit
-                val dedupId = if (!resolvedTxid.isNullOrBlank()) {
-                    "onchain_receive_$resolvedTxid"
-                } else {
-                    "${System.currentTimeMillis() / 1000}_$depositSats"
-                }
-                val rowId = db?.recordPayment(
-                    paymentId = dedupId,
-                    paymentType = "onchain",
-                    direction = "received",
-                    amountMsat = depositSats * 1000,
-                    amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
-                    btcPrice = price,
-                    status = "pending",
-                    txid = resolvedTxid,
-                    address = receiveAddress
-                )
 
-                if (rowId != null && rowId != -1L) {
-                    triggerPaymentFlash()
-                    AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf(
-                        "sats" to depositSats,
-                        "status" to "pending",
-                        "txid_known" to (!resolvedTxid.isNullOrBlank())
-                    ))
+                // If we can't tie this balance increase to a specific txid/address, it may
+                // already be tracked under a different (now-inactive) receive address — e.g.
+                // the websocket path recorded it before the user requested a new receive
+                // address. Skip creating a second, txid-less duplicate row in that case;
+                // confirmation polling will resolve the existing pending row instead.
+                val existingPendingReceive = resolvedTxid.isNullOrBlank() &&
+                    db?.latestPendingOnchainReceive() != null
+
+                if (existingPendingReceive) {
+                    AuditService.log("ONCHAIN_DEPOSIT_SKIPPED_DUPLICATE", mapOf("sats" to depositSats))
+                } else {
+                    // No pending close — record as new on-chain deposit
+                    val dedupId = if (!resolvedTxid.isNullOrBlank()) {
+                        "onchain_receive_$resolvedTxid"
+                    } else {
+                        "${System.currentTimeMillis() / 1000}_$depositSats"
+                    }
+                    val rowId = db?.recordPayment(
+                        paymentId = dedupId,
+                        paymentType = "onchain",
+                        direction = "received",
+                        amountMsat = depositSats * 1000,
+                        amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
+                        btcPrice = price,
+                        status = "pending",
+                        txid = resolvedTxid,
+                        address = receiveAddress
+                    )
+
+                    if (rowId != null && rowId != -1L) {
+                        triggerPaymentFlash()
+                        AuditService.log("ONCHAIN_DEPOSIT_DETECTED", mapOf(
+                            "sats" to depositSats,
+                            "status" to "pending",
+                            "txid_known" to (!resolvedTxid.isNullOrBlank())
+                        ))
+                    }
                 }
             }
             // Home card now carries pending receive state; remove stale capsule text.
@@ -1868,7 +1881,7 @@ class AppState(private val context: Context) : ViewModel() {
                     val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
                     if (txid != null) {
                         setLastReceiveTxid(txid, address)
-                        databaseService?.attachTxidToLatestOnchainReceive(txid)
+                        databaseService?.attachTxidToLatestOnchainReceive(txid, address)
                     }
                 }
             }
@@ -2050,7 +2063,7 @@ class AppState(private val context: Context) : ViewModel() {
             val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
             if (txid != null) {
                 setLastReceiveTxid(txid, address)
-                databaseService?.attachTxidToLatestOnchainReceive(txid)
+                databaseService?.attachTxidToLatestOnchainReceive(txid, address)
             }
         }
     }

@@ -246,7 +246,10 @@ class MempoolWebSocketService(
                 msg = msg,
                 tx = tx
             )
-            matches.forEach { match ->
+            // isTxid matches (spends of a tracked txid) are handled by the dedicated
+            // tracked-txs/utxoSpent branch below via TrackedOutspend; only address
+            // matches represent an actual incoming receive.
+            matches.filterNot { it.isTxid }.forEach { match ->
                 val dedupKey = "${tx.txid}_${match.target}"
                 if (dedupStore.isRecentlyProcessed(dedupKey)) {
                     return@forEach
