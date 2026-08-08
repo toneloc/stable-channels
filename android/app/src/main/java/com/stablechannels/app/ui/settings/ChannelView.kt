@@ -171,6 +171,7 @@ fun ChannelView(appState: AppState) {
                     showCloseConfirm = false
                     appState.isChannelClosing = true
                     appState.setStatus("Closing channel...")
+                    appState.prepareChannelCloseTracking(sc.userChannelId)
                     scope.launch(Dispatchers.IO) {
                         try {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)

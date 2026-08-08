@@ -483,6 +483,95 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    fun latestPendingOnchainReceive(): PaymentRecord? {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+            FROM payments
+            WHERE payment_type = 'onchain'
+              AND direction = 'received'
+              AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """.trimIndent(),
+            null
+        )
+        return cursor.use { c ->
+            if (!c.moveToFirst()) return@use null
+            PaymentRecord(
+                id = c.getLong(0), paymentId = c.getStringOrNull(1),
+                paymentType = c.getString(2), direction = c.getString(3),
+                amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+                btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
+                status = c.getString(8), createdAt = c.getLong(9),
+                feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+                address = c.getStringOrNull(12), confirmations = c.getInt(13)
+            )
+        }
+    }
+
+    fun getPaymentsNeedingConfirmation(limit: Int = 50): List<PaymentRecord> {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+            FROM payments
+            WHERE txid IS NOT NULL AND txid != ''
+              AND payment_type IN ('onchain', 'channel_close', 'splice_in', 'splice_out')
+              AND status != 'failed'
+              AND (
+                    (payment_type IN ('onchain', 'channel_close') AND confirmations < 6)
+                    OR
+                    (payment_type IN ('splice_in', 'splice_out') AND confirmations < 1)
+                  )
+            ORDER BY created_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        )
+        return cursor.use { c ->
+            val list = mutableListOf<PaymentRecord>()
+            while (c.moveToNext()) {
+                list.add(PaymentRecord(
+                    id = c.getLong(0), paymentId = c.getStringOrNull(1),
+                    paymentType = c.getString(2), direction = c.getString(3),
+                    amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+                    btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
+                    status = c.getString(8), createdAt = c.getLong(9),
+                    feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+                    address = c.getStringOrNull(12), confirmations = c.getInt(13)
+                ))
+            }
+            list
+        }
+    }
+
+    fun updatePaymentConfirmationState(paymentRowId: Long, confirmations: Int, status: String): Boolean {
+        val cv = ContentValues().apply {
+            put("confirmations", confirmations)
+            put("status", status)
+        }
+        return writableDatabase.update(
+            "payments",
+            cv,
+            "id = ?",
+            arrayOf(paymentRowId.toString())
+        ) > 0
+    }
+
+    fun clearPaymentTxidForRow(paymentRowId: Long): Boolean {
+        val cv = ContentValues().apply {
+            putNull("txid")
+            put("confirmations", 0)
+            put("status", "pending")
+        }
+        return writableDatabase.update(
+            "payments",
+            cv,
+            "id = ?",
+            arrayOf(paymentRowId.toString())
+        ) > 0
+    }
+
     fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
         val cv = ContentValues().apply {
             put("status", status)
@@ -504,6 +593,41 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             put("txid", txid)
         }
         writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+    }
+
+    fun attachTxidToLatestOnchainReceive(txid: String): Boolean {
+        val stmt = writableDatabase.compileStatement(
+            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND (txid IS NULL OR txid = '') ORDER BY created_at DESC LIMIT 1)"
+        )
+        stmt.bindString(1, txid)
+        return stmt.executeUpdateDelete() > 0
+    }
+
+    fun paymentExists(txid: String, excludePaymentId: String): Boolean {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE txid = ? AND payment_id != ? LIMIT 1",
+            arrayOf(txid, excludePaymentId)
+        )
+        return cursor.use { it.moveToFirst() }
+    }
+
+    fun deletePayment(paymentId: String) {
+        writableDatabase.delete("payments", "payment_id = ?", arrayOf(paymentId))
+    }
+
+    fun failPaymentByTxid(txid: String) {
+        writableDatabase.execSQL(
+            "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
+            arrayOf(txid)
+        )
+    }
+
+    fun completePaymentByTxid(txid: String): Boolean {
+        val stmt = writableDatabase.compileStatement(
+            "UPDATE payments SET status = 'completed' WHERE txid = ? AND status = 'pending'"
+        )
+        stmt.bindString(1, txid)
+        return stmt.executeUpdateDelete() > 0
     }
 
     fun getPendingChannelClosePaymentId(): String? {
