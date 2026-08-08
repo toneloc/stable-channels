@@ -1902,8 +1902,11 @@ impl StableChannelManager {
         };
 
         // The quote is a consent bound only. Capacity and allocation always use the LSP's price.
+        // Epsilon absorbs independent-feed skew so a full stabilization priced by the wallet a
+        // hair above the LSP's valuation is admitted rather than silently dropped.
         let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price).0;
-        if new_expected > receiver_usd {
+        let ceiling = receiver_usd + stable_channels::constants::STABILITY_THRESHOLD_USD;
+        if new_expected > ceiling {
             stable_channels::audit::audit_event(
                 "TRADE_EXCEEDS_BALANCE",
                 serde_json::json!({ "requested_usd": new_expected, "receiver_usd": receiver_usd, "user_channel_id": format!("{}", target_uid), "channel_id": chan.channel_id.clone() }),
@@ -3732,7 +3735,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trade_rejects_target_above_lsp_valued_capacity() {
+    async fn trade_admits_at_balance_boundary_within_epsilon() {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
@@ -3740,8 +3743,36 @@ mod tests {
         )]);
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
 
-        // A wallet-push lands at receiver_usd plus a sub-epsilon overshoot (independent f64 paths).
+        // A wallet-priced full stabilization lands at receiver_usd plus a sub-epsilon overshoot
+        // (independent feeds). It must be admitted, not silently dropped.
         let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD / 2.0;
+        let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        assert!(
+            (mgr.stable_channels[0].expected_usd.0 - target).abs() < 1e-6,
+            "a target within epsilon of the balance must be admitted, got {}",
+            mgr.stable_channels[0].expected_usd.0
+        );
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn trade_rejects_target_above_capacity_epsilon() {
+        let mut mgr = make_manager();
+        // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+
+        let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD * 2.0;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
         handle_trade_with_valid_fee(
             &mut mgr,
