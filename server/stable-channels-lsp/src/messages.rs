@@ -70,6 +70,22 @@ pub fn parse_envelope(raw: &str) -> Option<SignedEnvelope> {
     serde_json::from_str::<SignedEnvelope>(raw).ok()
 }
 
+/// Return true when a signed envelope declares an inner `TRADE_V1` message.
+///
+/// This only classifies the payment carrier. The trade handler still parses the complete
+/// payload and verifies its signature and channel binding before applying anything.
+pub fn is_trade_v1(envelope: &SignedEnvelope) -> bool {
+    serde_json::from_str::<serde_json::Value>(&envelope.payload)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|kind| kind == stable_channels::constants::TRADE_MESSAGE_TYPE)
+        })
+        .unwrap_or(false)
+}
+
 /// Parse the inner TRADE payload from the envelope's payload string.
 pub fn parse_trade_payload(payload: &str) -> Option<TradePayload> {
     serde_json::from_str::<TradePayload>(payload).ok()
@@ -109,6 +125,21 @@ mod tests {
         let parsed = parse_envelope(&env).unwrap();
         assert_eq!(parsed.payload, "the-payload");
         assert_eq!(parsed.signature, "the-sig");
+    }
+
+    #[test]
+    fn trade_v1_is_classified_by_inner_message_type() {
+        let trade = SignedEnvelope {
+            payload: r#"{"type":"TRADE_V1","expected_usd":12.5}"#.to_string(),
+            signature: "sig".to_string(),
+        };
+        let sync = SignedEnvelope {
+            payload: r#"{"type":"SYNC_V1","expected_usd":12.5}"#.to_string(),
+            signature: "sig".to_string(),
+        };
+
+        assert!(is_trade_v1(&trade));
+        assert!(!is_trade_v1(&sync));
     }
 
     #[test]

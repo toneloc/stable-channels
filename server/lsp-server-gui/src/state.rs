@@ -62,6 +62,7 @@ pub enum DisplayUnit {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SettlementKind {
 	Stability,
+	Trade,
 	Sync,
 }
 
@@ -70,6 +71,7 @@ impl SettlementKind {
 	pub fn parse(s: &str) -> Option<Self> {
 		match s {
 			"stability" => Some(Self::Stability),
+			"trade" => Some(Self::Trade),
 			"sync" => Some(Self::Sync),
 			_ => None,
 		}

@@ -786,16 +786,24 @@ impl StableChannelManager {
                 serde_json::json!({ "tlv": stable_channels::constants::STABLE_CHANNEL_TLV_TYPE, "payment_id": payment_id.clone() }),
             );
             let raw = raw.to_string();
-            if crate::messages::parse_envelope(&raw).is_some() {
-                if let Some(pid) = payment_id.as_deref() {
-                    if let Err(e) = self.db.record_settlement(pid, "sync") {
-                        tracing::error!("[stable] record_settlement (inbound sync) failed: {}", e);
-                        stable_channels::audit::audit_event(
-                            "DB_WRITE_FAILED",
-                            serde_json::json!({ "op": "record_settlement", "kind": "sync", "payment_id": pid, "error": e.to_string() }),
-                        );
+            if let Some(envelope) = crate::messages::parse_envelope(&raw) {
+                if crate::messages::is_trade_v1(&envelope) {
+                    if let Some(pid) = payment_id.as_deref() {
+                        if let Err(e) = self.db.record_settlement(pid, "trade") {
+                            tracing::error!(
+                                "[stable] record_settlement (inbound trade) failed: {}",
+                                e
+                            );
+                            stable_channels::audit::audit_event(
+                                "DB_WRITE_FAILED",
+                                serde_json::json!({ "op": "record_settlement", "kind": "trade", "payment_id": pid, "error": e.to_string() }),
+                            );
+                        }
                     }
                 }
+                // An envelope is a control message, even when its inner type is unknown or
+                // malformed. Let the trade handler audit/drop it; never reinterpret it as a
+                // stability payment.
                 self.handle_trade_message(&raw, amount_msat, ldk, btc_price)
                     .await;
             } else {
@@ -2572,7 +2580,7 @@ mod tests {
         assert_eq!(
             mgr.db.list_settlements().unwrap(),
             vec![
-                ("pay_test_1".to_string(), "sync".to_string()),
+                ("pay_test_1".to_string(), "trade".to_string()),
                 ("fake-payment-id".to_string(), "sync".to_string()),
             ]
         );
