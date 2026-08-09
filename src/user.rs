@@ -311,6 +311,8 @@ pub struct UserApp {
     fund_tab: FundTab,
     stable_channel: Arc<Mutex<StableChannel>>,
     background_started: bool,
+    mempool_ws: stable_channels::mempool_ws::MempoolWs,
+    ws_events: Option<std::sync::mpsc::Receiver<stable_channels::mempool_ws::WsEvent>>,
     audit_log_path: String,
     show_log_window: bool,
     show_diagnostics_window: bool,
@@ -662,6 +664,11 @@ impl UserApp {
         let db =
             Database::open(&data_dir).map_err(|e| format!("Failed to open database: {}", e))?;
 
+        // Mempool websocket: idle until the first receive address is tracked; events are
+        // consumed by a thread spawned in start_background_if_needed().
+        let (ws_tx, ws_events) = std::sync::mpsc::channel();
+        let mempool_ws = stable_channels::mempool_ws::MempoolWs::start(ws_tx);
+
         let mut app = Self {
             node: Arc::clone(&node),
             status_message: String::new(),
@@ -674,6 +681,8 @@ impl UserApp {
             fund_tab: FundTab::Lightning,
             stable_channel: Arc::clone(&stable_channel),
             background_started: false,
+            mempool_ws,
+            ws_events: Some(ws_events),
             btc_price,
             invoice_amount: "0".to_string(),
             jit_amount_input: String::new(),
@@ -804,6 +813,58 @@ impl UserApp {
             return;
         }
 
+        // Websocket events: record receives at mempool-sighting time (pending, later
+        // completed by the balance-delta path), fail rows on RBF/eviction.
+        if let Some(ws_rx) = self.ws_events.take() {
+            let ws_db = self.db.clone();
+            std::thread::spawn(move || {
+                for event in ws_rx {
+                    match event {
+                        stable_channels::mempool_ws::WsEvent::Receive {
+                            address,
+                            txid,
+                            amount_sats,
+                        } => {
+                            // The balance-delta path may already have recorded this deposit
+                            // (LDK named the txid first); never insert a second row per txid.
+                            if ws_db.payment_txid_exists(&txid).unwrap_or(true) {
+                                continue;
+                            }
+                            let price = stable_channels::price_feeds::get_cached_price();
+                            let amount_usd = (price > 0.0)
+                                .then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
+                            let payment_id = format!("onchain_receive_{txid}");
+                            let recorded = ws_db.record_payment(
+                                Some(&payment_id),
+                                "onchain",
+                                "received",
+                                amount_sats * 1000,
+                                amount_usd,
+                                (price > 0.0).then_some(price),
+                                None,
+                                "pending",
+                                Some(&txid),
+                                Some(&address),
+                            );
+                            if recorded.is_ok() {
+                                audit_event(
+                                    "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                                    json!({ "txid": txid, "amount_sats": amount_sats }),
+                                );
+                            }
+                        }
+                        stable_channels::mempool_ws::WsEvent::Removed { address, txid } => {
+                            let failed = ws_db.fail_payment_by_txid(&txid).unwrap_or(false);
+                            audit_event(
+                                "WEBSOCKET_RBF_FAILED_PAYMENT",
+                                json!({ "txid": txid, "address": address, "row_failed": failed }),
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
         let node_arc = Arc::clone(&self.node);
         let sc_arc = Arc::clone(&self.stable_channel);
         let db = self.db.clone();
@@ -931,24 +992,40 @@ impl UserApp {
                                 }
                                 None
                             });
-                        let _ = db.record_payment(
-                            None,
-                            "onchain",
-                            "received",
-                            deposit_sats * 1000,
-                            amount_usd,
-                            price,
-                            None,
-                            "completed",
-                            deposit_txid.as_deref(),
-                            None,
-                        );
+                        // The websocket path may have recorded this deposit at mempool time
+                        // as a pending row: complete that row instead of inserting a second
+                        // one. Txid match first; amount match (exact, per the Android
+                        // reconciliation) when LDK cannot name the txid yet.
+                        let mut ws_row_completed = deposit_txid
+                            .as_deref()
+                            .map(|txid| db.complete_payment_by_txid(txid).unwrap_or(false))
+                            .unwrap_or(false);
+                        if !ws_row_completed {
+                            ws_row_completed = db
+                                .complete_pending_onchain_receive_by_amount(deposit_sats * 1000)
+                                .unwrap_or(false);
+                        }
+                        if !ws_row_completed {
+                            let _ = db.record_payment(
+                                None,
+                                "onchain",
+                                "received",
+                                deposit_sats * 1000,
+                                amount_usd,
+                                price,
+                                None,
+                                "completed",
+                                deposit_txid.as_deref(),
+                                None,
+                            );
+                        }
                         audit_event(
                             "ONCHAIN_DEPOSIT_DETECTED",
                             json!({
                                 "amount_sats": deposit_sats,
                                 "prev_onchain": prev_onchain_sats,
                                 "new_onchain": current_onchain,
+                                "ws_row_completed": ws_row_completed,
                             }),
                         );
                     }
@@ -1839,7 +1916,11 @@ impl UserApp {
     pub fn get_address(&mut self) -> bool {
         match self.node.onchain_payment().new_address() {
             Ok(address) => {
-                self.on_chain_address = address.to_string();
+                let previous = std::mem::replace(&mut self.on_chain_address, address.to_string());
+                if !previous.is_empty() && previous != self.on_chain_address {
+                    self.mempool_ws.untrack_address(&previous);
+                }
+                self.mempool_ws.track_address(&self.on_chain_address);
                 self.status_message = "Address generated".to_string();
                 true
             }

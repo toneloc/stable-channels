@@ -1454,6 +1454,60 @@ impl Database {
         Ok(exists)
     }
 
+    /// Whether any payment row already carries this txid — the websocket path's dedup key
+    /// against the balance-delta detection path.
+    pub fn payment_txid_exists(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT 1 FROM payments WHERE txid = ?1 LIMIT 1")?;
+        let exists = stmt.exists(params![txid])?;
+        Ok(exists)
+    }
+
+    /// Complete the pending payment carrying this txid. Returns true if a row transitioned —
+    /// the balance-delta path uses this to adopt the websocket's pending row instead of
+    /// inserting a duplicate once LDK reports the same txid.
+    pub fn complete_payment_by_txid(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE payments SET status = 'completed' WHERE txid = ?1 AND status = 'pending'",
+            params![txid],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Complete the newest pending on-chain receive of exactly this amount. Amount-keyed on
+    /// purpose (not newest-row): when LDK cannot yet name the txid, equal amounts are what
+    /// identify the same deposit — a different-amount pending row belongs to another deposit
+    /// and must be left alone.
+    pub fn complete_pending_onchain_receive_by_amount(
+        &self,
+        amount_msat: u64,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE payments SET status = 'completed'
+             WHERE id = (
+                 SELECT id FROM payments
+                 WHERE payment_type = 'onchain' AND direction = 'received'
+                   AND status = 'pending' AND amount_msat = ?1
+                 ORDER BY created_at DESC LIMIT 1
+             )",
+            params![amount_msat],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Fail any pending payment carrying this txid (RBF replacement or mempool eviction).
+    /// Completed rows are never touched.
+    pub fn fail_payment_by_txid(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE payments SET status = 'failed' WHERE txid = ?1 AND status = 'pending'",
+            params![txid],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Whether a payment (by payment_id) is a recorded stability (peg-maintenance) payment.
     pub fn is_stability_payment(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
@@ -3164,6 +3218,54 @@ mod tests {
     fn test_open_in_memory() {
         let db = Database::open_in_memory().unwrap();
         assert!(db.conn.lock().is_ok());
+    }
+
+    #[test]
+    fn websocket_receive_reconciliation_helpers() {
+        let db = Database::open_in_memory().unwrap();
+        let record_pending = |payment_id: &str, amount_msat: u64, txid: &str| {
+            db.record_payment(
+                Some(payment_id),
+                "onchain",
+                "received",
+                amount_msat,
+                None,
+                None,
+                None,
+                "pending",
+                Some(txid),
+                Some("bc1qme"),
+            )
+            .unwrap();
+        };
+
+        record_pending("onchain_receive_tx1", 50_000_000, "tx1");
+        assert!(db.payment_txid_exists("tx1").unwrap());
+        assert!(!db.payment_txid_exists("tx2").unwrap());
+
+        assert!(db.complete_payment_by_txid("tx1").unwrap());
+        assert!(
+            !db.complete_payment_by_txid("tx1").unwrap(),
+            "an already-completed row must not transition again"
+        );
+
+        // Amount-keyed completion only adopts the pending row with exactly that amount —
+        // a different-amount pending row is a different deposit.
+        record_pending("onchain_receive_tx2", 70_000_000, "tx2");
+        assert!(!db
+            .complete_pending_onchain_receive_by_amount(50_000_000)
+            .unwrap());
+        assert!(db
+            .complete_pending_onchain_receive_by_amount(70_000_000)
+            .unwrap());
+
+        // RBF failure touches pending rows only.
+        record_pending("onchain_receive_tx3", 30_000_000, "tx3");
+        assert!(db.fail_payment_by_txid("tx3").unwrap());
+        assert!(
+            !db.fail_payment_by_txid("tx1").unwrap(),
+            "completed rows are never marked failed by an RBF event"
+        );
     }
 
     #[test]
