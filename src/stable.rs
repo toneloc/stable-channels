@@ -357,6 +357,97 @@ pub fn trade_backing_sats(
     )
 }
 
+/// Treat sub-cent stable targets as a full exit throughout trade processing.
+///
+/// The UI cannot action less than one cent, so retaining a fractional-cent target would only
+/// bypass the full-exit drift guard and leave an unusable residual allocation.
+pub fn normalize_trade_expected_usd(expected_usd: f64) -> f64 {
+    if expected_usd.is_finite() && expected_usd >= 0.0 && expected_usd < 0.01 {
+        0.0
+    } else {
+        expected_usd
+    }
+}
+
+/// Apply only the change in the stable target at this peer's local price.
+///
+/// Repricing the complete target would erase stability drift accumulated before the trade. A full
+/// exit is allowed only while that drift is inside the normal stability deadband; an actionable
+/// adjustment must settle first because a zero target cannot retain the old drift.
+pub fn trade_backing_after_delta(
+    receiver_sats: u64,
+    current_backing_sats: u64,
+    current_expected_usd: f64,
+    new_expected_usd: f64,
+    price: f64,
+) -> Option<u64> {
+    let new_expected_usd = normalize_trade_expected_usd(new_expected_usd);
+    if !current_expected_usd.is_finite()
+        || current_expected_usd < 0.0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+    {
+        return None;
+    }
+
+    let receiver_usd = receiver_sats as f64 / SATS_IN_BTC as f64 * price;
+    if new_expected_usd > receiver_usd {
+        return None;
+    }
+
+    if new_expected_usd == 0.0 {
+        return (!allocation_drift_is_actionable(
+            current_backing_sats,
+            current_expected_usd,
+            price,
+        ))
+        .then_some(0);
+    }
+
+    // Floor cumulative targets and subtract them instead of flooring each standalone delta. At a
+    // fixed price the differences telescope, so repeated sub-sat trades eventually apply exactly
+    // the same backing as one cumulative trade while preserving all pre-trade drift.
+    let current_target_sats_f = current_expected_usd / price * SATS_IN_BTC as f64;
+    let new_target_sats_f = new_expected_usd / price * SATS_IN_BTC as f64;
+    if !current_target_sats_f.is_finite()
+        || !new_target_sats_f.is_finite()
+        || current_target_sats_f >= u64::MAX as f64
+        || new_target_sats_f >= u64::MAX as f64
+    {
+        return None;
+    }
+    let current_target_sats = current_target_sats_f.floor() as u64;
+    let new_target_sats = new_target_sats_f.floor() as u64;
+    let mut backing_sats = if new_expected_usd >= current_expected_usd {
+        current_backing_sats.checked_add(new_target_sats.checked_sub(current_target_sats)?)?
+    } else {
+        current_backing_sats.checked_sub(current_target_sats.checked_sub(new_target_sats)?)?
+    };
+
+    // Native dust is absorbed only for a fresh allocation. normalize_backing_sats deliberately
+    // leaves an already-over-capacity value unchanged, and the final check rejects it.
+    if current_expected_usd < 0.01 && current_backing_sats == 0 {
+        backing_sats = normalize_backing_sats(receiver_sats, backing_sats, new_expected_usd, price);
+    }
+    (backing_sats <= receiver_sats).then_some(backing_sats)
+}
+
+fn allocation_drift_is_actionable(
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+) -> bool {
+    let current_value = backing_sats as f64 / SATS_IN_BTC as f64 * price;
+    let drift_usd = (current_value - expected_usd).abs();
+    if expected_usd < 0.01 {
+        return drift_usd >= STABILITY_THRESHOLD_USD;
+    }
+    let drift_percent = drift_usd / expected_usd * 100.0;
+    drift_usd >= STABILITY_THRESHOLD_USD && drift_percent >= STABILITY_THRESHOLD_PERCENT
+}
+
 /// Apply an allocation already derived by this peer.
 ///
 /// Callers must not pass a counterparty-supplied `backing_sats` value here. The shared contract is
@@ -368,25 +459,24 @@ pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, bac
     recompute_native(sc);
 }
 
-/// Apply a trade — set new expected_usd and recalculate backing_sats + native_sats.
+/// Apply a trade without repricing its existing backing.
 ///
-/// Used after buy/sell trades and when the LSP processes a trade message.
-/// Sets `expected_usd` to the new value and recalculates `backing_sats`
-/// at the current price. Updates `native_sats` (the invariant that stays
-/// fixed between stability payments).
-pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
-    sc.expected_usd = USD::from_f64(new_expected_usd);
-    if price > 0.0 {
-        let receiver_sats = sc.stable_receiver_btc.sats;
-        sc.backing_sats = if receiver_sats > 0 {
-            trade_backing_sats(receiver_sats, new_expected_usd, price)
-        } else {
-            (new_expected_usd / price * SATS_IN_BTC as f64) as u64
-        };
-    }
-    // native_sats is everything NOT backing the stable position
-    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
-    recompute_native(sc);
+/// Only the target delta is converted at the current price. Returns `false` and leaves the
+/// allocation untouched if the delta cannot be represented safely or fit the live balance.
+#[must_use]
+pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) -> bool {
+    let new_expected_usd = normalize_trade_expected_usd(new_expected_usd);
+    let Some(backing_sats) = trade_backing_after_delta(
+        sc.stable_receiver_btc.sats,
+        sc.backing_sats,
+        sc.expected_usd.0,
+        new_expected_usd,
+        price,
+    ) else {
+        return false;
+    };
+    apply_trade_allocation(sc, new_expected_usd, backing_sats);
+    true
 }
 
 /// Get the current BTC/USD price, preferring cached value when available
@@ -1164,7 +1254,7 @@ mod tests {
     fn trade_buy_reduces_stable() {
         // Buy $200 BTC: expected_usd $500 → $300
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 300.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 300.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 300.0);
         let expected_backing = (300.0 / 100_000.0 * 100_000_000.0) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
@@ -1174,7 +1264,7 @@ mod tests {
     fn trade_sell_increases_stable() {
         // Sell $200 BTC: expected_usd $500 → $700
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 700.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 700.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 700.0);
         let expected_backing = (700.0 / 100_000.0 * 100_000_000.0) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
@@ -1183,7 +1273,7 @@ mod tests {
     #[test]
     fn trade_to_zero() {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 0.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 0.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 0.0);
         assert_eq!(sc.backing_sats, 0);
     }
@@ -1192,27 +1282,26 @@ mod tests {
     fn trade_zero_price_skips_backing_update() {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         let backing_before = sc.backing_sats;
-        apply_trade(&mut sc, 700.0, 0.0);
-        assert_eq!(sc.expected_usd.0, 700.0); // usd updated
-        assert_eq!(sc.backing_sats, backing_before); // backing unchanged
+        assert!(!apply_trade(&mut sc, 700.0, 0.0));
+        assert_eq!(sc.expected_usd.0, 500.0);
+        assert_eq!(sc.backing_sats, backing_before);
     }
 
     #[test]
-    fn trade_at_different_price() {
-        // Same $500 stable, but price doubled to $200k
-        // backing should be half the sats
+    fn no_op_trades_preserve_above_and_below_par_drift() {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 500.0, 200_000.0);
-        let expected_backing = (500.0 / 200_000.0 * 100_000_000.0) as u64; // 250k
-        assert_eq!(sc.backing_sats, expected_backing);
-        assert_eq!(expected_backing, 250_000);
+        assert!(apply_trade(&mut sc, 500.0, 200_000.0));
+        assert_eq!(sc.backing_sats, 500_000);
+
+        assert!(apply_trade(&mut sc, 500.0, 80_000.0));
+        assert_eq!(sc.backing_sats, 500_000);
     }
 
     #[test]
     fn trade_full_balance_to_stable() {
         // Convert all $1000 to stable
         let mut sc = test_sc(0.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 1000.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 1000.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 1000.0);
         assert_eq!(sc.backing_sats, 1_000_000);
     }
@@ -1220,7 +1309,7 @@ mod tests {
     #[test]
     fn trade_full_balance_absorbs_sub_cent_native_dust() {
         let mut sc = test_sc(0.0, 66_250.21, 57_444);
-        apply_trade(&mut sc, 38.055025828575, 66_250.21);
+        assert!(apply_trade(&mut sc, 38.055025828575, 66_250.21));
 
         assert_eq!(sc.backing_sats, 57_444);
         assert_eq!(sc.native_sats, 0);
@@ -1230,7 +1319,7 @@ mod tests {
     #[test]
     fn trade_keeps_meaningful_native_allocation() {
         let mut sc = test_sc(0.0, 100_000.0, 100_000);
-        apply_trade(&mut sc, 99.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 99.0, 100_000.0));
 
         assert_eq!(sc.backing_sats, 99_000);
         assert_eq!(sc.native_sats, 1_000);
@@ -1238,12 +1327,134 @@ mod tests {
     }
 
     #[test]
-    fn trade_backing_never_exceeds_live_balance() {
+    fn trade_over_live_balance_is_not_partially_applied() {
         let mut sc = test_sc(0.0, 100_000.0, 95_000);
-        apply_trade(&mut sc, 100.0, 100_000.0);
+        assert!(!apply_trade(&mut sc, 100.0, 100_000.0));
 
-        assert_eq!(sc.backing_sats, 95_000);
-        assert_eq!(sc.native_sats, 0);
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+        assert_eq!(sc.native_sats, 95_000);
+    }
+
+    #[test]
+    fn normal_trades_apply_only_the_locally_priced_delta() {
+        let mut increase = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut increase, 110.0, 110_000.0));
+        assert_eq!(increase.backing_sats, 109_091);
+
+        let mut decrease = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut decrease, 90.0, 110_000.0));
+        assert_eq!(decrease.backing_sats, 90_909);
+    }
+
+    #[test]
+    fn tiny_trade_preserves_preexisting_stability_drift() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+
+        assert!(apply_trade(&mut sc, 100.01, 110_000.0));
+
+        assert_eq!(sc.backing_sats, 100_009);
+        let value = sc.backing_sats as f64 / SATS_IN_BTC as f64 * 110_000.0;
+        assert!(value - sc.expected_usd.0 > 9.99);
+    }
+
+    #[test]
+    fn repeated_sub_sat_target_changes_apply_the_cumulative_backing() {
+        let price = 63_734.35;
+        let mut current_expected = 0.0;
+        let mut backing = 0;
+
+        for step in 1..=10_000 {
+            let new_expected =
+                normalize_trade_expected_usd(step as f64 / 10_000.0);
+            backing = trade_backing_after_delta(
+                1_000_000,
+                backing,
+                current_expected,
+                new_expected,
+                price,
+            )
+            .unwrap();
+            current_expected = new_expected;
+        }
+
+        assert_eq!(
+            backing,
+            (current_expected / price * SATS_IN_BTC as f64).floor() as u64,
+        );
+    }
+
+    #[test]
+    fn arithmetic_underflow_leaves_trade_state_unchanged() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+        sc.backing_sats = 10;
+        sc.native_sats = 199_990;
+
+        assert!(!apply_trade(&mut sc, 99.0, 100_000.0));
+        assert_eq!(sc.expected_usd.0, 100.0);
+        assert_eq!(sc.backing_sats, 10);
+        assert_eq!(sc.native_sats, 199_990);
+    }
+
+    #[test]
+    fn full_exit_waits_for_actionable_drift_to_settle() {
+        for price in [90_000.0, 110_000.0] {
+            let mut sc = test_sc(100.0, 100_000.0, 200_000);
+            assert!(!apply_trade(&mut sc, 0.0, price));
+            assert_eq!(sc.expected_usd.0, 100.0);
+            assert_eq!(sc.backing_sats, 100_000);
+        }
+    }
+
+    #[test]
+    fn full_exit_allows_non_actionable_drift() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut sc, 0.0, 100_001.0));
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+    }
+
+    #[test]
+    fn sub_cent_target_is_normalized_through_the_full_exit_guard() {
+        let mut safe = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut safe, 0.009, 100_001.0));
+        assert_eq!(safe.expected_usd.0, 0.0);
+        assert_eq!(safe.backing_sats, 0);
+
+        let mut actionable = test_sc(100.0, 100_000.0, 200_000);
+        assert!(!apply_trade(&mut actionable, 0.009, 90_000.0));
+        assert_eq!(actionable.expected_usd.0, 100.0);
+        assert_eq!(actionable.backing_sats, 100_000);
+    }
+
+    #[test]
+    fn full_exit_does_not_hide_large_absolute_drift_on_sub_cent_target() {
+        let mut sc = test_sc(0.005, 100_000.0, 200_000);
+        sc.backing_sats = 100_000;
+        sc.native_sats = 100_000;
+
+        assert!(!apply_trade(&mut sc, 0.0, 100_000.0));
+        assert_eq!(sc.expected_usd.0, 0.005);
+        assert_eq!(sc.backing_sats, 100_000);
+    }
+
+    #[test]
+    fn capacity_overflow_is_rejected_instead_of_clamped() {
+        assert_eq!(
+            trade_backing_after_delta(100_000, 0, 0.0, 100.001, 100_000.0),
+            None,
+        );
+        assert_eq!(
+            trade_backing_after_delta(100_000, 0, 0.0, 100.10, 100_000.0),
+            None,
+        );
+
+        // Existing backing is $0.30 above a $10 target. Clamping this increase would silently
+        // erase that actionable pre-trade obligation.
+        assert_eq!(
+            trade_backing_after_delta(20_000, 10_300, 10.0, 20.001, 100_000.0),
+            None,
+        );
     }
 
     #[test]
@@ -1315,7 +1526,7 @@ mod tests {
     fn native_updated_after_apply_trade() {
         // Sell BTC: increase stable from $500 to $800
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 800.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 800.0, 100_000.0));
         let expected_backing = (800.0 / 100_000.0 * 100_000_000.0) as u64;
         assert_eq!(sc.native_channel_btc.sats, 1_000_000 - expected_backing);
     }

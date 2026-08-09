@@ -183,6 +183,17 @@ struct IncomingSync {
     sync_version: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalTradeAllocationError {
+    InvalidValues,
+    LiveBalanceUnavailable,
+    FeeExceedsBalance,
+    TargetExceedsCapacity,
+    TargetExceedsSafeCapacity,
+    SettlementRequired,
+    UnsafeAllocation,
+}
+
 struct BackupSnapshotDir {
     path: PathBuf,
 }
@@ -1920,6 +1931,7 @@ impl UserApp {
         trade_action: &str,
         trade_price: f64,
     ) -> Option<(PaymentId, u64)> {
+        let new_expected_usd = stable::normalize_trade_expected_usd(new_expected_usd);
         // The fee is a direct keysend amount. Account for its whole-sat channel impact before
         // deriving the wallet's post-settlement allocation.
         let fee_sats = if trade_price > 0.0 && fee_usd > 0.0 {
@@ -1932,6 +1944,32 @@ impl UserApp {
 
         // Refresh from this wallet's LDK node and derive the allocation this wallet will commit
         // after acceptance. The LSP independently derives its own allocation at its own price.
+        let local_allocation = {
+            let mut sc = self.stable_channel.lock().unwrap();
+            let (balances_updated, _) = stable::update_balances(&self.node, &mut sc);
+            if !balances_updated {
+                Err(LocalTradeAllocationError::LiveBalanceUnavailable)
+            } else {
+                local_trade_backing_sats(
+                    sc.stable_receiver_btc.sats,
+                    fee_sats,
+                    sc.backing_sats,
+                    sc.expected_usd.0,
+                    new_expected_usd,
+                    trade_price,
+                )
+                .map(|(post_fee_receiver_sats, backing_sats)| {
+                    (
+                        sc.channel_id.to_string(),
+                        format!("{}", sc.user_channel_id),
+                        sc.counterparty,
+                        sc.expected_usd.0,
+                        post_fee_receiver_sats,
+                        backing_sats,
+                    )
+                })
+            }
+        };
         let (
             channel_id_str,
             user_channel_id_str,
@@ -1939,23 +1977,47 @@ impl UserApp {
             old_expected_usd,
             post_fee_receiver_sats,
             backing_sats,
-        ) = {
-            let mut sc = self.stable_channel.lock().unwrap();
-            stable::update_balances(&self.node, &mut sc);
-            let post_fee_receiver_sats = sc.stable_receiver_btc.sats.saturating_sub(fee_sats);
-            let backing_sats = stable::trade_backing_sats(
-                post_fee_receiver_sats,
-                new_expected_usd,
-                trade_price,
-            );
-            (
-                sc.channel_id.to_string(),
-                format!("{}", sc.user_channel_id),
-                sc.counterparty,
-                sc.expected_usd.0,
-                post_fee_receiver_sats,
-                backing_sats,
-            )
+        ) = match local_allocation {
+            Ok(allocation) => allocation,
+            Err(reason) => {
+                self.trade_error = match reason {
+                    LocalTradeAllocationError::SettlementRequired => {
+                        "Settle the current stability adjustment, then retry this trade."
+                            .to_string()
+                    }
+                    LocalTradeAllocationError::FeeExceedsBalance => {
+                        "The trade fee exceeds the live channel balance.".to_string()
+                    }
+                    LocalTradeAllocationError::TargetExceedsCapacity => {
+                        "The trade target exceeds the wallet's local channel capacity.".to_string()
+                    }
+                    LocalTradeAllocationError::TargetExceedsSafeCapacity => {
+                        "The trade target is too close to the channel limit for independent price feeds. Reduce the amount and retry."
+                            .to_string()
+                    }
+                    LocalTradeAllocationError::InvalidValues => {
+                        "A trusted local price is required before trading.".to_string()
+                    }
+                    LocalTradeAllocationError::LiveBalanceUnavailable => {
+                        "The live channel balance is unavailable. Retry when the channel is ready."
+                            .to_string()
+                    }
+                    LocalTradeAllocationError::UnsafeAllocation => {
+                        "This trade cannot preserve the current stability allocation safely."
+                            .to_string()
+                    }
+                };
+                self.status_message = self.trade_error.clone();
+                audit_event(
+                    "TRADE_LOCAL_ALLOCATION_REJECTED",
+                    json!({
+                        "reason": format!("{reason:?}"),
+                        "new_expected_usd": new_expected_usd,
+                        "quote_price": trade_price,
+                    }),
+                );
+                return None;
+            }
         };
 
         let ts = std::time::SystemTime::now()
@@ -2027,6 +2089,7 @@ impl UserApp {
             }
             Err(e) => {
                 self.status_message = format!("Failed to send order: {}", e);
+                self.trade_error = self.status_message.clone();
                 audit_event(
                     "TRADE_MESSAGE_FAILED",
                     json!({
@@ -8988,7 +9051,18 @@ impl UserApp {
                 });
             });
 
-        ui.add_space(20.0);
+        let confirmation_blocked = !self.trade_error.is_empty();
+        if confirmation_blocked {
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(&self.trade_error)
+                    .color(theme::DANGER_HOVER)
+                    .size(12.0),
+            );
+            ui.add_space(8.0);
+        } else {
+            ui.add_space(20.0);
+        }
 
         // Confirm button
         let mut should_confirm = false;
@@ -9002,7 +9076,10 @@ impl UserApp {
             .fill(theme::IOS_BLUE)
             .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
-            if ui.add(confirm_btn).clicked() {
+            if ui
+                .add_enabled(!confirmation_blocked, confirm_btn)
+                .clicked()
+            {
                 should_confirm = true;
             }
         });
@@ -9347,7 +9424,18 @@ impl UserApp {
                 });
             });
 
-        ui.add_space(20.0);
+        let confirmation_blocked = !self.trade_error.is_empty();
+        if confirmation_blocked {
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(&self.trade_error)
+                    .color(theme::DANGER_HOVER)
+                    .size(12.0),
+            );
+            ui.add_space(8.0);
+        } else {
+            ui.add_space(20.0);
+        }
 
         // Confirm button
         let mut should_confirm = false;
@@ -9361,7 +9449,10 @@ impl UserApp {
             .fill(theme::IOS_BLUE)
             .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
-            if ui.add(confirm_btn).clicked() {
+            if ui
+                .add_enabled(!confirmation_blocked, confirm_btn)
+                .clicked()
+            {
                 should_confirm = true;
             }
         });
@@ -9629,6 +9720,7 @@ impl UserApp {
     }
 
     fn execute_buy(&mut self, amount_usd: f64, btc_price: f64) {
+        self.trade_error.clear();
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
@@ -9690,10 +9782,10 @@ impl UserApp {
                 "...",
             );
         }
-        self.trade_error.clear();
     }
 
     fn execute_sell(&mut self, amount_usd: f64, btc_price: f64, btc_sats: u64) {
+        self.trade_error.clear();
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
 
@@ -9754,7 +9846,6 @@ impl UserApp {
                 "...",
             );
         }
-        self.trade_error.clear();
     }
 
     fn show_diagnostics_window_if_open(&mut self, ctx: &egui::Context) {
@@ -10536,7 +10627,8 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
         return None;
     }
     let channel_id = channel_id.to_ascii_lowercase();
-    let expected_usd = payload.get("expected_usd")?.as_f64()?;
+    let expected_usd =
+        stable::normalize_trade_expected_usd(payload.get("expected_usd")?.as_f64()?);
     let backing_sats = payload.get("backing_sats")?.as_u64()?;
     let sync_version = payload.get("sync_version")?.as_u64()?;
     if !expected_usd.is_finite()
@@ -10555,13 +10647,96 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
     })
 }
 
+fn trade_reduction_underflows_backing(
+    current_backing_sats: u64,
+    current_expected_usd: f64,
+    new_expected_usd: f64,
+    current_price: f64,
+) -> bool {
+    if new_expected_usd >= current_expected_usd {
+        return false;
+    }
+    let current_target = current_expected_usd / current_price * SATS_IN_BTC as f64;
+    let new_target = new_expected_usd / current_price * SATS_IN_BTC as f64;
+    if !current_target.is_finite()
+        || !new_target.is_finite()
+        || current_target >= u64::MAX as f64
+        || new_target >= u64::MAX as f64
+    {
+        return false;
+    }
+    let reduction = (current_target.floor() as u64).saturating_sub(new_target.floor() as u64);
+    reduction > current_backing_sats
+}
+
+/// Calculate the allocation the wallet must persist before it sends the trade fee.
+fn local_trade_backing_sats(
+    live_receiver_sats: u64,
+    fee_sats: u64,
+    current_backing_sats: u64,
+    current_expected_usd: f64,
+    new_expected_usd: f64,
+    current_price: f64,
+) -> Result<(u64, u64), LocalTradeAllocationError> {
+    let new_expected_usd = stable::normalize_trade_expected_usd(new_expected_usd);
+    if !current_expected_usd.is_finite()
+        || current_expected_usd < 0.0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd < 0.0
+        || !current_price.is_finite()
+        || current_price <= 0.0
+    {
+        return Err(LocalTradeAllocationError::InvalidValues);
+    }
+    let post_fee_receiver_sats = live_receiver_sats
+        .checked_sub(fee_sats)
+        .ok_or(LocalTradeAllocationError::FeeExceedsBalance)?;
+    let receiver_usd =
+        post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * current_price;
+    if new_expected_usd > receiver_usd {
+        return Err(LocalTradeAllocationError::TargetExceedsCapacity);
+    }
+    if new_expected_usd > current_expected_usd {
+        // The LSP accepts a signed quote up to this deviation from its own price. Use the exact
+        // inverse of that check so every permitted lower LSP price still supports this target.
+        let minimum_permitted_lsp_price =
+            current_price / (1.0 + MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0);
+        let conservative_receiver_usd =
+            post_fee_receiver_sats as f64 / SATS_IN_BTC as f64
+                * minimum_permitted_lsp_price;
+        if new_expected_usd > conservative_receiver_usd {
+            return Err(LocalTradeAllocationError::TargetExceedsSafeCapacity);
+        }
+    }
+    let backing_sats = stable::trade_backing_after_delta(
+        post_fee_receiver_sats,
+        current_backing_sats,
+        current_expected_usd,
+        new_expected_usd,
+        current_price,
+    )
+    .ok_or(if new_expected_usd == 0.0
+        || trade_reduction_underflows_backing(
+            current_backing_sats,
+            current_expected_usd,
+            new_expected_usd,
+            current_price,
+        )
+    {
+        LocalTradeAllocationError::SettlementRequired
+    } else {
+        LocalTradeAllocationError::UnsafeAllocation
+    })?;
+    Ok((post_fee_receiver_sats, backing_sats))
+}
+
 /// Derive the allocation this wallet will commit for an authenticated sync. The peer's
 /// `backing_sats` is intentionally not an input: a pending trade uses the allocation this wallet
 /// stored when it created the trade; other syncs preserve the wallet's existing allocation
 /// (unchanged target) or shift it by the target delta valued at the wallet's own price. The full
-/// position is never repriced, so accrued-but-unsettled stability drift survives a sync, and a
-/// target at the capacity boundary clamps instead of rejecting — a fully-stabilized channel sits
-/// exactly on that boundary whenever the two feeds disagree by a hair.
+/// position is never repriced, so accrued-but-unsettled stability drift survives a sync. If an
+/// authenticated, uncorrelated sync lands just outside the wallet's local capacity, reconcile it
+/// to the live balance instead of consuming the event while leaving the expected target stale.
 fn local_sync_backing_sats(
     sync: &IncomingSync,
     live_receiver_sats: u64,
@@ -10570,34 +10745,62 @@ fn local_sync_backing_sats(
     current_backing_sats: u64,
     pending_trade: Option<&db::PendingTradeRow>,
 ) -> Result<u64, &'static str> {
-    if sync.expected_usd < 0.01 {
+    let expected_usd = stable::normalize_trade_expected_usd(sync.expected_usd);
+    if expected_usd == 0.0 {
         return Ok(0);
     }
     if let Some(stored_backing) = pending_trade.and_then(|trade| trade.new_backing_sats) {
-        return if stored_backing > 0 && stored_backing <= live_receiver_sats {
+        return if stored_backing <= live_receiver_sats {
             Ok(stored_backing)
         } else {
             Err("stored trade allocation exceeds the live balance")
         };
     }
-    let target_delta_usd = sync.expected_usd - current_expected_usd;
-    if current_backing_sats > 0 && target_delta_usd.abs() < 0.01 {
+    let target_delta_usd = expected_usd - current_expected_usd;
+    if current_backing_sats > 0 && target_delta_usd == 0.0 {
         return Ok(current_backing_sats.min(live_receiver_sats));
     }
     if !current_price.is_finite() || current_price <= 0.0 {
         return Err("no trusted wallet price available");
     }
-    let backing_sats = if current_backing_sats > 0 {
-        let delta_sats = (target_delta_usd / current_price * SATS_IN_BTC as f64).round() as i64;
-        let shifted = current_backing_sats as i64 + delta_sats;
-        (shifted.max(0) as u64).min(live_receiver_sats)
+    if let Some(backing_sats) = stable::trade_backing_after_delta(
+        live_receiver_sats,
+        current_backing_sats,
+        current_expected_usd,
+        expected_usd,
+        current_price,
+    ) {
+        return Ok(backing_sats);
+    }
+
+    // This is reconciliation of an already authenticated LSP decision, not capacity admission
+    // for a new trade. Preserve the same cumulative-floor delta and bound it by the live balance
+    // so a hairline feed disagreement cannot leave the wallet permanently on an older target.
+    let current_target = current_expected_usd / current_price * SATS_IN_BTC as f64;
+    let new_target = expected_usd / current_price * SATS_IN_BTC as f64;
+    if !current_target.is_finite()
+        || !new_target.is_finite()
+        || current_target < 0.0
+        || new_target < 0.0
+        || current_target >= u64::MAX as f64
+        || new_target >= u64::MAX as f64
+    {
+        return Err("sync target cannot be represented at the wallet's local price");
+    }
+    let current_target_sats = current_target.floor() as u64;
+    let new_target_sats = new_target.floor() as u64;
+    let backing_sats = if expected_usd >= current_expected_usd {
+        current_backing_sats
+            .saturating_add(new_target_sats.saturating_sub(current_target_sats))
+            .min(live_receiver_sats)
     } else {
-        // No local allocation to preserve (fresh restore): derive one at the wallet's price.
-        stable::trade_backing_sats(live_receiver_sats, sync.expected_usd, current_price)
+        current_backing_sats
+            .saturating_sub(current_target_sats.saturating_sub(new_target_sats))
+            .min(live_receiver_sats)
     };
     (backing_sats > 0)
         .then_some(backing_sats)
-        .ok_or("nonzero peg has no locally derived backing")
+        .ok_or("nonzero sync target has no locally derived backing")
 }
 
 fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -10640,10 +10843,10 @@ fn btc_amount_to_msat(input: &str) -> Option<u64> {
 mod tests {
     use super::{
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
-        local_sync_backing_sats, parse_incoming_sync, parse_trade_usd_cents,
-        restrict_secret_file_permissions, sats_for_usd_cents, splice_in_overlap_sats,
-        splice_reconcile_action, write_secret_file, IncomingSync, PendingSplice,
-        SpliceReconcileAction, UserApp,
+        local_sync_backing_sats, local_trade_backing_sats, parse_incoming_sync,
+        parse_trade_usd_cents, restrict_secret_file_permissions, sats_for_usd_cents,
+        splice_in_overlap_sats, splice_reconcile_action, write_secret_file, IncomingSync,
+        LocalTradeAllocationError, PendingSplice, SpliceReconcileAction, UserApp,
     };
     use stable_channels::db::PendingTradeRow;
 
@@ -10727,6 +10930,53 @@ mod tests {
     }
 
     #[test]
+    fn wallet_trade_preflight_rejects_before_unsafe_fee_send() {
+        assert_eq!(
+            local_trade_backing_sats(200_000, 500, 100_000, 100.0, 0.0, 110_000.0),
+            Err(LocalTradeAllocationError::SettlementRequired),
+        );
+        assert_eq!(
+            local_trade_backing_sats(100_000, 0, 0, 0.0, 100.001, 100_000.0),
+            Err(LocalTradeAllocationError::TargetExceedsCapacity),
+        );
+        assert_eq!(
+            local_trade_backing_sats(100, 101, 0, 0.0, 0.01, 100_000.0),
+            Err(LocalTradeAllocationError::FeeExceedsBalance),
+        );
+        assert_eq!(
+            local_trade_backing_sats(200_000, 0, 10, 100.0, 99.0, 100_000.0),
+            Err(LocalTradeAllocationError::SettlementRequired),
+        );
+        assert_eq!(
+            local_trade_backing_sats(100_000, 0, 0, 0.0, 99.51, 100_000.0),
+            Err(LocalTradeAllocationError::TargetExceedsSafeCapacity),
+            "the preflight reserves the full permitted quote-deviation band",
+        );
+    }
+
+    #[test]
+    fn wallet_trade_preflight_preserves_drift_and_allows_safe_exit() {
+        assert_eq!(
+            local_trade_backing_sats(100_000, 0, 0, 0.0, 99.50, 100_000.0),
+            Ok((100_000, 99_500)),
+            "a target below the conservative cross-feed limit remains available",
+        );
+        assert_eq!(
+            local_trade_backing_sats(200_000, 100, 100_000, 100.0, 100.01, 110_000.0),
+            Ok((199_900, 100_009)),
+        );
+        assert_eq!(
+            local_trade_backing_sats(200_000, 500, 100_000, 100.0, 0.0, 100_001.0),
+            Ok((199_500, 0)),
+        );
+        assert_eq!(
+            local_trade_backing_sats(200_000, 500, 100_000, 100.0, 0.009, 100_001.0),
+            Ok((199_500, 0)),
+            "a sub-cent target follows the same guarded full-exit path",
+        );
+    }
+
+    #[test]
     fn incoming_sync_preserves_or_shifts_wallet_allocation() {
         let sync = IncomingSync {
             channel_id: "00".repeat(32),
@@ -10748,14 +10998,14 @@ mod tests {
 
         assert_eq!(
             local_sync_backing_sats(&sync, 100_000, 100_000.0, 70.0, 65_000, None),
-            Ok(55_000),
+            Ok(54_999),
             "a target change moves backing by the delta at the wallet's price, never the whole position",
         );
 
         assert_eq!(
             local_sync_backing_sats(&sync, 58_000, 100_000.0, 50.0, 55_000, None),
             Ok(58_000),
-            "a delta past the live balance clamps instead of rejecting",
+            "an authenticated sync clamps to the live balance instead of leaving stale state",
         );
 
         let pending = PendingTradeRow {
@@ -10772,13 +11022,13 @@ mod tests {
         );
 
         let over_capacity = IncomingSync {
-            expected_usd: 100.01,
+            expected_usd: 100.001,
             ..sync.clone()
         };
         assert_eq!(
             local_sync_backing_sats(&over_capacity, 100_000, 100_000.0, 0.0, 0, None),
             Ok(100_000),
-            "a restore at the capacity boundary clamps to all-stable instead of rejecting",
+            "sync reconciliation cannot admit capacity but must converge authenticated state",
         );
 
         let closed = IncomingSync {
@@ -10788,6 +11038,24 @@ mod tests {
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 60_000, None),
             Ok(0),
+            "an authenticated full-exit sync needs no local price",
+        );
+        assert_eq!(
+            local_sync_backing_sats(
+                &closed,
+                100_000,
+                100_001.0,
+                60.0,
+                59_999,
+                None,
+            ),
+            Ok(0),
+            "a full exit with insignificant drift is safe",
+        );
+        assert_eq!(
+            local_sync_backing_sats(&closed, 100_000, 90_000.0, 60.0, 60_000, None),
+            Ok(0),
+            "a signed LSP decision is reconciled rather than silently dropped",
         );
     }
 
@@ -10906,6 +11174,10 @@ mod tests {
                 sync_version: 4,
             })
         );
+
+        let mut sub_cent = payload.clone();
+        sub_cent["expected_usd"] = serde_json::json!(0.009);
+        assert_eq!(parse_incoming_sync(&sub_cent).unwrap().expected_usd, 0.0);
 
         let mut missing_version = payload.clone();
         missing_version

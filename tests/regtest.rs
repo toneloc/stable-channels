@@ -776,8 +776,8 @@ async fn test_outgoing_payment_deducts_from_stable() {
     for _ in 0..5 {
         match lsp_node.next_event() {
             Some(ldk_node::Event::PaymentForwarded {
-                prev_channel_id,
-                next_channel_id,
+                prev_htlcs,
+                next_htlcs,
                 outbound_amount_forwarded_msat,
                 total_fee_earned_msat,
                 ..
@@ -785,8 +785,8 @@ async fn test_outgoing_payment_deducts_from_stable() {
                 forwarded_msat = outbound_amount_forwarded_msat.unwrap_or(0);
                 let fee_msat = total_fee_earned_msat.unwrap_or(0);
                 println!(
-                    "[event] LSP: PaymentForwarded {} msats (fee {} msats) prev={} next={}",
-                    forwarded_msat, fee_msat, prev_channel_id, next_channel_id
+                    "[event] LSP: PaymentForwarded {} msats (fee {} msats) prev={:?} next={:?}",
+                    forwarded_msat, fee_msat, prev_htlcs, next_htlcs
                 );
                 lsp_node.event_handled().unwrap();
                 break;
@@ -993,8 +993,8 @@ async fn test_buy_btc_reduces_stable_position() {
     println!("[event] LSP: PaymentReceived (trade fee)");
 
     // Apply trade on both sides (same shared code as app handlers)
-    apply_trade(&mut user_sc, new_expected_usd, price);
-    apply_trade(&mut lsp_sc, new_expected_usd, price);
+    assert!(apply_trade(&mut user_sc, new_expected_usd, price));
+    assert!(apply_trade(&mut lsp_sc, new_expected_usd, price));
 
     // Refresh balances after payment
     let (ok, _) = update_balances(&user_node, &mut user_sc);
@@ -1199,8 +1199,8 @@ async fn test_sell_btc_increases_stable_position() {
     println!("[event] LSP: PaymentReceived (trade fee)");
 
     // Apply trade on both sides (same shared code as app handlers)
-    apply_trade(&mut user_sc, new_expected_usd, price);
-    apply_trade(&mut lsp_sc, new_expected_usd, price);
+    assert!(apply_trade(&mut user_sc, new_expected_usd, price));
+    assert!(apply_trade(&mut lsp_sc, new_expected_usd, price));
 
     // Refresh balances
     let (ok, _) = update_balances(&user_node, &mut user_sc);
@@ -1312,9 +1312,25 @@ async fn test_sell_btc_increases_stable_position() {
     expect_payment_successful_event!(user_node);
     expect_payment_received_event!(lsp_node);
 
-    // Apply trade on both sides at the NEW price
-    apply_trade(&mut user_sc, new_expected_usd2, rise_price);
-    apply_trade(&mut lsp_sc, new_expected_usd2, rise_price);
+    // Apply only the target delta at the NEW price. Each peer preserves whatever stability drift
+    // its own backing carried before this trade.
+    let user_backing_before_trade = user_sc.backing_sats;
+    let lsp_backing_before_trade = lsp_sc.backing_sats;
+    let old_target_sats =
+        (pre_sell2_expected / rise_price * 100_000_000.0).floor() as u64;
+    let new_target_sats =
+        (new_expected_usd2 / rise_price * 100_000_000.0).floor() as u64;
+    let expected_delta_sats = new_target_sats - old_target_sats;
+    assert!(apply_trade(&mut user_sc, new_expected_usd2, rise_price));
+    assert!(apply_trade(&mut lsp_sc, new_expected_usd2, rise_price));
+    assert_eq!(
+        user_sc.backing_sats,
+        user_backing_before_trade + expected_delta_sats,
+    );
+    assert_eq!(
+        lsp_sc.backing_sats,
+        lsp_backing_before_trade + expected_delta_sats,
+    );
 
     update_balances(&user_node, &mut user_sc);
     update_balances(&lsp_node, &mut lsp_sc);
