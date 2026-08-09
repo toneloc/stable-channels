@@ -328,7 +328,6 @@ class AppState {
         }
 
         cancelBackgroundStop()
-        await waitForNSE()
 
         // Own the wallet dir before stopping/wiping: restore can be reached
         // while the lock is not held (e.g. after a startup failure released
@@ -510,25 +509,42 @@ class AppState {
         nodeFlowInProgress = true
         defer { nodeFlowInProgress = false }
 
-        // Migrate data from old Application Support dir to shared App Group container
-        migrateDataDirIfNeeded()
+        // Logging must be live before the startup prologue: chain resolution and
+        // the wallet-dir lock both emit audit events, and both run before
+        // initializeDatabaseServices() sets the path.
+        AuditService.setLogPath(
+            Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        )
 
-        // Wait for NSE to finish if it was recently active
-        await waitForNSE()
+        // The launch screen (phase == .loading) is shown for this entire prologue,
+        // so every step below is measured — several of them previously logged only
+        // on failure, which left the whole window invisible.
+        let prologueStart = Date()
+        func elapsedMs(_ since: Date) -> String { "\(Int(Date().timeIntervalSince(since) * 1000))" }
+
+        // Migrate data from old Application Support dir to shared App Group container
+        let migrateStart = Date()
+        migrateDataDirIfNeeded()
+        let migrateMs = elapsedMs(migrateStart)
 
         // Pick best esplora endpoint BEFORE taking the lock — pure network,
         // no DB access, and it can stall; no reason to hold the dir for it.
+        let chainStart = Date()
         chainURL = await resolveChainURL()
+        let chainMs = elapsedMs(chainStart)
 
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
+        let lockStart = Date()
         if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
         }
+        let lockMs = elapsedMs(lockStart)
 
         // Initialize database
+        let dbStart = Date()
         do {
             try initializeDatabaseServices()
         } catch {
@@ -539,7 +555,10 @@ class AppState {
             return
         }
 
+        let dbMs = elapsedMs(dbStart)
+
         // Load saved channel state from DB
+        let dbReadStart = Date()
         loadChannelFromDB()
 
         // Refresh payment status from DB (NSE may have recorded payments while app was closed)
@@ -547,6 +566,16 @@ class AppState {
 
         // Seed historical price data for charts
         seedHistoricalPrices()
+        let dbReadMs = elapsedMs(dbReadStart)
+
+        AuditService.log("STARTUP_PROLOGUE", data: [
+            "total_ms": elapsedMs(prologueStart),
+            "migrate_ms": migrateMs,
+            "chain_resolve_ms": chainMs,
+            "dir_lock_ms": lockMs,
+            "db_init_ms": dbMs,
+            "db_read_ms": dbReadMs
+        ])
 
         // Backfill hourly prices from Kraken for smooth 1D/1W/1M charts
         Task { await backfillHourlyPrices() }
@@ -688,23 +717,12 @@ class AppState {
     }
 
     // MARK: - NSE Coordination
-
-    /// Wait for the Notification Service Extension to finish if it's currently processing.
-    /// Prevents two processes from running LDK on the same data directory simultaneously.
-    private func waitForNSE() async {
-        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        var waited = 0
-        while shared?.bool(forKey: "nse_processing") == true {
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-            waited += 1
-            if waited >= 30 {
-                break
-            } // NSE has an approximately 30-second execution window
-        }
-        if waited > 0 {
-            AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
-        }
-    }
+    //
+    // Coordination with the Notification Service Extension is handled entirely by
+    // NodeDirLock (flock on ldk-node.lock). The kernel releases that lock when the
+    // holding process dies, so it self-heals; the previous `nse_processing`
+    // UserDefaults flag did not, and a jetsammed NSE left it set permanently —
+    // every launch then burned the full 30s ceiling waiting on a dead process.
 
     func stop() {
         stabilityTimer?.cancel()
@@ -808,7 +826,6 @@ class AppState {
         nodeFlowInProgress = true
         defer { nodeFlowInProgress = false }
         cancelBackgroundStop()
-        await waitForNSE()
         loadChannelFromDB()
         // Payments received while backgrounded are recorded by the NSE, not the foreground
         // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
@@ -2528,15 +2545,28 @@ class AppState {
         guard let url = URL(string: "\(Constants.primaryChainURL)/blocks/tip/height") else {
             return Constants.fallbackChainURL
         }
+        // This sits on the critical path before first paint, so it gets a short
+        // budget of its own: URLSession.shared defaults to a 60s request timeout,
+        // which would hold the launch screen for a minute on a slow primary.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 2
+        config.timeoutIntervalForResource = 3
+        let session = URLSession(configuration: config)
+        let startedAt = Date()
         do {
-            let (_, response) = try await URLSession.shared.data(from: url)
+            let (_, response) = try await session.data(from: url)
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                AuditService.log("CHAIN_SOURCE_RESOLVED", data: [
+                    "using": Constants.primaryChainURL,
+                    "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+                ])
                 return Constants.primaryChainURL
             }
         } catch {}
         AuditService.log("CHAIN_SOURCE_FALLBACK", data: [
             "primary": Constants.primaryChainURL,
-            "using": Constants.fallbackChainURL
+            "using": Constants.fallbackChainURL,
+            "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         ])
         return Constants.fallbackChainURL
     }
