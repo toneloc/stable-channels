@@ -1740,16 +1740,40 @@ impl Database {
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
         // OR IGNORE + the unique payment_id index turn a duplicate insert into a no-op
-        // (returned as -1) instead of a second row for the same payment.
+        // instead of a second row for the same payment.
         let changed = conn.execute(
             "INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![payment_id, payment_type, direction, amount_msat as i64, amount_usd, btc_price, counterparty, status, txid, address],
         )?;
-        if changed == 0 {
-            return Ok(-1);
+        if changed > 0 {
+            return Ok(conn.last_insert_rowid());
         }
-        Ok(conn.last_insert_rowid())
+        // Duplicate payment_id — a legitimate replay: retrying a failed BOLT11 invoice
+        // reuses its payment hash. Hand back the REAL row id (callers store it and later
+        // update by id), and revive a failed row into the caller's fresh status so the
+        // retry tracks the same row. Completed rows are never downgraded, and non-failed
+        // rows are returned untouched (idempotent replay).
+        let Some(pid) = payment_id else {
+            // Unreachable in practice: only the unique payment_id index can trigger
+            // OR IGNORE, and it exempts NULL ids.
+            return Ok(-1);
+        };
+        let (existing_id, existing_status): (i64, String) = conn.query_row(
+            "SELECT id, status FROM payments WHERE payment_id = ?1",
+            params![pid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if existing_status == "failed" && status != "failed" {
+            conn.execute(
+                "UPDATE payments SET status = ?1, amount_msat = ?2,
+                                     amount_usd = COALESCE(?3, amount_usd),
+                                     btc_price = COALESCE(?4, btc_price)
+                 WHERE id = ?5",
+                params![status, amount_msat as i64, amount_usd, btc_price, existing_id],
+            )?;
+        }
+        Ok(existing_id)
     }
 
     /// Persist a sent stability payment and its optimistic channel allocation in one transaction.
@@ -3302,9 +3326,11 @@ mod tests {
             .record_websocket_receive("tx1", "bc1qme", 50_000_000, None, None)
             .unwrap());
 
-        // Duplicate deterministic payment_ids collapse via OR IGNORE + the unique index.
+        // Duplicate deterministic payment_ids collapse to the EXISTING row (never -1, never
+        // a second row): callers store the returned id and later update by id, so a retry
+        // of the same payment hash must resolve to the row it will be updating.
         record_pending("onchain_receive_tx3", 30_000_000, "tx3");
-        let dup = db
+        let first = db
             .record_payment(
                 Some("onchain_receive_tx3"),
                 "onchain",
@@ -3318,7 +3344,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(dup, -1, "a duplicate payment_id must not create a second row");
+        assert!(first > 0, "a duplicate payment_id must return the real row id");
 
         // RBF failure touches pending rows only.
         assert!(db.fail_payment_by_txid("tx3").unwrap());
@@ -3326,6 +3352,51 @@ mod tests {
             !db.fail_payment_by_txid("tx1").unwrap(),
             "completed rows are never marked failed by an RBF event"
         );
+    }
+
+    #[test]
+    fn retrying_a_failed_payment_revives_its_row() {
+        let db = Database::open_in_memory().unwrap();
+        let record = |status: &str| {
+            db.record_payment(
+                Some("bolt11_hash"),
+                "lightning",
+                "sent",
+                10_000,
+                None,
+                None,
+                None,
+                status,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let status_of = |id: i64| -> String {
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM payments WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        let first = record("pending");
+        db.update_payment_status(first, "failed", None);
+
+        // Retrying the same invoice reuses its payment hash: same row, revived to pending.
+        let retry = record("pending");
+        assert_eq!(retry, first, "the retry must track the original row");
+        assert_eq!(status_of(first), "pending");
+
+        // A replay against a completed row is idempotent — never downgraded.
+        db.update_payment_status(first, "completed", None);
+        let replay = record("pending");
+        assert_eq!(replay, first);
+        assert_eq!(status_of(first), "completed");
     }
 
     #[test]
