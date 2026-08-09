@@ -10,7 +10,7 @@ use chrono::{TimeZone, Utc};
 use egui::{Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
 use image::{GrayImage, Luma};
 use ldk_node::lightning::ln::channelmanager::PaymentId;
-use ldk_node::payment::{PaymentDirection, PaymentKind};
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use qrcode::QrCode;
 use serde_json::json;
 use std::collections::HashMap;
@@ -825,28 +825,21 @@ impl UserApp {
                             txid,
                             amount_sats,
                         } => {
-                            // The balance-delta path may already have recorded this deposit
-                            // (LDK named the txid first); never insert a second row per txid.
-                            if ws_db.payment_txid_exists(&txid).unwrap_or(true) {
-                                continue;
-                            }
                             let price = stable_channels::price_feeds::get_cached_price();
                             let amount_usd = (price > 0.0)
                                 .then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
-                            let payment_id = format!("onchain_receive_{txid}");
-                            let recorded = ws_db.record_payment(
-                                Some(&payment_id),
-                                "onchain",
-                                "received",
-                                amount_sats * 1000,
-                                amount_usd,
-                                (price > 0.0).then_some(price),
-                                None,
-                                "pending",
-                                Some(&txid),
-                                Some(&address),
-                            );
-                            if recorded.is_ok() {
+                            // Atomic txid-dedup + insert; the balance-delta path can race
+                            // this without producing a second row.
+                            let recorded = ws_db
+                                .record_websocket_receive(
+                                    &txid,
+                                    &address,
+                                    amount_sats * 1000,
+                                    amount_usd,
+                                    (price > 0.0).then_some(price),
+                                )
+                                .unwrap_or(false);
+                            if recorded {
                                 audit_event(
                                     "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
                                     json!({ "txid": txid, "amount_sats": amount_sats }),
@@ -883,6 +876,12 @@ impl UserApp {
             }
 
             let mut prev_onchain_sats: u64 = node_arc.list_balances().total_onchain_balance_sats;
+            // Deposits whose LDK payment entry updated after this moment are "new" for the
+            // insert fallback; older entries are history and must not re-materialize as rows.
+            let thread_started_unix: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
 
             loop {
                 // Refresh the shared price state outside the channel lock. This preserves the
@@ -976,36 +975,76 @@ impl UserApp {
                 // Housekeeping must continue during a price-feed outage. Only the optional USD
                 // metadata depends on price; balance observations and splice completion do not.
                 {
+                    // Completion is keyed to LDK's confirmation view, never to mempool or
+                    // balance sight: sweep every inbound on-chain payment LDK reports
+                    // Succeeded (confirmed) and complete its pending row. Idempotent —
+                    // the UPDATE only touches pending rows — and it covers every deposit,
+                    // not just the latest, so several deposits inside one sync interval
+                    // each complete. Rows still pending stay eligible for RBF failure.
+                    let mut new_deposits: Vec<(String, u64, PaymentStatus)> = Vec::new();
+                    for p in node_arc.list_payments() {
+                        if p.direction != PaymentDirection::Inbound {
+                            continue;
+                        }
+                        let PaymentKind::Onchain { ref txid, .. } = p.kind else {
+                            continue;
+                        };
+                        let txid = txid.to_string();
+                        if p.status == PaymentStatus::Succeeded {
+                            let _ = db.complete_payment_by_txid(&txid);
+                        }
+                        if p.latest_update_timestamp >= thread_started_unix {
+                            new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
+                        }
+                    }
+
                     let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
                     let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
                     if current_onchain > prev_onchain_sats && !is_splicing {
                         let deposit_sats = current_onchain - prev_onchain_sats;
-                        let amount_usd =
-                            price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
-                        // Try to find the txid from LDK's payment list
-                        let deposit_txid: Option<String> =
-                            node_arc.list_payments().iter().rev().find_map(|p| {
-                                if p.direction == PaymentDirection::Inbound {
-                                    if let PaymentKind::Onchain { ref txid, .. } = p.kind {
-                                        return Some(txid.to_string());
-                                    }
-                                }
-                                None
+                        // One row per LDK-reported deposit the websocket did not already
+                        // record, with LDK's own amount and confirmation-derived status —
+                        // an unconfirmed deposit is pending until the sweep above
+                        // completes it.
+                        let mut covered = false;
+                        for (txid, ldk_amount_msat, status) in &new_deposits {
+                            if db.payment_txid_exists(txid).unwrap_or(true) {
+                                covered = true;
+                                continue;
+                            }
+                            let amount_msat = if *ldk_amount_msat > 0 {
+                                *ldk_amount_msat
+                            } else {
+                                deposit_sats * 1000
+                            };
+                            let amount_usd = price.map(|value| {
+                                amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * value
                             });
-                        // The websocket path may have recorded this deposit at mempool time
-                        // as a pending row: complete that row instead of inserting a second
-                        // one. Txid match first; amount match (exact, per the Android
-                        // reconciliation) when LDK cannot name the txid yet.
-                        let mut ws_row_completed = deposit_txid
-                            .as_deref()
-                            .map(|txid| db.complete_payment_by_txid(txid).unwrap_or(false))
-                            .unwrap_or(false);
-                        if !ws_row_completed {
-                            ws_row_completed = db
-                                .complete_pending_onchain_receive_by_amount(deposit_sats * 1000)
-                                .unwrap_or(false);
+                            let row_status = if *status == PaymentStatus::Succeeded {
+                                "completed"
+                            } else {
+                                "pending"
+                            };
+                            let _ = db.record_payment(
+                                Some(&format!("onchain_receive_{txid}")),
+                                "onchain",
+                                "received",
+                                amount_msat,
+                                amount_usd,
+                                price,
+                                None,
+                                row_status,
+                                Some(txid),
+                                None,
+                            );
+                            covered = true;
                         }
-                        if !ws_row_completed {
+                        if !covered {
+                            // Neither the websocket nor LDK's payment list has surfaced
+                            // this yet: record the raw delta with no txid (pre-websocket
+                            // behavior). It cannot be RBF-tracked without an identity.
+                            let amount_usd =
+                                price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
                             let _ = db.record_payment(
                                 None,
                                 "onchain",
@@ -1015,7 +1054,7 @@ impl UserApp {
                                 price,
                                 None,
                                 "completed",
-                                deposit_txid.as_deref(),
+                                None,
                                 None,
                             );
                         }
@@ -1025,7 +1064,7 @@ impl UserApp {
                                 "amount_sats": deposit_sats,
                                 "prev_onchain": prev_onchain_sats,
                                 "new_onchain": current_onchain,
-                                "ws_row_completed": ws_row_completed,
+                                "ldk_reported_deposits": new_deposits.len(),
                             }),
                         );
                     }

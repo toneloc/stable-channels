@@ -305,6 +305,17 @@ impl Database {
             [],
         )?;
 
+        // Uniqueness backstop for deterministic payment ids (e.g. onchain_receive_<txid>):
+        // record_payment uses INSERT OR IGNORE, and this index is what turns a racing
+        // duplicate insert into a no-op instead of a second row. Best-effort — a database
+        // that already holds duplicate payment_ids from the pre-dedup era keeps working,
+        // it just doesn't get the constraint.
+        let _ = conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id
+             ON payments(payment_id) WHERE payment_id IS NOT NULL",
+            [],
+        );
+
         // On-chain transactions table - stores on-chain tx history
         conn.execute(
             "CREATE TABLE IF NOT EXISTS onchain_txs (
@@ -1475,26 +1486,41 @@ impl Database {
         Ok(changed > 0)
     }
 
-    /// Complete the newest pending on-chain receive of exactly this amount. Amount-keyed on
-    /// purpose (not newest-row): when LDK cannot yet name the txid, equal amounts are what
-    /// identify the same deposit — a different-amount pending row belongs to another deposit
-    /// and must be left alone.
-    pub fn complete_pending_onchain_receive_by_amount(
+    /// Record a websocket-detected receive unless its txid is already tracked. The check and
+    /// the insert run in one transaction so a racing balance-delta detection cannot slip a
+    /// duplicate in between; the unique payment_id index is the backstop underneath.
+    /// Returns true when a new row was inserted.
+    pub fn record_websocket_receive(
         &self,
+        txid: &str,
+        address: &str,
         amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
     ) -> SqliteResult<bool> {
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
-            "UPDATE payments SET status = 'completed'
-             WHERE id = (
-                 SELECT id FROM payments
-                 WHERE payment_type = 'onchain' AND direction = 'received'
-                   AND status = 'pending' AND amount_msat = ?1
-                 ORDER BY created_at DESC LIMIT 1
-             )",
-            params![amount_msat],
-        )?;
-        Ok(changed > 0)
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let already_tracked = tx
+            .prepare("SELECT 1 FROM payments WHERE txid = ?1 LIMIT 1")?
+            .exists(params![txid])?;
+        let inserted = if already_tracked {
+            false
+        } else {
+            tx.execute(
+                "INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, txid, address)
+                 VALUES (?1, 'onchain', 'received', ?2, ?3, ?4, 'pending', ?5, ?6)",
+                params![
+                    format!("onchain_receive_{txid}"),
+                    amount_msat as i64,
+                    amount_usd,
+                    btc_price,
+                    txid,
+                    address
+                ],
+            )? > 0
+        };
+        tx.commit()?;
+        Ok(inserted)
     }
 
     /// Fail any pending payment carrying this txid (RBF replacement or mempool eviction).
@@ -1703,11 +1729,16 @@ impl Database {
         address: Option<&str>,
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+        // OR IGNORE + the unique payment_id index turn a duplicate insert into a no-op
+        // (returned as -1) instead of a second row for the same payment.
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![payment_id, payment_type, direction, amount_msat as i64, amount_usd, btc_price, counterparty, status, txid, address],
         )?;
+        if changed == 0 {
+            return Ok(-1);
+        }
         Ok(conn.last_insert_rowid())
     }
 
@@ -3249,18 +3280,37 @@ mod tests {
             "an already-completed row must not transition again"
         );
 
-        // Amount-keyed completion only adopts the pending row with exactly that amount —
-        // a different-amount pending row is a different deposit.
-        record_pending("onchain_receive_tx2", 70_000_000, "tx2");
-        assert!(!db
-            .complete_pending_onchain_receive_by_amount(50_000_000)
-            .unwrap());
+        // Websocket recording is txid-deduped atomically; a second sighting is a no-op,
+        // as is a sighting of a txid the delta path already recorded (tx1).
         assert!(db
-            .complete_pending_onchain_receive_by_amount(70_000_000)
+            .record_websocket_receive("tx2", "bc1qme", 70_000_000, None, None)
+            .unwrap());
+        assert!(!db
+            .record_websocket_receive("tx2", "bc1qme", 70_000_000, None, None)
+            .unwrap());
+        assert!(!db
+            .record_websocket_receive("tx1", "bc1qme", 50_000_000, None, None)
             .unwrap());
 
-        // RBF failure touches pending rows only.
+        // Duplicate deterministic payment_ids collapse via OR IGNORE + the unique index.
         record_pending("onchain_receive_tx3", 30_000_000, "tx3");
+        let dup = db
+            .record_payment(
+                Some("onchain_receive_tx3"),
+                "onchain",
+                "received",
+                30_000_000,
+                None,
+                None,
+                None,
+                "pending",
+                Some("tx3"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(dup, -1, "a duplicate payment_id must not create a second row");
+
+        // RBF failure touches pending rows only.
         assert!(db.fail_payment_by_txid("tx3").unwrap());
         assert!(
             !db.fail_payment_by_txid("tx1").unwrap(),
