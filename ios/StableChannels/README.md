@@ -106,7 +106,6 @@ Both the main app and NSE access the same data through the App Group container:
 | Key | Writer | Purpose |
 |-----|--------|---------|
 | `main_app_last_active` | Main app | Heartbeat timestamp — NSE skips if < 10s ago |
-| `nse_processing` | NSE | Flag indicating NSE is currently running |
 | `nse_last_active` | NSE | NSE heartbeat (2-second interval) |
 | `pending_push_payment` | NSE | Flag for main app to retry on next launch |
 | `node_id` | Main app | LDK node ID for push token registration |
