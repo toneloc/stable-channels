@@ -1,7 +1,8 @@
 use crate::audit::audit_event;
 use crate::constants::{
-    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
-    STABILITY_THRESHOLD_USD,
+    MAX_RISK_LEVEL, MAX_TRADE_QUOTE_DEVIATION_PERCENT, SATS_IN_BTC,
+    STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT, STABILITY_THRESHOLD_USD,
+    STABLE_CHANNEL_TRADE_FEE_RATE,
 };
 use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
 use crate::types::{Bitcoin, StableChannel, USD};
@@ -328,6 +329,29 @@ pub fn normalize_backing_sats(
     } else {
         backing_sats
     }
+}
+
+/// Highest additional stable amount (USD) a buy can target such that the LSP's strict
+/// sat-denominated capacity check passes at ANY price within the quote-deviation band.
+///
+/// The LSP values capacity at its own price, which may sit up to the band below the wallet's
+/// quote — so the wallet prices its maximum at the band floor. The trade fee
+/// (`STABLE_CHANNEL_TRADE_FEE_RATE` × amount) is paid from the same receiver balance, hence
+/// the `(1 + rate)` divisor; valuing that fee at the band floor keeps the bound conservative.
+/// A full stabilization therefore leaves a small native remainder (≤ band + fee) by design —
+/// the price the wallet pays for deterministic admission instead of a capacity epsilon the
+/// stability loop can be made to pay out repeatedly.
+pub fn conservative_max_buy_usd(
+    receiver_sats: u64,
+    current_expected_usd: f64,
+    quote_price: f64,
+) -> f64 {
+    if !quote_price.is_finite() || quote_price <= 0.0 {
+        return 0.0;
+    }
+    let band_floor_price = quote_price / (1.0 + MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0);
+    let capacity_usd = receiver_sats as f64 / SATS_IN_BTC as f64 * band_floor_price;
+    ((capacity_usd - current_expected_usd) / (1.0 + STABLE_CHANNEL_TRADE_FEE_RATE)).max(0.0)
 }
 
 /// Derive this peer's stable backing allocation for a trade at its local price.
@@ -760,6 +784,37 @@ pub fn check_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conservative_max_passes_strict_capacity_check_at_band_floor() {
+        let receiver_sats = 100_000u64;
+        let quote = 100_000.0;
+        let max_buy = conservative_max_buy_usd(receiver_sats, 0.0, quote);
+        assert!(max_buy > 0.0);
+
+        // The LSP may hold any price within the band and still accept this quote; the
+        // strict check must pass even at the band floor, with the fee paid from the
+        // same balance.
+        let band_floor = quote / (1.0 + MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0);
+        let fee_usd = max_buy * STABLE_CHANNEL_TRADE_FEE_RATE;
+        let fee_sats = (fee_usd / quote * SATS_IN_BTC as f64) as u64;
+        let required_sats = (max_buy / band_floor * SATS_IN_BTC as f64).ceil() as u64;
+        assert!(
+            required_sats + fee_sats <= receiver_sats,
+            "required {required_sats} + fee {fee_sats} must fit in {receiver_sats}"
+        );
+
+        // The bound is conservative but not wasteful: within ~2% of par value.
+        let par_usd = receiver_sats as f64 / SATS_IN_BTC as f64 * quote;
+        assert!(max_buy > par_usd * 0.98);
+    }
+
+    #[test]
+    fn conservative_max_is_zero_when_over_pegged_or_priceless() {
+        assert_eq!(conservative_max_buy_usd(100_000, 200.0, 100_000.0), 0.0);
+        assert_eq!(conservative_max_buy_usd(100_000, 0.0, 0.0), 0.0);
+        assert_eq!(conservative_max_buy_usd(100_000, 0.0, f64::NAN), 0.0);
+    }
 
     #[test]
     fn only_pending_outbound_lightning_blocks_capacity_repair() {

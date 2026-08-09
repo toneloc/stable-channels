@@ -9069,20 +9069,20 @@ impl UserApp {
         // Show the native allocation valued in USD. A price quote changes its value, not which
         // sats belong to it.
         let btc_price = get_cached_price_no_fetch();
-        let native_sats = {
+        let (receiver_sats, expected_usd) = {
             let sc = self.stable_channel.lock().unwrap();
-            let (_, native_sats, _) = channel_balance_split(
-                sc.stable_receiver_btc.sats,
-                sc.backing_sats,
-                sc.expected_usd.0,
-                btc_price,
-            );
-            native_sats
+            (sc.stable_receiver_btc.sats, sc.expected_usd.0)
         };
         // A hard spending limit must never be formatted upward. Otherwise an exact displayed
-        // maximum can exceed the underlying sats by a fraction of a cent.
-        let available_btc_usd_cents =
-            floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * btc_price);
+        // maximum can exceed the underlying sats by a fraction of a cent. The maximum itself
+        // is conservative: it must pass the LSP's strict sat-denominated capacity check at any
+        // price within the quote-deviation band, with the trade fee paid from the same balance
+        // — so a full stabilization leaves a small native remainder by design.
+        let available_btc_usd_cents = floor_usd_cents(stable::conservative_max_buy_usd(
+            receiver_sats,
+            expected_usd,
+            btc_price,
+        ));
         let available_btc_usd = available_btc_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!(

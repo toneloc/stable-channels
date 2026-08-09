@@ -96,6 +96,14 @@ pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
 /// Shared by wallet fee construction and the LSP's server-side amount validation.
 pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
 
+/// Maximum percent a wallet's signed trade quote may deviate from the LSP's own price.
+///
+/// Shared by the LSP's quote validation and the wallet's conservative "max" derivation:
+/// a buy target priced at the band floor (`quote / (1 + band)`) is guaranteed to pass the
+/// LSP's capacity check at any price the band permits, so admission never depends on which
+/// side's feed reads higher.
+pub const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
+
 /// LDK channel-config defaults for outbound forwarding fees.
 pub const LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT: u64 = 1_000;
 pub const LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS: u64 = 0;
