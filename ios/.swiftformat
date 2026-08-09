@@ -35,4 +35,3 @@
 --disable spaceAroundOperators
 --disable conditionalAssignment
 --disable hoistPatternLet
---disable wrapIfStatementBodies
