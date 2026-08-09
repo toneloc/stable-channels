@@ -307,14 +307,24 @@ impl Database {
 
         // Uniqueness backstop for deterministic payment ids (e.g. onchain_receive_<txid>):
         // record_payment uses INSERT OR IGNORE, and this index is what turns a racing
-        // duplicate insert into a no-op instead of a second row. Best-effort — a database
-        // that already holds duplicate payment_ids from the pre-dedup era keeps working,
-        // it just doesn't get the constraint.
-        let _ = conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id
-             ON payments(payment_id) WHERE payment_id IS NOT NULL",
-            [],
-        );
+        // duplicate insert into a no-op instead of a second row. Pre-dedup databases may
+        // hold duplicate payment_ids that block index creation; those rows are history the
+        // user must keep, so the migration renames the extras (suffixing the rowid) rather
+        // than deleting them, then retries the index once.
+        let unique_index_sql = "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id
+             ON payments(payment_id) WHERE payment_id IS NOT NULL";
+        if conn.execute(unique_index_sql, []).is_err() {
+            let _ = conn.execute(
+                "UPDATE payments SET payment_id = payment_id || '_dup' || id
+                 WHERE payment_id IS NOT NULL
+                   AND id NOT IN (
+                       SELECT MIN(id) FROM payments
+                       WHERE payment_id IS NOT NULL GROUP BY payment_id
+                   )",
+                [],
+            );
+            let _ = conn.execute(unique_index_sql, []);
+        }
 
         // On-chain transactions table - stores on-chain tx history
         conn.execute(

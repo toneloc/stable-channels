@@ -882,6 +882,9 @@ impl UserApp {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            // Ticks a balance rise has gone unexplained by any txid; bounds the deferral
+            // before the anonymous-aggregate fallback records it.
+            let mut unaccounted_delta_ticks: u8 = 0;
 
             loop {
                 // Refresh the shared price state outside the channel lock. This preserves the
@@ -975,6 +978,12 @@ impl UserApp {
                 // Housekeeping must continue during a price-feed outage. Only the optional USD
                 // metadata depends on price; balance observations and splice completion do not.
                 {
+                    // Balance FIRST, payments second: the payments snapshot can then only be
+                    // fresher than the balance it must explain, so a sync landing between the
+                    // two reads can no longer produce a delta whose txid is missing from the
+                    // snapshot (which is what used to recreate the anonymous fallback row).
+                    let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
+
                     // Completion is keyed to LDK's confirmation view, never to mempool or
                     // balance sight: sweep every inbound on-chain payment LDK reports
                     // Succeeded (confirmed) and complete its pending row. Idempotent —
@@ -998,7 +1007,6 @@ impl UserApp {
                         }
                     }
 
-                    let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
                     let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
                     if current_onchain > prev_onchain_sats && !is_splicing {
                         let deposit_sats = current_onchain - prev_onchain_sats;
@@ -1039,10 +1047,36 @@ impl UserApp {
                             );
                             covered = true;
                         }
-                        if !covered {
-                            // Neither the websocket nor LDK's payment list has surfaced
-                            // this yet: record the raw delta with no txid (pre-websocket
-                            // behavior). It cannot be RBF-tracked without an identity.
+                        if covered {
+                            unaccounted_delta_ticks = 0;
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DETECTED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "prev_onchain": prev_onchain_sats,
+                                    "new_onchain": current_onchain,
+                                    "ldk_reported_deposits": new_deposits.len(),
+                                }),
+                            );
+                            prev_onchain_sats = current_onchain;
+                        } else if unaccounted_delta_ticks < 3 {
+                            // Nothing names this delta yet. Hold the watermark and retry:
+                            // LDK's payment list usually surfaces the entry within a tick,
+                            // at which point it records per-txid instead of as an
+                            // anonymous aggregate.
+                            unaccounted_delta_ticks += 1;
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DEFERRED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "ticks_waited": unaccounted_delta_ticks,
+                                }),
+                            );
+                        } else {
+                            // Bounded fallback (~3 ticks): a balance rise LDK never names
+                            // as a payment still gets recorded — txid-less and completed
+                            // (pre-websocket behavior). It cannot be RBF-tracked without
+                            // an identity.
                             let amount_usd =
                                 price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
                             let _ = db.record_payment(
@@ -1057,18 +1091,23 @@ impl UserApp {
                                 None,
                                 None,
                             );
+                            unaccounted_delta_ticks = 0;
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DETECTED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "prev_onchain": prev_onchain_sats,
+                                    "new_onchain": current_onchain,
+                                    "ldk_reported_deposits": new_deposits.len(),
+                                    "anonymous_fallback": true,
+                                }),
+                            );
+                            prev_onchain_sats = current_onchain;
                         }
-                        audit_event(
-                            "ONCHAIN_DEPOSIT_DETECTED",
-                            json!({
-                                "amount_sats": deposit_sats,
-                                "prev_onchain": prev_onchain_sats,
-                                "new_onchain": current_onchain,
-                                "ldk_reported_deposits": new_deposits.len(),
-                            }),
-                        );
+                    } else {
+                        unaccounted_delta_ticks = 0;
+                        prev_onchain_sats = current_onchain;
                     }
-                    prev_onchain_sats = current_onchain;
                 }
 
                 // The splice flag stays set until BDK observes the on-chain spend.
