@@ -717,6 +717,7 @@ class AppState {
     }
 
     // MARK: - NSE Coordination
+
     //
     // Coordination with the Notification Service Extension is handled entirely by
     // NodeDirLock (flock on ldk-node.lock). The kernel releases that lock when the
