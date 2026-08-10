@@ -47,7 +47,7 @@ class AppState {
 
         let success: Bool
         do {
-            success = try await biometricAuth.authenticate(reason: reason)
+            success = try await biometricAuth.authenticate(reason: reason, allowPasscodeFallback: true)
         } catch let error as BiometricError {
             if error != .cancelled {
                 authError = error.errorDescription

@@ -12,7 +12,6 @@ enum BiometricError: Error, LocalizedError, Equatable {
     case cancelled
     case lockout
     case biometryFailed
-    case passcodeFailed
 
     var errorDescription: String? {
         switch self {
@@ -21,7 +20,6 @@ enum BiometricError: Error, LocalizedError, Equatable {
         case .cancelled: return "Authentication was cancelled."
         case .lockout: return "Biometrics locked. Please use your device passcode."
         case .biometryFailed: return "Biometric authentication failed. Try again or use your passcode."
-        case .passcodeFailed: return "Authentication failed. Please try again."
         }
     }
 }
@@ -37,5 +35,5 @@ protocol BiometricCapabilityChecking: Sendable {
 // MARK: - Authentication (Interface Segregation)
 
 protocol BiometricAuthenticating: Sendable {
-    @MainActor func authenticate(reason: String) async throws -> Bool
+    @MainActor func authenticate(reason: String, allowPasscodeFallback: Bool) async throws -> Bool
 }

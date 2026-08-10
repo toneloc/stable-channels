@@ -1,5 +1,4 @@
 import Foundation
-import LocalAuthentication
 
 @MainActor @Observable
 final class BiometricToggleCoordinator {
@@ -25,20 +24,15 @@ final class BiometricToggleCoordinator {
         isEnabling = true
         defer { isEnabling = false }
 
-        let ctx = LAContext()
-        var error: NSError?
-        _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
-        if let err = error, err.code == LAError.biometryNotAvailable.rawValue {
-            requiresSettingsRedirect = true
-            return false
-        }
-
         do {
-            let success = try await auth.authenticate(reason: reason)
+            let success = try await auth.authenticate(reason: reason, allowPasscodeFallback: false)
             if success {
                 UserDefaults.standard.set(true, forKey: key)
             }
             return success
+        } catch let error as BiometricError where error == .notAvailable {
+            requiresSettingsRedirect = true
+            return false
         } catch {
             return false
         }
@@ -48,7 +42,7 @@ final class BiometricToggleCoordinator {
 
     func disableToggle(_ key: String, reason: String) async -> Bool {
         do {
-            let success = try await auth.authenticate(reason: reason)
+            let success = try await auth.authenticate(reason: reason, allowPasscodeFallback: true)
             if success {
                 UserDefaults.standard.set(false, forKey: key)
                 return true

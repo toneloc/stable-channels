@@ -30,21 +30,38 @@ final class BiometricService: BiometricCapabilityChecking, BiometricAuthenticati
     // MARK: - BiometricAuthenticating
 
     @MainActor
-    func authenticate(reason: String) async throws -> Bool {
+    func authenticate(reason: String, allowPasscodeFallback: Bool) async throws -> Bool {
         let ctx = LAContext()
         ctx.localizedCancelTitle = "Cancel"
 
-        // Pre-flight check to request/check biometric permissions, ensuring Face ID is tried first if available
-        var error: NSError?
-        _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+        if allowPasscodeFallback {
+            // Pre-flight check to request/check biometric permissions, ensuring Face ID is tried first if available
+            var error: NSError?
+            _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
 
-        do {
-            return try await ctx.evaluatePolicy(
-                .deviceOwnerAuthentication,
-                localizedReason: reason
-            )
-        } catch {
-            throw Self.classifyLAError(error)
+            do {
+                return try await ctx.evaluatePolicy(
+                    .deviceOwnerAuthentication,
+                    localizedReason: reason
+                )
+            } catch {
+                throw Self.classifyLAError(error)
+            }
+        } else {
+            // Strictly check biometric availability first.
+            var error: NSError?
+            guard ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+                throw Self.classifyLAError(error!)
+            }
+
+            do {
+                return try await ctx.evaluatePolicy(
+                    .deviceOwnerAuthenticationWithBiometrics,
+                    localizedReason: reason
+                )
+            } catch {
+                throw Self.classifyLAError(error)
+            }
         }
     }
 
