@@ -63,7 +63,7 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, newPhase in
             // Lock only on .background. .inactive fires during app switcher and Face ID prompts.
             if newPhase == .background {
-                appState.isUnlocked = false
+                appState.lock()
                 authFailed = false
                 hasTriggeredAuth = false
                 authInProgress = false
@@ -73,7 +73,7 @@ struct ContentView: View {
                 Task { @MainActor in
                     // 200ms delay lets .inactive from app switcher/Face ID fully settle first
                     try? await Task.sleep(nanoseconds: 200_000_000)
-                    if !appState.isUnlocked && biometricEnabled && scenePhase == .active {
+                    if !appState.isUnlocked && biometricEnabled && !authFailed && scenePhase == .active {
                         await runAuth()
                     }
                 }
@@ -151,10 +151,6 @@ struct ContentView: View {
         authFailed = false
 
         let success = await appState.authenticate()
-
-        if success {
-            appState.isUnlocked = true
-        }
 
         authInProgress = false
         if !success {

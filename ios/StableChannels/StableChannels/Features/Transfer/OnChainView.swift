@@ -299,12 +299,14 @@ struct OnChainSendView: View {
             for: nil
         )
 
-        // Always require auth for on-chain sends — highest risk, drains to external wallet
-        let authReason = sendAll ? "Confirm onchain withdrawal" : "Confirm onchain send"
-        let authPassed = await appState.authenticate(reason: authReason)
-        guard authPassed else {
-            errorMessage = appState.authError ?? "Authentication required to send."
-            return
+        let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
+        if transactionAuth {
+            let authReason = sendAll ? "Confirm onchain withdrawal" : "Confirm onchain send"
+            let authPassed = await appState.authenticate(reason: authReason)
+            guard authPassed else {
+                errorMessage = appState.authError ?? "Authentication required to send."
+                return
+            }
         }
 
         isSending = true

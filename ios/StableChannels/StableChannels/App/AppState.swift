@@ -20,9 +20,13 @@ class AppState {
 
     // MARK: - Authentication
 
+    /// Injected biometric authenticator — defaults to `BiometricService.shared`.
+    /// Depend on the `BiometricAuthenticating` protocol, not the concrete type (DI).
+    let biometricAuth: BiometricAuthenticating = BiometricService.shared
+
     /// Whether user has passed biometric/passcode auth this session.
     /// Reset to false on app termination (no persistence = no bypass on restart).
-    var isUnlocked: Bool = false
+    private(set) var isUnlocked: Bool = false
 
     /// Prevents double-trigger of auth (onAppear + onChange both firing).
     var isAuthenticating: Bool = false
@@ -30,32 +34,35 @@ class AppState {
     /// Last auth error for UI display.
     var authError: String?
 
+    func lock() {
+        isUnlocked = false
+        authError = nil
+    }
+
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
         guard !isAuthenticating else { return false }
         isAuthenticating = true
         defer { isAuthenticating = false }
         authError = nil
 
+        let success: Bool
         do {
-            return try await BiometricService.authenticate(reason: reason)
+            success = try await biometricAuth.authenticate(reason: reason, allowPasscodeFallback: true)
         } catch let error as BiometricError {
-            // Fallback to passcode unless user explicitly cancelled
-            if error == .cancelled {
-                authError = nil
-                return false
-            }
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
-            if !passcodeOk {
+            if error != .cancelled {
                 authError = error.errorDescription
             }
-            return passcodeOk
+            success = false
         } catch {
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
-            if !passcodeOk {
-                authError = "Authentication failed. Please try again."
-            }
-            return passcodeOk
+            authError = "Authentication failed. Please try again."
+            success = false
         }
+
+        if success {
+            isUnlocked = true
+        }
+
+        return success
     }
 
     // MARK: - Services
