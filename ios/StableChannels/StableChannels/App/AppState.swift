@@ -1838,10 +1838,22 @@ class AppState {
     private func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
         if let db = databaseService,
            let row = db.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
-            if db.paymentRepo.paymentExists(txid: txid, excludePaymentId: row.paymentId) {
-                // WebSocket beat us to it, this fallback placeholder is a duplicate.
-                db.paymentRepo.deletePayment(paymentId: row.paymentId)
+            if let wsPayment = db.paymentRepo.payment(txid: txid) {
+                if wsPayment.amountMsat == UInt64(row.amountMsat) {
+                    // WebSocket beat us to it, this fallback placeholder is a duplicate.
+                    db.paymentRepo.deletePayment(paymentId: row.paymentId)
+                } else {
+                    // Mismatched amount! This placeholder belongs to a different deposit.
+                    // Leave it intact to prevent erasing it from history.
+                    AuditService.log("ONCHAIN_RECEIVE_RES_MISMATCHED_AMOUNT", data: [
+                        "resolution_id": "\(resolutionId)",
+                        "txid": txid,
+                        "placeholder_msat": "\(row.amountMsat)",
+                        "websocket_msat": "\(wsPayment.amountMsat)"
+                    ])
+                }
             } else {
+                // No websocket row exists. Attach the txid to this placeholder.
                 db.paymentRepo.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
             }
         }

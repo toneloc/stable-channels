@@ -396,6 +396,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
             )
 
             for match in matches {
+                guard !match.isTxid else { continue }
                 let targetKey = match.target
                 let isTxid = match.isTxid
                 let dedupKey = "\(txid)_\(targetKey)"
