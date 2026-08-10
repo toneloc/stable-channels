@@ -118,14 +118,11 @@ class NotificationService: UNNotificationServiceExtension {
 
         logger.log("didReceive: direction=\(direction.rawValue)")
 
-        // Signal processing started
         let shared = UserDefaults(suiteName: Constants.appGroup)
-        shared?.set(true, forKey: "nse_processing")
 
         // Skip if main app is active
         if isMainAppActive() {
             logger.log("Main app is active, skipping node start")
-            shared?.set(false, forKey: "nse_processing")
             shared?.set(true, forKey: "pending_push_payment")
             finish(content)
             return
@@ -246,7 +243,7 @@ class NotificationService: UNNotificationServiceExtension {
             if expiredDuringBuild {
                 logger.log("Time expired during node build; stopping node and releasing")
                 UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
-                cleanup() // stops the node, releases the lock, clears nse_processing
+                cleanup() // stops the node and releases the wallet-dir lock
                 return // expire handler already delivered the notification
             }
             logger.log("Node started")
@@ -378,6 +375,5 @@ class NotificationService: UNNotificationServiceExtension {
         try? node?.stop()
         node = nil
         NodeDirLock.shared.release()
-        UserDefaults(suiteName: Constants.appGroup)?.set(false, forKey: "nse_processing")
     }
 }

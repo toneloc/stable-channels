@@ -26,7 +26,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install SwiftFormat
-        run: brew install swiftformat
+        # Pinned: the runner image ships a pre-installed older brew version, so
+        # `brew install` is a no-op and the effective linter version drifts with
+        # the image. The config uses 0.62-only rule names.
+        run: |
+          curl -sL -o /tmp/swiftformat.zip https://github.com/nicklockwood/SwiftFormat/releases/download/0.62.1/swiftformat.zip
+          unzip -o /tmp/swiftformat.zip -d /tmp/swiftformat-bin
+          echo "/tmp/swiftformat-bin" >> "$GITHUB_PATH"
 
       - name: Run SwiftFormat
         working-directory: ios
