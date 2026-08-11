@@ -133,14 +133,29 @@ class NodeService: NodeServiceProtocol {
     weak var databaseService: DatabaseService?
 
     init() {
-        // Pre-load saved mnemonic from disk so it's available immediately,
-        // even before start() completes (avoids race with early UI display)
+        // Pre-load saved mnemonic from Keychain (or migrate legacy plaintext file)
         let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        if let words = try? String(contentsOfFile: path.path, encoding: .utf8) {
-            let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                savedMnemonic = trimmed
+        if FileManager.default.fileExists(atPath: path.path) {
+            if let words = try? String(contentsOfFile: path.path, encoding: .utf8) {
+                let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    savedMnemonic = trimmed
+                    // Attempt immediate migration to Keychain
+                    var migrationSucceeded = false
+                    do {
+                        try WalletKeychainService.shared.storeMnemonic(trimmed)
+                        migrationSucceeded = true
+                    } catch {
+                        AuditService.log("KEYCHAIN_MIGRATION_FAILED", data: ["error": error.localizedDescription])
+                    }
+                    // If migration succeeded, delete the plaintext file
+                    if migrationSucceeded {
+                        try? FileManager.default.removeItem(at: path)
+                    }
+                }
             }
+        } else if let keychainMnemonic = try? WalletKeychainService.shared.loadMnemonic() {
+            savedMnemonic = keychainMnemonic
         }
     }
 
@@ -233,12 +248,15 @@ class NodeService: NodeServiceProtocol {
             // Explicit restore callers must reset app + LDK state before
             // starting with a replacement seed. NodeService only starts LDK.
             words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if let saved = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
-                  !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Existing wallet — re-read saved mnemonic
-            words = saved.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let saved = try? WalletKeychainService.shared.loadMnemonic(), !saved.isEmpty {
+            // Existing wallet — read from Keychain
+            words = saved
+        } else if let savedPlaintext = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
+                  !savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Existing wallet — fallback read from legacy plaintext file (migration path)
+            words = savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines)
         } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
-            // Truly new wallet — no seed_phrase, no keys_seed
+            // Truly new wallet — no seed in Keychain/file, no keys_seed
             Self.wipeWalletData()
             words = generateEntropyMnemonic(wordCount: nil)
         } else {
@@ -246,12 +264,17 @@ class NodeService: NodeServiceProtocol {
             words = ""
         }
 
-        // Save mnemonic to file and derive node entropy (now passed to build()).
+        // Save mnemonic to Keychain and derive node entropy
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
-            try words.write(toFile: seedPhrasePath.path, atomically: true, encoding: .utf8)
+            try? WalletKeychainService.shared.storeMnemonic(words)
             self.savedMnemonic = words
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+
+            // Clean up legacy plaintext file if it exists
+            if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
+                try? FileManager.default.removeItem(at: seedPhrasePath)
+            }
         } else {
             // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
             nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
@@ -613,6 +636,7 @@ class NodeService: NodeServiceProtocol {
         for file in filesToDelete {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
         }
+        WalletKeychainService.shared.deleteMnemonic()
     }
 }
 
