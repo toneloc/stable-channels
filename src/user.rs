@@ -25,7 +25,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use stable_channels::audit::*;
 use stable_channels::constants::*;
-use stable_channels::db::{self, DailyPriceRecord, Database, PaymentRecord, TradeRecord};
+use stable_channels::db::{
+    self, DailyPriceRecord, Database, InboundStabilityRegistration, PaymentRecord, TradeRecord,
+};
 use stable_channels::historical_prices::get_seed_prices;
 use stable_channels::price_feeds::{get_cached_price_no_fetch, get_fresh_cached_price_no_fetch};
 use stable_channels::stable;
@@ -192,6 +194,13 @@ enum LocalTradeAllocationError {
     TargetExceedsSafeCapacity,
     SettlementRequired,
     UnsafeAllocation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignedStabilityHandling {
+    Applied,
+    Invalid,
+    Retry,
 }
 
 struct BackupSnapshotDir {
@@ -2104,6 +2113,437 @@ impl UserApp {
         }
     }
 
+    fn handle_signed_stability_payment_received(
+        &mut self,
+        record: &ldk_node::CustomTlvRecord,
+        amount_msat: u64,
+        payment_hash: &str,
+        ack: &mut bool,
+    ) -> SignedStabilityHandling {
+        if record.value.len() > MAX_SIGNED_STABILITY_TLV_VALUE_BYTES {
+            audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                json!({
+                    "payment_hash": payment_hash,
+                    "reason": "oversize",
+                    "payload_len": record.value.len(),
+                }),
+            );
+            return SignedStabilityHandling::Invalid;
+        }
+        let Ok(raw) = std::str::from_utf8(record.value.as_ref()) else {
+            audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                json!({ "payment_hash": payment_hash, "reason": "utf8" }),
+            );
+            return SignedStabilityHandling::Invalid;
+        };
+        let Some(envelope) = stable::parse_stability_signed_envelope(raw) else {
+            audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                json!({ "payment_hash": payment_hash, "reason": "envelope" }),
+            );
+            return SignedStabilityHandling::Invalid;
+        };
+        let Some(payload) = stable::parse_stability_payment_payload(&envelope.payload) else {
+            audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                json!({ "payment_hash": payment_hash, "reason": "fields" }),
+            );
+            return SignedStabilityHandling::Invalid;
+        };
+        let registration = match self.db.register_inbound_stability_settlement(
+            &payload.settlement_id,
+            payment_hash,
+            &payload.channel_id,
+            payload.amount_msat,
+            "lsp_to_user",
+            raw,
+        ) {
+            Ok(registration) => registration,
+            Err(error) => {
+                audit_event(
+                    "STABILITY_PAYMENT_REPLAY_CONFLICT",
+                    json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_hash": payment_hash,
+                        "error": error.to_string(),
+                    }),
+                );
+                return SignedStabilityHandling::Invalid;
+            }
+        };
+        if registration == InboundStabilityRegistration::Applied {
+            audit_event(
+                "STABILITY_PAYMENT_REPLAY_IGNORED",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                }),
+            );
+            return SignedStabilityHandling::Applied;
+        }
+        if registration == InboundStabilityRegistration::Invalid {
+            return SignedStabilityHandling::Invalid;
+        }
+
+        let invalidate = |reason: &str| {
+            let _ = self.db.finish_inbound_stability_settlement(
+                &payload.settlement_id,
+                "invalid",
+                Some(reason),
+            );
+        };
+        if payload.direction != stable::StabilityPaymentDirection::LspToUser {
+            invalidate("direction");
+            audit_event(
+                "STABILITY_PAYMENT_BINDING_INVALID",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                    "reason": "direction",
+                }),
+            );
+            return SignedStabilityHandling::Invalid;
+        }
+        if payload.amount_msat != amount_msat {
+            invalidate("amount");
+            audit_event(
+                "STABILITY_PAYMENT_AMOUNT_MISMATCH",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                    "signed_amount_msat": payload.amount_msat,
+                    "received_amount_msat": amount_msat,
+                }),
+            );
+            return SignedStabilityHandling::Invalid;
+        }
+        let received_at = match self
+            .db
+            .inbound_stability_settlement_received_at(&payload.settlement_id)
+        {
+            Ok(Some(received_at)) => received_at,
+            Ok(None) => {
+                *ack = false;
+                return SignedStabilityHandling::Retry;
+            }
+            Err(error) => {
+                *ack = false;
+                audit_event(
+                    "DB_READ_FAILED",
+                    json!({
+                        "op": "inbound_stability_settlement_received_at",
+                        "settlement_id": payload.settlement_id,
+                        "payment_hash": payment_hash,
+                        "error": error.to_string(),
+                    }),
+                );
+                return SignedStabilityHandling::Retry;
+            }
+        };
+        if !stable::stability_payment_is_fresh(&payload, received_at) {
+            invalidate("expired");
+            audit_event(
+                "STABILITY_PAYMENT_EXPIRED",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                    "created_at": payload.created_at,
+                    "expires_at": payload.expires_at,
+                    "received_at": received_at,
+                }),
+            );
+            return SignedStabilityHandling::Invalid;
+        }
+
+        let (counterparty, wallet_channel_id, local_expected_usd) = {
+            let sc = self.stable_channel.lock().unwrap();
+            (
+                sc.counterparty,
+                sc.channel_id.to_string(),
+                sc.expected_usd.0,
+            )
+        };
+        if payload.channel_id != wallet_channel_id {
+            invalidate("channel");
+            audit_event(
+                "STABILITY_PAYMENT_CHANNEL_MISMATCH",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                    "signed_channel_id": payload.channel_id,
+                    "wallet_channel_id": wallet_channel_id,
+                }),
+            );
+            return SignedStabilityHandling::Invalid;
+        }
+        if !self.node.verify_signature(
+            envelope.payload.as_bytes(),
+            &envelope.signature,
+            &counterparty,
+        ) {
+            invalidate("signature");
+            audit_event(
+                "STABILITY_PAYMENT_SIGNATURE_INVALID",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                    "channel_id": payload.channel_id,
+                }),
+            );
+            return SignedStabilityHandling::Invalid;
+        }
+        if payload.expected_usd.to_bits() != local_expected_usd.to_bits() {
+            // expected_usd is independently maintained between SYNCs. The authenticated amount
+            // and the wallet's local equilibrium determine the safe transition; retain the peer
+            // value only as divergence telemetry.
+            audit_event(
+                "STABILITY_PAYMENT_STATE_DIVERGENCE",
+                json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_hash": payment_hash,
+                    "signed_expected_usd": payload.expected_usd,
+                    "local_expected_usd": local_expected_usd,
+                }),
+            );
+        }
+
+        let amount_sats = amount_msat / 1000;
+        let (
+            price,
+            user_channel_id,
+            live_receiver_sats,
+            mut backing_before,
+            mut backing_after,
+            mut native_after,
+        ) = {
+            let mut sc = self.stable_channel.lock().unwrap();
+            update_balances(&self.node, &mut sc);
+            if !sc.latest_price.is_finite() || sc.latest_price <= 0.0 {
+                *ack = false;
+                audit_event(
+                    "STABILITY_PAYMENT_PRICE_UNAVAILABLE",
+                    json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_hash": payment_hash,
+                    }),
+                );
+                return SignedStabilityHandling::Retry;
+            }
+            let Some(backing_after) = stable::backing_after_lsp_to_user_stability(
+                sc.backing_sats,
+                sc.expected_usd.0,
+                sc.latest_price,
+                amount_sats,
+                sc.stable_receiver_btc.sats,
+            ) else {
+                invalidate("allocation_capacity");
+                audit_event(
+                    "STABILITY_PAYMENT_ALLOCATION_INVALID",
+                    json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_hash": payment_hash,
+                        "backing_sats": sc.backing_sats,
+                        "amount_sats": amount_sats,
+                        "live_receiver_sats": sc.stable_receiver_btc.sats,
+                    }),
+                );
+                return SignedStabilityHandling::Invalid;
+            };
+            (
+                sc.latest_price,
+                format!("{}", sc.user_channel_id),
+                sc.stable_receiver_btc.sats,
+                sc.backing_sats,
+                backing_after,
+                sc.stable_receiver_btc.sats.saturating_sub(backing_after),
+            )
+        };
+        let amount_usd = (price > 0.0)
+            .then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
+        let persist = |backing_sats_before, backing_sats_after, native_sats_after| {
+            self.db.record_signed_stability_payment_and_update_allocation(
+                payment_hash,
+                &payload.settlement_id,
+                amount_msat,
+                amount_usd,
+                (price > 0.0).then_some(price),
+                &user_channel_id,
+                backing_sats_before,
+                backing_sats_after,
+                native_sats_after,
+            )
+        };
+        let mut reloaded_expected_usd = None;
+        let persisted = match persist(backing_before, backing_after, native_after) {
+            Err(ref error) if db::is_stale_inbound_stability_allocation(error) => {
+                let durable = match self.db.load_channel(&user_channel_id) {
+                    Ok(Some(channel)) => channel,
+                    Ok(None) => {
+                        *ack = false;
+                        return SignedStabilityHandling::Retry;
+                    }
+                    Err(error) => {
+                        *ack = false;
+                        audit_event(
+                            "STABILITY_PAYMENT_PERSIST_FAILED",
+                            json!({
+                                "settlement_id": payload.settlement_id,
+                                "payment_hash": payment_hash,
+                                "stage": "reload_after_stale_allocation",
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return SignedStabilityHandling::Retry;
+                    }
+                };
+                let Some(reloaded_backing_after) =
+                    stable::backing_after_lsp_to_user_stability(
+                        durable.backing_sats,
+                        durable.expected_usd,
+                        price,
+                        amount_sats,
+                        live_receiver_sats,
+                    )
+                else {
+                    *ack = false;
+                    audit_event(
+                        "STABILITY_PAYMENT_ALLOCATION_RETRY_DEFERRED",
+                        json!({
+                            "settlement_id": payload.settlement_id,
+                            "payment_hash": payment_hash,
+                            "durable_backing_sats": durable.backing_sats,
+                            "live_receiver_sats": live_receiver_sats,
+                        }),
+                    );
+                    return SignedStabilityHandling::Retry;
+                };
+                backing_before = durable.backing_sats;
+                backing_after = reloaded_backing_after;
+                native_after = live_receiver_sats.saturating_sub(backing_after);
+                reloaded_expected_usd = Some(durable.expected_usd);
+                match persist(backing_before, backing_after, native_after) {
+                    Ok(persisted) => persisted,
+                    Err(error) => {
+                        *ack = false;
+                        audit_event(
+                            "STABILITY_PAYMENT_PERSIST_FAILED",
+                            json!({
+                                "settlement_id": payload.settlement_id,
+                                "payment_hash": payment_hash,
+                                "stage": "retry_after_stale_allocation",
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return SignedStabilityHandling::Retry;
+                    }
+                }
+            }
+            Err(ref error) if db::is_missing_channel_row(error) => {
+                self.save_channel_settings();
+                match persist(backing_before, backing_after, native_after) {
+                    Ok(persisted) => persisted,
+                    Err(error) => {
+                        *ack = false;
+                        audit_event(
+                            "STABILITY_PAYMENT_PERSIST_FAILED",
+                            json!({
+                                "settlement_id": payload.settlement_id,
+                                "payment_hash": payment_hash,
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return SignedStabilityHandling::Retry;
+                    }
+                }
+            }
+            Ok(persisted) => persisted,
+            Err(error) => {
+                *ack = false;
+                audit_event(
+                    "STABILITY_PAYMENT_PERSIST_FAILED",
+                    json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_hash": payment_hash,
+                        "error": error.to_string(),
+                    }),
+                );
+                return SignedStabilityHandling::Retry;
+            }
+        };
+        if persisted.is_new {
+            let mut sc = self.stable_channel.lock().unwrap();
+            update_balances(&self.node, &mut sc);
+            if let Some(expected_usd) = reloaded_expected_usd {
+                sc.expected_usd = USD::from_f64(expected_usd);
+            }
+            sc.backing_sats = backing_after;
+            sc.native_sats = native_after;
+            stable::recompute_native(&mut sc);
+        }
+        self.update_balances();
+        audit_event(
+            "STABILITY_PAYMENT_V1_APPLIED",
+            json!({
+                "settlement_id": payload.settlement_id,
+                "payment_hash": payment_hash,
+                "channel_id": payload.channel_id,
+                "amount_msat": amount_msat,
+                "backing_sats_before": backing_before,
+                "backing_sats_after": backing_after,
+                "native_sats_after": native_after,
+                "is_new": persisted.is_new,
+            }),
+        );
+        SignedStabilityHandling::Applied
+    }
+
+    fn record_untrusted_signed_stability_as_lightning(
+        &mut self,
+        payment_hash: &str,
+        amount_msat: u64,
+        ack: &mut bool,
+    ) {
+        if amount_msat < 1000 {
+            return;
+        }
+        let price = self.stable_channel.lock().unwrap().latest_price;
+        let amount_usd = (price > 0.0)
+            .then(|| amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * price);
+        match self.db.record_payment_and_maybe_update_backing(
+            Some(payment_hash),
+            "lightning",
+            "received",
+            amount_msat,
+            amount_usd,
+            (price > 0.0).then_some(price),
+            "completed",
+            None,
+            None,
+        ) {
+            Ok(_) => {
+                let mut sc = self.stable_channel.lock().unwrap();
+                update_balances(&self.node, &mut sc);
+                stable::recompute_native(&mut sc);
+                drop(sc);
+                self.save_channel_settings_preserving_backing();
+                self.update_balances();
+            }
+            Err(error) => {
+                *ack = false;
+                audit_event(
+                    "PAYMENT_PERSIST_FAILED",
+                    json!({
+                        "payment_hash": payment_hash,
+                        "reason": "invalid_signed_stability",
+                        "error": error.to_string(),
+                    }),
+                );
+            }
+        }
+    }
+
     /// Save user's stable channel to database
     fn save_channel_settings(&self) {
         let sc = self.stable_channel.lock().unwrap();
@@ -2842,8 +3282,31 @@ impl UserApp {
                 } => {
                     let payment_hash_str = format!("{payment_hash}");
 
+                    let signed_stability = custom_records
+                        .iter()
+                        .find(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE)
+                        .map(|record| {
+                            self.handle_signed_stability_payment_received(
+                                record,
+                                amount_msat,
+                                &payment_hash_str,
+                                &mut ack,
+                            )
+                        });
+                    let handled_signed_stability = signed_stability.is_some();
+                    if signed_stability == Some(SignedStabilityHandling::Invalid) {
+                        self.record_untrusted_signed_stability_as_lightning(
+                            &payment_hash_str,
+                            amount_msat,
+                            &mut ack,
+                        );
+                    }
+
                     // Check for SYNC_V1 message from LSP (expected_usd synchronization)
-                    let handled_sync = 'sync: {
+                    let handled_sync = if handled_signed_stability {
+                        false
+                    } else {
+                        'sync: {
                         for tlv in &custom_records {
                             if tlv.type_num != STABLE_CHANNEL_TLV_TYPE {
                                 continue;
@@ -3058,9 +3521,14 @@ impl UserApp {
                             break 'sync true;
                         }
                         false
+                        }
                     };
 
-                    if handled_sync {
+                    if handled_signed_stability {
+                        // Signed stability metadata takes precedence over the compatibility marker.
+                        // Invalid signed records are recorded as ordinary Lightning receipts and
+                        // can never downgrade to unsigned stability accounting.
+                    } else if handled_sync {
                         // Sync message: update balances but don't record as a normal payment
                         {
                             let mut sc = self.stable_channel.lock().unwrap();
@@ -3071,6 +3539,19 @@ impl UserApp {
                         let has_stable_control_message = custom_records.iter().any(|tlv| {
                             tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() != [1u8]
                         });
+                        let has_legacy_stability_marker = custom_records.iter().any(|tlv| {
+                            tlv.type_num == STABLE_CHANNEL_TLV_TYPE
+                                && tlv.value.as_slice() == [1u8]
+                        });
+                        if has_legacy_stability_marker {
+                            audit_event(
+                                "LEGACY_STABILITY_MARKER_UNAUTHENTICATED",
+                                json!({
+                                    "payment_hash": payment_hash_str,
+                                    "amount_msat": amount_msat,
+                                }),
+                            );
+                        }
                         if has_stable_control_message || amount_msat < 1000 {
                             audit_event(
                                 "PAYMENT_RECEIVED_IGNORED",
@@ -3085,11 +3566,7 @@ impl UserApp {
                                 }),
                             );
                         } else {
-                            let is_stability_payment = custom_records.iter().any(|tlv| {
-                                tlv.type_num == STABLE_CHANNEL_TLV_TYPE
-                                    && tlv.value.as_slice() == [1u8]
-                            });
-                            let (amount_usd, btc_price, payment_type, user_channel_id_str) = {
+                            let (amount_usd, btc_price) = {
                                 let sc = self.stable_channel.lock().unwrap();
                                 let price = sc.latest_price;
                                 let usd = if price > 0.0 {
@@ -3097,69 +3574,27 @@ impl UserApp {
                                 } else {
                                     None
                                 };
-                                let ptype = if is_stability_payment {
-                                    "stability"
-                                } else {
-                                    "lightning"
-                                };
-                                let ucid = format!("{}", sc.user_channel_id);
-                                (
-                                    usd,
-                                    if price > 0.0 { Some(price) } else { None },
-                                    ptype,
-                                    ucid,
-                                )
+                                (usd, if price > 0.0 { Some(price) } else { None })
                             };
-                            let backing_delta =
-                                is_stability_payment.then(|| (amount_msat / 1000) as i64);
-                            // Atomically insert payment and update backing in one transaction.
-                            // is_new=true → inserted, is_new=false → duplicate → acknowledge.
-                            // Err → transient failure, do not acknowledge so LDK re-delivers.
-                            let record = || {
-                                self.db.record_payment_and_maybe_update_backing(
-                                    Some(&payment_hash_str),
-                                    payment_type,
-                                    "received",
-                                    amount_msat,
-                                    amount_usd,
-                                    btc_price,
-                                    "completed",
-                                    is_stability_payment.then(|| user_channel_id_str.as_str()),
-                                    backing_delta,
-                                )
-                            };
-                            let db_result = match record() {
-                                Err(ref e) if db::is_missing_channel_row(e) => {
-                                    // The channels row is gone (nothing else recreates
-                                    // it) — recreate it from in-memory state and retry
-                                    // once so this event can't permanently block the
-                                    // queue.
-                                    audit_event(
-                                        "PAYMENT_CHANNEL_ROW_MISSING",
-                                        json!({
-                                            "payment_hash": payment_hash_str,
-                                            "user_channel_id": user_channel_id_str,
-                                        }),
-                                    );
-                                    self.save_channel_settings();
-                                    record()
-                                }
-                                other => other,
-                            };
+                            // Desktop backing changes only through authenticated stability
+                            // metadata. A legacy marker is retained for migration diagnostics but
+                            // its settled value is ordinary Lightning.
+                            let db_result = self.db.record_payment_and_maybe_update_backing(
+                                Some(&payment_hash_str),
+                                "lightning",
+                                "received",
+                                amount_msat,
+                                amount_usd,
+                                btc_price,
+                                "completed",
+                                None,
+                                None,
+                            );
                             match db_result {
                                 Ok(persisted) => {
                                     {
                                         let mut sc = self.stable_channel.lock().unwrap();
                                         update_balances(&self.node, &mut sc);
-                                        if persisted.is_new && is_stability_payment {
-                                            // Sync memory from the authoritative DB value
-                                            // committed in the transaction, not by
-                                            // re-applying the delta — the sc mutex was
-                                            // dropped across the transaction.
-                                            if let Some(new_backing) = persisted.new_backing {
-                                                sc.backing_sats = new_backing.max(0) as u64;
-                                            }
-                                        }
                                         stable::reconcile_incoming(&mut sc);
                                     }
                                     if persisted.clamped {
@@ -3167,7 +3602,7 @@ impl UserApp {
                                             "PAYMENT_BACKING_CLAMPED",
                                             json!({
                                                 "payment_hash": payment_hash_str,
-                                                "backing_delta_sats": backing_delta,
+                                                "backing_delta_sats": null,
                                                 "new_backing_sats": persisted.new_backing,
                                             }),
                                         );
@@ -10647,13 +11082,13 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
     })
 }
 
-fn trade_reduction_underflows_backing(
+fn trade_reduction_exhausts_backing(
     current_backing_sats: u64,
     current_expected_usd: f64,
     new_expected_usd: f64,
     current_price: f64,
 ) -> bool {
-    if new_expected_usd >= current_expected_usd {
+    if new_expected_usd >= current_expected_usd || new_expected_usd == 0.0 {
         return false;
     }
     let current_target = current_expected_usd / current_price * SATS_IN_BTC as f64;
@@ -10666,7 +11101,7 @@ fn trade_reduction_underflows_backing(
         return false;
     }
     let reduction = (current_target.floor() as u64).saturating_sub(new_target.floor() as u64);
-    reduction > current_backing_sats
+    reduction >= current_backing_sats
 }
 
 /// Calculate the allocation the wallet must persist before it sends the trade fee.
@@ -10696,16 +11131,53 @@ fn local_trade_backing_sats(
     if new_expected_usd > receiver_usd {
         return Err(LocalTradeAllocationError::TargetExceedsCapacity);
     }
+    // The LSP measures quote deviation against its own price. These are therefore the exact local
+    // price endpoints that can still pass its symmetric deviation check.
+    let quote_deviation = MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0;
+    let minimum_permitted_lsp_price = current_price / (1.0 + quote_deviation);
+    let maximum_permitted_lsp_price = current_price / (1.0 - quote_deviation);
     if new_expected_usd > current_expected_usd {
-        // The LSP accepts a signed quote up to this deviation from its own price. Use the exact
-        // inverse of that check so every permitted lower LSP price still supports this target.
-        let minimum_permitted_lsp_price =
-            current_price / (1.0 + MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0);
+        // Every permitted lower LSP price must still support an increased target.
         let conservative_receiver_usd =
             post_fee_receiver_sats as f64 / SATS_IN_BTC as f64
                 * minimum_permitted_lsp_price;
         if new_expected_usd > conservative_receiver_usd {
             return Err(LocalTradeAllocationError::TargetExceedsSafeCapacity);
+        }
+    } else {
+        // Reductions and exits can underflow backing or cross the actionable-drift gate at either
+        // edge of the accepted quote range. Validate both before paying the non-refundable fee.
+        for permitted_lsp_price in [
+            minimum_permitted_lsp_price,
+            maximum_permitted_lsp_price,
+        ] {
+            let permitted_receiver_usd =
+                post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * permitted_lsp_price;
+            if new_expected_usd > permitted_receiver_usd {
+                return Err(LocalTradeAllocationError::TargetExceedsSafeCapacity);
+            }
+            if stable::trade_backing_after_delta(
+                post_fee_receiver_sats,
+                current_backing_sats,
+                current_expected_usd,
+                new_expected_usd,
+                permitted_lsp_price,
+            )
+            .is_none()
+            {
+                return Err(if new_expected_usd == 0.0
+                    || trade_reduction_exhausts_backing(
+                        current_backing_sats,
+                        current_expected_usd,
+                        new_expected_usd,
+                        permitted_lsp_price,
+                    )
+                {
+                    LocalTradeAllocationError::SettlementRequired
+                } else {
+                    LocalTradeAllocationError::UnsafeAllocation
+                });
+            }
         }
     }
     let backing_sats = stable::trade_backing_after_delta(
@@ -10716,7 +11188,7 @@ fn local_trade_backing_sats(
         current_price,
     )
     .ok_or(if new_expected_usd == 0.0
-        || trade_reduction_underflows_backing(
+        || trade_reduction_exhausts_backing(
             current_backing_sats,
             current_expected_usd,
             new_expected_usd,
@@ -10948,9 +11420,24 @@ mod tests {
             Err(LocalTradeAllocationError::SettlementRequired),
         );
         assert_eq!(
+            local_trade_backing_sats(10_000, 0, 500, 1.0, 0.5, 100_000.0),
+            Err(LocalTradeAllocationError::SettlementRequired),
+            "a live target cannot consume the final initialized backing sat",
+        );
+        assert_eq!(
             local_trade_backing_sats(100_000, 0, 0, 0.0, 99.51, 100_000.0),
             Err(LocalTradeAllocationError::TargetExceedsSafeCapacity),
             "the preflight reserves the full permitted quote-deviation band",
+        );
+        assert_eq!(
+            local_trade_backing_sats(200_000, 0, 501, 1.0, 0.5, 100_000.0),
+            Err(LocalTradeAllocationError::SettlementRequired),
+            "a reduction that works locally must also work at the lowest permitted LSP price",
+        );
+        assert_eq!(
+            local_trade_backing_sats(200_000, 0, 100_000, 100.0, 0.0, 100_000.0),
+            Err(LocalTradeAllocationError::SettlementRequired),
+            "a full exit must be below the stability threshold across the accepted quote range",
         );
     }
 
@@ -10966,13 +11453,18 @@ mod tests {
             Ok((199_900, 100_009)),
         );
         assert_eq!(
-            local_trade_backing_sats(200_000, 500, 100_000, 100.0, 0.0, 100_001.0),
-            Ok((199_500, 0)),
+            local_trade_backing_sats(20_000, 50, 10_000, 10.0, 0.0, 100_001.0),
+            Ok((19_950, 0)),
         );
         assert_eq!(
-            local_trade_backing_sats(200_000, 500, 100_000, 100.0, 0.009, 100_001.0),
-            Ok((199_500, 0)),
+            local_trade_backing_sats(20_000, 50, 10_000, 10.0, 0.009, 100_001.0),
+            Ok((19_950, 0)),
             "a sub-cent target follows the same guarded full-exit path",
+        );
+        assert_eq!(
+            local_trade_backing_sats(2_000, 0, 1_000, 1.0, 0.5, 100_000.0),
+            Ok((2_000, 500)),
+            "ordinary reductions remain available when both quote endpoints are safe",
         );
     }
 

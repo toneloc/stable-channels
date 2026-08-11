@@ -15,8 +15,12 @@ use ldk_server_client::ldk_server_grpc::api::{
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord};
-use stable_channels::constants::MAX_TRADE_QUOTE_DEVIATION_PERCENT;
-use stable_channels::db::Database;
+use stable_channels::constants::{
+    MAX_TRADE_QUOTE_DEVIATION_PERCENT, SIGNED_STABILITY_TLV_TYPE,
+    STABILITY_PAYMENT_AUTH_TTL_SECS,
+};
+use stable_channels::db::{Database, InboundStabilityRegistration};
+use stable_channels::stable::StabilityPaymentDirection;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
 
@@ -762,6 +766,23 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
+        if let Some(record) = custom_records
+            .iter()
+            .find(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE)
+        {
+            self.handle_signed_stability_payment(
+                record,
+                payment_id.as_deref(),
+                amount_msat,
+                ldk,
+                btc_price,
+            )
+            .await;
+            // A malformed signed record must never downgrade to the unsigned marker included for
+            // older mobile clients.
+            return;
+        }
+
         for rec in &custom_records {
             if rec.type_num != stable_channels::constants::STABLE_CHANNEL_TLV_TYPE {
                 continue;
@@ -805,7 +826,7 @@ impl StableChannelManager {
                 // stability payment.
                 self.handle_trade_message(&raw, amount_msat, ldk, btc_price)
                     .await;
-            } else {
+            } else if rec.value.as_ref() == [1u8] {
                 if let Some(pid) = payment_id.as_deref() {
                     if let Err(e) = self.db.record_settlement(pid, "stability") {
                         tracing::error!("[stable] record_settlement (inbound stability) failed: {}", e);
@@ -821,6 +842,15 @@ impl StableChannelManager {
                 // user's payment as an unreconciled spend and deduct expected_usd.
                 self.reconcile_incoming_stability(payment_id.as_deref(), amount_msat, ldk, btc_price)
                     .await;
+            } else {
+                stable_channels::audit::audit_event(
+                    "LEGACY_STABILITY_MARKER_INVALID",
+                    serde_json::json!({
+                        "payment_id": payment_id,
+                        "amount_msat": amount_msat,
+                        "payload_len": rec.value.len(),
+                    }),
+                );
             }
             return;
         }
@@ -829,6 +859,491 @@ impl StableChannelManager {
             "PAYMENT_RECEIVED",
             serde_json::json!({ "payment_id": payment_id, "amount_msat": amount_msat }),
         );
+    }
+
+    async fn handle_signed_stability_payment(
+        &mut self,
+        record: &CustomTlvRecord,
+        payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
+        if record.value.len()
+            > stable_channels::constants::MAX_SIGNED_STABILITY_TLV_VALUE_BYTES
+        {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                serde_json::json!({
+                    "payment_id": payment_id,
+                    "reason": "oversize",
+                    "payload_len": record.value.len(),
+                }),
+            );
+            return;
+        }
+        let Ok(raw) = std::str::from_utf8(record.value.as_ref()) else {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                serde_json::json!({ "payment_id": payment_id, "reason": "utf8" }),
+            );
+            return;
+        };
+        let Some(envelope) = stable_channels::stable::parse_stability_signed_envelope(raw) else {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                serde_json::json!({ "payment_id": payment_id, "reason": "envelope" }),
+            );
+            return;
+        };
+        let Some(payload) =
+            stable_channels::stable::parse_stability_payment_payload(&envelope.payload)
+        else {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_PAYLOAD_INVALID",
+                serde_json::json!({ "payment_id": payment_id, "reason": "fields" }),
+            );
+            return;
+        };
+        let (Some(payment_id), Some(received_msat)) = (payment_id, amount_msat) else {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_BINDING_INVALID",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "amount_msat": amount_msat,
+                    "reason": "missing_payment_details",
+                }),
+            );
+            return;
+        };
+        if payload.direction != StabilityPaymentDirection::UserToLsp {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_BINDING_INVALID",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "reason": "direction",
+                }),
+            );
+            return;
+        }
+        if payload.amount_msat != received_msat {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_AMOUNT_MISMATCH",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "signed_amount_msat": payload.amount_msat,
+                    "received_amount_msat": received_msat,
+                }),
+            );
+            return;
+        }
+        let registration = match self.db.register_inbound_stability_settlement(
+            &payload.settlement_id,
+            payment_id,
+            &payload.channel_id,
+            payload.amount_msat,
+            "user_to_lsp",
+            raw,
+        ) {
+            Ok(registration) => registration,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "STABILITY_PAYMENT_REPLAY_CONFLICT",
+                    serde_json::json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_id": payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        if registration == InboundStabilityRegistration::Applied {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_REPLAY_IGNORED",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                }),
+            );
+            return;
+        }
+        if registration == InboundStabilityRegistration::Invalid {
+            return;
+        }
+
+        let invalidate = |reason: &str| {
+            let _ = self.db.finish_inbound_stability_settlement(
+                &payload.settlement_id,
+                "invalid",
+                Some(reason),
+            );
+        };
+        let received_at = match self
+            .db
+            .inbound_stability_settlement_received_at(&payload.settlement_id)
+        {
+            Ok(Some(received_at)) => received_at,
+            Ok(None) => return,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "DB_READ_FAILED",
+                    serde_json::json!({
+                        "op": "inbound_stability_settlement_received_at",
+                        "settlement_id": payload.settlement_id,
+                        "payment_id": payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        // Evaluate expiry at the durable first-receipt time. A transient failure may be retried
+        // later without turning an on-time, already-settled Lightning payment into an invalid one.
+        if !stable_channels::stable::stability_payment_is_fresh(&payload, received_at) {
+            invalidate("expired");
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_EXPIRED",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "created_at": payload.created_at,
+                    "expires_at": payload.expires_at,
+                    "received_at": received_at,
+                }),
+            );
+            return;
+        }
+
+        let channels = match ldk.list_channels(ListChannelsRequest {}).await {
+            Ok(response) => response.channels,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "STABILITY_PAYMENT_CHANNEL_LOOKUP_FAILED",
+                    serde_json::json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_id": payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        let Some(channel) = channels
+            .iter()
+            .find(|channel| channel.channel_id.eq_ignore_ascii_case(&payload.channel_id))
+            .cloned()
+        else {
+            invalidate("channel");
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_CHANNEL_MISMATCH",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "channel_id": payload.channel_id,
+                }),
+            );
+            return;
+        };
+        let Some(user_channel_id) = parse_user_channel_id(&channel.user_channel_id) else {
+            invalidate("user_channel_id");
+            return;
+        };
+        let canonical_user_channel_id = format!("{}", user_channel_id);
+        let Some(idx) = self
+            .stable_channels
+            .iter()
+            .position(|stable| stable.user_channel_id == user_channel_id)
+        else {
+            let known_stable_channel = match self
+                .db
+                .get_active_user_channel_id_by_channel_id(&payload.channel_id)
+            {
+                Ok(channel_id) => channel_id.is_some(),
+                Err(error) => {
+                    stable_channels::audit::audit_event(
+                        "DB_READ_FAILED",
+                        serde_json::json!({
+                            "op": "get_active_user_channel_id_by_channel_id",
+                            "settlement_id": payload.settlement_id,
+                            "payment_id": payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return;
+                }
+            };
+            if !known_stable_channel {
+                invalidate("channel_not_stable");
+            }
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_CHANNEL_UNAVAILABLE",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "channel_id": payload.channel_id,
+                    "will_retry": known_stable_channel,
+                }),
+            );
+            return;
+        };
+        let signature_valid = match ldk
+            .verify_signature(VerifySignatureRequest {
+                message: envelope.payload.as_bytes().to_vec().into(),
+                signature: envelope.signature,
+                public_key: channel.counterparty_node_id.clone(),
+            })
+            .await
+        {
+            Ok(response) => response.valid,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "STABILITY_PAYMENT_SIGNATURE_CHECK_FAILED",
+                    serde_json::json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_id": payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        if !signature_valid {
+            invalidate("signature");
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_SIGNATURE_INVALID",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "channel_id": payload.channel_id,
+                }),
+            );
+            return;
+        }
+        if payload.expected_usd.to_bits()
+            != self.stable_channels[idx].expected_usd.0.to_bits()
+        {
+            // The signed amount and local equilibrium bound the economic transition. A target
+            // difference between independent peers is useful telemetry, but is not a reason to
+            // discard an already-settled authenticated payment.
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_STATE_DIVERGENCE",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                    "signed_expected_usd": payload.expected_usd,
+                    "local_expected_usd": self.stable_channels[idx].expected_usd.0,
+                }),
+            );
+        }
+        if btc_price <= 0.0 {
+            stable_channels::audit::audit_event(
+                "STABILITY_PAYMENT_PRICE_UNAVAILABLE",
+                serde_json::json!({
+                    "settlement_id": payload.settlement_id,
+                    "payment_id": payment_id,
+                }),
+            );
+            return;
+        }
+
+        let (_, their_sats) = channel_peer_balances(&channel);
+        let amount_sats = received_msat / 1000;
+        let mut allocation_expected_usd = self.stable_channels[idx].expected_usd.0;
+        let mut backing_before = self.stable_channels[idx].backing_sats;
+        let Some(mut backing_after) =
+            stable_channels::stable::backing_after_user_to_lsp_stability(
+                backing_before,
+                allocation_expected_usd,
+                btc_price,
+                amount_sats,
+                their_sats,
+            )
+        else {
+            invalidate("allocation");
+            return;
+        };
+        let mut native_after = their_sats.saturating_sub(backing_after);
+        let amount_usd = amount_sats as f64
+            / stable_channels::constants::SATS_IN_BTC as f64
+            * btc_price;
+        let persist = |backing_sats_before, backing_sats_after, native_sats_after| {
+            self.db.record_signed_stability_payment_and_update_allocation(
+                payment_id,
+                &payload.settlement_id,
+                received_msat,
+                Some(amount_usd),
+                Some(btc_price),
+                &canonical_user_channel_id,
+                backing_sats_before,
+                backing_sats_after,
+                native_sats_after,
+            )
+        };
+        let persisted = match persist(backing_before, backing_after, native_after) {
+            Err(ref error)
+                if stable_channels::db::is_stale_inbound_stability_allocation(error) =>
+            {
+                let durable = match self.db.load_channel(&canonical_user_channel_id) {
+                    Ok(Some(channel)) => channel,
+                    Ok(None) => return,
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "STABILITY_PAYMENT_PERSIST_FAILED",
+                            serde_json::json!({
+                                "settlement_id": payload.settlement_id,
+                                "payment_id": payment_id,
+                                "stage": "reload_after_stale_allocation",
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return;
+                    }
+                };
+                let Some(reloaded_backing_after) =
+                    stable_channels::stable::backing_after_user_to_lsp_stability(
+                        durable.backing_sats,
+                        durable.expected_usd,
+                        btc_price,
+                        amount_sats,
+                        their_sats,
+                    )
+                else {
+                    return;
+                };
+                allocation_expected_usd = durable.expected_usd;
+                backing_before = durable.backing_sats;
+                backing_after = reloaded_backing_after;
+                native_after = their_sats.saturating_sub(backing_after);
+                match persist(backing_before, backing_after, native_after) {
+                    Ok(persisted) => persisted,
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "STABILITY_PAYMENT_PERSIST_FAILED",
+                            serde_json::json!({
+                                "settlement_id": payload.settlement_id,
+                                "payment_id": payment_id,
+                                "stage": "retry_after_stale_allocation",
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return;
+                    }
+                }
+            }
+            Err(ref error) if stable_channels::db::is_missing_channel_row(error) => {
+                if let Err(error) = self.db.save_channel(
+                    &payload.channel_id,
+                    &canonical_user_channel_id,
+                    allocation_expected_usd,
+                    backing_before,
+                    their_sats.saturating_sub(backing_before),
+                    self.stable_channels[idx].note.as_deref(),
+                ) {
+                    stable_channels::audit::audit_event(
+                        "STABILITY_PAYMENT_PERSIST_FAILED",
+                        serde_json::json!({
+                            "settlement_id": payload.settlement_id,
+                            "payment_id": payment_id,
+                            "stage": "canonicalize_channel_row",
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return;
+                }
+                match persist(backing_before, backing_after, native_after) {
+                    Ok(persisted) => persisted,
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "STABILITY_PAYMENT_PERSIST_FAILED",
+                            serde_json::json!({
+                                "settlement_id": payload.settlement_id,
+                                "payment_id": payment_id,
+                                "stage": "retry_after_channel_canonicalization",
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return;
+                    }
+                }
+            }
+            Ok(persisted) => persisted,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "STABILITY_PAYMENT_PERSIST_FAILED",
+                    serde_json::json!({
+                        "settlement_id": payload.settlement_id,
+                        "payment_id": payment_id,
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        if persisted.is_new {
+            let stable = &mut self.stable_channels[idx];
+            stable.expected_usd = USD::from_f64(allocation_expected_usd);
+            stable.latest_price = btc_price;
+            stable.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+            stable.stable_receiver_usd = USD::from_bitcoin(stable.stable_receiver_btc, btc_price);
+            stable.backing_sats = backing_after;
+            stable.native_sats = native_after;
+            stable_channels::stable::recompute_native(stable);
+            self.spend_debounce.remove(&stable.user_channel_id);
+        }
+        stable_channels::audit::audit_event(
+            "STABILITY_PAYMENT_V1_APPLIED",
+            serde_json::json!({
+                "settlement_id": payload.settlement_id,
+                "payment_id": payment_id,
+                "channel_id": payload.channel_id,
+                "amount_msat": received_msat,
+                "backing_sats_before": backing_before,
+                "backing_sats_after": backing_after,
+                "native_sats_after": native_after,
+                "is_new": persisted.is_new,
+            }),
+        );
+    }
+
+    async fn retry_pending_signed_stability(
+        &mut self,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
+        if !btc_price.is_finite() || btc_price <= 0.0 {
+            return;
+        }
+        let pending = match self.db.pending_inbound_stability_settlements(32) {
+            Ok(pending) => pending,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "DB_READ_FAILED",
+                    serde_json::json!({
+                        "op": "pending_inbound_stability_settlements",
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        for settlement in pending {
+            let record = CustomTlvRecord {
+                type_num: SIGNED_STABILITY_TLV_TYPE,
+                value: settlement.envelope.into_bytes().into(),
+            };
+            self.handle_signed_stability_payment(
+                &record,
+                Some(&settlement.payment_id),
+                Some(settlement.amount_msat),
+                ldk,
+                btc_price,
+            )
+            .await;
+        }
     }
 
     /// Settle the books for an inbound stability payment (user above par paid the LSP).
@@ -918,15 +1433,24 @@ impl StableChannelManager {
         // 1 sat of drift, not erase the entire above-par surplus and reclassify it as the
         // user's own native BTC. Floor at equilibrium so a (rounding) overpayment cannot
         // drive backing below the peg; clamp to the live balance so backing never exceeds it.
-        let equilibrium = ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
-        let settled_backing = if sc.backing_sats > equilibrium {
-            sc.backing_sats.saturating_sub(amount_sats).max(equilibrium)
-        } else {
-            // At or below the peg there was no above-par surplus to settle on this receive
-            // path; never inflate backing toward equilibrium on an unexpected payment.
-            sc.backing_sats
+        let Some(settled_backing) = stable_channels::stable::backing_after_user_to_lsp_stability(
+            sc.backing_sats,
+            sc.expected_usd.0,
+            btc_price,
+            amount_sats,
+            their_sats,
+        ) else {
+            stable_channels::audit::audit_event(
+                "STABILITY_RECEIVE_UNATTRIBUTED",
+                serde_json::json!({
+                    "payment_id": payment_id,
+                    "amount_msat": amount_msat,
+                    "reason": "invalid_allocation_inputs",
+                }),
+            );
+            return;
         };
-        sc.backing_sats = settled_backing.min(their_sats);
+        sc.backing_sats = settled_backing;
         sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
         stable_channels::stable::recompute_native(sc);
         // The drop is settled; make sure the backstop forgets any ticks it counted.
@@ -966,6 +1490,9 @@ impl StableChannelManager {
         push: &std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>,
         btc_price: f64,
     ) {
+        // LDK Server's event stream is not replayable. Finish any receive that was durably
+        // registered before a transient channel/signature/DB failure.
+        self.retry_pending_signed_stability(ldk, btc_price).await;
         if btc_price <= 0.0 {
             return;
         }
@@ -1118,15 +1645,100 @@ impl StableChannelManager {
 
             if c.is_usable {
                 if is_receiver_below_expected {
+                    let settlement_id = stable_channels::stable::new_stability_settlement_id();
+                    let created_at = now.max(0) as u64;
+                    let expires_at = created_at.saturating_add(STABILITY_PAYMENT_AUTH_TTL_SECS);
+                    let payload = match stable_channels::stable::build_stability_payment_payload(
+                        &settlement_id,
+                        &c.channel_id,
+                        amount_msat,
+                        StabilityPaymentDirection::LspToUser,
+                        sc.expected_usd.0,
+                        created_at,
+                        expires_at,
+                    ) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            stable_channels::audit::audit_event(
+                                "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                                serde_json::json!({
+                                    "channel_id": c.channel_id,
+                                    "user_channel_id": format!("{}", sc.user_channel_id),
+                                    "settlement_id": settlement_id,
+                                    "amount_msat": amount_msat,
+                                    "error": error.to_string(),
+                                }),
+                            );
+                            continue;
+                        }
+                    };
+                    let signature = match ldk
+                        .sign_message(SignMessageRequest {
+                            message: payload.as_bytes().to_vec().into(),
+                        })
+                        .await
+                    {
+                        Ok(response) if !response.signature.is_empty() => response.signature,
+                        Ok(_) => {
+                            stable_channels::audit::audit_event(
+                                "STABILITY_PAYMENT_SIGN_FAILED",
+                                serde_json::json!({
+                                    "channel_id": c.channel_id,
+                                    "user_channel_id": format!("{}", sc.user_channel_id),
+                                    "settlement_id": settlement_id,
+                                    "reason": "empty_signature",
+                                }),
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            stable_channels::audit::audit_event(
+                                "STABILITY_PAYMENT_SIGN_FAILED",
+                                serde_json::json!({
+                                    "channel_id": c.channel_id,
+                                    "user_channel_id": format!("{}", sc.user_channel_id),
+                                    "settlement_id": settlement_id,
+                                    "error": error.to_string(),
+                                }),
+                            );
+                            continue;
+                        }
+                    };
+                    let envelope = match stable_channels::stable::build_stability_signed_envelope(
+                        payload,
+                        signature,
+                    ) {
+                        Ok(envelope) => envelope,
+                        Err(error) => {
+                            stable_channels::audit::audit_event(
+                                "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                                serde_json::json!({
+                                    "channel_id": c.channel_id,
+                                    "user_channel_id": format!("{}", sc.user_channel_id),
+                                    "settlement_id": settlement_id,
+                                    "stage": "envelope",
+                                    "error": error.to_string(),
+                                }),
+                            );
+                            continue;
+                        }
+                    };
                     let send_req = SpontaneousSendRequest {
                         amount_msat,
                         node_id: sc.counterparty.to_string(),
                         route_parameters: None,
-                        // Tag as a stability payment so receiving clients can identify it.
-                        custom_tlvs: vec![CustomTlvRecord {
-                            type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
-                            value: vec![1u8].into(),
-                        }],
+                        // Keep the marker during the mobile rollout. Upgraded receivers must
+                        // prefer and validate the signed record whenever both are present.
+                        custom_tlvs: vec![
+                            CustomTlvRecord {
+                                type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
+                                value: vec![1u8].into(),
+                            },
+                            CustomTlvRecord {
+                                type_num: SIGNED_STABILITY_TLV_TYPE,
+                                value: envelope.into_bytes().into(),
+                            },
+                        ],
                     };
                     let channel_id_clone = c.channel_id.clone();
                     let user_channel_id_clone = c.user_channel_id.clone();
@@ -1140,6 +1752,17 @@ impl StableChannelManager {
                     let counterparty_for_db = sc.counterparty.to_string();
                     match ldk.spontaneous_send(send_req).await {
                         Ok(resp) => {
+                            stable_channels::audit::audit_event(
+                                "STABILITY_PAYMENT_V1_SENT",
+                                serde_json::json!({
+                                    "payment_id": resp.payment_id,
+                                    "settlement_id": settlement_id,
+                                    "channel_id": channel_id_clone,
+                                    "user_channel_id": user_channel_id_clone,
+                                    "amount_msat": amount_msat,
+                                    "direction": "lsp_to_user",
+                                }),
+                            );
                             let persisted = if resp.payment_id.is_empty() {
                                 false
                             } else {
@@ -2128,6 +2751,7 @@ mod tests {
         pub verify_should_pass: bool,
         pub signature: String,
         pub sign_calls: StdMutex<Vec<Vec<u8>>>,
+        pub verify_calls: StdMutex<Vec<VerifySignatureRequest>>,
         pub forwarded: StdMutex<Vec<GrpcForwardedPayment>>,
         pub forward_next_page_token: StdMutex<Option<PageToken>>,
         pub forward_calls: AtomicUsize,
@@ -2145,6 +2769,7 @@ mod tests {
                 verify_should_pass: true,
                 signature: "fake-sig".to_string(),
                 sign_calls: StdMutex::new(Vec::new()),
+                verify_calls: StdMutex::new(Vec::new()),
                 forwarded: StdMutex::new(Vec::new()),
                 forward_next_page_token: StdMutex::new(None),
                 forward_calls: AtomicUsize::new(0),
@@ -2207,8 +2832,9 @@ mod tests {
         }
         async fn verify_signature(
             &self,
-            _req: VerifySignatureRequest,
+            req: VerifySignatureRequest,
         ) -> Result<VerifySignatureResponse, LdkServerError> {
+            self.verify_calls.lock().unwrap().push(req);
             Ok(VerifySignatureResponse {
                 valid: self.verify_should_pass,
             })
@@ -2972,6 +3598,32 @@ mod tests {
         assert_eq!(sends.len(), 1, "expected one stability payment");
         assert_eq!(sends[0].node_id, COUNTERPARTY_HEX);
         assert!(sends[0].amount_msat > 0);
+        assert_eq!(sends[0].custom_tlvs.len(), 2);
+        assert_eq!(
+            sends[0].custom_tlvs[0].type_num,
+            stable_channels::constants::STABLE_CHANNEL_TLV_TYPE
+        );
+        assert_eq!(sends[0].custom_tlvs[0].value.as_ref(), [1u8]);
+        assert_eq!(
+            sends[0].custom_tlvs[1].type_num,
+            stable_channels::constants::SIGNED_STABILITY_TLV_TYPE
+        );
+        let raw = std::str::from_utf8(sends[0].custom_tlvs[1].value.as_ref()).unwrap();
+        let envelope = stable_channels::stable::parse_stability_signed_envelope(raw).unwrap();
+        let payload =
+            stable_channels::stable::parse_stability_payment_payload(&envelope.payload).unwrap();
+        assert_eq!(payload.channel_id, CHANNEL_ID_HEX);
+        assert_eq!(payload.amount_msat, sends[0].amount_msat);
+        assert_eq!(
+            payload.direction,
+            stable_channels::stable::StabilityPaymentDirection::LspToUser
+        );
+        assert_eq!(payload.expected_usd, 50.0);
+        assert_eq!(envelope.signature, "fake-sig");
+        assert_eq!(
+            fake_drift.sign_calls.lock().unwrap().as_slice(),
+            [envelope.payload.as_bytes()]
+        );
         assert!(mgr.stable_channels[0].last_stability_payment > 0,
             "cooldown timestamp should be set");
     }
@@ -4460,6 +5112,503 @@ mod tests {
             type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
             value: vec![1u8].into(),
         }
+    }
+
+    fn signed_stability_record(
+        settlement_id: &str,
+        channel_id: &str,
+        amount_msat: u64,
+        direction: stable_channels::stable::StabilityPaymentDirection,
+        expected_usd: f64,
+    ) -> CustomTlvRecord {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = stable_channels::stable::build_stability_payment_payload(
+            settlement_id,
+            channel_id,
+            amount_msat,
+            direction,
+            expected_usd,
+            now,
+            now + STABILITY_PAYMENT_AUTH_TTL_SECS,
+        )
+        .unwrap();
+        let envelope = stable_channels::stable::build_stability_signed_envelope(
+            payload,
+            "signed-by-test-peer".to_owned(),
+        )
+        .unwrap();
+        CustomTlvRecord {
+            type_num: stable_channels::constants::SIGNED_STABILITY_TLV_TYPE,
+            value: envelope.into_bytes().into(),
+        }
+    }
+
+    async fn manager_at_par_for_signed_stability() -> StableChannelManager {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+        mgr
+    }
+
+    #[tokio::test]
+    async fn signed_stability_payment_is_bound_to_amount_and_applied_once() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let settlement_id = "11".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![stability_marker(), record.clone()],
+            Some("signed-payment-1".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 9_091);
+        assert_eq!(mgr.stable_channels[0].native_sats, 40_000);
+        assert!(mgr
+            .db
+            .load_channel(USER_CHANNEL_ID_DECIMAL)
+            .unwrap()
+            .is_some());
+        let verify_calls = fake.verify_calls.lock().unwrap();
+        assert_eq!(verify_calls.len(), 1);
+        assert_eq!(verify_calls[0].public_key, COUNTERPARTY_HEX);
+        let envelope = stable_channels::stable::parse_stability_signed_envelope(
+            std::str::from_utf8(record.value.as_ref()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(verify_calls[0].message.as_ref(), envelope.payload.as_bytes());
+        drop(verify_calls);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("applied")
+        );
+
+        mgr.handle_payment_received(
+            vec![stability_marker(), record],
+            Some("signed-payment-1".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+        assert_eq!(
+            mgr.stable_channels[0].backing_sats, 9_091,
+            "replaying the event must not apply the amount twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_stability_uses_local_state_when_peer_expected_usd_differs() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let settlement_id = "66".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.5,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![record],
+            Some("signed-payment-divergent-target".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 10.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 9_091);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("applied"),
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_stability_recovers_once_from_durable_backing_cas_conflict() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                10.0,
+                9_999,
+                40_001,
+                None,
+            )
+            .unwrap();
+        let settlement_id = "77".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![record],
+            Some("signed-payment-stale-allocation".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].backing_sats, 9_090);
+        assert_eq!(
+            mgr.db
+                .load_channel(USER_CHANNEL_ID_DECIMAL)
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            9_090,
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_stability_migrates_a_legacy_noncanonical_channel_row() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let legacy_user_channel_id = format!(
+            "{:032x}",
+            USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap()
+        );
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                &legacy_user_channel_id,
+                10.0,
+                10_000,
+                40_000,
+                None,
+            )
+            .unwrap();
+        assert!(mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
+
+        let settlement_id = "99".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![record],
+            Some("signed-payment-legacy-channel-row".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+
+        assert_eq!(
+            mgr.db
+                .load_channel(USER_CHANNEL_ID_DECIMAL)
+                .unwrap()
+                .unwrap()
+                .backing_sats,
+            9_091,
+        );
+        assert!(mgr
+            .db
+            .load_channel(&legacy_user_channel_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn signed_stability_invalidates_an_untracked_channel_instead_of_retrying_forever() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let settlement_id = "88".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            1_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_001_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![record],
+            Some("signed-payment-untracked-channel".to_owned()),
+            Some(1_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("invalid"),
+        );
+        assert!(mgr
+            .db
+            .pending_inbound_stability_settlements(32)
+            .unwrap()
+            .is_empty());
+        assert!(fake.verify_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn signed_stability_payment_rejects_amount_mismatch() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let settlement_id = "22".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            51_000_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![stability_marker(), record],
+            Some("signed-payment-wrong-amount".to_owned()),
+            Some(1_000_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_stability_payment_is_bound_to_the_claimed_channel() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let settlement_id = "55".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            &"aa".repeat(32),
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )]);
+
+        mgr.handle_payment_received(
+            vec![record],
+            Some("signed-payment-wrong-channel".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("invalid")
+        );
+        assert!(fake.verify_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn signed_stability_payment_retries_from_durable_inbox() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let settlement_id = "44".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )]);
+
+        // The event is durably registered, but cannot be accounted without a trusted price.
+        mgr.handle_payment_received(
+            vec![record],
+            Some("signed-payment-retry".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            0.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("pending")
+        );
+
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0)
+            .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 9_091);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("applied")
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_stability_payment_rejects_invalid_signature_without_legacy_fallback() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        let settlement_id = "33".repeat(32);
+        let record = signed_stability_record(
+            &settlement_id,
+            CHANNEL_ID_HEX,
+            909_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp,
+            10.0,
+        );
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
+        )])
+        .with_verify_failure();
+
+        mgr.handle_payment_received(
+            vec![stability_marker(), record],
+            Some("signed-payment-bad-signature".to_owned()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+        assert_eq!(
+            mgr.db
+                .inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("invalid")
+        );
     }
 
     #[tokio::test]

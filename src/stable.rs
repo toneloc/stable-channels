@@ -1,11 +1,14 @@
 use crate::audit::audit_event;
 use crate::constants::{
-    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
-    STABILITY_THRESHOLD_USD,
+    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_AUTH_TTL_SECS,
+    STABILITY_PAYMENT_CLOCK_SKEW_SECS, STABILITY_PAYMENT_COOLDOWN_SECS,
+    STABILITY_PAYMENT_MESSAGE_TYPE, STABILITY_THRESHOLD_PERCENT, STABILITY_THRESHOLD_USD,
 };
 use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use ureq::Agent;
@@ -431,7 +434,10 @@ pub fn trade_backing_after_delta(
     if current_expected_usd < 0.01 && current_backing_sats == 0 {
         backing_sats = normalize_backing_sats(receiver_sats, backing_sats, new_expected_usd, price);
     }
-    (backing_sats <= receiver_sats).then_some(backing_sats)
+    // Zero is also used by stability checks to mean "legacy/uninitialized backing". Persisting
+    // that sentinel for a live target would make the next check rebuild the full target at the
+    // latest price and erase the drift this delta calculation is designed to preserve.
+    (backing_sats > 0 && backing_sats <= receiver_sats).then_some(backing_sats)
 }
 
 fn allocation_drift_is_actionable(
@@ -605,12 +611,178 @@ pub fn update_balances<'update_balance_lifetime>(
 /// Information about a stability payment that was sent
 #[derive(Debug, Clone)]
 pub struct StabilityPaymentInfo {
+    pub settlement_id: String,
     pub payment_id: String,
     pub amount_msat: u64,
     pub counterparty: String,
     pub btc_price: f64,
     pub backing_sats_before: u64,
     pub backing_sats_after: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StabilityPaymentDirection {
+    UserToLsp,
+    LspToUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StabilityPaymentPayload {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub settlement_id: String,
+    pub channel_id: String,
+    pub amount_msat: u64,
+    pub direction: StabilityPaymentDirection,
+    pub expected_usd: f64,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StabilitySignedEnvelope {
+    pub payload: String,
+    pub signature: String,
+}
+
+pub fn new_stability_settlement_id() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn is_lower_hex_32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_stability_payment_payload(
+    settlement_id: &str,
+    channel_id: &str,
+    amount_msat: u64,
+    direction: StabilityPaymentDirection,
+    expected_usd: f64,
+    created_at: u64,
+    expires_at: u64,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&StabilityPaymentPayload {
+        kind: STABILITY_PAYMENT_MESSAGE_TYPE.to_owned(),
+        settlement_id: settlement_id.to_owned(),
+        channel_id: channel_id.to_owned(),
+        amount_msat,
+        direction,
+        expected_usd,
+        created_at,
+        expires_at,
+    })
+}
+
+pub fn build_stability_signed_envelope(
+    payload: String,
+    signature: String,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&StabilitySignedEnvelope { payload, signature })
+}
+
+pub fn parse_stability_signed_envelope(raw: &str) -> Option<StabilitySignedEnvelope> {
+    serde_json::from_str(raw).ok()
+}
+
+pub fn parse_stability_payment_payload(payload: &str) -> Option<StabilityPaymentPayload> {
+    let payment: StabilityPaymentPayload = serde_json::from_str(payload).ok()?;
+    if payment.kind != STABILITY_PAYMENT_MESSAGE_TYPE
+        || !is_lower_hex_32(&payment.settlement_id)
+        || !is_lower_hex_32(&payment.channel_id)
+        || payment.amount_msat == 0
+        || !payment.amount_msat.is_multiple_of(1000)
+        || !payment.expected_usd.is_finite()
+        || payment.expected_usd < 0.0
+        || payment.created_at > payment.expires_at
+        || payment.expires_at.saturating_sub(payment.created_at)
+            > STABILITY_PAYMENT_AUTH_TTL_SECS
+    {
+        return None;
+    }
+    Some(payment)
+}
+
+pub fn stability_payment_is_fresh(payment: &StabilityPaymentPayload, now: u64) -> bool {
+    payment.created_at <= now.saturating_add(STABILITY_PAYMENT_CLOCK_SKEW_SECS)
+        && now <= payment.expires_at.saturating_add(STABILITY_PAYMENT_CLOCK_SKEW_SECS)
+}
+
+/// Apply a wallet-to-LSP stability payment to the LSP's local allocation.
+///
+/// The paid sats are authoritative, but PR #231's local-equilibrium floor remains in force: a
+/// payment may settle an above-par surplus, never manufacture a below-par claim at the LSP's
+/// price. The final live-balance clamp preserves the allocation invariant.
+pub fn backing_after_user_to_lsp_stability(
+    current_backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+    amount_sats: u64,
+    live_receiver_sats: u64,
+) -> Option<u64> {
+    if !expected_usd.is_finite()
+        || expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+        || amount_sats == 0
+    {
+        return None;
+    }
+    let equilibrium_f = expected_usd / price * SATS_IN_BTC as f64;
+    if !equilibrium_f.is_finite() || equilibrium_f >= u64::MAX as f64 {
+        return None;
+    }
+    let equilibrium = equilibrium_f.floor() as u64;
+    let settled = if current_backing_sats > equilibrium {
+        current_backing_sats
+            .saturating_sub(amount_sats)
+            .max(equilibrium)
+    } else {
+        current_backing_sats
+    };
+    Some(settled.min(live_receiver_sats))
+}
+
+/// Apply an LSP-to-wallet stability payment to the wallet's local allocation.
+///
+/// The received sats move backing only toward the wallet's equilibrium at its own price. Any
+/// overpayment remains native, and an already above-par allocation is never reduced by an incoming
+/// payment. This lets peers safely retain independent price feeds without comparing `f64` state
+/// bit-for-bit.
+pub fn backing_after_lsp_to_user_stability(
+    current_backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+    amount_sats: u64,
+    live_receiver_sats: u64,
+) -> Option<u64> {
+    if !expected_usd.is_finite()
+        || expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+        || amount_sats == 0
+        || current_backing_sats > live_receiver_sats
+    {
+        return None;
+    }
+    let equilibrium_f = expected_usd / price * SATS_IN_BTC as f64;
+    if !equilibrium_f.is_finite() || equilibrium_f >= u64::MAX as f64 {
+        return None;
+    }
+    let equilibrium = (equilibrium_f.floor() as u64).min(live_receiver_sats);
+    if current_backing_sats >= equilibrium {
+        return Some(current_backing_sats);
+    }
+    current_backing_sats
+        .checked_add(amount_sats)
+        .map(|backing| backing.min(equilibrium))
 }
 
 /// Check and enforce stability for a channel.
@@ -804,12 +976,69 @@ pub fn check_stability(
         return None;
     }
 
-    let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+    // Stable allocations are sat-denominated. Send and sign the same exact whole-sat value that
+    // both peers can apply to backing without fractional-sat ambiguity.
+    let amt = (USD::to_msats(dollars_from_par, sc.latest_price) / 1000) * 1000;
+    if amt == 0 {
+        return None;
+    }
+    let settlement_id = new_stability_settlement_id();
+    let created_at = now.max(0) as u64;
+    let expires_at = created_at.saturating_add(STABILITY_PAYMENT_AUTH_TTL_SECS);
+    let payload = match build_stability_payment_payload(
+        &settlement_id,
+        &sc.channel_id.to_string(),
+        amt,
+        StabilityPaymentDirection::UserToLsp,
+        sc.expected_usd.0,
+        created_at,
+        expires_at,
+    ) {
+        Ok(payload) => payload,
+        Err(error) => {
+            audit_event(
+                "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                json!({
+                    "user_channel_id": format!("{}", sc.user_channel_id),
+                    "settlement_id": settlement_id,
+                    "amount_msat": amt,
+                    "error": error.to_string(),
+                }),
+            );
+            return None;
+        }
+    };
+    let signature = node.sign_message(payload.as_bytes());
+    let signed_envelope = match build_stability_signed_envelope(payload, signature) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            audit_event(
+                "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                json!({
+                    "user_channel_id": format!("{}", sc.user_channel_id),
+                    "settlement_id": settlement_id,
+                    "amount_msat": amt,
+                    "stage": "envelope",
+                    "error": error.to_string(),
+                }),
+            );
+            return None;
+        }
+    };
     let marker = ldk_node::CustomTlvRecord {
         type_num: crate::constants::STABLE_CHANNEL_TLV_TYPE,
         value: vec![1u8],
     };
-    match node.spontaneous_payment().send_with_custom_tlvs(amt, sc.counterparty, None, vec![marker]) {
+    let signed_record = ldk_node::CustomTlvRecord {
+        type_num: crate::constants::SIGNED_STABILITY_TLV_TYPE,
+        value: signed_envelope.into_bytes(),
+    };
+    match node.spontaneous_payment().send_with_custom_tlvs(
+        amt,
+        sc.counterparty,
+        None,
+        vec![marker, signed_record],
+    ) {
         Ok(payment_id) => {
             sc.payment_made = true;
             sc.last_stability_payment = now;
@@ -825,6 +1054,7 @@ pub fn check_stability(
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
             Some(StabilityPaymentInfo {
+                settlement_id,
                 payment_id: payment_id_str,
                 amount_msat: amt,
                 counterparty: counterparty_str,
@@ -850,6 +1080,124 @@ pub fn check_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_stability_payload_round_trips_and_enforces_expiry() {
+        let settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        let payload = build_stability_payment_payload(
+            &settlement_id,
+            &channel_id,
+            909_000,
+            StabilityPaymentDirection::UserToLsp,
+            10.0,
+            1_000,
+            1_000 + STABILITY_PAYMENT_AUTH_TTL_SECS,
+        )
+        .unwrap();
+        let parsed = parse_stability_payment_payload(&payload).unwrap();
+        assert_eq!(parsed.settlement_id, settlement_id);
+        assert_eq!(parsed.channel_id, channel_id);
+        assert_eq!(parsed.amount_msat, 909_000);
+        assert_eq!(parsed.direction, StabilityPaymentDirection::UserToLsp);
+        assert!(stability_payment_is_fresh(&parsed, 1_300));
+        assert!(!stability_payment_is_fresh(
+            &parsed,
+            parsed.expires_at + STABILITY_PAYMENT_CLOCK_SKEW_SECS + 1
+        ));
+
+        let envelope = build_stability_signed_envelope(payload.clone(), "signature".to_owned())
+            .unwrap();
+        let parsed_envelope = parse_stability_signed_envelope(&envelope).unwrap();
+        assert_eq!(parsed_envelope.payload, payload);
+        assert_eq!(parsed_envelope.signature, "signature");
+    }
+
+    #[test]
+    fn signed_stability_payload_rejects_non_sat_and_invalid_identifiers() {
+        let valid_id = "aa".repeat(32);
+        let valid_channel = "22".repeat(32);
+        let non_sat = build_stability_payment_payload(
+            &valid_id,
+            &valid_channel,
+            1_001,
+            StabilityPaymentDirection::LspToUser,
+            10.0,
+            1_000,
+            1_100,
+        )
+        .unwrap();
+        assert!(parse_stability_payment_payload(&non_sat).is_none());
+
+        let uppercase_id = build_stability_payment_payload(
+            &valid_id.to_uppercase(),
+            &valid_channel,
+            1_000,
+            StabilityPaymentDirection::LspToUser,
+            10.0,
+            1_000,
+            1_100,
+        )
+        .unwrap();
+        assert!(parse_stability_payment_payload(&uppercase_id).is_none());
+
+        let excessive_lifetime = build_stability_payment_payload(
+            &valid_id,
+            &valid_channel,
+            1_000,
+            StabilityPaymentDirection::LspToUser,
+            10.0,
+            1_000,
+            1_001 + STABILITY_PAYMENT_AUTH_TTL_SECS,
+        )
+        .unwrap();
+        assert!(parse_stability_payment_payload(&excessive_lifetime).is_none());
+    }
+
+    #[test]
+    fn user_to_lsp_settlement_is_amount_bound_and_keeps_pr231_floor() {
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 1, 49_999),
+            Some(9_999)
+        );
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 909, 49_091),
+            Some(9_091)
+        );
+        // An oversized marker/payment cannot push backing below the LSP's local equilibrium.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 5_000, 45_000),
+            Some(9_090)
+        );
+        // If already below the local equilibrium, receiving money does not erase that drift.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(9_000, 10.0, 110_000.0, 909, 49_091),
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn lsp_to_user_settlement_uses_local_equilibrium_and_keeps_excess_native() {
+        assert_eq!(
+            backing_after_lsp_to_user_stability(9_000, 10.0, 100_000.0, 1_000, 50_000),
+            Some(10_000),
+        );
+        assert_eq!(
+            backing_after_lsp_to_user_stability(9_000, 10.0, 100_000.0, 5_000, 50_000),
+            Some(10_000),
+            "an overpayment cannot create backing above the local target",
+        );
+        assert_eq!(
+            backing_after_lsp_to_user_stability(10_000, 10.0, 110_000.0, 1_000, 50_000),
+            Some(10_000),
+            "an incoming payment cannot reduce an existing above-par allocation",
+        );
+        assert_eq!(
+            backing_after_lsp_to_user_stability(10_001, 10.0, 100_000.0, 1_000, 10_000),
+            None,
+            "a stale over-capacity allocation must be reconciled before settlement",
+        );
+    }
 
     #[test]
     fn only_pending_outbound_lightning_blocks_capacity_repair() {
@@ -1394,6 +1742,24 @@ mod tests {
         assert_eq!(sc.expected_usd.0, 100.0);
         assert_eq!(sc.backing_sats, 10);
         assert_eq!(sc.native_sats, 199_990);
+    }
+
+    #[test]
+    fn nonzero_trade_target_cannot_use_the_uninitialized_zero_backing_sentinel() {
+        // At the local price this reduction consumes the final 500 backing sats while leaving a
+        // live $0.50 target. Accepting it would let check_stability rebuild 500 sats and erase the
+        // existing below-par drift.
+        assert_eq!(
+            trade_backing_after_delta(10_000, 500, 1.0, 0.5, 100_000.0),
+            None,
+        );
+
+        let mut sc = test_sc(1.0, 100_000.0, 10_000);
+        sc.backing_sats = 500;
+        sc.native_sats = 9_500;
+        assert!(!apply_trade(&mut sc, 0.5, 100_000.0));
+        assert_eq!(sc.expected_usd.0, 1.0);
+        assert_eq!(sc.backing_sats, 500);
     }
 
     #[test]
