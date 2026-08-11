@@ -912,10 +912,21 @@ impl StableChannelManager {
         sc.latest_price = btc_price;
         sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
         sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
-        // Equilibrium reset, clamped so backing can never exceed the live balance
-        // (which would immediately re-trigger the backstop we're protecting against).
+        // Amount-proportional settlement. Reduce the stable backing by exactly the sats
+        // received — never blindly to equilibrium. The stability marker is unsigned and
+        // carries no proof of the amount owed, so a token 1-sat payment must settle only
+        // 1 sat of drift, not erase the entire above-par surplus and reclassify it as the
+        // user's own native BTC. Floor at equilibrium so a (rounding) overpayment cannot
+        // drive backing below the peg; clamp to the live balance so backing never exceeds it.
         let equilibrium = ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
-        sc.backing_sats = equilibrium.min(their_sats);
+        let settled_backing = if sc.backing_sats > equilibrium {
+            sc.backing_sats.saturating_sub(amount_sats).max(equilibrium)
+        } else {
+            // At or below the peg there was no above-par surplus to settle on this receive
+            // path; never inflate backing toward equilibrium on an unexpected payment.
+            sc.backing_sats
+        };
+        sc.backing_sats = settled_backing.min(their_sats);
         sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
         stable_channels::stable::recompute_native(sc);
         // The drop is settled; make sure the backstop forgets any ticks it counted.
@@ -4483,11 +4494,54 @@ mod tests {
         .await;
 
         let sc = &mgr.stable_channels[0];
-        // Equilibrium at $110k: 10/110_000 BTC = 9_090 sats.
-        assert_eq!(sc.backing_sats, 9_090, "backing must reset to equilibrium at the new price");
-        // Native must absorb only rounding, never the settlement: 49_091 - 9_090 = 40_001.
-        assert_eq!(sc.native_sats, 40_001, "native sats must be preserved across the settlement");
+        // Amount-proportional: backing 10_000 minus the 909 sats actually paid = 9_091,
+        // one sat above the truncated equilibrium (9_090) — that residual sat is the honest
+        // rounding remainder the wallet under-paid, not stolen surplus.
+        assert_eq!(sc.backing_sats, 9_091, "backing is reduced by the settled amount");
+        // Native absorbs only rounding, never the settlement: 49_091 - 9_091 = 40_000.
+        assert_eq!(sc.native_sats, 40_000, "native sats must be preserved across the settlement");
         assert!(sc.backing_sats <= sc.stable_receiver_btc.sats, "backing may never exceed live balance");
+    }
+
+    #[tokio::test]
+    async fn token_stability_payment_settles_only_the_amount_paid() {
+        // Exploit guard: a 1-sat payment against a large above-par surplus must settle
+        // exactly 1 sat, NOT reset backing to equilibrium (which would hand the entire
+        // surplus to the sender as free native BTC for a fraction of a cent).
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let fake0 = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // Snapshot at par: backing = 10_000 sats, user side = 50_000.
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
+
+        // Price rises to $110k: the honest owed amount is ~910 sats. The attacker instead
+        // keysends 1 sat with the same marker. The user paying 1 sat raises the LSP's
+        // outbound by 1 sat (50_000_000 -> 50_001_000), so the user side drops 50_000 -> 49_999.
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_001_000, true,
+        )]);
+        mgr.handle_payment_received(
+            vec![stability_marker()],
+            Some("attack-1".to_string()),
+            Some(1_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+
+        let sc = &mgr.stable_channels[0];
+        // Only 1 sat of drift settled: 10_000 - 1 = 9_999. The surplus stays owed as backing,
+        // NOT erased to the $110k equilibrium of 9_090.
+        assert_eq!(sc.backing_sats, 9_999, "a 1-sat payment settles only 1 sat of drift");
+        assert_ne!(sc.backing_sats, 9_090, "backing must NOT collapse to equilibrium for a token payment");
+        assert_eq!(sc.native_sats, 40_000, "the surplus is not reclassified as free native BTC");
     }
 
     #[tokio::test]
