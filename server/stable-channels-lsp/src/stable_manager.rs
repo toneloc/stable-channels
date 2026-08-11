@@ -15,11 +15,10 @@ use ldk_server_client::ldk_server_grpc::api::{
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord};
+use stable_channels::constants::MAX_TRADE_QUOTE_DEVIATION_PERCENT;
 use stable_channels::db::Database;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
-
-const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
 
 /// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
 /// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
@@ -1812,11 +1811,13 @@ impl StableChannelManager {
             );
             return;
         };
+        let new_expected =
+            stable_channels::stable::normalize_trade_expected_usd(payload.expected_usd);
 
         let fee_price = payload.quote_price.unwrap_or(btc_price);
         let Some(expected_fee_msat) = expected_trade_fee_msat(
             current_expected_usd,
-            payload.expected_usd,
+            new_expected,
             fee_price,
         ) else {
             stable_channels::audit::audit_event(
@@ -1824,7 +1825,7 @@ impl StableChannelManager {
                 serde_json::json!({
                     "reason": "fee inputs are invalid",
                     "old_expected_usd": current_expected_usd,
-                    "new_expected_usd": payload.expected_usd,
+                    "new_expected_usd": new_expected,
                     "fee_price": fee_price,
                     "amount_msat": amount_msat,
                     "channel_id": chan.channel_id.clone(),
@@ -1847,7 +1848,7 @@ impl StableChannelManager {
                     "expected_fee_msat": expected_fee_msat,
                     "tolerance_msat": tolerance_msat,
                     "old_expected_usd": current_expected_usd,
-                    "new_expected_usd": payload.expected_usd,
+                    "new_expected_usd": new_expected,
                     "fee_price": fee_price,
                     "channel_id": chan.channel_id.clone(),
                     "user_channel_id": chan.user_channel_id.clone(),
@@ -1856,7 +1857,6 @@ impl StableChannelManager {
             return;
         }
         let (our_sats, their_sats) = channel_peer_balances(&chan);
-        let new_expected = payload.expected_usd;
         let quoted_trade = match payload.quote_price {
             Some(quote_price) => {
                 if payload.ts == 0
@@ -1902,11 +1902,10 @@ impl StableChannelManager {
         };
 
         // The quote is a consent bound only. Capacity and allocation always use the LSP's price.
-        // Epsilon absorbs independent-feed skew so a full stabilization priced by the wallet a
-        // hair above the LSP's valuation is admitted rather than silently dropped.
+        // Never admit a target above the locally valued balance: the stability threshold is a
+        // payment deadband, not extra trade capacity.
         let receiver_usd = USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price).0;
-        let ceiling = receiver_usd + stable_channels::constants::STABILITY_THRESHOLD_USD;
-        if new_expected > ceiling {
+        if new_expected > receiver_usd {
             stable_channels::audit::audit_event(
                 "TRADE_EXCEEDS_BALANCE",
                 serde_json::json!({ "requested_usd": new_expected, "receiver_usd": receiver_usd, "user_channel_id": format!("{}", target_uid), "channel_id": chan.channel_id.clone() }),
@@ -1927,12 +1926,29 @@ impl StableChannelManager {
                 );
                 return;
             };
-            sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
-            sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
-            sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, btc_price);
-            sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
-            sc.latest_price = btc_price;
-            stable_channels::stable::apply_trade(sc, new_expected, btc_price);
+            let mut updated = sc.clone();
+            updated.stable_provider_btc = Bitcoin::from_sats(our_sats);
+            updated.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+            updated.stable_provider_usd = USD::from_bitcoin(updated.stable_provider_btc, btc_price);
+            updated.stable_receiver_usd = USD::from_bitcoin(updated.stable_receiver_btc, btc_price);
+            updated.latest_price = btc_price;
+            if !stable_channels::stable::apply_trade(&mut updated, new_expected, btc_price) {
+                stable_channels::audit::audit_event(
+                    "TRADE_ALLOCATION_REJECTED",
+                    serde_json::json!({
+                        "channel_id": channel_id_hex,
+                        "user_channel_id": format!("{}", target_uid),
+                        "current_expected_usd": sc.expected_usd.0,
+                        "new_expected_usd": new_expected,
+                        "current_backing_sats": sc.backing_sats,
+                        "live_receiver_sats": their_sats,
+                        "lsp_price": btc_price,
+                        "reason": "target delta cannot preserve the current stability drift",
+                    }),
+                );
+                return;
+            }
+            *sc = updated;
             (
                 format!("{}", sc.user_channel_id),
                 sc.expected_usd.0,
@@ -3457,7 +3473,7 @@ mod tests {
             .unwrap_or(0.0);
         let fee_msat = expected_trade_fee_msat(
             current_expected,
-            payload.expected_usd,
+            stable_channels::stable::normalize_trade_expected_usd(payload.expected_usd),
             payload.quote_price.unwrap_or(lsp_price),
         )
         .unwrap();
@@ -3511,6 +3527,170 @@ mod tests {
         .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn tiny_and_noop_trades_preserve_lsp_stability_drift() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            300_000,
+            100_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            100.0,
+            100_000,
+            100_000,
+            200_000,
+            100_000.0,
+        );
+
+        let tiny = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.01);
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &tiny,
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 100_009);
+
+        let noop = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.01);
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &noop,
+            &fake as &dyn LdkServerCalls,
+            90_000.0,
+        )
+        .await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 100_009);
+    }
+
+    #[tokio::test]
+    async fn trade_arithmetic_underflow_leaves_lsp_state_unchanged() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            300_000,
+            100_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            100.0,
+            10,
+            199_990,
+            200_000,
+            100_000.0,
+        );
+        let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 99.0);
+
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 100.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 10);
+        assert_eq!(mgr.stable_channels[0].native_sats, 199_990);
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_exit_is_gated_by_lsp_stability_drift() {
+        for (price, should_apply) in [(90_000.0, false), (100_001.0, true)] {
+            let mut mgr = make_manager();
+            let fake = FakeLdkServer::new(vec![make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                COUNTERPARTY_HEX,
+                300_000,
+                100_000_000,
+                true,
+            )]);
+            seed_channel(
+                &mut mgr,
+                189476124653200987495269098788434301048u128,
+                COUNTERPARTY_HEX,
+                CHANNEL_ID_HEX,
+                100.0,
+                100_000,
+                100_000,
+                200_000,
+                100_000.0,
+            );
+            let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 0.0);
+
+            handle_trade_with_valid_fee(
+                &mut mgr,
+                &env,
+                &fake as &dyn LdkServerCalls,
+                price,
+            )
+            .await;
+
+            if should_apply {
+                assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+                assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+                assert_eq!(fake.sends.lock().unwrap().len(), 1);
+            } else {
+                assert_eq!(mgr.stable_channels[0].expected_usd.0, 100.0);
+                assert_eq!(mgr.stable_channels[0].backing_sats, 100_000);
+                assert!(fake.sends.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sub_cent_trade_target_is_persisted_as_a_full_exit() {
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            300_000,
+            100_000_000,
+            true,
+        )]);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            100.0,
+            100_000,
+            100_000,
+            200_000,
+            100_000.0,
+        );
+        let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 0.009);
+
+        handle_trade_with_valid_fee(
+            &mut mgr,
+            &env,
+            &fake as &dyn LdkServerCalls,
+            100_001.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -3735,7 +3915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trade_admits_at_balance_boundary_within_epsilon() {
+    async fn trade_rejects_even_one_sat_above_balance_boundary() {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
@@ -3743,9 +3923,7 @@ mod tests {
         )]);
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
 
-        // A wallet-priced full stabilization lands at receiver_usd plus a sub-epsilon overshoot
-        // (independent feeds). It must be admitted, not silently dropped.
-        let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD / 2.0;
+        let target = 50.001;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
         handle_trade_with_valid_fee(
             &mut mgr,
@@ -3755,16 +3933,13 @@ mod tests {
         )
         .await;
 
-        assert!(
-            (mgr.stable_channels[0].expected_usd.0 - target).abs() < 1e-6,
-            "a target within epsilon of the balance must be admitted, got {}",
-            mgr.stable_channels[0].expected_usd.0
-        );
-        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn trade_rejects_target_above_capacity_epsilon() {
+    async fn trade_rejects_dollar_denominated_capacity_epsilon() {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
@@ -3772,7 +3947,7 @@ mod tests {
         )]);
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
 
-        let target = 50.0 + stable_channels::constants::STABILITY_THRESHOLD_USD * 2.0;
+        let target = 50.01;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
         handle_trade_with_valid_fee(
             &mut mgr,
