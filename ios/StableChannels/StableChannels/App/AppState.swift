@@ -597,6 +597,11 @@ class AppState {
         // Set audit log path
         let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
         AuditService.setLogPath(auditPath)
+
+        // Hook WalletKeychainService logging into AuditService
+        WalletKeychainService.onLog = { event, data in
+            AuditService.log(event, data: data)
+        }
     }
 
     /// Replace the active wallet with a restored seed in one app-owned flow.
@@ -942,10 +947,11 @@ class AppState {
         // Subscribe to push notifications (background wake)
         subscribeToPushNotifications()
 
-        // Check for existing wallet (keys_seed from default path, OR seed_phrase from mnemonic path)
+        // Check for existing wallet (keys_seed from default path, OR seed stored in Keychain)
         let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
         let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
         if FileManager.default.fileExists(atPath: seedPath.path)
+            || WalletKeychainService.shared.hasMnemonic()
             || FileManager.default.fileExists(atPath: seedPhrasePath.path) {
             if !networkMonitor.isOnline {
                 AuditService.log("STARTUP_ALREADY_OFFLINE", data: [:])
