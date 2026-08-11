@@ -68,12 +68,18 @@ final class DefaultNodeStarter: NodeStarter {
 
         // Derive node entropy
         let nodeEntropy: NodeEntropy
-        let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
-        if FileManager.default.fileExists(atPath: seedPhrasePath.path),
-           let words = (try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8))?
-           .trimmingCharacters(in: .whitespacesAndNewlines),
-           !words.isEmpty {
+        if let words = try? WalletKeychainService.shared.loadMnemonic(), !words.isEmpty {
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+        } else if let plaintextWords = try? String(
+            contentsOfFile: dataDir.appendingPathComponent("seed_phrase").path,
+            encoding: .utf8
+        ),
+            !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            logger.log("WARNING: SEED_PLAINTEXT_FALLBACK - keychain_unavailable")
+            nodeEntropy = NodeEntropy.fromBip39Mnemonic(
+                mnemonic: plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines),
+                passphrase: nil
+            )
         } else {
             let keySeedPath = dataDir.appendingPathComponent("keys_seed")
             nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)

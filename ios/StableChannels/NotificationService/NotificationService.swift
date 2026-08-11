@@ -397,6 +397,7 @@ class NotificationService: UNNotificationServiceExtension {
         let keySeedPath = dataDir.appendingPathComponent("keys_seed")
         let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
         return FileManager.default.fileExists(atPath: keySeedPath.path)
+            || WalletKeychainService.shared.hasMnemonic()
             || FileManager.default.fileExists(atPath: seedPhrasePath.path)
     }
 
