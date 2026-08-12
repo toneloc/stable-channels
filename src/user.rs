@@ -156,6 +156,7 @@ pub struct PendingTrade {
     pub btc_amount: f64,
     pub btc_sats: u64,
     pub net_amount_usd: f64,
+    pub is_full_peg: bool,
 }
 
 /// Trade payment that's been sent but not yet confirmed by LDK.
@@ -183,6 +184,9 @@ struct IncomingSync {
     expected_usd: f64,
     backing_sats: u64,
     sync_version: u64,
+    trade_id: Option<String>,
+    trade_payment_id: Option<String>,
+    request_hash: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +195,6 @@ enum LocalTradeAllocationError {
     LiveBalanceUnavailable,
     FeeExceedsBalance,
     TargetExceedsCapacity,
-    TargetExceedsSafeCapacity,
     SettlementRequired,
     UnsafeAllocation,
 }
@@ -681,6 +684,12 @@ impl UserApp {
         // Initialize SQLite database
         let db =
             Database::open(&data_dir).map_err(|e| format!("Failed to open database: {}", e))?;
+        let startup_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .min(i64::MAX as u64) as i64;
+        let _ = db.mark_unresolved_trades_unknown(startup_now);
 
         let mut app = Self {
             node: Arc::clone(&node),
@@ -1939,7 +1948,9 @@ impl UserApp {
         fee_usd: f64,
         trade_action: &str,
         trade_price: f64,
-    ) -> Option<(PaymentId, u64)> {
+        amount_usd: f64,
+        amount_btc: f64,
+    ) -> Option<(PaymentId, u64, i64)> {
         let new_expected_usd = stable::normalize_trade_expected_usd(new_expected_usd);
         // The fee is a direct keysend amount. Account for its whole-sat channel impact before
         // deriving the wallet's post-settlement allocation.
@@ -2000,10 +2011,6 @@ impl UserApp {
                     LocalTradeAllocationError::TargetExceedsCapacity => {
                         "The trade target exceeds the wallet's local channel capacity.".to_string()
                     }
-                    LocalTradeAllocationError::TargetExceedsSafeCapacity => {
-                        "The trade target is too close to the channel limit for independent price feeds. Reduce the amount and retry."
-                            .to_string()
-                    }
                     LocalTradeAllocationError::InvalidValues => {
                         "A trusted local price is required before trading.".to_string()
                     }
@@ -2029,10 +2036,23 @@ impl UserApp {
             }
         };
 
+        if self
+            .db
+            .has_unresolved_trade_for_channel(&channel_id_str)
+            .unwrap_or(true)
+        {
+            self.trade_error =
+                "A previous trade on this channel is still awaiting its authoritative result."
+                    .to_string();
+            self.status_message = self.trade_error.clone();
+            return None;
+        }
+
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let trade_id = hex::encode(rand::random::<[u8; 32]>());
 
         // The quote is signed as the user's slippage bound and fee input. backing_sats remains
         // local state; a peer-supplied allocation must never become authoritative.
@@ -2040,6 +2060,7 @@ impl UserApp {
             "type": TRADE_MESSAGE_TYPE,
             "channel_id": channel_id_str,
             "user_channel_id": user_channel_id_str,
+            "trade_id": trade_id,
             "expected_usd": new_expected_usd,
             "quote_price": trade_price,
             "ts": ts,
@@ -2047,6 +2068,7 @@ impl UserApp {
 
         // Serialize payload and sign it with the node's key
         let payload_str = payload.to_string();
+        let request_hash = stable_channels::trade::request_hash(payload_str.as_bytes());
         let signature = self.node.sign_message(payload_str.as_bytes());
 
         // Envelope we actually send over the wire:
@@ -2057,6 +2079,37 @@ impl UserApp {
         });
 
         let signed_str = signed_msg.to_string();
+
+        let expires_at = ts
+            .saturating_add(TRADE_RESULT_TIMEOUT_SECS)
+            .min(i64::MAX as u64) as i64;
+        let trade_db_id = match self.db.record_prepared_trade(
+            &channel_id_str,
+            &trade_id,
+            &request_hash,
+            &payload_str,
+            trade_action,
+            amount_usd,
+            amount_btc,
+            trade_price,
+            fee_usd,
+            amt_msat,
+            new_expected_usd,
+            backing_sats,
+            expires_at,
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                self.trade_error =
+                    "The trade intent could not be saved, so no fee was sent.".to_string();
+                self.status_message = self.trade_error.clone();
+                audit_event(
+                    "TRADE_INTENT_PERSIST_FAILED",
+                    json!({ "trade_id": trade_id, "error": error.to_string() }),
+                );
+                return None;
+            }
+        };
 
         // Build custom TLV record
         let custom_tlv = ldk_node::CustomTlvRecord {
@@ -2074,12 +2127,28 @@ impl UserApp {
                 // Don't apply_trade yet — wait for PaymentSuccessful event.
                 // Store pending info so we can finalize or revert later.
                 let payment_id_str = format!("{payment_id}");
+                if !self
+                    .db
+                    .attach_trade_payment_id(trade_db_id, &payment_id_str)
+                    .unwrap_or(false)
+                {
+                    audit_event(
+                        "TRADE_PAYMENT_ID_PERSIST_FAILED",
+                        json!({
+                            "trade_db_id": trade_db_id,
+                            "trade_id": trade_id,
+                            "payment_id": payment_id_str,
+                        }),
+                    );
+                }
 
                 self.status_message = format!("Order pending (fee: ${:.2})", fee_usd,);
                 audit_event(
                     "TRADE_MESSAGE_SENT",
                     json!({
                         "payment_id": payment_id_str,
+                        "trade_id": trade_id,
+                        "request_hash": request_hash,
                         "user_channel_id": user_channel_id_str,
                         "action": trade_action,
                         "old_expected_usd": old_expected_usd,
@@ -2094,15 +2163,17 @@ impl UserApp {
                     }),
                 );
 
-                Some((payment_id, backing_sats))
+                Some((payment_id, backing_sats, trade_db_id))
             }
             Err(e) => {
+                let _ = self.db.mark_trade_send_failed(trade_db_id);
                 self.status_message = format!("Failed to send order: {}", e);
                 self.trade_error = self.status_message.clone();
                 audit_event(
                     "TRADE_MESSAGE_FAILED",
                     json!({
                         "user_channel_id": user_channel_id_str,
+                        "trade_id": trade_id,
                         "action": trade_action,
                         "new_expected_usd": new_expected_usd,
                         "error": format!("{e}"),
@@ -2735,44 +2806,6 @@ impl UserApp {
         }
     }
 
-    /// Record a trade in the database. Returns the DB row id (0 on error).
-    fn record_trade(
-        &self,
-        action: &str,
-        amount_usd: f64,
-        amount_btc: f64,
-        btc_price: f64,
-        fee_usd: f64,
-        new_expected_usd: f64,
-        new_backing_sats: Option<u64>,
-        payment_id: Option<&str>,
-        status: &str,
-    ) -> i64 {
-        let user_channel_id_str = {
-            let sc = self.stable_channel.lock().unwrap();
-            format!("{}", sc.user_channel_id)
-        };
-
-        match self.db.record_trade(
-            &user_channel_id_str,
-            action,
-            amount_usd,
-            amount_btc,
-            btc_price,
-            fee_usd,
-            new_expected_usd,
-            new_backing_sats,
-            payment_id,
-            status,
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("Failed to record trade: {}", e);
-                0
-            }
-        }
-    }
-
     fn send_stable_message(&mut self) {
         let amt = 1;
         let custom_str = self.stable_message.clone();
@@ -3302,225 +3335,314 @@ impl UserApp {
                         );
                     }
 
-                    // Check for SYNC_V1 message from LSP (expected_usd synchronization)
+                    // Check for an authenticated trade result or ordinary SYNC_V1 from the LSP.
                     let handled_sync = if handled_signed_stability {
                         false
                     } else {
                         'sync: {
-                        for tlv in &custom_records {
-                            if tlv.type_num != STABLE_CHANNEL_TLV_TYPE {
-                                continue;
-                            }
-                            let raw = match String::from_utf8(tlv.value.clone()) {
-                                Ok(s) => s,
-                                Err(_) => continue,
-                            };
-                            let envelope: serde_json::Value = match serde_json::from_str(&raw) {
-                                Ok(v) => v,
-                                Err(_) => continue,
-                            };
-                            let payload_str = match envelope.get("payload").and_then(|v| v.as_str())
-                            {
-                                Some(s) => s,
-                                None => continue,
-                            };
-                            let signature = match envelope.get("signature").and_then(|v| v.as_str())
-                            {
-                                Some(s) => s,
-                                None => continue,
-                            };
-                            let payload: serde_json::Value = match serde_json::from_str(payload_str)
-                            {
-                                Ok(v) => v,
-                                Err(_) => continue,
-                            };
-                            if payload.get("type").and_then(|v| v.as_str())
-                                != Some(SYNC_MESSAGE_TYPE)
-                            {
-                                continue;
-                            }
-                            // Verify signature against LSP (counterparty)
-                            let counterparty = {
-                                let sc = self.stable_channel.lock().unwrap();
-                                sc.counterparty
-                            };
-                            let sig_ok = self.node.verify_signature(
-                                payload_str.as_bytes(),
-                                signature,
-                                &counterparty,
-                            );
-                            if !sig_ok {
-                                audit_event(
-                                    "SYNC_V1_SIGNATURE_INVALID",
-                                    json!({
-                                        "payment_hash": &payment_hash_str,
-                                    }),
-                                );
-                                continue;
-                            }
-                            let Some(sync) = parse_incoming_sync(&payload) else {
-                                audit_event(
-                                    "SYNC_V1_PAYLOAD_INVALID",
-                                    json!({ "payment_hash": &payment_hash_str }),
-                                );
-                                break 'sync true;
-                            };
-
-                            let mut sc = self.stable_channel.lock().unwrap();
-                            let wallet_channel_id = sc.channel_id.to_string();
-                            if sync.channel_id != wallet_channel_id {
-                                audit_event(
-                                    "SYNC_V1_CHANNEL_MISMATCH",
-                                    json!({
-                                        "payment_hash": &payment_hash_str,
-                                        "payload_channel_id": sync.channel_id.clone(),
-                                        "wallet_channel_id": wallet_channel_id,
-                                        "sync_version": sync.sync_version,
-                                    }),
-                                );
-                                break 'sync true;
-                            }
-
-                            stable::update_balances(&self.node, &mut sc);
-                            let price = sc.latest_price;
-                            let old_expected = sc.expected_usd.0;
-                            let live_receiver_sats = sc.stable_receiver_btc.sats;
-                            let pending_trade = match self
-                                .db
-                                .get_pending_trade_by_expected_usd(sync.expected_usd)
-                            {
-                                Ok(trade) => trade,
-                                Err(e) => {
-                                    audit_event(
-                                        "DB_READ_FAILED",
-                                        json!({
-                                            "op": "get_pending_trade_by_expected_usd",
-                                            "payment_hash": &payment_hash_str,
-                                            "error": e.to_string(),
-                                        }),
-                                    );
-                                    ack = false;
-                                    break 'sync true;
+                            for tlv in &custom_records {
+                                if tlv.type_num != STABLE_CHANNEL_TLV_TYPE {
+                                    continue;
                                 }
-                            };
-                            let local_backing_sats = match local_sync_backing_sats(
-                                &sync,
-                                live_receiver_sats,
-                                price,
-                                old_expected,
-                                sc.backing_sats,
-                                pending_trade.as_ref(),
-                            ) {
-                                Ok(backing_sats) => backing_sats,
-                                Err(reason) => {
-                                    audit_event(
-                                        "SYNC_V1_ALLOCATION_REJECTED",
-                                        json!({
-                                            "payment_hash": &payment_hash_str,
-                                            "reason": reason,
-                                            "expected_usd": sync.expected_usd,
-                                            "peer_backing_sats": sync.backing_sats,
-                                            "live_receiver_sats": live_receiver_sats,
-                                            "btc_price": price,
-                                            "sync_version": sync.sync_version,
-                                        }),
-                                    );
-                                    break 'sync true;
+                                let Ok(raw) = std::str::from_utf8(&tlv.value) else {
+                                    continue;
+                                };
+                                let Ok(envelope) = serde_json::from_str::<serde_json::Value>(raw)
+                                else {
+                                    continue;
+                                };
+                                let Some(payload_str) =
+                                    envelope.get("payload").and_then(|value| value.as_str())
+                                else {
+                                    continue;
+                                };
+                                let Some(signature) =
+                                    envelope.get("signature").and_then(|value| value.as_str())
+                                else {
+                                    continue;
+                                };
+                                let Ok(payload) =
+                                    serde_json::from_str::<serde_json::Value>(payload_str)
+                                else {
+                                    continue;
+                                };
+                                let kind = payload.get("type").and_then(|value| value.as_str());
+                                if kind != Some(SYNC_MESSAGE_TYPE)
+                                    && kind != Some(TRADE_REJECTED_MESSAGE_TYPE)
+                                {
+                                    continue;
                                 }
-                            };
-                            if local_backing_sats != sync.backing_sats {
-                                audit_event(
-                                    "SYNC_V1_ALLOCATION_DIVERGENCE",
-                                    json!({
-                                        "payment_hash": &payment_hash_str,
-                                        "peer_backing_sats": sync.backing_sats,
-                                        "local_backing_sats": local_backing_sats,
-                                        "sync_version": sync.sync_version,
-                                    }),
-                                );
-                            }
-                            let native_sats =
-                                live_receiver_sats.saturating_sub(local_backing_sats);
-                            let user_channel_id = format!("{}", sc.user_channel_id);
-                            match self.db.apply_sync_if_newer_and_complete_trade(
-                                &user_channel_id,
-                                sync.sync_version,
-                                sync.expected_usd,
-                                local_backing_sats,
-                                native_sats,
-                                pending_trade.as_ref().map(|trade| trade.id),
-                            ) {
-                                Ok(true) => {
-                                    stable::apply_trade_allocation(
-                                        &mut sc,
-                                        sync.expected_usd,
-                                        local_backing_sats,
-                                    );
+
+                                let counterparty = self.stable_channel.lock().unwrap().counterparty;
+                                if !self.node.verify_signature(
+                                    payload_str.as_bytes(),
+                                    signature,
+                                    &counterparty,
+                                ) {
                                     audit_event(
-                                        "SYNC_V1_APPLIED",
-                                        json!({
-                                            "old_expected_usd": old_expected,
-                                            "new_expected_usd": sync.expected_usd,
-                                            "backing_sats": local_backing_sats,
-                                            "peer_backing_sats": sync.backing_sats,
-                                            "sync_version": sync.sync_version,
-                                            "live_receiver_sats": live_receiver_sats,
-                                            "btc_price": price,
-                                            "payment_hash": &payment_hash_str,
-                                        }),
+                                        "TRADE_RESULT_SIGNATURE_INVALID",
+                                        json!({ "payment_hash": &payment_hash_str, "type": kind }),
                                     );
-                                    drop(sc);
-                                    if let Some(trade) = pending_trade {
-                                        self.pending_trade_payments
-                                            .retain(|_, pending| pending.trade_db_id != trade.id);
+                                    continue;
+                                }
+
+                                if kind == Some(TRADE_REJECTED_MESSAGE_TYPE) {
+                                    let Some(rejection) = parse_trade_rejection(payload_str) else {
                                         audit_event(
-                                            "TRADE_ACCEPTED_BY_LSP",
+                                            "TRADE_REJECTED_V1_PAYLOAD_INVALID",
+                                            json!({ "payment_hash": &payment_hash_str }),
+                                        );
+                                        break 'sync true;
+                                    };
+                                    let wallet_channel_id =
+                                        self.stable_channel.lock().unwrap().channel_id.to_string();
+                                    if amount_msat != 1
+                                        || rejection.channel_id != wallet_channel_id
+                                    {
+                                        audit_event(
+                                            "TRADE_REJECTED_V1_CONTEXT_INVALID",
+                                            json!({ "payment_hash": &payment_hash_str }),
+                                        );
+                                        break 'sync true;
+                                    }
+                                    let trade = match self.db.get_trade_by_correlation(
+                                        &rejection.trade_id,
+                                        &rejection.trade_payment_id,
+                                        &rejection.request_hash,
+                                    ) {
+                                        Ok(Some(trade)) if trade.channel_id == rejection.channel_id => trade,
+                                        Ok(_) => {
+                                            audit_event(
+                                                "TRADE_REJECTED_V1_UNMATCHED",
+                                                json!({ "payment_hash": &payment_hash_str }),
+                                            );
+                                            break 'sync true;
+                                        }
+                                        Err(error) => {
+                                            audit_event(
+                                                "DB_READ_FAILED",
+                                                json!({ "op": "get_trade_by_correlation", "error": error.to_string() }),
+                                            );
+                                            ack = false;
+                                            break 'sync true;
+                                        }
+                                    };
+                                    match self.db.mark_trade_rejected(
+                                        trade.id,
+                                        &rejection.trade_payment_id,
+                                        rejection.reason_code.as_str(),
+                                        rejection.decided_at as i64,
+                                    ) {
+                                        Ok(true) => {
+                                            self.pending_trade_payments.retain(|_, pending| {
+                                                pending.trade_db_id != trade.id
+                                            });
+                                            self.status_message =
+                                                rejection.reason_code.user_message().to_string();
+                                            self.show_toast("Trade rejected", "X");
+                                            audit_event(
+                                                "TRADE_REJECTED_BY_LSP",
+                                                json!({
+                                                    "trade_id": rejection.trade_id,
+                                                    "reason_code": rejection.reason_code.as_str(),
+                                                    "decided_at": rejection.decided_at,
+                                                }),
+                                            );
+                                        }
+                                        Ok(false) => {}
+                                        Err(error) => {
+                                            audit_event(
+                                                "DB_WRITE_FAILED",
+                                                json!({ "op": "mark_trade_rejected", "error": error.to_string() }),
+                                            );
+                                            ack = false;
+                                        }
+                                    }
+                                    break 'sync true;
+                                }
+
+                                let Some(sync) = parse_incoming_sync(&payload) else {
+                                    audit_event(
+                                        "SYNC_V1_PAYLOAD_INVALID",
+                                        json!({ "payment_hash": &payment_hash_str }),
+                                    );
+                                    break 'sync true;
+                                };
+                                let correlation = sync
+                                    .trade_id
+                                    .as_deref()
+                                    .zip(sync.trade_payment_id.as_deref())
+                                    .zip(sync.request_hash.as_deref())
+                                    .map(|((trade_id, payment_id), request_hash)| {
+                                        (trade_id, payment_id, request_hash)
+                                    });
+                                if correlation.is_some() && amount_msat != 1 {
+                                    audit_event(
+                                        "SYNC_V1_CORRELATED_AMOUNT_INVALID",
+                                        json!({ "payment_hash": &payment_hash_str, "amount_msat": amount_msat }),
+                                    );
+                                    break 'sync true;
+                                }
+
+                                let mut sc = self.stable_channel.lock().unwrap();
+                                let wallet_channel_id = sc.channel_id.to_string();
+                                if sync.channel_id != wallet_channel_id {
+                                    audit_event(
+                                        "SYNC_V1_CHANNEL_MISMATCH",
+                                        json!({
+                                            "payment_hash": &payment_hash_str,
+                                            "payload_channel_id": sync.channel_id,
+                                            "wallet_channel_id": wallet_channel_id,
+                                            "sync_version": sync.sync_version,
+                                        }),
+                                    );
+                                    break 'sync true;
+                                }
+
+                                let pending_trade = match correlation {
+                                    Some((trade_id, payment_id, request_hash)) => self
+                                        .db
+                                        .get_trade_by_correlation(
+                                            trade_id,
+                                            payment_id,
+                                            request_hash,
+                                        ),
+                                    None => self
+                                        .db
+                                        .get_pending_trade_by_expected_usd(sync.expected_usd),
+                                };
+                                let pending_trade = match pending_trade {
+                                    Ok(trade) => trade,
+                                    Err(error) => {
+                                        audit_event(
+                                            "DB_READ_FAILED",
+                                            json!({ "op": "find_trade_for_sync", "error": error.to_string() }),
+                                        );
+                                        ack = false;
+                                        break 'sync true;
+                                    }
+                                };
+                                if correlation.is_some()
+                                    && !pending_trade.as_ref().is_some_and(|trade| {
+                                        trade.channel_id == sync.channel_id
+                                            && stable_channels::trade::target_matches(
+                                                trade.new_expected_usd,
+                                                sync.expected_usd,
+                                            )
+                                    })
+                                {
+                                    audit_event(
+                                        "SYNC_V1_CORRELATION_INVALID",
+                                        json!({ "payment_hash": &payment_hash_str }),
+                                    );
+                                    break 'sync true;
+                                }
+
+                                stable::update_balances(&self.node, &mut sc);
+                                let price = sc.latest_price;
+                                let old_expected = sc.expected_usd.0;
+                                let live_receiver_sats = sc.stable_receiver_btc.sats;
+                                let local_backing_sats = match local_sync_backing_sats(
+                                    &sync,
+                                    live_receiver_sats,
+                                    price,
+                                    old_expected,
+                                    sc.backing_sats,
+                                    pending_trade.as_ref(),
+                                ) {
+                                    Ok(backing_sats) => backing_sats,
+                                    Err(reason) => {
+                                        audit_event(
+                                            "SYNC_V1_ALLOCATION_REJECTED",
+                                            json!({ "payment_hash": &payment_hash_str, "reason": reason }),
+                                        );
+                                        // A correlated result can arrive while another outbound
+                                        // HTLC temporarily lowers live capacity. Keep the local
+                                        // LDK event queued for retry instead of consuming it after
+                                        // the LSP has already observed successful delivery.
+                                        if correlation.is_some() {
+                                            ack = false;
+                                        }
+                                        break 'sync true;
+                                    }
+                                };
+                                let native_sats =
+                                    live_receiver_sats.saturating_sub(local_backing_sats);
+                                let user_channel_id = format!("{}", sc.user_channel_id);
+
+                                let persistence = if let Some((_, payment_id, _)) = correlation {
+                                    self.db
+                                        .apply_correlated_trade_acceptance(
+                                            &user_channel_id,
+                                            sync.sync_version,
+                                            sync.expected_usd,
+                                            local_backing_sats,
+                                            native_sats,
+                                            pending_trade.as_ref().unwrap().id,
+                                            payment_id,
+                                        )
+                                        .map(|result| {
+                                            (result.allocation_applied, result.trade_resolved)
+                                        })
+                                } else {
+                                    self.db
+                                        .apply_sync_if_newer_and_complete_trade(
+                                            &user_channel_id,
+                                            sync.sync_version,
+                                            sync.expected_usd,
+                                            local_backing_sats,
+                                            native_sats,
+                                            pending_trade.as_ref().map(|trade| trade.id),
+                                        )
+                                        .map(|applied| (applied, applied && pending_trade.is_some()))
+                                };
+                                match persistence {
+                                    Ok((allocation_applied, trade_resolved)) => {
+                                        if allocation_applied {
+                                            stable::apply_trade_allocation(
+                                                &mut sc,
+                                                sync.expected_usd,
+                                                local_backing_sats,
+                                            );
+                                        }
+                                        drop(sc);
+                                        if trade_resolved {
+                                            let trade = pending_trade.as_ref().unwrap();
+                                            self.pending_trade_payments.retain(|_, pending| {
+                                                pending.trade_db_id != trade.id
+                                            });
+                                            let verb = if trade.action == "buy" {
+                                                "USD → BTC"
+                                            } else {
+                                                "BTC → USD"
+                                            };
+                                            self.show_toast(
+                                                &format!("{} order confirmed", verb),
+                                                "OK",
+                                            );
+                                        }
+                                        audit_event(
+                                            "SYNC_V1_PROCESSED",
                                             json!({
-                                                "trade_id": trade.id,
-                                                "action": trade.action,
-                                                "expected_usd": sync.expected_usd,
-                                                "backing_sats": local_backing_sats,
                                                 "sync_version": sync.sync_version,
+                                                "allocation_applied": allocation_applied,
+                                                "trade_resolved": trade_resolved,
+                                                "local_backing_sats": local_backing_sats,
+                                                "peer_backing_sats": sync.backing_sats,
                                             }),
                                         );
-                                        let verb = if trade.action == "buy" {
-                                            "USD → BTC"
-                                        } else {
-                                            "BTC → USD"
-                                        };
-                                        self.show_toast(
-                                            &format!("{} order confirmed", verb),
-                                            "OK",
+                                    }
+                                    Err(error) => {
+                                        audit_event(
+                                            "DB_WRITE_FAILED",
+                                            json!({ "op": "apply_trade_sync", "error": error.to_string() }),
                                         );
+                                        ack = false;
                                     }
                                 }
-                                Ok(false) => {
-                                    audit_event(
-                                        "SYNC_V1_REPLAY_REJECTED",
-                                        json!({
-                                            "payment_hash": &payment_hash_str,
-                                            "user_channel_id": user_channel_id,
-                                            "sync_version": sync.sync_version,
-                                        }),
-                                    );
-                                }
-                                Err(e) => {
-                                    audit_event(
-                                        "DB_WRITE_FAILED",
-                                        json!({
-                                            "op": "apply_sync_if_newer",
-                                            "payment_hash": &payment_hash_str,
-                                            "user_channel_id": user_channel_id,
-                                            "sync_version": sync.sync_version,
-                                            "error": e.to_string(),
-                                        }),
-                                    );
-                                    ack = false;
-                                }
+                                break 'sync true;
                             }
-                            break 'sync true;
-                        }
-                        false
+                            false
                         }
                     };
 
@@ -3663,6 +3785,15 @@ impl UserApp {
                     ..
                 } => {
                     let payment_hash_str = format!("{payment_hash}");
+                    if let Some(pid) = payment_id {
+                        if let Err(error) = self.db.mark_trade_fee_paid(&format!("{pid}")) {
+                            ack = false;
+                            audit_event(
+                                "TRADE_FEE_STATUS_PERSIST_FAILED",
+                                json!({ "payment_id": format!("{pid}"), "error": error.to_string() }),
+                            );
+                        }
+                    }
 
                     // Payment success proves that the fee reached the LSP, not that it accepted the
                     // trade. Keep it pending until the LSP's signed SYNC_V1 arrives.
@@ -3803,40 +3934,47 @@ impl UserApp {
                     }
 
                     if !handled_stability_failure {
-                        // Check if this is a pending trade payment
-                        let mut pending_trade =
-                            payment_id.and_then(|pid| self.pending_trade_payments.remove(&pid));
-                        if pending_trade.is_none() {
-                            if let Some(pid) = payment_id {
-                                match self.db.get_pending_trade_by_payment_id(&format!("{pid}")) {
-                                    Ok(Some(row)) => {
-                                        pending_trade = Some(PendingTradePayment {
-                                            new_expected_usd: row.new_expected_usd,
-                                            backing_sats: row.new_backing_sats,
-                                            trade_db_id: row.id,
-                                            action: row.action,
-                                        });
+                        let mut is_trade_payment = false;
+                        let pending_trade = if let Some(pid) = payment_id {
+                            self.pending_trade_payments.remove(&pid);
+                            match self.db.mark_trade_payment_failed(&format!("{pid}")) {
+                                Ok(Some(row)) => {
+                                    is_trade_payment = true;
+                                    Some(PendingTradePayment {
+                                        new_expected_usd: row.new_expected_usd,
+                                        backing_sats: row.new_backing_sats,
+                                        trade_db_id: row.id,
+                                        action: row.action,
+                                    })
+                                }
+                                Ok(None) => match self.db.is_trade_payment(&format!("{pid}")) {
+                                    Ok(found) => {
+                                        is_trade_payment = found;
+                                        None
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => {
+                                    Err(error) => {
                                         ack = false;
                                         audit_event(
                                             "TRADE_PAYMENT_CLASSIFICATION_FAILED",
-                                            json!({
-                                                "payment_id": format!("{pid}"),
-                                                "context": "payment_failed",
-                                                "error": e.to_string(),
-                                            }),
+                                            json!({ "payment_id": format!("{pid}"), "error": error.to_string() }),
                                         );
+                                        None
                                     }
+                                },
+                                Err(error) => {
+                                    ack = false;
+                                    audit_event(
+                                        "TRADE_PAYMENT_FAILURE_PERSIST_FAILED",
+                                        json!({ "payment_id": format!("{pid}"), "error": error.to_string() }),
+                                    );
+                                    None
                                 }
                             }
-                        }
+                        } else {
+                            None
+                        };
 
                         if let Some(trade) = pending_trade {
-                            // Trade payment failed — mark as failed, don't apply trade
-                            let _ = self.db.update_trade_status(trade.trade_db_id, "failed");
-
                             audit_event(
                                 "TRADE_FAILED",
                                 json!({
@@ -3854,7 +3992,7 @@ impl UserApp {
                             };
                             self.status_message = format!("{} order failed: {:?}", verb, reason);
                             self.show_toast(&format!("{} order failed", verb), "X");
-                        } else if ack {
+                        } else if !is_trade_payment && ack {
                             // Check if this is a pending outgoing payment
                             let pending =
                                 payment_id.and_then(|pid| self.pending_payments.remove(&pid));
@@ -5700,13 +5838,14 @@ impl UserApp {
             let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
 
             // Get balance info
-            let (btc_price, last_update, expected_usd, backing_sats) = {
+            let (btc_price, last_update, expected_usd, backing_sats, receiver_sats) = {
                 let sc = self.stable_channel.lock().unwrap();
                 (
                     sc.latest_price,
                     sc.timestamp,
                     sc.expected_usd.0,
                     sc.backing_sats,
+                    sc.stable_receiver_btc.sats,
                 )
             };
 
@@ -5751,6 +5890,17 @@ impl UserApp {
                 expected_usd,
                 btc_price,
             );
+            let (_, receiver_native_sats, _) =
+                channel_balance_split(receiver_sats, backing_sats, expected_usd, btc_price);
+            let buy_available_usd = floor_usd_cents(stabilized_usd) as f64 / 100.0;
+            let sell_available_usd = max_sell_trade_usd_cents(
+                receiver_sats,
+                receiver_native_sats,
+                backing_sats,
+                expected_usd,
+                btc_price,
+            ) as f64
+                / 100.0;
 
             // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
             ui.horizontal(|ui| {
@@ -5928,6 +6078,17 @@ impl UserApp {
                 let base_x_local = rect.width() * synth_ratio;
                 let base_x = rect.min.x + base_x_local;
                 let min_trade_usd = 1.0_f64;
+                let max_buy_drag_offset = if bar_total_usd > 0.0 {
+                    ((buy_available_usd / bar_total_usd) as f32 * rect.width()).min(base_x_local)
+                } else {
+                    0.0
+                };
+                let max_sell_drag_offset = if bar_total_usd > 0.0 {
+                    ((sell_available_usd / bar_total_usd) as f32 * rect.width())
+                        .min(rect.width() - base_x_local)
+                } else {
+                    0.0
+                };
 
                 // Begin drag if pointer started near the thumb.
                 if response.drag_started() {
@@ -5943,7 +6104,7 @@ impl UserApp {
                 if response.dragged() && self.bar_slider_dragging {
                     self.bar_slider_drag_offset = (self.bar_slider_drag_offset
                         + response.drag_delta().x)
-                        .clamp(-base_x_local, rect.width() - base_x_local);
+                        .clamp(-max_buy_drag_offset, max_sell_drag_offset);
                 }
 
                 if response.drag_stopped() && self.bar_slider_dragging {
@@ -5956,7 +6117,7 @@ impl UserApp {
                     if trade_usd >= min_trade_usd {
                         if self.bar_slider_drag_offset > 0.0 {
                             // Drag right → SELL native BTC, grow USD position.
-                            let clamped = trade_usd.min(native_usd).max(0.0);
+                            let clamped = trade_usd.min(sell_available_usd).max(0.0);
                             if clamped >= min_trade_usd {
                                 self.trade_amount_input = format!("{:.2}", clamped);
                                 self.trade_error.clear();
@@ -5965,7 +6126,7 @@ impl UserApp {
                             }
                         } else {
                             // Drag left → BUY BTC, shrink USD position.
-                            let clamped = trade_usd.min(stabilized_usd).max(0.0);
+                            let clamped = trade_usd.min(buy_available_usd).max(0.0);
                             if clamped >= min_trade_usd {
                                 self.trade_amount_input = format!("{:.2}", clamped);
                                 self.trade_error.clear();
@@ -6143,7 +6304,7 @@ impl UserApp {
                                 let native_btc = native_sats as f64 / 100_000_000.0;
                                 format!("{} BTC", Self::format_btc_spaced(native_btc))
                             } else {
-                                Self::format_price(native_usd)
+                                Self::format_price(floor_usd_cents(native_usd) as f64 / 100.0)
                             };
                             ui.label(
                                 RichText::new(native_text)
@@ -7144,6 +7305,11 @@ impl UserApp {
                     .add(make_action_btn("USD → BTC", theme::IOS_ORANGE))
                     .clicked()
                 {
+                    self.trade_amount_input.clear();
+                    self.trade_error.clear();
+                    self.pending_trade = None;
+                    self.show_confirm_trade = false;
+                    self.trade_success = None;
                     self.show_buy_modal = true;
                     self.modal_opened_at = std::time::Instant::now();
                 }
@@ -7152,6 +7318,11 @@ impl UserApp {
                     .add(make_action_btn("BTC → USD", theme::IOS_RED))
                     .clicked()
                 {
+                    self.trade_amount_input.clear();
+                    self.trade_error.clear();
+                    self.pending_trade = None;
+                    self.show_confirm_trade = false;
+                    self.trade_success = None;
                     self.show_sell_modal = true;
                     self.modal_opened_at = std::time::Instant::now();
                 }
@@ -7815,9 +7986,15 @@ impl UserApp {
                                     );
 
                                     let (status_label, status_color) = match trade.status.as_str() {
-                                        "completed" => ("Confirmed", theme::SUCCESS),
-                                        "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                                        "failed" => ("Failed", theme::DANGER_HOVER),
+                                        "completed" | "accepted" => ("Confirmed", theme::SUCCESS),
+                                        "pending" | "sending" | "awaiting_result" => {
+                                            ("Pending", Color32::from_rgb(234, 179, 8))
+                                        }
+                                        "outcome_unknown" => ("Unknown", theme::WARNING),
+                                        "rejected" => ("Rejected", theme::DANGER_HOVER),
+                                        "failed" | "payment_failed" => {
+                                            ("Failed", theme::DANGER_HOVER)
+                                        }
                                         _ => (&*trade.status, Color32::DARK_GRAY),
                                     };
                                     let (badge_rect, _) = ui.allocate_exact_size(
@@ -8177,6 +8354,14 @@ impl UserApp {
                     });
                     ui.add_space(2.0);
                 };
+                let wrapped_row = |ui: &mut egui::Ui, label: &str, value: &str| {
+                    ui.label(RichText::new(label).size(12.0).color(Color32::GRAY));
+                    ui.add(
+                        egui::Label::new(RichText::new(value).size(12.0).color(Color32::BLACK))
+                            .wrap(),
+                    );
+                    ui.add_space(6.0);
+                };
 
                 let action = if trade.action == "buy" {
                     "USD → BTC"
@@ -8194,9 +8379,13 @@ impl UserApp {
                 row(ui, "BTC Price", &Self::format_price(trade.btc_price));
 
                 let (status_label, status_color) = match trade.status.as_str() {
-                    "completed" => ("Confirmed", theme::SUCCESS),
-                    "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                    "failed" => ("Failed", theme::DANGER_HOVER),
+                    "completed" | "accepted" => ("Confirmed", theme::SUCCESS),
+                    "pending" | "sending" | "awaiting_result" => {
+                        ("Pending", Color32::from_rgb(234, 179, 8))
+                    }
+                    "outcome_unknown" => ("Unknown", theme::WARNING),
+                    "rejected" => ("Rejected", theme::DANGER_HOVER),
+                    "failed" | "payment_failed" => ("Failed", theme::DANGER_HOVER),
                     _ => (&*trade.status, Color32::DARK_GRAY),
                 };
                 ui.horizontal(|ui| {
@@ -8214,6 +8403,23 @@ impl UserApp {
                     });
                 });
                 ui.add_space(2.0);
+
+                if trade.status == "rejected" {
+                    if let Some(message) = trade
+                        .failure_code
+                        .as_deref()
+                        .and_then(stable_channels::trade::TradeRejectionReason::from_code)
+                        .map(|reason| reason.user_message())
+                    {
+                        wrapped_row(ui, "Reason", message);
+                    }
+                } else if trade.status == "outcome_unknown" {
+                    wrapped_row(
+                        ui,
+                        "Result",
+                        "Still awaiting the provider; another trade is blocked.",
+                    );
+                }
 
                 row(ui, "Date", &Self::format_timestamp(trade.created_at));
 
@@ -9258,9 +9464,10 @@ impl UserApp {
             if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
                 if amount_cents > 0 {
                     let amount = amount_cents as f64 / 100.0;
+                    let net_amount = amount - Self::stable_trade_fee(amount);
                     let btc_price = get_cached_price_no_fetch();
                     if btc_price > 0.0 {
-                        let btc = amount / btc_price;
+                        let btc = net_amount / btc_price;
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(format!("\u{2248} {:.8} BTC", btc))
@@ -9339,6 +9546,7 @@ impl UserApp {
                         btc_amount,
                         btc_sats,
                         net_amount_usd: net_amount,
+                        is_full_peg: false,
                     });
                     self.show_confirm_trade = true;
                     self.trade_error.clear();
@@ -9581,7 +9789,7 @@ impl UserApp {
         // Show the native allocation valued in USD. A price quote changes its value, not which
         // sats belong to it.
         let btc_price = get_cached_price_no_fetch();
-        let native_sats = {
+        let (live_receiver_sats, native_sats, current_backing_sats, current_expected_usd) = {
             let sc = self.stable_channel.lock().unwrap();
             let (_, native_sats, _) = channel_balance_split(
                 sc.stable_receiver_btc.sats,
@@ -9589,16 +9797,27 @@ impl UserApp {
                 sc.expected_usd.0,
                 btc_price,
             );
-            native_sats
+            (
+                sc.stable_receiver_btc.sats,
+                native_sats,
+                sc.backing_sats,
+                sc.expected_usd.0,
+            )
         };
-        // A hard spending limit must never be formatted upward. Otherwise an exact displayed
-        // maximum can exceed the underlying sats by a fraction of a cent.
-        let available_btc_usd_cents =
-            floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * btc_price);
+        // Native BTC can be worth more than the channel's remaining stable-target capacity when
+        // the current backing has drifted below its USD target. Show the largest cent-denominated
+        // order that passes the same post-fee allocation check used when the order is submitted.
+        let available_btc_usd_cents = max_sell_trade_usd_cents(
+            live_receiver_sats,
+            native_sats,
+            current_backing_sats,
+            current_expected_usd,
+            btc_price,
+        );
         let available_btc_usd = available_btc_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!(
-                "Available: {}",
+                "Available to convert: {}",
                 Self::format_price(available_btc_usd)
             ))
             .size(14.0)
@@ -9685,13 +9904,13 @@ impl UserApp {
             if let Some(amount_cents) = parse_trade_usd_cents(&self.trade_amount_input) {
                 let amount = amount_cents as f64 / 100.0;
                 // Validate user has enough BTC to sell
-                if amount_cents > available_btc_usd_cents {
+                if btc_price < 1.0 || !btc_price.is_finite() {
+                    self.trade_error = "Invalid price".to_string();
+                } else if amount_cents > available_btc_usd_cents {
                     self.trade_error = format!(
-                        "Insufficient BTC. You have {} available.",
+                        "Amount exceeds tradable channel capacity. Maximum is {}.",
                         Self::format_price(available_btc_usd)
                     );
-                } else if btc_price < 1.0 || !btc_price.is_finite() {
-                    self.trade_error = "Invalid price".to_string();
                 } else {
                     // Calculate trade details
                     let fee_usd = Self::stable_trade_fee(amount);
@@ -9711,6 +9930,7 @@ impl UserApp {
                         btc_amount,
                         btc_sats,
                         net_amount_usd: net_amount,
+                        is_full_peg: amount_cents == available_btc_usd_cents,
                     });
                     self.show_confirm_trade = true;
                     self.trade_error.clear();
@@ -9764,6 +9984,7 @@ impl UserApp {
         let btc_amount = trade.btc_amount;
         let btc_sats = trade.btc_sats;
         let net_amount = trade.net_amount_usd;
+        let is_full_peg = trade.is_full_peg;
 
         // Header
         ui.label(
@@ -9858,6 +10079,20 @@ impl UserApp {
                     });
                 });
             });
+
+        if is_full_peg {
+            ui.add_space(12.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "This trade may be rejected by the LSP if the price changes, and the trade fee will not be refunded.",
+                    )
+                    .size(12.0)
+                    .color(theme::WARNING),
+                )
+                .wrap(),
+            );
+        }
 
         let confirmation_blocked = !self.trade_error.is_empty();
         if confirmation_blocked {
@@ -10188,21 +10423,15 @@ impl UserApp {
         } else {
             0.0
         };
-        if let Some((payment_id, backing_sats)) =
-            self.send_trade(new_expected_usd, fee_usd, "buy", btc_price)
+        if let Some((payment_id, backing_sats, trade_db_id)) = self.send_trade(
+            new_expected_usd,
+            fee_usd,
+            "buy",
+            btc_price,
+            amount_usd,
+            btc_amount,
+        )
         {
-            let payment_id_str = format!("{payment_id}");
-            let trade_db_id = self.record_trade(
-                "buy",
-                amount_usd,
-                btc_amount,
-                btc_price,
-                fee_usd,
-                new_expected_usd,
-                Some(backing_sats),
-                Some(&payment_id_str),
-                "pending",
-            );
             self.pending_trade_payments.insert(
                 payment_id,
                 PendingTradePayment {
@@ -10252,21 +10481,15 @@ impl UserApp {
         let new_expected_usd = current_expected_usd + net_amount;
 
         let btc_amount = btc_sats as f64 / SATS_IN_BTC as f64;
-        if let Some((payment_id, backing_sats)) =
-            self.send_trade(new_expected_usd, fee_usd, "sell", btc_price)
+        if let Some((payment_id, backing_sats, trade_db_id)) = self.send_trade(
+            new_expected_usd,
+            fee_usd,
+            "sell",
+            btc_price,
+            amount_usd,
+            btc_amount,
+        )
         {
-            let payment_id_str = format!("{payment_id}");
-            let trade_db_id = self.record_trade(
-                "sell",
-                amount_usd,
-                btc_amount,
-                btc_price,
-                fee_usd,
-                new_expected_usd,
-                Some(backing_sats),
-                Some(&payment_id_str),
-                "pending",
-            );
             self.pending_trade_payments.insert(
                 payment_id,
                 PendingTradePayment {
@@ -10592,6 +10815,12 @@ impl App for UserApp {
         self.start_background_if_needed();
 
         if self.balance_last_update.elapsed() >= Duration::from_secs(2) {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .min(i64::MAX as u64) as i64;
+            let _ = self.db.mark_unresolved_trades_unknown(now);
             self.update_balances();
             self.balance_last_update = std::time::Instant::now();
         }
@@ -11058,10 +11287,10 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
         return None;
     }
     let channel_id = payload.get("channel_id")?.as_str()?;
-    if channel_id.len() != 64 || !channel_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !stable_channels::trade::is_channel_id(channel_id) {
         return None;
     }
-    let channel_id = channel_id.to_ascii_lowercase();
+    let channel_id = channel_id.to_string();
     let expected_usd =
         stable::normalize_trade_expected_usd(payload.get("expected_usd")?.as_f64()?);
     let backing_sats = payload.get("backing_sats")?.as_u64()?;
@@ -11074,12 +11303,58 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
     {
         return None;
     }
+    let correlation = match (
+        payload.get("trade_id"),
+        payload.get("trade_payment_id"),
+        payload.get("request_hash"),
+    ) {
+        (None, None, None) => None,
+        (Some(trade_id), Some(payment_id), Some(request_hash)) => {
+            let trade_id = trade_id.as_str()?;
+            let payment_id = payment_id.as_str()?;
+            let request_hash = request_hash.as_str()?;
+            if !stable_channels::trade::is_trade_id(trade_id)
+                || !stable_channels::trade::is_payment_id(payment_id)
+                || !stable_channels::trade::is_request_hash(request_hash)
+            {
+                return None;
+            }
+            Some((
+                trade_id.to_string(),
+                payment_id.to_string(),
+                request_hash.to_string(),
+            ))
+        }
+        _ => return None,
+    };
+    let (trade_id, trade_payment_id, request_hash) = correlation
+        .map(|(trade_id, payment_id, request_hash)| {
+            (Some(trade_id), Some(payment_id), Some(request_hash))
+        })
+        .unwrap_or((None, None, None));
     Some(IncomingSync {
         channel_id,
         expected_usd,
         backing_sats,
         sync_version,
+        trade_id,
+        trade_payment_id,
+        request_hash,
     })
+}
+
+fn parse_trade_rejection(payload: &str) -> Option<stable_channels::trade::TradeRejectedV1> {
+    let rejection: stable_channels::trade::TradeRejectedV1 = serde_json::from_str(payload).ok()?;
+    if rejection.kind != TRADE_REJECTED_MESSAGE_TYPE
+        || !stable_channels::trade::is_channel_id(&rejection.channel_id)
+        || !stable_channels::trade::is_trade_id(&rejection.trade_id)
+        || !stable_channels::trade::is_payment_id(&rejection.trade_payment_id)
+        || !stable_channels::trade::is_request_hash(&rejection.request_hash)
+        || rejection.decided_at > i64::MAX as u64
+    {
+        return None;
+    }
+    Some(rejection)
 }
 
 fn trade_reduction_exhausts_backing(
@@ -11131,55 +11406,6 @@ fn local_trade_backing_sats(
     if new_expected_usd > receiver_usd {
         return Err(LocalTradeAllocationError::TargetExceedsCapacity);
     }
-    // The LSP measures quote deviation against its own price. These are therefore the exact local
-    // price endpoints that can still pass its symmetric deviation check.
-    let quote_deviation = MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0;
-    let minimum_permitted_lsp_price = current_price / (1.0 + quote_deviation);
-    let maximum_permitted_lsp_price = current_price / (1.0 - quote_deviation);
-    if new_expected_usd > current_expected_usd {
-        // Every permitted lower LSP price must still support an increased target.
-        let conservative_receiver_usd =
-            post_fee_receiver_sats as f64 / SATS_IN_BTC as f64
-                * minimum_permitted_lsp_price;
-        if new_expected_usd > conservative_receiver_usd {
-            return Err(LocalTradeAllocationError::TargetExceedsSafeCapacity);
-        }
-    } else {
-        // Reductions and exits can underflow backing or cross the actionable-drift gate at either
-        // edge of the accepted quote range. Validate both before paying the non-refundable fee.
-        for permitted_lsp_price in [
-            minimum_permitted_lsp_price,
-            maximum_permitted_lsp_price,
-        ] {
-            let permitted_receiver_usd =
-                post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * permitted_lsp_price;
-            if new_expected_usd > permitted_receiver_usd {
-                return Err(LocalTradeAllocationError::TargetExceedsSafeCapacity);
-            }
-            if stable::trade_backing_after_delta(
-                post_fee_receiver_sats,
-                current_backing_sats,
-                current_expected_usd,
-                new_expected_usd,
-                permitted_lsp_price,
-            )
-            .is_none()
-            {
-                return Err(if new_expected_usd == 0.0
-                    || trade_reduction_exhausts_backing(
-                        current_backing_sats,
-                        current_expected_usd,
-                        new_expected_usd,
-                        permitted_lsp_price,
-                    )
-                {
-                    LocalTradeAllocationError::SettlementRequired
-                } else {
-                    LocalTradeAllocationError::UnsafeAllocation
-                });
-            }
-        }
-    }
     let backing_sats = stable::trade_backing_after_delta(
         post_fee_receiver_sats,
         current_backing_sats,
@@ -11200,6 +11426,55 @@ fn local_trade_backing_sats(
         LocalTradeAllocationError::UnsafeAllocation
     })?;
     Ok((post_fee_receiver_sats, backing_sats))
+}
+
+/// Largest whole-cent BTC-to-USD order that fits both the native sat allocation and the wallet's
+/// post-fee channel allocation. The predicate is monotonic for an increasing stable target, so a
+/// binary search keeps this cheap even for large channels.
+fn max_sell_trade_usd_cents(
+    live_receiver_sats: u64,
+    native_sats: u64,
+    current_backing_sats: u64,
+    current_expected_usd: f64,
+    current_price: f64,
+) -> u64 {
+    if native_sats == 0
+        || !current_expected_usd.is_finite()
+        || current_expected_usd < 0.0
+        || !current_price.is_finite()
+        || current_price <= 0.0
+    {
+        return 0;
+    }
+
+    let mut low = 0_u64;
+    let mut high = floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * current_price);
+    while low < high {
+        let distance = high - low;
+        let cents = low + distance / 2 + distance % 2;
+        let amount_usd = cents as f64 / 100.0;
+        let fee_usd = amount_usd * STABLE_CHANNEL_TRADE_FEE_RATE;
+        let fee_sats = (fee_usd / current_price * SATS_IN_BTC as f64) as u64;
+        let new_expected_usd = current_expected_usd + amount_usd - fee_usd;
+        let fits_native = sats_for_usd_cents(cents, current_price)
+            .is_some_and(|required_sats| required_sats <= native_sats);
+        let fits_allocation = fits_native
+            && local_trade_backing_sats(
+                live_receiver_sats,
+                fee_sats,
+                current_backing_sats,
+                current_expected_usd,
+                new_expected_usd,
+                current_price,
+            )
+            .is_ok();
+        if fits_allocation {
+            low = cents;
+        } else {
+            high = cents - 1;
+        }
+    }
+    low
 }
 
 /// Derive the allocation this wallet will commit for an authenticated sync. The peer's
@@ -11315,8 +11590,9 @@ fn btc_amount_to_msat(input: &str) -> Option<u64> {
 mod tests {
     use super::{
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
-        local_sync_backing_sats, local_trade_backing_sats, parse_incoming_sync,
-        parse_trade_usd_cents, restrict_secret_file_permissions, sats_for_usd_cents,
+        local_sync_backing_sats, local_trade_backing_sats, max_sell_trade_usd_cents,
+        parse_incoming_sync, parse_trade_rejection, parse_trade_usd_cents,
+        restrict_secret_file_permissions, sats_for_usd_cents,
         splice_in_overlap_sats, splice_reconcile_action, write_secret_file, IncomingSync,
         LocalTradeAllocationError, PendingSplice, SpliceReconcileAction, UserApp,
     };
@@ -11348,6 +11624,36 @@ mod tests {
 
         assert_eq!(available_cents, 1_060);
         assert!(required_sats <= native_sats);
+    }
+
+    #[test]
+    fn sell_limit_accounts_for_stable_target_drift_and_trade_fee() {
+        // Production-shaped state: the native bucket is worth $7.70, but the backing is worth
+        // about $0.21 less than its $25.407 target. Only $7.50 can become a safe new target.
+        assert_eq!(
+            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_304.40),
+            750,
+        );
+        assert_eq!(
+            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_321.94),
+            751,
+        );
+        assert_eq!(
+            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_425.91),
+            756,
+        );
+    }
+
+    #[test]
+    fn sell_limit_allows_the_full_native_value_when_the_target_is_fully_backed() {
+        assert_eq!(
+            max_sell_trade_usd_cents(150_000, 50_000, 100_000, 100.0, 100_000.0),
+            5_000,
+        );
+        assert_eq!(
+            max_sell_trade_usd_cents(150_000, 50_000, 100_000, 100.0, f64::NAN),
+            0,
+        );
     }
 
     #[test]
@@ -11426,18 +11732,18 @@ mod tests {
         );
         assert_eq!(
             local_trade_backing_sats(100_000, 0, 0, 0.0, 99.51, 100_000.0),
-            Err(LocalTradeAllocationError::TargetExceedsSafeCapacity),
-            "the preflight reserves the full permitted quote-deviation band",
+            Ok((100_000, 99_510)),
+            "the LSP may reject a near-capacity target priced outside its safe capacity",
         );
         assert_eq!(
             local_trade_backing_sats(200_000, 0, 501, 1.0, 0.5, 100_000.0),
-            Err(LocalTradeAllocationError::SettlementRequired),
-            "a reduction that works locally must also work at the lowest permitted LSP price",
+            Ok((200_000, 1)),
+            "the wallet validates reductions only at its own trusted price",
         );
         assert_eq!(
             local_trade_backing_sats(200_000, 0, 100_000, 100.0, 0.0, 100_000.0),
-            Err(LocalTradeAllocationError::SettlementRequired),
-            "a full exit must be below the stability threshold across the accepted quote range",
+            Ok((200_000, 0)),
+            "the wallet validates a full exit only at its own trusted price",
         );
     }
 
@@ -11446,7 +11752,7 @@ mod tests {
         assert_eq!(
             local_trade_backing_sats(100_000, 0, 0, 0.0, 99.50, 100_000.0),
             Ok((100_000, 99_500)),
-            "a target below the conservative cross-feed limit remains available",
+            "a locally safe near-capacity target remains available",
         );
         assert_eq!(
             local_trade_backing_sats(200_000, 100, 100_000, 100.0, 100.01, 110_000.0),
@@ -11464,7 +11770,7 @@ mod tests {
         assert_eq!(
             local_trade_backing_sats(2_000, 0, 1_000, 1.0, 0.5, 100_000.0),
             Ok((2_000, 500)),
-            "ordinary reductions remain available when both quote endpoints are safe",
+            "ordinary reductions remain available when locally safe",
         );
     }
 
@@ -11475,6 +11781,9 @@ mod tests {
             expected_usd: 60.0,
             backing_sats: 99_999,
             sync_version: 1,
+            trade_id: None,
+            trade_payment_id: None,
+            request_hash: None,
         };
         assert_eq!(
             local_sync_backing_sats(&sync, 100_000, 100_000.0, 0.0, 0, None),
@@ -11502,15 +11811,37 @@ mod tests {
 
         let pending = PendingTradeRow {
             id: 1,
+            channel_id: "00".repeat(32),
+            trade_id: None,
+            payment_id: None,
+            request_hash: None,
+            fee_msat: 0,
             new_expected_usd: 60.0,
             btc_price: 100_500.0,
             new_backing_sats: Some(59_701),
             action: "sell".to_owned(),
+            status: "pending".to_owned(),
         };
         assert_eq!(
             local_sync_backing_sats(&sync, 100_000, 0.0, 50.0, 50_000, Some(&pending)),
             Ok(59_701),
             "a trade acknowledgment uses the wallet's stored trade-time allocation",
+        );
+        let temporarily_over_capacity = PendingTradeRow {
+            new_backing_sats: Some(100_001),
+            ..pending
+        };
+        assert_eq!(
+            local_sync_backing_sats(
+                &sync,
+                100_000,
+                0.0,
+                50.0,
+                50_000,
+                Some(&temporarily_over_capacity),
+            ),
+            Err("stored trade allocation exceeds the live balance"),
+            "a correlated result must be retried while live capacity is temporarily reduced",
         );
 
         let over_capacity = IncomingSync {
@@ -11664,6 +11995,9 @@ mod tests {
                 expected_usd: 25.0,
                 backing_sats: 31_250,
                 sync_version: 4,
+                trade_id: None,
+                trade_payment_id: None,
+                request_hash: None,
             })
         );
 
@@ -11699,6 +12033,52 @@ mod tests {
             "sync_version": 5,
         });
         assert_eq!(parse_incoming_sync(&malformed_channel), None);
+    }
+
+    #[test]
+    fn correlated_sync_requires_all_strict_identifiers() {
+        let identifier = "ab".repeat(32);
+        let mut payload = serde_json::json!({
+            "type": "SYNC_V1",
+            "channel_id": identifier,
+            "expected_usd": 25.0,
+            "backing_sats": 31_250,
+            "sync_version": 4,
+            "trade_id": identifier,
+            "trade_payment_id": identifier,
+            "request_hash": identifier,
+        });
+        assert!(parse_incoming_sync(&payload).unwrap().trade_id.is_some());
+        payload.as_object_mut().unwrap().remove("request_hash");
+        assert_eq!(parse_incoming_sync(&payload), None);
+        payload["request_hash"] = serde_json::json!("AB".repeat(32));
+        assert_eq!(parse_incoming_sync(&payload), None);
+    }
+
+    #[test]
+    fn rejection_parser_is_closed_and_strict() {
+        let identifier = "cd".repeat(32);
+        let payload = serde_json::json!({
+            "type": "TRADE_REJECTED_V1",
+            "channel_id": identifier,
+            "trade_id": identifier,
+            "trade_payment_id": identifier,
+            "request_hash": identifier,
+            "reason_code": "insufficient_capacity",
+            "decided_at": 1_786_310_000u64,
+        });
+        assert_eq!(
+            parse_trade_rejection(&payload.to_string())
+                .unwrap()
+                .reason_code,
+            stable_channels::trade::TradeRejectionReason::InsufficientCapacity
+        );
+        let mut unknown_reason = payload.clone();
+        unknown_reason["reason_code"] = serde_json::json!("peer_text");
+        assert_eq!(parse_trade_rejection(&unknown_reason.to_string()), None);
+        let mut extra = payload;
+        extra["message"] = serde_json::json!("render me");
+        assert_eq!(parse_trade_rejection(&extra.to_string()), None);
     }
 
     #[cfg(unix)]

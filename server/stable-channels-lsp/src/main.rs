@@ -12,6 +12,7 @@ mod stability_tick;
 mod stable_manager;
 mod state;
 mod tls;
+mod trade_response_retry;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,6 +180,7 @@ async fn main() -> Result<()> {
     event_loop::spawn(state.clone());
     stability_tick::spawn(state.clone());
     observability::spawn(state.clone());
+    trade_response_retry::spawn(state.clone());
 
     let router = Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))

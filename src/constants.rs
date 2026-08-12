@@ -20,6 +20,9 @@ pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 /// Sync message type identifier (LSP → user expected_usd sync after stable deductions)
 pub const SYNC_MESSAGE_TYPE: &str = "SYNC_V1";
 
+/// Signed rejection message returned for correlated desktop trades.
+pub const TRADE_REJECTED_MESSAGE_TYPE: &str = "TRADE_REJECTED_V1";
+
 /// Signed stability-payment message type identifier.
 pub const STABILITY_PAYMENT_MESSAGE_TYPE: &str = "STABILITY_PAYMENT_V1";
 
@@ -80,6 +83,15 @@ pub const BALANCE_UPDATE_INTERVAL_SECS: u64 = 30;
 /// Stability check interval (in seconds)
 pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 60;
 
+/// A correlated trade becomes locally uncertain after this long, but remains late-resolvable.
+pub const TRADE_RESULT_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// The LSP retries durable result delivery throughout this window.
+pub const TRADE_RESPONSE_RETRY_WINDOW_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Detailed signed response bytes may be pruned after this retention period.
+pub const TRADE_RESPONSE_DETAIL_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
 // ============================================================================
 // BUSINESS LOGIC CONSTANTS
 // ============================================================================
@@ -112,9 +124,7 @@ pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
 pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
 
 /// Maximum difference between the wallet's signed trade quote and the LSP's local price.
-///
-/// The wallet also uses this bound to reject near-capacity trades that the LSP could not support
-/// at the lowest price permitted by the quote check.
+/// Enforced by the LSP; the wallet accepts an explicit rejection if their trusted prices differ.
 pub const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
 
 /// LDK channel-config defaults for outbound forwarding fees.
