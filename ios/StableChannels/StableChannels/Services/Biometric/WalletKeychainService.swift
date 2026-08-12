@@ -55,7 +55,11 @@ final class WalletKeychainService {
     }
 
     func storeMnemonic(_ mnemonic: String) throws {
-        guard let data = mnemonic.data(using: .utf8) else {
+        let trimmed = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw WalletKeychainError.dataConversionFailed
+        }
+        guard let data = trimmed.data(using: .utf8) else {
             throw WalletKeychainError.dataConversionFailed
         }
 
@@ -82,6 +86,13 @@ final class WalletKeychainService {
         guard status == errSecSuccess else {
             logError("KEYCHAIN_STORE_FAILED", data: ["status": String(status)])
             throw WalletKeychainError.accessDenied(status)
+        }
+
+        // Verify write by loading back (Issue 8)
+        let loaded = try loadMnemonic()
+        guard loaded == trimmed else {
+            logError("KEYCHAIN_VERIFICATION_FAILED", data: [:])
+            throw WalletKeychainError.dataConversionFailed
         }
     }
 
@@ -135,6 +146,10 @@ final class WalletKeychainService {
             kSecReturnData as String: false
         ]
         var result: AnyObject?
-        return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            logError("KEYCHAIN_EXISTS_CHECK_FAILED", data: ["status": String(status)])
+        }
+        return status == errSecSuccess
     }
 }
