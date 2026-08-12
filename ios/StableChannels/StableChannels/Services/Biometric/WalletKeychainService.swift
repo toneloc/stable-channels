@@ -63,29 +63,37 @@ final class WalletKeychainService {
             throw WalletKeychainError.dataConversionFailed
         }
 
-        let query: [String: Any] = [
+        // No-op if the stored value already matches — avoids any unnecessary write.
+        if let existing = try? loadMnemonic(), existing == trimmed {
+            return
+        }
+
+        let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrAccessGroup as String: accessGroup
         ]
 
-        // Delete any existing item to prevent duplicate error
-        SecItemDelete(query as CFDictionary)
-
-        let attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            logError("KEYCHAIN_STORE_FAILED", data: ["status": String(status)])
-            throw WalletKeychainError.accessDenied(status)
+        if hasMnemonic() {
+            let attributesToUpdate: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            ]
+            let status = SecItemUpdate(base as CFDictionary, attributesToUpdate as CFDictionary)
+            guard status == errSecSuccess else {
+                logError("KEYCHAIN_STORE_FAILED", data: ["op": "update", "status": String(status)])
+                throw WalletKeychainError.accessDenied(status)
+            }
+        } else {
+            var attributes = base
+            attributes[kSecValueData as String] = data
+            attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            let status = SecItemAdd(attributes as CFDictionary, nil)
+            guard status == errSecSuccess else {
+                logError("KEYCHAIN_STORE_FAILED", data: ["op": "add", "status": String(status)])
+                throw WalletKeychainError.accessDenied(status)
+            }
         }
 
         // Verify write by loading back (Issue 8)
