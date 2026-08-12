@@ -806,25 +806,13 @@ impl StableChannelManager {
                 serde_json::json!({ "tlv": stable_channels::constants::STABLE_CHANNEL_TLV_TYPE, "payment_id": payment_id.clone() }),
             );
             let raw = raw.to_string();
-            if let Some(envelope) = crate::messages::parse_envelope(&raw) {
-                if crate::messages::is_trade_v1(&envelope) {
-                    if let Some(pid) = payment_id.as_deref() {
-                        if let Err(e) = self.db.record_settlement(pid, "trade") {
-                            tracing::error!(
-                                "[stable] record_settlement (inbound trade) failed: {}",
-                                e
-                            );
-                            stable_channels::audit::audit_event(
-                                "DB_WRITE_FAILED",
-                                serde_json::json!({ "op": "record_settlement", "kind": "trade", "payment_id": pid, "error": e.to_string() }),
-                            );
-                        }
-                    }
-                }
+            if let Some(_envelope) = crate::messages::parse_envelope(&raw) {
                 // An envelope is a control message, even when its inner type is unknown or
                 // malformed. Let the trade handler audit/drop it; never reinterpret it as a
-                // stability payment.
-                self.handle_trade_message(&raw, amount_msat, ldk, btc_price)
+                // stability payment. The trade settlement is recorded INSIDE the handler, only
+                // after the signature verifies — a forged or unsigned envelope from any peer no
+                // longer writes a settlement row before it is authenticated.
+                self.handle_trade_message(&raw, payment_id.as_deref(), amount_msat, ldk, btc_price)
                     .await;
             } else if rec.value.as_ref() == [1u8] {
                 if let Some(pid) = payment_id.as_deref() {
@@ -2320,6 +2308,7 @@ impl StableChannelManager {
     pub async fn handle_trade_message(
         &mut self,
         raw: &str,
+        payment_id: Option<&str>,
         amount_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
@@ -2412,6 +2401,19 @@ impl StableChannelManager {
             "TRADE_SIGNATURE_VALID",
             serde_json::json!({ "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
         );
+
+        // Verify-then-write: the settlement row is recorded only now that the envelope's
+        // signature is verified against the channel counterparty. An unauthenticated peer's
+        // forged TLV is dropped above without ever touching the settlements table.
+        if let Some(pid) = payment_id {
+            if let Err(e) = self.db.record_settlement(pid, "trade") {
+                tracing::error!("[stable] record_settlement (inbound trade) failed: {}", e);
+                stable_channels::audit::audit_event(
+                    "DB_WRITE_FAILED",
+                    serde_json::json!({ "op": "record_settlement", "kind": "trade", "payment_id": pid, "error": e.to_string() }),
+                );
+            }
+        }
 
         // Replay protection: reject a signed trade with a stale `ts`; ts==0 means an un-upgraded wallet (no timestamp yet) — accepted until all wallets sign one.
         const TRADE_SIG_WINDOW_SECS: u64 = 300;
@@ -4140,7 +4142,7 @@ mod tests {
             payload.quote_price.unwrap_or(lsp_price),
         )
         .unwrap();
-        mgr.handle_trade_message(envelope, Some(fee_msat), ldk, lsp_price)
+        mgr.handle_trade_message(envelope, None, Some(fee_msat), ldk, lsp_price)
             .await;
     }
 
@@ -4388,6 +4390,7 @@ mod tests {
 
         mgr.handle_trade_message(
             &env,
+            None,
             Some(1),
             &fake as &dyn LdkServerCalls,
             100_000.0,
