@@ -28,6 +28,22 @@ pub struct PaymentPersistence {
     pub clamped: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundStabilityRegistration {
+    New,
+    Pending,
+    Applied,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInboundStabilitySettlement {
+    pub settlement_id: String,
+    pub payment_id: String,
+    pub amount_msat: u64,
+    pub envelope: String,
+}
+
 /// Result of consuming a failed outbound stability settlement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StabilityRollback {
@@ -57,6 +73,18 @@ pub struct StabilityPaymentRollback {
 /// can recreate the row and retry.
 pub fn is_missing_channel_row(err: &rusqlite::Error) -> bool {
     matches!(err, rusqlite::Error::QueryReturnedNoRows)
+}
+
+const STALE_INBOUND_STABILITY_ALLOCATION: &str = "stale inbound stability allocation";
+
+/// Returns true when an authenticated settlement raced with a newer durable backing allocation.
+/// Callers may reload that allocation and retry the same inbox transition once.
+pub fn is_stale_inbound_stability_allocation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::InvalidParameterName(message)
+            if message == STALE_INBOUND_STABILITY_ALLOCATION
+    )
 }
 
 /// Database file name
@@ -392,6 +420,30 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
             [],
         );
+
+        // Authenticated stability-payment inbox. The settlement id prevents the same signed
+        // authorization being reused with another keysend, while payment_id makes LDK event
+        // replay idempotent. The raw envelope is retained for audit and conflict detection.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS inbound_stability_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                payment_id TEXT NOT NULL UNIQUE,
+                channel_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL,
+                direction TEXT NOT NULL,
+                envelope TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inbound_stability_settlements_state
+             ON inbound_stability_settlements(state, updated_at)",
+            [],
+        )?;
 
         // Forwarded-payment dedup: tracks fingerprints of forwards already audited (live or backfilled)
         conn.execute(
@@ -1017,6 +1069,23 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    /// Resolve user_channel_id only when the channel is currently tracked as active.
+    pub fn get_active_user_channel_id_by_channel_id(
+        &self,
+        channel_id: &str,
+    ) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let user_channel_id: Option<Option<String>> = conn
+            .query_row(
+                "SELECT user_channel_id FROM channels
+                 WHERE channel_id = ?1 AND closed_at IS NULL",
+                params![channel_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(user_channel_id.flatten())
     }
 
     /// Load channel settings by user_channel_id (stable across splices)
@@ -2074,10 +2143,116 @@ impl Database {
         user_channel_id: Option<&str>,
         backing_delta_sats: Option<i64>,
     ) -> SqliteResult<PaymentPersistence> {
+        self.record_payment_and_update_allocation_inner(
+            payment_id,
+            payment_type,
+            direction,
+            amount_msat,
+            amount_usd,
+            btc_price,
+            status,
+            user_channel_id,
+            backing_delta_sats,
+            None,
+            None,
+        )
+    }
+
+    /// Atomically record an authenticated inbound stability payment, apply its complete local
+    /// allocation transition, classify the payment, and consume its settlement id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_signed_stability_payment_and_update_allocation(
+        &self,
+        payment_id: &str,
+        settlement_id: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
+        user_channel_id: &str,
+        backing_sats_before: u64,
+        backing_sats_after: u64,
+        native_sats_after: u64,
+    ) -> SqliteResult<PaymentPersistence> {
+        if amount_msat > i64::MAX as u64
+            || backing_sats_before > i64::MAX as u64
+            || backing_sats_after > i64::MAX as u64
+            || native_sats_after > i64::MAX as u64
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "stability allocation exceeds sqlite range".to_string(),
+            ));
+        }
+        self.record_payment_and_update_allocation_inner(
+            Some(payment_id),
+            "stability",
+            "received",
+            amount_msat,
+            amount_usd,
+            btc_price,
+            "completed",
+            Some(user_channel_id),
+            None,
+            Some((
+                backing_sats_before,
+                backing_sats_after,
+                native_sats_after,
+            )),
+            Some(settlement_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_payment_and_update_allocation_inner(
+        &self,
+        payment_id: Option<&str>,
+        payment_type: &str,
+        direction: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
+        status: &str,
+        user_channel_id: Option<&str>,
+        backing_delta_sats: Option<i64>,
+        absolute_allocation: Option<(u64, u64, u64)>,
+        inbound_settlement_id: Option<&str>,
+    ) -> SqliteResult<PaymentPersistence> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let mut mirror = None;
         let result: SqliteResult<PaymentPersistence> = (|| {
+            if let Some(settlement_id) = inbound_settlement_id {
+                let pid = payment_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "payment_id required for stability settlement".to_string(),
+                    )
+                })?;
+                let registered: (String, i64, String) = conn.query_row(
+                    "SELECT payment_id, amount_msat, state
+                     FROM inbound_stability_settlements WHERE settlement_id = ?1",
+                    params![settlement_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                if registered.0 != pid || registered.1 != amount_msat as i64 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "stability settlement does not match its inbox record".to_string(),
+                    ));
+                }
+                match registered.2.as_str() {
+                    "pending" => {}
+                    "applied" => {
+                        return Ok(PaymentPersistence {
+                            is_new: false,
+                            new_backing: None,
+                            clamped: false,
+                        });
+                    }
+                    _ => {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "stability settlement is not pending".to_string(),
+                        ));
+                    }
+                }
+            }
             // Dedup check inside the transaction to prevent cross-process TOCTOU
             if let Some(pid) = payment_id {
                 let exists: Option<i64> = conn
@@ -2088,6 +2263,11 @@ impl Database {
                     )
                     .optional()?;
                 if exists.is_some() {
+                    if inbound_settlement_id.is_some() {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "stability payment id was already classified elsewhere".to_string(),
+                        ));
+                    }
                     return Ok(PaymentPersistence {
                         is_new: false,
                         new_backing: None,
@@ -2105,9 +2285,41 @@ impl Database {
             )?;
             let payment_row_id = conn.last_insert_rowid();
             let mut new_backing = None;
+            let mut new_native = None;
             let mut clamped = false;
             let mut channel_before: Option<(f64, i64, i64)> = None;
-            if let Some(delta) = backing_delta_sats {
+            if let Some((backing_before, backing_after, native_after)) = absolute_allocation {
+                let ucid = user_channel_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "user_channel_id required for allocation update".to_string(),
+                    )
+                })?;
+                channel_before = conn
+                    .query_row(
+                        "SELECT expected_usd, stable_sats, native_sats
+                         FROM channels WHERE user_channel_id = ?1",
+                        params![ucid],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                let current = channel_before
+                    .as_ref()
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if current.1 != backing_before as i64 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        STALE_INBOUND_STABILITY_ALLOCATION.to_string(),
+                    ));
+                }
+                conn.execute(
+                    "UPDATE channels
+                     SET stable_sats = ?1, native_sats = ?2,
+                         updated_at = strftime('%s', 'now')
+                     WHERE user_channel_id = ?3",
+                    params![backing_after as i64, native_after as i64, ucid],
+                )?;
+                new_backing = Some(backing_after as i64);
+                new_native = Some(native_after as i64);
+            } else if let Some(delta) = backing_delta_sats {
                 // user_channel_id must be set when a backing update is requested.
                 let ucid = user_channel_id.ok_or_else(|| {
                     rusqlite::Error::InvalidParameterName(
@@ -2136,6 +2348,36 @@ impl Database {
                 )?;
                 new_backing = Some(updated);
             }
+            if let Some(settlement_id) = inbound_settlement_id {
+                let pid = payment_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "payment_id required for stability settlement".to_string(),
+                    )
+                })?;
+                let ucid = user_channel_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "user_channel_id required for stability settlement".to_string(),
+                    )
+                })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO settlement_payments
+                        (payment_id, kind, user_channel_id, outcome)
+                     VALUES (?1, 'stability', ?2, 'succeeded')",
+                    params![pid, ucid],
+                )?;
+                let consumed = conn.execute(
+                    "UPDATE inbound_stability_settlements
+                     SET state = 'applied', reason = NULL,
+                         updated_at = strftime('%s', 'now')
+                     WHERE settlement_id = ?1 AND payment_id = ?2 AND state = 'pending'",
+                    params![settlement_id, pid],
+                )?;
+                if consumed != 1 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "stability settlement inbox transition failed".to_string(),
+                    ));
+                }
+            }
             let after_backing = new_backing.and_then(|value| u64::try_from(value).ok());
             let before_snapshot = channel_before.map(|(expected, backing, native)| AccountingSnapshot {
                 expected_usd: Some(expected),
@@ -2150,10 +2392,16 @@ impl Database {
             let after_snapshot = before_snapshot.as_ref().map(|before| AccountingSnapshot {
                 expected_usd: before.expected_usd,
                 backing_sats: after_backing.or(before.backing_sats),
-                native_sats: before.native_sats,
+                native_sats: new_native
+                    .and_then(|value| u64::try_from(value).ok())
+                    .or(before.native_sats),
                 live_receiver_sats: after_backing
                     .or(before.backing_sats)
-                    .zip(before.native_sats)
+                    .zip(
+                        new_native
+                            .and_then(|value| u64::try_from(value).ok())
+                            .or(before.native_sats),
+                    )
                     .map(|(backing, native)| backing.saturating_add(native)),
                 btc_price,
                 amount_msat: Some(amount_msat),
@@ -2197,7 +2445,9 @@ impl Database {
                     "user_channel_id": user_channel_id,
                     "backing_delta_sats": backing_delta_sats,
                     "new_backing_sats": new_backing,
+                    "new_native_sats": new_native,
                     "clamped": clamped,
+                    "settlement_id": inbound_settlement_id,
                 }),
                 refs,
             };
@@ -2597,6 +2847,178 @@ impl Database {
             params![payment_id, kind, user_channel_id],
         )?;
         Ok(())
+    }
+
+    /// Durably register signed stability metadata before changing channel accounting.
+    /// Replays must match the original payment and complete signed envelope exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_inbound_stability_settlement(
+        &self,
+        settlement_id: &str,
+        payment_id: &str,
+        channel_id: &str,
+        amount_msat: u64,
+        direction: &str,
+        envelope: &str,
+    ) -> SqliteResult<InboundStabilityRegistration> {
+        if settlement_id.is_empty()
+            || payment_id.is_empty()
+            || channel_id.is_empty()
+            || direction.is_empty()
+            || envelope.is_empty()
+            || amount_msat == 0
+            || amount_msat > i64::MAX as u64
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid inbound stability settlement".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        // Terminal rows are replay tombstones only until their signed authorization is guaranteed
+        // to be expired. Prune them opportunistically so paid one-sat garbage cannot grow the
+        // inbox forever, while pending work remains durable.
+        let terminal_retention_secs = crate::constants::STABILITY_PAYMENT_AUTH_TTL_SECS
+            .saturating_add(crate::constants::STABILITY_PAYMENT_CLOCK_SKEW_SECS);
+        conn.execute(
+            "DELETE FROM inbound_stability_settlements
+             WHERE state IN ('applied', 'invalid')
+               AND updated_at < strftime('%s', 'now') - ?1",
+            params![i64::try_from(terminal_retention_secs).unwrap_or(i64::MAX)],
+        )?;
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO inbound_stability_settlements
+                (settlement_id, payment_id, channel_id, amount_msat, direction, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                settlement_id,
+                payment_id,
+                channel_id,
+                amount_msat as i64,
+                direction,
+                envelope,
+            ],
+        )?;
+        let existing: (String, String, i64, String, String, String) = conn.query_row(
+            "SELECT payment_id, channel_id, amount_msat, direction, envelope, state
+             FROM inbound_stability_settlements WHERE settlement_id = ?1",
+            params![settlement_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+        if existing.0 != payment_id
+            || existing.1 != channel_id
+            || existing.2 != amount_msat as i64
+            || existing.3 != direction
+            || existing.4 != envelope
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "conflicting inbound stability settlement replay".to_string(),
+            ));
+        }
+        if inserted == 1 {
+            return Ok(InboundStabilityRegistration::New);
+        }
+        match existing.5.as_str() {
+            "pending" => Ok(InboundStabilityRegistration::Pending),
+            "applied" => Ok(InboundStabilityRegistration::Applied),
+            "invalid" => Ok(InboundStabilityRegistration::Invalid),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+
+    pub fn finish_inbound_stability_settlement(
+        &self,
+        settlement_id: &str,
+        state: &str,
+        reason: Option<&str>,
+    ) -> SqliteResult<()> {
+        if !matches!(state, "applied" | "invalid") {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid inbound stability settlement state".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE inbound_stability_settlements
+             SET state = ?2, reason = ?3, updated_at = strftime('%s', 'now')
+             WHERE settlement_id = ?1 AND state = 'pending'",
+            params![settlement_id, state, reason],
+        )?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn inbound_stability_settlement_state(
+        &self,
+        settlement_id: &str,
+    ) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT state FROM inbound_stability_settlements WHERE settlement_id = ?1",
+            params![settlement_id],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    pub fn inbound_stability_settlement_received_at(
+        &self,
+        settlement_id: &str,
+    ) -> SqliteResult<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        let created_at: Option<i64> = conn
+            .query_row(
+                "SELECT created_at FROM inbound_stability_settlements
+                 WHERE settlement_id = ?1",
+                params![settlement_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        created_at
+            .map(|value| {
+                u64::try_from(value).map_err(|_| {
+                    rusqlite::Error::IntegralValueOutOfRange(0, value)
+                })
+            })
+            .transpose()
+    }
+
+    pub fn pending_inbound_stability_settlements(
+        &self,
+        limit: usize,
+    ) -> SqliteResult<Vec<PendingInboundStabilitySettlement>> {
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT settlement_id, payment_id, amount_msat, envelope
+             FROM inbound_stability_settlements
+             WHERE state = 'pending'
+             ORDER BY created_at ASC, settlement_id ASC
+             LIMIT ?1",
+        )?;
+        let settlements = statement
+            .query_map(params![limit], |row| {
+                let amount_msat: i64 = row.get(2)?;
+                let amount_msat = u64::try_from(amount_msat).map_err(|_| {
+                    rusqlite::Error::IntegralValueOutOfRange(2, amount_msat)
+                })?;
+                Ok(PendingInboundStabilitySettlement {
+                    settlement_id: row.get(0)?,
+                    payment_id: row.get(1)?,
+                    amount_msat,
+                    envelope: row.get(3)?,
+                })
+            })?
+            .collect();
+        settlements
     }
 
     /// Record the reversible allocation transition, optimistic channel state, and ledger event in
@@ -3159,6 +3581,177 @@ pub struct DailyPriceRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_stability_registration_detects_replays_and_conflicts() {
+        let db = Database::open_in_memory().unwrap();
+        let settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        assert_eq!(
+            db.register_inbound_stability_settlement(
+                &settlement_id,
+                "payment-1",
+                &channel_id,
+                909_000,
+                "user_to_lsp",
+                "signed-envelope",
+            )
+            .unwrap(),
+            InboundStabilityRegistration::New
+        );
+        assert_eq!(
+            db.register_inbound_stability_settlement(
+                &settlement_id,
+                "payment-1",
+                &channel_id,
+                909_000,
+                "user_to_lsp",
+                "signed-envelope",
+            )
+            .unwrap(),
+            InboundStabilityRegistration::Pending
+        );
+        assert_eq!(
+            db.pending_inbound_stability_settlements(10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(db
+            .register_inbound_stability_settlement(
+                &settlement_id,
+                "payment-2",
+                &channel_id,
+                909_000,
+                "user_to_lsp",
+                "signed-envelope",
+            )
+            .is_err());
+
+        db.finish_inbound_stability_settlement(&settlement_id, "invalid", Some("signature"))
+            .unwrap();
+        assert_eq!(
+            db.inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("invalid")
+        );
+        assert!(db
+            .pending_inbound_stability_settlements(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn inbound_stability_registration_prunes_only_expired_terminal_tombstones() {
+        let db = Database::open_in_memory().unwrap();
+        let old_settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        db.register_inbound_stability_settlement(
+            &old_settlement_id,
+            "payment-old",
+            &channel_id,
+            1_000,
+            "user_to_lsp",
+            "old-envelope",
+        )
+        .unwrap();
+        db.finish_inbound_stability_settlement(&old_settlement_id, "invalid", Some("test"))
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE inbound_stability_settlements SET updated_at = 0
+                 WHERE settlement_id = ?1",
+                params![old_settlement_id],
+            )
+            .unwrap();
+
+        let new_settlement_id = "33".repeat(32);
+        db.register_inbound_stability_settlement(
+            &new_settlement_id,
+            "payment-new",
+            &channel_id,
+            1_000,
+            "user_to_lsp",
+            "new-envelope",
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.inbound_stability_settlement_state(&old_settlement_id)
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            db.inbound_stability_settlement_state(&new_settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("pending"),
+        );
+    }
+
+    #[test]
+    fn signed_stability_payment_updates_allocation_once_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        let settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        db.save_channel(&channel_id, "42", 10.0, 10_000, 40_000, None)
+            .unwrap();
+        db.register_inbound_stability_settlement(
+            &settlement_id,
+            "payment-1",
+            &channel_id,
+            909_000,
+            "user_to_lsp",
+            "signed-envelope",
+        )
+        .unwrap();
+
+        let first = db
+            .record_signed_stability_payment_and_update_allocation(
+                "payment-1",
+                &settlement_id,
+                909_000,
+                Some(0.9999),
+                Some(110_000.0),
+                "42",
+                10_000,
+                9_091,
+                40_000,
+            )
+            .unwrap();
+        assert!(first.is_new);
+        let channel = db.load_channel("42").unwrap().unwrap();
+        assert_eq!(channel.backing_sats, 9_091);
+        assert_eq!(channel.native_sats, 40_000);
+        assert_eq!(
+            db.inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("applied")
+        );
+
+        let replay = db
+            .record_signed_stability_payment_and_update_allocation(
+                "payment-1",
+                &settlement_id,
+                909_000,
+                Some(0.9999),
+                Some(110_000.0),
+                "42",
+                10_000,
+                9_091,
+                40_000,
+            )
+            .unwrap();
+        assert!(!replay.is_new);
+        assert_eq!(
+            db.load_channel("42").unwrap().unwrap().backing_sats,
+            9_091
+        );
+    }
 
     #[test]
     fn test_open_in_memory() {
@@ -4116,7 +4709,19 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.save_channel("chan_x", "42", 0.0, 0, 0, None).unwrap();
         assert_eq!(db.get_user_channel_id_by_channel_id("chan_x").unwrap(), Some("42".to_string()));
+        assert_eq!(
+            db.get_active_user_channel_id_by_channel_id("chan_x").unwrap(),
+            Some("42".to_string())
+        );
         assert_eq!(db.get_user_channel_id_by_channel_id("missing").unwrap(), None);
+        assert_eq!(db.get_active_user_channel_id_by_channel_id("missing").unwrap(), None);
+
+        db.mark_channel_closed("42").unwrap();
+        assert_eq!(
+            db.get_user_channel_id_by_channel_id("chan_x").unwrap(),
+            Some("42".to_string())
+        );
+        assert_eq!(db.get_active_user_channel_id_by_channel_id("chan_x").unwrap(), None);
     }
 
     #[test]

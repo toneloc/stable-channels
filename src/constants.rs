@@ -8,11 +8,20 @@ pub const SATS_IN_BTC: u64 = 100_000_000;
 /// Custom TLV type for stable channel messages
 pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 
+/// Authenticated metadata for a stability-payment keysend.
+pub const SIGNED_STABILITY_TLV_TYPE: u64 = 13377333;
+
+/// Maximum signed stability metadata accepted before parsing.
+pub const MAX_SIGNED_STABILITY_TLV_VALUE_BYTES: usize = 8 * 1024;
+
 /// Trade message type identifier
 pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
 /// Sync message type identifier (LSP → user expected_usd sync after stable deductions)
 pub const SYNC_MESSAGE_TYPE: &str = "SYNC_V1";
+
+/// Signed stability-payment message type identifier.
+pub const STABILITY_PAYMENT_MESSAGE_TYPE: &str = "STABILITY_PAYMENT_V1";
 
 // ============================================================================
 // DEFAULT CONFIGURATION VALUES
@@ -84,6 +93,12 @@ pub const STABILITY_THRESHOLD_USD: f64 = 0.25; // minimum $0.25 drift to trigger
 
 /// Minimum seconds between stability payments on the same channel (cooldown)
 pub const STABILITY_PAYMENT_COOLDOWN_SECS: u64 = 120;
+
+/// Maximum lifetime of a newly-created stability settlement authorization.
+pub const STABILITY_PAYMENT_AUTH_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Small allowance for peers whose system clocks are not perfectly aligned.
+pub const STABILITY_PAYMENT_CLOCK_SKEW_SECS: u64 = 60;
 
 /// Minimum USD amount to display in UI
 pub const MIN_DISPLAY_USD: f64 = 2.0;
