@@ -68,21 +68,30 @@ final class DefaultNodeStarter: NodeStarter {
 
         // Derive node entropy
         let nodeEntropy: NodeEntropy
-        if let words = try? WalletKeychainService.shared.loadMnemonic(), !words.isEmpty {
+        do {
+            let words = try WalletKeychainService.shared.loadMnemonic()
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
-        } else if let plaintextWords = try? String(
-            contentsOfFile: dataDir.appendingPathComponent("seed_phrase").path,
-            encoding: .utf8
-        ),
-            !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            logger.log("WARNING: SEED_PLAINTEXT_FALLBACK - keychain_unavailable")
-            nodeEntropy = NodeEntropy.fromBip39Mnemonic(
-                mnemonic: plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines),
-                passphrase: nil
-            )
-        } else {
-            let keySeedPath = dataDir.appendingPathComponent("keys_seed")
-            nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
+        } catch WalletKeychainError.keyNotFound {
+            // Mnemonic not in Keychain: fallback check legacy plaintext file or keys_seed
+            if let plaintextWords = try? String(
+                contentsOfFile: dataDir.appendingPathComponent("seed_phrase").path,
+                encoding: .utf8
+            ),
+                !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                logger.log("WARNING: SEED_PLAINTEXT_FALLBACK - keychain_unavailable")
+                nodeEntropy = NodeEntropy.fromBip39Mnemonic(
+                    mnemonic: plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines),
+                    passphrase: nil
+                )
+            } else {
+                let keySeedPath = dataDir.appendingPathComponent("keys_seed")
+                nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
+            }
+        } catch {
+            // Unrecoverable Keychain access failure (e.g. locked, missing group entitlements):
+            // Fail immediately instead of generating a new wallet seed or using a wrong fallback keys_seed!
+            logger.log("ERROR: KEYCHAIN_ACCESS_DENIED - \(error.localizedDescription)")
+            throw error
         }
 
         // Sync config. Only fee estimation blocks node.start() — the wallet syncs run in

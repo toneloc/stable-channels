@@ -248,32 +248,41 @@ class NodeService: NodeServiceProtocol {
             // Explicit restore callers must reset app + LDK state before
             // starting with a replacement seed. NodeService only starts LDK.
             words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if let saved = try? WalletKeychainService.shared.loadMnemonic(), !saved.isEmpty {
-            // Existing wallet — read from Keychain
-            words = saved
-        } else if let savedPlaintext = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
-                  !savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Existing wallet — fallback read from legacy plaintext file (migration path)
-            words = savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
-            // Truly new wallet — no seed in Keychain/file, no keys_seed
-            Self.wipeWalletData()
-            words = generateEntropyMnemonic(wordCount: nil)
         } else {
-            // Pre-upgrade wallet with only keys_seed, no mnemonic available
-            words = ""
+            do {
+                words = try WalletKeychainService.shared.loadMnemonic()
+            } catch WalletKeychainError.keyNotFound {
+                // Legacy migration fallback or new wallet generation
+                if let savedPlaintext = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
+                   !savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    words = savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
+                    Self.wipeWalletData()
+                    words = generateEntropyMnemonic(wordCount: nil)
+                } else {
+                    words = ""
+                }
+            } catch {
+                AuditService.log("KEYCHAIN_LOAD_FAILED", data: ["error": error.localizedDescription])
+                throw error
+            }
         }
 
         // Save mnemonic to Keychain and derive node entropy
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
-            try? WalletKeychainService.shared.storeMnemonic(words)
-            self.savedMnemonic = words
-            nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+            do {
+                try WalletKeychainService.shared.storeMnemonic(words)
+                self.savedMnemonic = words
+                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
 
-            // Clean up legacy plaintext file if it exists
-            if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
-                try? FileManager.default.removeItem(at: seedPhrasePath)
+                // Clean up legacy plaintext file ONLY if the write succeeded
+                if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
+                    try FileManager.default.removeItem(at: seedPhrasePath)
+                }
+            } catch {
+                AuditService.log("KEYCHAIN_STORE_FAILED", data: ["error": error.localizedDescription])
+                throw error
             }
         } else {
             // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
