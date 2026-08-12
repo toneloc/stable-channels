@@ -109,8 +109,30 @@ fn mirror_event_at(
     // so concurrent calls can interleave into corrupt lines.
     let mut line = log_line.to_string();
     line.push('\n');
+    rotate_if_oversize(path);
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line.as_bytes())
+}
+
+/// Cap on the live audit log before it rotates. The file grows one line per event and events can
+/// be driven by any Lightning peer (inbound TLVs), so without a bound the disk fills — which stops
+/// the daemon and its stability payments. One previous generation is kept (`<path>.1`), so on-disk
+/// audit history is bounded to roughly 2× this figure.
+const AUDIT_LOG_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Rotate `path` to `<path>.1` when it reaches the size cap, replacing any prior `.1`. Best-effort:
+/// any error leaves the current file in place so logging simply continues appending. The rename is
+/// atomic on a single filesystem; a couple of lines may land in the pre-rotation file if another
+/// thread appends between the size check and the rename, which is harmless.
+fn rotate_if_oversize(path: &std::path::Path) {
+    let over = std::fs::metadata(path)
+        .map(|meta| meta.len() >= AUDIT_LOG_MAX_BYTES)
+        .unwrap_or(false);
+    if over {
+        let mut rotated = path.as_os_str().to_owned();
+        rotated.push(".1");
+        let _ = std::fs::rename(path, std::path::PathBuf::from(rotated));
+    }
 }
 
 #[cfg(test)]

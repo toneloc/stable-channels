@@ -7,6 +7,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Maximum allowed clock skew between client and server, in seconds.
 pub const TIMESTAMP_TOLERANCE_SECS: u64 = 60;
 
+/// Maximum request body the auth layer will buffer before validating `X-Auth`.
+///
+/// REST payloads here are small prost/JSON documents. The middleware reads the body in full to
+/// compute the HMAC, and `axum`'s default 2 MiB extractor limit does NOT apply to a manual
+/// `to_bytes` read — so without this cap an unauthenticated client on the public `/api/*` proxy
+/// could POST a multi-gigabyte body and OOM-kill the daemon (which also halts stability payments).
+/// 1 MiB is generous for every real request and small enough that concurrent maxima stay bounded.
+pub const MAX_AUTH_BODY_BYTES: usize = 1024 * 1024;
+
+/// Whether a declared `Content-Length` already exceeds the cap, so the body can be rejected
+/// before a single byte is buffered. A missing or unparseable header returns `false` — the
+/// streaming read is still hard-capped at [`MAX_AUTH_BODY_BYTES`], so chunked bodies with no
+/// declared length cannot bypass the limit.
+fn declared_length_exceeds(content_length: Option<&str>, cap: usize) -> bool {
+    content_length
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|len| len > cap as u64)
+        .unwrap_or(false)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthError {
     MissingHeader,
@@ -87,7 +107,20 @@ pub async fn auth_middleware(
         .map(|s| s.to_string());
 
     let (parts, body) = req.into_parts();
-    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+
+    // Reject an oversized body before buffering it. The Content-Length check is the cheap
+    // pre-read guard; the capped `to_bytes` is the authoritative limit for bodies that lie about
+    // or omit their length. Either way, the daemon never buffers more than MAX_AUTH_BODY_BYTES
+    // for an unauthenticated request.
+    let declared_len = parts
+        .headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
+    if declared_length_exceeds(declared_len, MAX_AUTH_BODY_BYTES) {
+        return error_response(ErrorCode::InvalidRequestError, "Request body too large");
+    }
+
+    let body_bytes = match axum::body::to_bytes(body, MAX_AUTH_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             return error_response(
@@ -182,5 +215,26 @@ mod tests {
             validate_auth(Some(&header), key, b"body-b"),
             Err(AuthError::HmacMismatch),
         );
+    }
+
+    #[test]
+    fn declared_length_over_cap_is_rejected() {
+        assert!(declared_length_exceeds(Some("1048577"), MAX_AUTH_BODY_BYTES));
+        assert!(declared_length_exceeds(Some("9999999999"), MAX_AUTH_BODY_BYTES));
+    }
+
+    #[test]
+    fn declared_length_at_or_under_cap_is_allowed() {
+        assert!(!declared_length_exceeds(Some("1048576"), MAX_AUTH_BODY_BYTES));
+        assert!(!declared_length_exceeds(Some("0"), MAX_AUTH_BODY_BYTES));
+        assert!(!declared_length_exceeds(Some("512"), MAX_AUTH_BODY_BYTES));
+    }
+
+    #[test]
+    fn absent_or_garbage_length_defers_to_streaming_cap() {
+        // No pre-read rejection — the capped to_bytes read is the real limit.
+        assert!(!declared_length_exceeds(None, MAX_AUTH_BODY_BYTES));
+        assert!(!declared_length_exceeds(Some("not-a-number"), MAX_AUTH_BODY_BYTES));
+        assert!(!declared_length_exceeds(Some(""), MAX_AUTH_BODY_BYTES));
     }
 }
