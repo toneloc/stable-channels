@@ -52,6 +52,15 @@ final class WalletKeychainServiceTests: XCTestCase {
         XCTAssertEqual(loaded, otherMnemonic)
     }
 
+    func testStoreMnemonicIsIdempotentWhenValueIsUnchanged() throws {
+        let service = makeService()
+        try service.storeMnemonic(testMnemonic)
+        // Store same mnemonic again — should succeed (no-op path)
+        XCTAssertNoThrow(try service.storeMnemonic(testMnemonic))
+        let loaded = try service.loadMnemonic()
+        XCTAssertEqual(loaded, testMnemonic)
+    }
+
     // MARK: - hasMnemonic
 
     func testHasMnemonicReturnsFalseWhenEmpty() {
