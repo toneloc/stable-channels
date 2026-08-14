@@ -231,12 +231,23 @@ struct ErrorDisplayView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button(String(localized: "try_again", defaultValue: "Try Again")) {
-                appState.phase = .loading
-                Task { await appState.start() }
+            if message.contains("Mismatched state") {
+                Button("Reset and Restore") {
+                    AppState.wipeAllWalletState()
+                    appState.phase = .loading
+                    Task { await appState.start() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .padding(.top, 4)
+            } else {
+                Button(String(localized: "try_again", defaultValue: "Try Again")) {
+                    appState.phase = .loading
+                    Task { await appState.start() }
+                }
+                .buttonStyle(.bordered)
+                .padding(.top, 8)
             }
-            .buttonStyle(.bordered)
-            .padding(.top, 8)
         }
     }
 }

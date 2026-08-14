@@ -8,10 +8,25 @@ final class WalletKeychainServiceTests: XCTestCase {
 
     // MARK: - Helpers
 
+    private var servicesCreated: [WalletKeychainService] = []
+
     private func makeService() -> WalletKeychainService {
-        let svc = WalletKeychainService.shared
-        svc.deleteMnemonic()
+        let svc = WalletKeychainService(
+            service: "com.stablechannels.wallet.test",
+            account: "seed_phrase_test_\(UUID().uuidString)",
+            accessGroup: nil
+        )
+        servicesCreated.append(svc)
+        try? svc.deleteMnemonic()
         return svc
+    }
+
+    override func tearDownWithError() throws {
+        for svc in servicesCreated {
+            try? svc.deleteMnemonic()
+        }
+        servicesCreated.removeAll()
+        try super.tearDownWithError()
     }
 
     // MARK: - storeMnemonic / loadMnemonic round-trip
@@ -77,7 +92,7 @@ final class WalletKeychainServiceTests: XCTestCase {
     func testHasMnemonicReturnsFalseAfterDelete() throws {
         let service = makeService()
         try service.storeMnemonic(testMnemonic)
-        service.deleteMnemonic()
+        try? service.deleteMnemonic()
         XCTAssertFalse(service.hasMnemonic())
     }
 
@@ -98,13 +113,13 @@ final class WalletKeychainServiceTests: XCTestCase {
     func testDeleteMnemonicIsIdempotent() {
         let service = makeService()
         // Must not throw when deleting a key that does not exist
-        service.deleteMnemonic()
+        XCTAssertNoThrow(try service.deleteMnemonic())
     }
 
     func testDeleteMnemonicRemovesKeyPermanently() throws {
         let service = makeService()
         try service.storeMnemonic(testMnemonic)
-        service.deleteMnemonic()
+        try service.deleteMnemonic()
         XCTAssertFalse(service.hasMnemonic())
         XCTAssertThrowsError(try service.loadMnemonic()) { error in
             guard case WalletKeychainError.keyNotFound = error else {
