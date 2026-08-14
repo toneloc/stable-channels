@@ -5,6 +5,7 @@ enum StartupState: Equatable {
     case newWallet
     case seedOnlyMismatch
     case dbOnlyMismatch
+    case seedStorageMismatch
     case storageError(String)
 }
 
@@ -29,17 +30,24 @@ final class WalletLifecycleManager {
     private let keychain: any MnemonicStorageProtocol
     private let userDataDir: URL
     private let appGroupIdentifier: String
+    private let validator: (String) -> Bool
 
     private static let restorePhaseKey = "restore_phase"
 
     init(
         keychain: any MnemonicStorageProtocol = WalletKeychainService.shared,
         userDataDir: URL = Constants.userDataDir,
-        appGroupIdentifier: String = Constants.appGroupIdentifier
+        appGroupIdentifier: String = Constants.appGroupIdentifier,
+        validator: @escaping (String) -> Bool = { mnemonic in
+            let words = mnemonic.split(whereSeparator: \.isWhitespace)
+            guard [12, 15, 18, 21, 24].contains(words.count) else { return false }
+            return AppState.deriveNodeId(mnemonic: mnemonic) != nil
+        }
     ) {
         self.keychain = keychain
         self.userDataDir = userDataDir
         self.appGroupIdentifier = appGroupIdentifier
+        self.validator = validator
     }
 
     /// Evaluates if a given mnemonic string matches valid BIP-39 word counts (12, 15, 18, 21, 24 words).
@@ -55,11 +63,24 @@ final class WalletLifecycleManager {
         let seedPhrasePath = userDataDir.appendingPathComponent("seed_phrase")
 
         let hasKeychainSeed: Bool
+        let keychainSeed: String?
         do {
             hasKeychainSeed = try keychain.hasMnemonic()
+            keychainSeed = hasKeychainSeed ? try keychain.loadMnemonic() : nil
         } catch {
             AuditService.log("STARTUP_KEYCHAIN_ERROR", data: ["error": error.localizedDescription])
             return .storageError(error.localizedDescription)
+        }
+
+        // Detect seed storage mismatch between secure Keychain and plaintext seed_phrase
+        if let kcSeed = keychainSeed,
+           let plaintext = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8) {
+            let canonicalPlaintext = MnemonicMigrator.canonicalizeMnemonic(plaintext)
+            let canonicalKeychain = MnemonicMigrator.canonicalizeMnemonic(kcSeed)
+            if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
+                AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
+                return .seedStorageMismatch
+            }
         }
 
         let hasSeed = FileManager.default.fileExists(atPath: seedPath.path)
@@ -97,7 +118,7 @@ final class WalletLifecycleManager {
             case .pendingValidation:
                 // Old database may still exist: wipe persistence first, then advance
                 try onWipePersistence()
-                setRestorePhase(.oldPersistenceWiped)
+                try setRestorePhase(.oldPersistenceWiped)
                 try keychain.storeMnemonic(pending)
                 try keychain.deletePendingMnemonic()
                 clearRestorePhase()
@@ -118,7 +139,7 @@ final class WalletLifecycleManager {
 
     /// Executes the staged restore transaction safely.
     /// Order of operations:
-    /// 1. Validate mnemonic format (fails before any mutation).
+    /// 1. Validate BIP-39 mnemonic (fails before any mutation).
     /// 2. Store in pending Keychain slot.
     /// 3. Save durable restore phase (.pendingValidation).
     /// 4. Stop node.
@@ -132,16 +153,16 @@ final class WalletLifecycleManager {
         onWipePersistence: () throws -> Void
     ) throws {
         let canonical = MnemonicMigrator.canonicalizeMnemonic(mnemonic)
-        guard Self.isValidMnemonicFormat(canonical) else {
+        guard validator(canonical) else {
             AuditService.log("RESTORE_INVALID_MNEMONIC", data: [:])
-            throw WalletRestoreError.invalidMnemonic("Invalid mnemonic word count. Expected 12 or 24 words.")
+            throw WalletRestoreError.invalidMnemonic("Invalid BIP-39 mnemonic phrase. Check words and checksum.")
         }
 
         // 1. Store and verify pending seed (abort if write fails - active wallet is untouched)
         try keychain.storePendingMnemonic(canonical)
 
         // 2. Record durable restore phase
-        setRestorePhase(.pendingValidation)
+        try setRestorePhase(.pendingValidation)
 
         // 3. Stop node and wipe old database/persistence (throwing)
         onStopNode()
@@ -153,7 +174,7 @@ final class WalletLifecycleManager {
         }
 
         // 4. Mark old persistence successfully wiped
-        setRestorePhase(.oldPersistenceWiped)
+        try setRestorePhase(.oldPersistenceWiped)
 
         // 5. Promote pending seed to active slot
         do {
@@ -181,10 +202,15 @@ final class WalletLifecycleManager {
         return nil
     }
 
-    private func setRestorePhase(_ phase: RestorePhase) {
-        let ud = UserDefaults(suiteName: appGroupIdentifier)
-        ud?.set(phase.rawValue, forKey: Self.restorePhaseKey)
-        ud?.set(true, forKey: "restore_in_progress")
+    private func setRestorePhase(_ phase: RestorePhase) throws {
+        guard let ud = UserDefaults(suiteName: appGroupIdentifier) else {
+            throw WalletRestoreError.wipeFailed("UserDefaults app group is inaccessible")
+        }
+        ud.set(phase.rawValue, forKey: Self.restorePhaseKey)
+        ud.set(true, forKey: "restore_in_progress")
+        guard ud.string(forKey: Self.restorePhaseKey) == phase.rawValue else {
+            throw WalletRestoreError.wipeFailed("Failed to persist restore phase marker")
+        }
     }
 
     private func clearRestorePhase() {
