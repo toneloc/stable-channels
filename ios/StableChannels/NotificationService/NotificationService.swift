@@ -397,8 +397,9 @@ class NotificationService: UNNotificationServiceExtension {
         let keySeedPath = dataDir.appendingPathComponent("keys_seed")
         let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
         let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
+        let hasKeychainSeed = (try? keychain.hasMnemonic()) ?? false
         return FileManager.default.fileExists(atPath: keySeedPath.path)
-            || keychain.hasMnemonic()
+            || hasKeychainSeed
             || FileManager.default.fileExists(atPath: seedPhrasePath.path)
     }
 

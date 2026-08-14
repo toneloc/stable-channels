@@ -13,6 +13,13 @@ enum MnemonicMigrationError: Error, LocalizedError {
 
 /// Responsible solely for encrypted-first mnemonic loading and legacy plaintext migration.
 enum MnemonicMigrator {
+    /// Normalizes internal and external whitespace for canonical BIP-39 mnemonic comparison.
+    static func canonicalizeMnemonic(_ mnemonic: String) -> String {
+        mnemonic
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
     /// Loads the stored mnemonic from Keychain, or migrates an existing legacy plaintext file to Keychain.
     ///
     /// Encrypted-first rule: If a Keychain entry exists, it is authoritative.
@@ -25,10 +32,11 @@ enum MnemonicMigrator {
         // 1. Encrypted-first: an existing Keychain seed is authoritative.
         do {
             let keychainMnemonic = try keychain.loadMnemonic()
+            let canonicalKeychain = canonicalizeMnemonic(keychainMnemonic)
             // Reconcile lingering legacy plaintext file if present
             if let plaintext = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) {
-                let trimmed = plaintext.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty, trimmed != keychainMnemonic {
+                let canonicalPlaintext = canonicalizeMnemonic(plaintext)
+                if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
                     logError?("KEYCHAIN_PLAINTEXT_MISMATCH", [:])
                     throw MnemonicMigrationError.seedMismatch
                 }
@@ -38,32 +46,32 @@ enum MnemonicMigrator {
                     logError?("KEYCHAIN_PLAINTEXT_DELETE_FAILED", ["error": error.localizedDescription])
                 }
             }
-            return keychainMnemonic
+            return canonicalKeychain
         } catch WalletKeychainError.keyNotFound {
             // Keychain is genuinely empty; plaintext migration is allowed.
         } catch let mismatch as MnemonicMigrationError {
             throw mismatch // Propagate mismatch error up to block startup
         } catch {
             logError?("KEYCHAIN_LOAD_FAILED", ["error": error.localizedDescription])
-            return nil // Fail closed: leave both stores untouched
+            throw error // Fail closed: operational Keychain error must halt startup!
         }
 
         // 2. Keychain empty — migrate plaintext if present.
         guard let words = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) else { return nil }
-        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
+        let canonicalWords = canonicalizeMnemonic(words)
+        guard !canonicalWords.isEmpty else { return nil }
 
         do {
-            try keychain.storeMnemonic(trimmed)
+            try keychain.storeMnemonic(canonicalWords)
             do {
                 try FileManager.default.removeItem(at: legacyPath)
             } catch {
                 logError?("KEYCHAIN_PLAINTEXT_DELETE_FAILED", ["error": error.localizedDescription])
             }
-            return trimmed
+            return canonicalWords
         } catch {
             logError?("KEYCHAIN_MIGRATION_FAILED", ["error": error.localizedDescription])
-            return trimmed // Return candidate so app still functions even if Keychain write failed
+            throw error // Fail closed: migration failure must halt startup, never continue in plaintext!
         }
     }
 }
