@@ -170,11 +170,9 @@ enum Constants {
             filterValue: "BTCUSDT"
         ),
         PriceFeedConfig(
-            name: "Bitpay",
-            urlFormat: "https://bitpay.com/rates",
-            jsonPath: ["rate"],
-            filterKey: "code",
-            filterValue: "USD"
+            name: "Mempool.space",
+            urlFormat: "https://mempool.space/api/v1/prices",
+            jsonPath: ["USD"]
         )
     ]
 
