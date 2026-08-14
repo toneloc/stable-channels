@@ -397,7 +397,13 @@ class NotificationService: UNNotificationServiceExtension {
         let keySeedPath = dataDir.appendingPathComponent("keys_seed")
         let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
         let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
-        let hasKeychainSeed = (try? keychain.hasMnemonic()) ?? false
+        let hasKeychainSeed: Bool
+        do {
+            hasKeychainSeed = try keychain.hasMnemonic()
+        } catch {
+            NSLog("[NotificationService] ERROR: KEYCHAIN_ACCESS_DENIED - \(error.localizedDescription)")
+            return false
+        }
         return FileManager.default.fileExists(atPath: keySeedPath.path)
             || hasKeychainSeed
             || FileManager.default.fileExists(atPath: seedPhrasePath.path)
