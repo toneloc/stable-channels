@@ -487,14 +487,14 @@ class AppState {
         }
 
         // Force delete both active and pending keychains
-        try? keychain.deleteMnemonic()
-        try? keychain.deletePendingMnemonic()
+        try keychain.deleteMnemonic()
+        try keychain.deletePendingMnemonic()
     }
 
     /// Derive the node_id a mnemonic maps to by building (never starting) a
     /// throwaway node in a temp directory. Returns nil on any failure so the
     /// restore guard fails open.
-    private nonisolated static func deriveNodeId(mnemonic: String) -> String? {
+    nonisolated static func deriveNodeId(mnemonic: String) -> String? {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -743,6 +743,15 @@ class AppState {
                 phase =
                     .error(
                         "Mismatched state: Local channel database exists, but the wallet seed is missing. Please restore using your backup seed words."
+                    )
+            }
+        case .seedStorageMismatch:
+            AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase =
+                    .error(
+                        "Mismatched state: Secure Keychain seed does not match plaintext backup file. Please restore using your backup seed words."
                     )
             }
         case .storageError(let msg):

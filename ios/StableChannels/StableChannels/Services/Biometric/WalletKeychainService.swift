@@ -47,7 +47,7 @@ protocol MnemonicStorageProtocol {
 /// Keychain-backed secure storage service for the wallet mnemonic.
 ///
 /// ...
-class WalletKeychainService: MnemonicStorageProtocol {
+final class WalletKeychainService: MnemonicStorageProtocol {
     static let shared = WalletKeychainService()
 
     static var onLog: ((String, [String: Any]) -> Void)?
@@ -132,7 +132,7 @@ class WalletKeychainService: MnemonicStorageProtocol {
             base[kSecAttrAccessGroup as String] = group
         }
 
-        let exists = (try? hasMnemonicInternal(accountName: accountName)) ?? false
+        let exists = try hasMnemonicInternal(accountName: accountName)
         if exists {
             let attributesToUpdate: [String: Any] = [
                 kSecValueData as String: data,
