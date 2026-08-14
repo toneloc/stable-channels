@@ -91,7 +91,22 @@ class AppState {
     var confirmationUpdateEpoch: Int = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
-    private var lifecycleManager: WalletLifecycleManager!
+    private let lifecycleManager = WalletLifecycleManager(
+        validator: { mnemonic in
+            AppState.deriveNodeId(mnemonic: mnemonic) != nil
+        }
+    )
+
+    init() {
+        // Set audit log path
+        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        AuditService.setLogPath(auditPath)
+
+        // Hook WalletKeychainService logging into AuditService
+        WalletKeychainService.onLog = { event, data in
+            AuditService.log(event, data: data)
+        }
+    }
 
     // MARK: - State
 
@@ -273,22 +288,6 @@ class AppState {
             Task { @MainActor in
                 self?.handleWebSocketTransactionDetected(event: event)
             }
-        }
-
-        // Set audit log path
-        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
-        AuditService.setLogPath(auditPath)
-
-        // Initialize WalletLifecycleManager with injected BIP-39 validator
-        self.lifecycleManager = WalletLifecycleManager(
-            validator: { mnemonic in
-                AppState.deriveNodeId(mnemonic: mnemonic) != nil
-            }
-        )
-
-        // Hook WalletKeychainService logging into AuditService
-        WalletKeychainService.onLog = { event, data in
-            AuditService.log(event, data: data)
         }
     }
 
