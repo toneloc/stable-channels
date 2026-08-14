@@ -239,14 +239,75 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertEqual(ud?.string(forKey: "restore_phase"), RestorePhase.pendingValidation.rawValue)
     }
 
-    func testRecoveryKeyNotFoundClearsDanglingPhase() throws {
+    func testRecoveryKeyNotFoundClearsDanglingPhaseWhenActiveSeedPresent() throws {
         let ud = UserDefaults(suiteName: testAppGroup)
         ud?.set(RestorePhase.pendingValidation.rawValue, forKey: "restore_phase")
-        // No pending mnemonic stored (keyNotFound)
+        mockStorage.mockMnemonic = testMnemonic // Active seed exists
 
         try manager.runRecoveryIfNeeded(onWipePersistence: {})
 
-        // Dangling phase should be cleared safely
+        // Dangling phase should be cleared safely when active wallet is intact
+        XCTAssertNil(ud?.string(forKey: "restore_phase"))
+    }
+
+    func testRecoveryWithRestoreMarkerFailsClosedWhenBothPendingAndActiveSeedsMissing() throws {
+        let ud = UserDefaults(suiteName: testAppGroup)
+        ud?.set(RestorePhase.pendingValidation.rawValue, forKey: "restore_phase")
+        // Neither active nor pending seed exists in mockStorage
+
+        XCTAssertThrowsError(try manager.runRecoveryIfNeeded(onWipePersistence: {})) { error in
+            guard let restoreError = error as? WalletRestoreError,
+                  case .recoveryFailed = restoreError else {
+                XCTFail("Expected WalletRestoreError.recoveryFailed but got \(error)")
+                return
+            }
+        }
+
+        // Marker must be preserved so system fails closed and does not start as a fresh blank wallet
+        XCTAssertEqual(ud?.string(forKey: "restore_phase"), RestorePhase.pendingValidation.rawValue)
+    }
+
+    func testRestoreRealWipePreservesPendingSeedAndPromotesSuccessfully() throws {
+        let ud = UserDefaults(suiteName: testAppGroup)
+        mockStorage.mockMnemonic = testMnemonic
+
+        var wipeExecuted = false
+        // Simulate real persistence wipe: wipes files and active Keychain seed, but NOT pending seed
+        try manager.restoreMnemonic(
+            otherMnemonic,
+            onStopNode: {},
+            onWipePersistence: {
+                wipeExecuted = true
+                try mockStorage.deleteMnemonic() // real wipe deletes active seed only
+                XCTAssertEqual(
+                    mockStorage.mockPendingMnemonic,
+                    otherMnemonic,
+                    "Pending seed must remain in Keychain during wipe!"
+                )
+            }
+        )
+
+        XCTAssertTrue(wipeExecuted)
+        XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
+        XCTAssertNil(ud?.string(forKey: "restore_phase"))
+    }
+
+    func testInterruptedRestoreAfterWipeRecoversFromPendingSeed() throws {
+        let ud = UserDefaults(suiteName: testAppGroup)
+        ud?.set(RestorePhase.oldPersistenceWiped.rawValue, forKey: "restore_phase")
+        mockStorage.mockPendingMnemonic = otherMnemonic
+        mockStorage.mockMnemonic = nil // Active seed was wiped before the crash
+
+        var wipeCalled = false
+        try manager.runRecoveryIfNeeded(onWipePersistence: {
+            wipeCalled = true
+        })
+
+        // In oldPersistenceWiped phase, wipe is already complete; pending seed promotes to active
+        XCTAssertFalse(wipeCalled)
+        XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
         XCTAssertNil(ud?.string(forKey: "restore_phase"))
     }
 }

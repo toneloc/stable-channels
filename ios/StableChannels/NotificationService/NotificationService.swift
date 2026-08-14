@@ -226,8 +226,25 @@ class NotificationService: UNNotificationServiceExtension {
             .appendingPathComponent("StableChannels")
             .appendingPathComponent("user")
 
+        let sharedUD = UserDefaults(suiteName: Constants.appGroup)
+        let isRestoring = sharedUD?.string(forKey: "restore_phase") != nil
+            || sharedUD?.bool(forKey: "restore_in_progress") == true
+
+        let dbPath = dataDir.appendingPathComponent("ldk_node_data.sqlite")
+        let hasDb = FileManager.default.fileExists(atPath: dbPath.path)
+        let seedExists = hasSeed(dataDir: dataDir)
+
+        // Refuse to start if restore is in progress or if seed exists without its database (mismatch)
+        if isRestoring || (seedExists && !hasDb) {
+            logger.log("Startup mismatch or restore in progress: deferring payment to main app")
+            sharedUD?.set(true, forKey: "pending_push_payment")
+            cleanup()
+            finish(content)
+            return
+        }
+
         // Check for seed
-        guard hasSeed(dataDir: dataDir) else {
+        guard seedExists else {
             logger.log("FAILED: No seed found")
             cleanup()
             finish(content)
