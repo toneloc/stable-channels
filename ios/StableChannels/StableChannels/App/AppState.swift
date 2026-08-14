@@ -593,22 +593,6 @@ class AppState {
                 await self?.feeRateService.updateRecommendedFees(rec)
             }
         }
-
-        // Set audit log path
-        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
-        AuditService.setLogPath(auditPath)
-
-        // Initialize WalletLifecycleManager with injected BIP-39 validator
-        self.lifecycleManager = WalletLifecycleManager(
-            validator: { mnemonic in
-                AppState.deriveNodeId(mnemonic: mnemonic) != nil
-            }
-        )
-
-        // Hook WalletKeychainService logging into AuditService
-        WalletKeychainService.onLog = { event, data in
-            AuditService.log(event, data: data)
-        }
     }
 
     /// Replace the active wallet with a restored seed in one app-owned flow.
