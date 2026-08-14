@@ -218,6 +218,7 @@ struct SyncingView: View {
 struct ErrorDisplayView: View {
     let message: String
     @Environment(AppState.self) private var appState
+    @State private var showingRestoreSheet = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -232,17 +233,10 @@ struct ErrorDisplayView: View {
                 .padding(.horizontal)
 
             if message.contains("Mismatched state") {
-                Button("Reset and Restore") {
-                    do {
-                        try AppState.wipeAllWalletState()
-                        appState.phase = .loading
-                        Task { await appState.start() }
-                    } catch {
-                        appState.phase = .error("Unable to reset wallet securely: \(error.localizedDescription)")
-                    }
+                Button("Restore From Backup Seed") {
+                    showingRestoreSheet = true
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
                 .padding(.top, 4)
             } else {
                 Button(String(localized: "try_again", defaultValue: "Try Again")) {
@@ -253,6 +247,39 @@ struct ErrorDisplayView: View {
                 .padding(.top, 8)
             }
         }
+        .sheet(isPresented: $showingRestoreSheet) {
+            MismatchRecoverySheet()
+        }
+    }
+}
+
+private struct MismatchRecoverySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+    @State private var restoreMnemonic = ""
+    @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.wordCount12)
+    @State private var isWordFieldsReadOnly = false
+    @State private var isImportingSeed = false
+    @State private var isRestoring = false
+    @State private var restoreError: String?
+
+    var body: some View {
+        RestoreSeedSheet(
+            restoreMnemonic: $restoreMnemonic,
+            wordFields: $wordFields,
+            isWordFieldsReadOnly: $isWordFieldsReadOnly,
+            isImportingSeed: $isImportingSeed,
+            isRestoring: $isRestoring,
+            restoreError: $restoreError,
+            onCancel: {
+                dismiss()
+            },
+            onSuccess: {
+                dismiss()
+                appState.phase = .loading
+                Task { await appState.start() }
+            }
+        )
     }
 }
 
