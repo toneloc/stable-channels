@@ -67,14 +67,68 @@ final class WalletLifecycleManagerTests: XCTestCase {
         }
     }
 
+    func testDetectStartupStateSeedStorageMismatch() throws {
+        try mockStorage.storeMnemonic(testMnemonic)
+        let seedPhrasePath = tempDirURL.appendingPathComponent("seed_phrase")
+        try otherMnemonic.write(to: seedPhrasePath, atomically: true, encoding: .utf8)
+
+        let state = manager.detectStartupState()
+        XCTAssertEqual(state, .seedStorageMismatch)
+    }
+
     // MARK: - BIP-39 Validation & Restore Flow
 
-    func testRestoreRejectsInvalidMnemonicWithoutTouchingStorage() {
+    func testRestoreRejectsInvalidWordCountWithoutTouchingStorage() {
         var nodeStopped = false
         var persistenceWiped = false
 
         XCTAssertThrowsError(try manager.restoreMnemonic(
             "one two three four five",
+            onStopNode: { nodeStopped = true },
+            onWipePersistence: { persistenceWiped = true }
+        )) { error in
+            guard case WalletRestoreError.invalidMnemonic = error else {
+                XCTFail("Expected invalidMnemonic, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertFalse(nodeStopped)
+        XCTAssertFalse(persistenceWiped)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
+        XCTAssertNil(mockStorage.mockMnemonic)
+    }
+
+    func testRestoreRejectsInvalidBip39WordWithoutTouchingStorage() {
+        var nodeStopped = false
+        var persistenceWiped = false
+        let invalidWordMnemonic = "foo foo foo foo foo foo foo foo foo foo foo foo"
+
+        XCTAssertThrowsError(try manager.restoreMnemonic(
+            invalidWordMnemonic,
+            onStopNode: { nodeStopped = true },
+            onWipePersistence: { persistenceWiped = true }
+        )) { error in
+            guard case WalletRestoreError.invalidMnemonic = error else {
+                XCTFail("Expected invalidMnemonic, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertFalse(nodeStopped)
+        XCTAssertFalse(persistenceWiped)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
+        XCTAssertNil(mockStorage.mockMnemonic)
+    }
+
+    func testRestoreRejectsInvalidBip39ChecksumWithoutTouchingStorage() {
+        var nodeStopped = false
+        var persistenceWiped = false
+        // 12th word is 'abandon' instead of 'about', creating an invalid BIP-39 checksum
+        let invalidChecksumMnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon"
+
+        XCTAssertThrowsError(try manager.restoreMnemonic(
+            invalidChecksumMnemonic,
             onStopNode: { nodeStopped = true },
             onWipePersistence: { persistenceWiped = true }
         )) { error in
