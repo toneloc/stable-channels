@@ -86,6 +86,7 @@
 		49B100D6302A493400D72430 /* WalletKeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B100D4302A493400D72430 /* WalletKeychainService.swift */; };
 		49D0FF57302CF5FD00D38B06 /* MnemonicMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */; };
 		49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */; };
+		49D0FF61302CF70000D38B06 /* WalletLifecycleManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF60302CF70000D38B06 /* WalletLifecycleManagerTests.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -263,6 +264,7 @@
 		49B100D4302A493400D72430 /* WalletKeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletKeychainService.swift; sourceTree = "<group>"; };
 		49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicMigrator.swift; sourceTree = "<group>"; };
 		49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicMigratorTests.swift; sourceTree = "<group>"; };
+		49D0FF60302CF70000D38B06 /* WalletLifecycleManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletLifecycleManagerTests.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -743,6 +745,7 @@
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
 				64791A21EBEE43769493F7F4 /* WalletKeychainServiceTests.swift */,
+				49D0FF60302CF70000D38B06 /* WalletLifecycleManagerTests.swift */,
 			);
 			path = StableChannelsTests;
 			sourceTree = "<group>";
@@ -873,6 +876,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49D0FF61302CF70000D38B06 /* WalletLifecycleManagerTests.swift in Sources */,
 				49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,

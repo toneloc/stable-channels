@@ -233,7 +233,7 @@ struct ErrorDisplayView: View {
 
             if message.contains("Mismatched state") {
                 Button("Reset and Restore") {
-                    AppState.wipeAllWalletState()
+                    try? AppState.wipeAllWalletState()
                     appState.phase = .loading
                     Task { await appState.start() }
                 }

@@ -619,7 +619,10 @@ class NodeService: NodeServiceProtocol {
             "ldk_node_data.sqlite-shm"
         ]
         for file in filesToDelete {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
+            let path = dir.appendingPathComponent(file)
+            if FileManager.default.fileExists(atPath: path.path) {
+                try FileManager.default.removeItem(at: path)
+            }
         }
         try keychain.deleteMnemonic()
     }
