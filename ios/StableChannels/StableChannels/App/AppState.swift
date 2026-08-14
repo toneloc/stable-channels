@@ -469,7 +469,8 @@ class AppState {
     }
 
     static func wipeAllWalletState() {
-        try? NodeService.wipeWalletData()
+        let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
+        try? NodeService.wipeWalletData(keychain: keychain)
 
         let dir = Constants.userDataDir
         let filesToDelete = [
@@ -483,8 +484,8 @@ class AppState {
         }
 
         // Force delete both active and pending keychains
-        try? WalletKeychainService.shared.deleteMnemonic()
-        try? WalletKeychainService.shared.deletePendingMnemonic()
+        try? keychain.deleteMnemonic()
+        try? keychain.deletePendingMnemonic()
     }
 
     /// Derive the node_id a mnemonic maps to by building (never starting) a
