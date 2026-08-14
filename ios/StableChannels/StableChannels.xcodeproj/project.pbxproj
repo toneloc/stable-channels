@@ -43,6 +43,7 @@
 		498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A83022712F0086BDB6 /* BiometricProtocols.swift */; };
 		498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */; };
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
+		498790D0302F089F00479903 /* WalletLifecycleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498790CF302F089F00479903 /* WalletLifecycleManager.swift */; };
 		499127782FFEB4FB00D9C81F /* PaymentDirection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127772FFEB4FB00D9C81F /* PaymentDirection.swift */; };
 		499127802FFEB50B00D9C81F /* IncomingPaymentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */; };
 		499127812FFEB50B00D9C81F /* Logger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277A2FFEB50B00D9C81F /* Logger.swift */; };
@@ -221,6 +222,7 @@
 		498244A83022712F0086BDB6 /* BiometricProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricProtocols.swift; sourceTree = "<group>"; };
 		498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricToggleCoordinator.swift; sourceTree = "<group>"; };
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
+		498790CF302F089F00479903 /* WalletLifecycleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletLifecycleManager.swift; sourceTree = "<group>"; };
 		499127772FFEB4FB00D9C81F /* PaymentDirection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDirection.swift; sourceTree = "<group>"; };
 		499127792FFEB50B00D9C81F /* IncomingPaymentHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IncomingPaymentHandler.swift; sourceTree = "<group>"; };
 		4991277A2FFEB50B00D9C81F /* Logger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logger.swift; sourceTree = "<group>"; };
@@ -432,6 +434,7 @@
 				498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */,
 				49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */,
 				49B100D4302A493400D72430 /* WalletKeychainService.swift */,
+				498790CF302F089F00479903 /* WalletLifecycleManager.swift */,
 			);
 			path = Biometric;
 			sourceTree = "<group>";
@@ -896,6 +899,7 @@
 				499E5372301A92900050E3F8 /* SettingsBannerView.swift in Sources */,
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
 				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
+				498790D0302F089F00479903 /* WalletLifecycleManager.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
 				49ACB1D7301BD2A500C3B1A7 /* BackupSheetHelpers.swift in Sources */,
 				49ACB1D8301BD2A500C3B1A7 /* ExportSheet.swift in Sources */,

@@ -91,6 +91,7 @@ class AppState {
     var confirmationUpdateEpoch: Int = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
+    private let lifecycleManager = WalletLifecycleManager()
 
     // MARK: - State
 
@@ -358,55 +359,28 @@ class AppState {
             throw WalletRestoreError.walletBusy
         }
 
-        // 1. Store and verify pending seed (abort if write fails - active wallet is untouched)
+        // Execute staged restore transaction via decoupled WalletLifecycleManager
         do {
-            try WalletKeychainService.shared.storePendingMnemonic(words)
+            try lifecycleManager.restoreMnemonic(
+                words,
+                onStopNode: {
+                    self.stabilityTimer?.cancel()
+                    self.stabilityTimer = nil
+                    self.txidResolutionService.cancelAllLaunchers()
+                    self.nodeService.stop()
+                    self.resetInMemoryWalletState()
+                    self.dropDatabaseServices()
+                },
+                onWipePersistence: {
+                    self.wipeWalletPersistence()
+                }
+            )
         } catch {
-            AuditService.log("RESTORE_PENDING_STORE_FAILED", data: ["error": error.localizedDescription])
             NodeDirLock.shared.release()
             phase = priorPhase
             statusMessage = ""
             throw error
         }
-
-        // 2. Record restore marker
-        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        ud?.set(true, forKey: "restore_in_progress")
-
-        // 3. Wipe active state
-        stabilityTimer?.cancel()
-        stabilityTimer = nil
-        txidResolutionService.cancelAllLaunchers()
-        nodeService.stop()
-
-        resetInMemoryWalletState()
-        dropDatabaseServices()
-
-        // Wipe Keychain mnemonic (old seed)
-        do {
-            try WalletKeychainService.shared.deleteMnemonic()
-        } catch {
-            AuditService.log("RESTORE_KEYCHAIN_DELETE_FAILED", data: ["error": error.localizedDescription])
-            // Proceed anyway since we have the pending seed and can overwrite the active slot
-        }
-
-        // Wipe database files
-        wipeWalletPersistence()
-
-        // 4. Activate new seed
-        do {
-            let pendingMnemonic = try WalletKeychainService.shared.loadPendingMnemonic()
-            try WalletKeychainService.shared.storeMnemonic(pendingMnemonic)
-            try WalletKeychainService.shared.deletePendingMnemonic()
-        } catch {
-            AuditService.log("RESTORE_ACTIVATION_FAILED", data: ["error": error.localizedDescription])
-            // Do not clear the restore marker so recovery can resume on next launch
-            phase = .error("Restore failed during activation. Please restart the app.")
-            throw error
-        }
-
-        // 5. Clear marker
-        ud?.removeObject(forKey: "restore_in_progress")
 
         do {
             try initializeDatabaseServices()
@@ -607,25 +581,16 @@ class AppState {
         }
         let lockMs = elapsedMs(lockStart)
 
-        // Self-healing restore recovery: Check if there was an interrupted restore transaction
-        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        if ud?.bool(forKey: "restore_in_progress") == true {
-            AuditService.log("RESTORE_INTERRUPTED_RECOVERY_START", data: [:])
-            do {
-                if let pendingMnemonic = try? WalletKeychainService.shared.loadPendingMnemonic(),
-                   !pendingMnemonic.isEmpty {
-                    // Staged recovery: complete the transition
-                    wipeWalletPersistence()
-                    try WalletKeychainService.shared.storeMnemonic(pendingMnemonic)
-                    try WalletKeychainService.shared.deletePendingMnemonic()
-                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_SUCCESS", data: [:])
-                } else {
-                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_FAILED_NO_PENDING", data: [:])
-                }
-            } catch {
-                AuditService.log("RESTORE_INTERRUPTED_RECOVERY_FAILED", data: ["error": error.localizedDescription])
+        // Self-healing restore recovery: Delegate to WalletLifecycleManager
+        do {
+            try lifecycleManager.runRecoveryIfNeeded {
+                self.wipeWalletPersistence()
             }
-            ud?.removeObject(forKey: "restore_in_progress")
+        } catch {
+            await MainActor.run {
+                phase = .error("Restore recovery failed: \(error.localizedDescription). Please restart the app.")
+            }
+            return // Stop startup, keep directory lock and marker intact
         }
 
         // Initialize database
@@ -679,17 +644,9 @@ class AppState {
         // Subscribe to push notifications (background wake)
         subscribeToPushNotifications()
 
-        // Check for existing wallet components to prevent state mismatches (Issue 13)
-        let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
-        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        let hasSeed = FileManager.default.fileExists(atPath: seedPath.path)
-            || WalletKeychainService.shared.hasMnemonic()
-            || FileManager.default.fileExists(atPath: seedPhrasePath.path)
-
-        let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite")
-        let hasDb = FileManager.default.fileExists(atPath: dbPath.path)
-
-        if hasSeed && hasDb {
+        // Evaluate startup state using WalletLifecycleManager (Issue 13 / SOLID cleanup)
+        switch lifecycleManager.detectStartupState() {
+        case .ready:
             // Safe state: Both seed and database present. Start node.
             let hasCachedData = !stableChannel.userChannelId.isEmpty
             await MainActor.run {
@@ -739,7 +696,7 @@ class AppState {
             } catch {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
-        } else if !hasSeed && !hasDb {
+        case .newWallet:
             // Safe state: Neither present. Auto-create new wallet.
             await MainActor.run { phase = .syncing }
             do {
@@ -764,7 +721,7 @@ class AppState {
             } catch {
                 await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
             }
-        } else if hasSeed && !hasDb {
+        case .seedOnlyMismatch:
             // Mismatched state: Seed present but database missing
             AuditService.log("STARTUP_MISMATCH_SEED_ONLY", data: [:])
             NodeDirLock.shared.release()
@@ -774,7 +731,7 @@ class AppState {
                         "Mismatched state: Wallet seed exists, but the channel database is missing. Please restore using your backup seed words."
                     )
             }
-        } else {
+        case .dbOnlyMismatch:
             // Mismatched state: Database present but seed missing (e.g., device migration)
             AuditService.log("STARTUP_MISMATCH_DB_ONLY", data: [:])
             NodeDirLock.shared.release()

@@ -1,5 +1,16 @@
 import Foundation
 
+enum MnemonicMigrationError: Error, LocalizedError {
+    case seedMismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .seedMismatch:
+            return "Mismatched seed storage detected. The secure Keychain seed does not match the legacy plaintext backup."
+        }
+    }
+}
+
 /// Responsible solely for encrypted-first mnemonic loading and legacy plaintext migration.
 enum MnemonicMigrator {
     /// Loads the stored mnemonic from Keychain, or migrates an existing legacy plaintext file to Keychain.
@@ -7,10 +18,10 @@ enum MnemonicMigrator {
     /// Encrypted-first rule: If a Keychain entry exists, it is authoritative.
     @discardableResult
     static func loadOrMigrateMnemonic(
-        keychain: WalletKeychainService = .shared,
+        keychain: any MnemonicStorageProtocol = WalletKeychainService.shared,
         legacyPath: URL = Constants.userDataDir.appendingPathComponent("seed_phrase"),
         logError: ((String, [String: Any]) -> Void)? = { event, data in AuditService.log(event, data: data) }
-    ) -> String? {
+    ) throws -> String? {
         // 1. Encrypted-first: an existing Keychain seed is authoritative.
         do {
             let keychainMnemonic = try keychain.loadMnemonic()
@@ -19,7 +30,7 @@ enum MnemonicMigrator {
                 let trimmed = plaintext.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty, trimmed != keychainMnemonic {
                     logError?("KEYCHAIN_PLAINTEXT_MISMATCH", [:])
-                    return keychainMnemonic
+                    throw MnemonicMigrationError.seedMismatch
                 }
                 do {
                     try FileManager.default.removeItem(at: legacyPath)
@@ -30,6 +41,8 @@ enum MnemonicMigrator {
             return keychainMnemonic
         } catch WalletKeychainError.keyNotFound {
             // Keychain is genuinely empty; plaintext migration is allowed.
+        } catch let mismatch as MnemonicMigrationError {
+            throw mismatch // Propagate mismatch error up to block startup
         } catch {
             logError?("KEYCHAIN_LOAD_FAILED", ["error": error.localizedDescription])
             return nil // Fail closed: leave both stores untouched
