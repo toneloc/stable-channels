@@ -1,16 +1,33 @@
 import Foundation
 import Security
 
-enum WalletKeychainError: Error, LocalizedError {
+enum WalletKeychainError: Error, LocalizedError, Equatable {
     case accessDenied(OSStatus)
     case keyNotFound
+    case duplicateItem(OSStatus)
     case dataConversionFailed
+    case unexpectedStatus(OSStatus)
 
     var errorDescription: String? {
         switch self {
         case .accessDenied(let status): return "Keychain access denied (status: \(status))"
         case .keyNotFound: return "Wallet seed not found in Keychain"
+        case .duplicateItem(let status): return "Keychain duplicate item (status: \(status))"
         case .dataConversionFailed: return "Mnemonic string conversion failed"
+        case .unexpectedStatus(let status): return "Unexpected Keychain status (status: \(status))"
+        }
+    }
+
+    static func from(status: OSStatus) -> WalletKeychainError {
+        switch status {
+        case errSecItemNotFound:
+            return .keyNotFound
+        case errSecAuthFailed, errSecInteractionNotAllowed, errSecMissingEntitlement:
+            return .accessDenied(status)
+        case errSecDuplicateItem:
+            return .duplicateItem(status)
+        default:
+            return .unexpectedStatus(status)
         }
     }
 }
@@ -19,12 +36,12 @@ protocol MnemonicStorageProtocol {
     func storeMnemonic(_ mnemonic: String) throws
     func loadMnemonic() throws -> String
     func deleteMnemonic() throws
-    func hasMnemonic() -> Bool
+    func hasMnemonic() throws -> Bool
 
     func storePendingMnemonic(_ mnemonic: String) throws
     func loadPendingMnemonic() throws -> String
     func deletePendingMnemonic() throws
-    func hasPendingMnemonic() -> Bool
+    func hasPendingMnemonic() throws -> Bool
 }
 
 /// Keychain-backed secure storage service for the wallet mnemonic.
@@ -68,8 +85,8 @@ class WalletKeychainService: MnemonicStorageProtocol {
         try deleteMnemonicInternal(accountName: account)
     }
 
-    func hasMnemonic() -> Bool {
-        return hasMnemonicInternal(accountName: account)
+    func hasMnemonic() throws -> Bool {
+        return try hasMnemonicInternal(accountName: account)
     }
 
     // MARK: - Pending Mnemonic (Staged Restore Transaction)
@@ -86,8 +103,8 @@ class WalletKeychainService: MnemonicStorageProtocol {
         try deleteMnemonicInternal(accountName: pendingAccount)
     }
 
-    func hasPendingMnemonic() -> Bool {
-        return hasMnemonicInternal(accountName: pendingAccount)
+    func hasPendingMnemonic() throws -> Bool {
+        return try hasMnemonicInternal(accountName: pendingAccount)
     }
 
     // MARK: - Generic Internal Implementations
@@ -115,7 +132,8 @@ class WalletKeychainService: MnemonicStorageProtocol {
             base[kSecAttrAccessGroup as String] = group
         }
 
-        if hasMnemonicInternal(accountName: accountName) {
+        let exists = (try? hasMnemonicInternal(accountName: accountName)) ?? false
+        if exists {
             let attributesToUpdate: [String: Any] = [
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -126,7 +144,7 @@ class WalletKeychainService: MnemonicStorageProtocol {
                     "KEYCHAIN_STORE_FAILED",
                     data: ["op": "update", "account": accountName, "status": String(status)]
                 )
-                throw WalletKeychainError.accessDenied(status)
+                throw WalletKeychainError.from(status: status)
             }
         } else {
             var attributes = base
@@ -135,7 +153,7 @@ class WalletKeychainService: MnemonicStorageProtocol {
             let status = SecItemAdd(attributes as CFDictionary, nil)
             guard status == errSecSuccess else {
                 logError("KEYCHAIN_STORE_FAILED", data: ["op": "add", "account": accountName, "status": String(status)])
-                throw WalletKeychainError.accessDenied(status)
+                throw WalletKeychainError.from(status: status)
             }
         }
 
@@ -167,7 +185,7 @@ class WalletKeychainService: MnemonicStorageProtocol {
                 throw WalletKeychainError.keyNotFound
             }
             logError("KEYCHAIN_LOAD_FAILED", data: ["account": accountName, "status": String(status)])
-            throw WalletKeychainError.accessDenied(status)
+            throw WalletKeychainError.from(status: status)
         }
 
         guard let mnemonic = String(data: data, encoding: .utf8) else {
@@ -189,11 +207,11 @@ class WalletKeychainService: MnemonicStorageProtocol {
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             logError("KEYCHAIN_DELETE_FAILED", data: ["account": accountName, "status": String(status)])
-            throw WalletKeychainError.accessDenied(status)
+            throw WalletKeychainError.from(status: status)
         }
     }
 
-    private func hasMnemonicInternal(accountName: String) -> Bool {
+    private func hasMnemonicInternal(accountName: String) throws -> Bool {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -205,9 +223,13 @@ class WalletKeychainService: MnemonicStorageProtocol {
         }
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status != errSecSuccess && status != errSecItemNotFound {
+        if status == errSecSuccess {
+            return true
+        } else if status == errSecItemNotFound {
+            return false
+        } else {
             logError("KEYCHAIN_EXISTS_CHECK_FAILED", data: ["account": accountName, "status": String(status)])
+            throw WalletKeychainError.from(status: status)
         }
-        return status == errSecSuccess
     }
 }

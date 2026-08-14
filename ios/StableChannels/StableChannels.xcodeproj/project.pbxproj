@@ -1161,6 +1161,7 @@
 				4993591930712D1500D6B50E /* Base58CheckTests.swift in Sources */,
 				D20000000000000000000037 /* Bech32Tests.swift in Sources */,
 				D20000000000000000000043 /* LNURLServiceTests.swift in Sources */,
+				49D0FF61302CF70000D38B06 /* WalletLifecycleManagerTests.swift in Sources */,
 				49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
 				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
