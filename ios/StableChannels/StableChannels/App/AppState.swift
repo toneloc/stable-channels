@@ -471,10 +471,10 @@ class AppState {
     }
 
     private func wipeWalletPersistence() throws {
-        try Self.wipeAllWalletState()
+        try Self.wipeAllWalletState(wipePending: false)
     }
 
-    static func wipeAllWalletState() throws {
+    static func wipeAllWalletState(wipePending: Bool = false) throws {
         let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
         try NodeService.wipeWalletData(keychain: keychain)
 
@@ -492,9 +492,13 @@ class AppState {
             }
         }
 
-        // Force delete both active and pending keychains
+        // Delete active keychain mnemonic
         try keychain.deleteMnemonic()
-        try keychain.deletePendingMnemonic()
+
+        // Only delete pending slot on explicit full wipe, never during restore wipe!
+        if wipePending {
+            try keychain.deletePendingMnemonic()
+        }
     }
 
     /// Derive the node_id a mnemonic maps to by building (never starting) a
