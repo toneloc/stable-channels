@@ -78,22 +78,22 @@ final class WalletKeychainServiceTests: XCTestCase {
 
     // MARK: - hasMnemonic
 
-    func testHasMnemonicReturnsFalseWhenEmpty() {
+    func testHasMnemonicReturnsFalseWhenEmpty() throws {
         let service = makeService()
-        XCTAssertFalse(service.hasMnemonic())
+        XCTAssertFalse(try service.hasMnemonic())
     }
 
     func testHasMnemonicReturnsTrueAfterStore() throws {
         let service = makeService()
         try service.storeMnemonic(testMnemonic)
-        XCTAssertTrue(service.hasMnemonic())
+        XCTAssertTrue(try service.hasMnemonic())
     }
 
     func testHasMnemonicReturnsFalseAfterDelete() throws {
         let service = makeService()
         try service.storeMnemonic(testMnemonic)
         try? service.deleteMnemonic()
-        XCTAssertFalse(service.hasMnemonic())
+        XCTAssertFalse(try service.hasMnemonic())
     }
 
     // MARK: - loadMnemonic missing key
@@ -120,7 +120,7 @@ final class WalletKeychainServiceTests: XCTestCase {
         let service = makeService()
         try service.storeMnemonic(testMnemonic)
         try service.deleteMnemonic()
-        XCTAssertFalse(service.hasMnemonic())
+        XCTAssertFalse(try service.hasMnemonic())
         XCTAssertThrowsError(try service.loadMnemonic()) { error in
             guard case WalletKeychainError.keyNotFound = error else {
                 XCTFail("Expected keyNotFound after delete, got \(error)")

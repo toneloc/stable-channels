@@ -930,6 +930,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49D0FF61302CF70000D38B06 /* WalletLifecycleManagerTests.swift in Sources */,
 				49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
 				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
