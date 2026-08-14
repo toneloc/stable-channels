@@ -17,11 +17,13 @@ enum RestorePhase: String, Codable {
 enum WalletRestoreError: Error, LocalizedError, Equatable {
     case invalidMnemonic(String)
     case wipeFailed(String)
+    case recoveryFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidMnemonic(let msg): return msg
         case .wipeFailed(let msg): return msg
+        case .recoveryFailed(let msg): return msg
         }
     }
 }
@@ -100,6 +102,13 @@ final class WalletLifecycleManager {
             do {
                 pending = try keychain.loadPendingMnemonic()
             } catch WalletKeychainError.keyNotFound {
+                let hasActive = (try? keychain.hasMnemonic()) ?? false
+                if !hasActive {
+                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_SEEDS", data: ["phase": phase.rawValue])
+                    throw WalletRestoreError.recoveryFailed(
+                        "Restore phase is active but neither pending nor active seed exists in secure storage."
+                    )
+                }
                 clearRestorePhase()
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_PENDING", data: [:])
                 return
@@ -112,6 +121,13 @@ final class WalletLifecycleManager {
             }
 
             guard !pending.isEmpty else {
+                let hasActive = (try? keychain.hasMnemonic()) ?? false
+                if !hasActive {
+                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_SEEDS", data: ["phase": phase.rawValue])
+                    throw WalletRestoreError.recoveryFailed(
+                        "Restore phase is active but pending seed is empty and no active seed exists."
+                    )
+                }
                 clearRestorePhase()
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_PENDING", data: [:])
                 return
