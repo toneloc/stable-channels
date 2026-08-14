@@ -421,7 +421,7 @@ class AppState {
             )
         } catch {
             NodeDirLock.shared.release()
-            phase = priorPhase
+            phase = .error("Restore failed: \(error.localizedDescription). Please retry.")
             statusMessage = ""
             throw error
         }

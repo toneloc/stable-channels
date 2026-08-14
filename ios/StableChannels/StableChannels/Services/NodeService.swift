@@ -135,8 +135,8 @@ class NodeService: NodeServiceProtocol {
 
     init(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) {
         self.keychain = keychain
-        // Pre-load saved mnemonic from Keychain (or migrate legacy plaintext file)
-        savedMnemonic = try? MnemonicMigrator.loadOrMigrateMnemonic(keychain: keychain)
+        // Pre-load saved mnemonic directly from Keychain if present
+        savedMnemonic = try? keychain.loadMnemonic()
     }
 
     // MARK: - Lifecycle
