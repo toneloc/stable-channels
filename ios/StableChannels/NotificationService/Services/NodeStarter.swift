@@ -79,7 +79,7 @@ final class DefaultNodeStarter: NodeStarter {
                 encoding: .utf8
             ),
                 !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                logger.log("WARNING: SEED_PLAINTEXT_FALLBACK - keychain_unavailable")
+                logger.log("NOTICE: SEED_PLAINTEXT_FALLBACK - legacy_pending_migration")
                 nodeEntropy = NodeEntropy.fromBip39Mnemonic(
                     mnemonic: plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines),
                     passphrase: nil
