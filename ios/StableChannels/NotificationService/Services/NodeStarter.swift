@@ -67,9 +67,10 @@ final class DefaultNodeStarter: NodeStarter {
         )
 
         // Derive node entropy
+        let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
         let nodeEntropy: NodeEntropy
         do {
-            let words = try WalletKeychainService.shared.loadMnemonic()
+            let words = try keychain.loadMnemonic()
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
         } catch WalletKeychainError.keyNotFound {
             // Mnemonic not in Keychain: fallback check legacy plaintext file or keys_seed

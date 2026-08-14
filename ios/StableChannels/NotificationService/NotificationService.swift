@@ -396,8 +396,9 @@ class NotificationService: UNNotificationServiceExtension {
     private func hasSeed(dataDir: URL) -> Bool {
         let keySeedPath = dataDir.appendingPathComponent("keys_seed")
         let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+        let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
         return FileManager.default.fileExists(atPath: keySeedPath.path)
-            || WalletKeychainService.shared.hasMnemonic()
+            || keychain.hasMnemonic()
             || FileManager.default.fileExists(atPath: seedPhrasePath.path)
     }
 
