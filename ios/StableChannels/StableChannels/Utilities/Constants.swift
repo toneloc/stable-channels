@@ -59,7 +59,6 @@ enum Constants {
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     static let minDisplayUSD: Double = 2.0
     static let maxChannelUSD: Double = 100.0
-    /// Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount.
     static let stableChannelTradeFeeRate: Double = 0.01
     static let lightningDefaultForwardingFeeBaseMsat: UInt32 = 1_000
     static let lightningDefaultForwardingFeeProportionalMillionths: UInt32 = 0
@@ -82,15 +81,11 @@ enum Constants {
     // MARK: - Price Feeds
 
     static let defaultPriceFeeds: [PriceFeedConfig] = [
+        // Tier 1 — top volume global exchanges
         PriceFeedConfig(
-            name: "Bitstamp",
-            urlFormat: "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-            jsonPath: ["last"]
-        ),
-        PriceFeedConfig(
-            name: "CoinGecko",
-            urlFormat: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            jsonPath: ["bitcoin", "usd"]
+            name: "Binance",
+            urlFormat: "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
+            jsonPath: ["lastPrice"]
         ),
         PriceFeedConfig(
             name: "Kraken",
@@ -99,13 +94,87 @@ enum Constants {
         ),
         PriceFeedConfig(
             name: "Coinbase",
-            urlFormat: "https://api.coinbase.com/v2/prices/spot?currency=USD",
+            urlFormat: "https://api.coinbase.com/v2/prices/BTC-USD/spot",
             jsonPath: ["data", "amount"]
+        ),
+        PriceFeedConfig(
+            name: "Bitfinex",
+            urlFormat: "https://api-pub.bitfinex.com/v2/ticker/tBTCUSD",
+            jsonPath: ["6"]
+        ),
+        PriceFeedConfig(
+            name: "CoinGecko",
+            urlFormat: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+            jsonPath: ["bitcoin", "usd"]
         ),
         PriceFeedConfig(
             name: "Blockchain.com",
             urlFormat: "https://blockchain.info/ticker",
             jsonPath: ["USD", "last"]
+        ),
+        PriceFeedConfig(
+            name: "Coinlore",
+            urlFormat: "https://api.coinlore.net/api/ticker/?id=90",
+            jsonPath: ["price_usd"]
+        ),
+        PriceFeedConfig(
+            name: "Bybit",
+            urlFormat: "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
+            jsonPath: ["result", "list", "0", "lastPrice"]
+        ),
+        PriceFeedConfig(
+            name: "Huobi",
+            urlFormat: "https://api.huobi.pro/market/detail/merged?symbol=btcusdt",
+            jsonPath: ["tick", "close"]
+        ),
+        // Tier 2 — regional coverage
+        PriceFeedConfig(
+            name: "KuCoin",
+            urlFormat: "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=BTC-USDT",
+            jsonPath: ["data", "price"]
+        ),
+        PriceFeedConfig(
+            name: "Gate.io",
+            urlFormat: "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT",
+            jsonPath: ["0", "last"]
+        ),
+        PriceFeedConfig(
+            name: "MEXC",
+            urlFormat: "https://api.mexc.com/api/v3/ticker/24hr?symbol=BTCUSDT",
+            jsonPath: ["lastPrice"]
+        ),
+        PriceFeedConfig(
+            name: "Yadio",
+            urlFormat: "https://api.yadio.io/exrates/BTC",
+            jsonPath: ["BTC", "USD"]
+        ),
+        PriceFeedConfig(
+            name: "Luno",
+            urlFormat: "https://api.luno.com/api/1/tickers",
+            jsonPath: ["last_trade"],
+            filterKey: "pair",
+            filterValue: "XBTUSDT"
+        ),
+        PriceFeedConfig(
+            name: "CoinDCX",
+            urlFormat: "https://api.coindcx.com/exchange/ticker",
+            jsonPath: ["last_price"],
+            filterKey: "market",
+            filterValue: "BTCUSDT"
+        ),
+        PriceFeedConfig(
+            name: "BTCTurk",
+            urlFormat: "https://api.btcturk.com/api/v2/ticker",
+            jsonPath: ["last"],
+            filterKey: "pairNormalized",
+            filterValue: "BTCUSDT"
+        ),
+        PriceFeedConfig(
+            name: "Bitpay",
+            urlFormat: "https://bitpay.com/rates",
+            jsonPath: ["rate"],
+            filterKey: "code",
+            filterValue: "USD"
         )
     ]
 
@@ -113,7 +182,7 @@ enum Constants {
 
     enum RGSServer {
         static let bitcoin = "https://rapidsync.lightningdevkit.org/snapshot/"
-        static let signet = "https://rgs.mutinynet.com/snapshot/"
+        static let signet = "https://rgs.mutinynet.org/snapshot/"
         static let testnet = "https://rapidsync.lightningdevkit.org/testnet/snapshot/"
     }
 
@@ -130,7 +199,6 @@ enum Constants {
             return shared.appendingPathComponent("StableChannels")
                 .appendingPathComponent(defaultUserAlias)
         }
-        // Fallback to Application Support if App Group is unavailable
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("StableChannels").appendingPathComponent(defaultUserAlias)
     }
@@ -140,6 +208,16 @@ struct PriceFeedConfig: Codable {
     let name: String
     let urlFormat: String
     let jsonPath: [String]
+    let filterKey: String?
+    let filterValue: String?
+
+    init(name: String, urlFormat: String, jsonPath: [String], filterKey: String? = nil, filterValue: String? = nil) {
+        self.name = name
+        self.urlFormat = urlFormat
+        self.jsonPath = jsonPath
+        self.filterKey = filterKey
+        self.filterValue = filterValue
+    }
 }
 
 // MARK: - Seed Constants
@@ -155,8 +233,6 @@ enum SeedConstants {
 }
 
 extension Constants {
-    /// URLs for the logs the app already writes today (audit log and LDK node log),
-    /// filtered to those that currently exist on disk. Used by the Logs & Diagnostics export UI.
     static func exportableLogURLs() -> [URL] {
         let fileManager = FileManager.default
         let candidates = [

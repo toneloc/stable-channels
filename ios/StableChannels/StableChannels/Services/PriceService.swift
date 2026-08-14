@@ -112,11 +112,7 @@ class PriceService {
     // MARK: - Private
 
     private static func fetchSingleFeed(_ feed: PriceFeedConfig) async -> Double? {
-        let urlString = feed.urlFormat
-            .replacingOccurrences(of: "{currency_lc}", with: "usd")
-            .replacingOccurrences(of: "{currency}", with: "USD")
-
-        guard let url = URL(string: urlString) else { return nil }
+        guard let url = URL(string: feed.urlFormat) else { return nil }
 
         for attempt in 0..<Constants.priceFetchMaxRetries {
             do {
@@ -130,7 +126,15 @@ class PriceService {
                     return nil
                 }
 
-                return extractPrice(from: json, path: feed.jsonPath)
+                // Apply feed-level filter if specified (for APIs returning multiple pairs)
+                let filteredJSON: [String: Any]
+                if let filterKey = feed.filterKey, let filterValue = feed.filterValue {
+                    filteredJSON = Self.filterJSON(json, filterKey: filterKey, filterValue: filterValue) ?? json
+                } else {
+                    filteredJSON = json
+                }
+
+                return extractPrice(from: filteredJSON, path: feed.jsonPath)
             } catch {
                 if attempt < Constants.priceFetchMaxRetries - 1 {
                     try? await Task.sleep(nanoseconds: Constants.priceFetchRetryDelayMs * 1_000_000)
@@ -140,10 +144,45 @@ class PriceService {
         return nil
     }
 
-    private static func extractPrice(from json: [String: Any], path: [String]) -> Double? {
+    /// Filter a JSON response to find the entry matching filterKey == filterValue.
+    /// Handles both array-of-dicts and dict-of-dicts structures.
+    static func filterJSON(_ json: [String: Any], filterKey: String, filterValue: String) -> [String: Any]? {
+        // Search all values recursively for a matching entry
+        if let match = findMatchingEntry(in: json, filterKey: filterKey, filterValue: filterValue) {
+            return match
+        }
+        return nil
+    }
+
+    private static func findMatchingEntry(in json: Any, filterKey: String, filterValue: String) -> [String: Any]? {
+        if let dict = json as? [String: Any] {
+            // Check if this dict matches
+            if let val = dict[filterKey] as? String, val == filterValue {
+                return dict
+            }
+            // Recurse into values
+            for (_, v) in dict {
+                if let found = findMatchingEntry(in: v, filterKey: filterKey, filterValue: filterValue) {
+                    return found
+                }
+            }
+        } else if let array = json as? [Any] {
+            for item in array {
+                if let found = findMatchingEntry(in: item, filterKey: filterKey, filterValue: filterValue) {
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    static func extractPrice(from json: [String: Any], path: [String]) -> Double? {
         var current: Any = json
         for key in path {
-            if let dict = current as? [String: Any], let next = dict[key] {
+            // Handle numeric keys (array indices)
+            if let index = Int(key), let array = current as? [Any], array.indices.contains(index) {
+                current = array[index]
+            } else if let dict = current as? [String: Any], let next = dict[key] {
                 current = next
             } else {
                 return nil
@@ -166,7 +205,7 @@ class PriceService {
         return nil
     }
 
-    private static func median(_ values: [Double]) -> Double {
+    static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let sorted = values.sorted()
         let count = sorted.count
