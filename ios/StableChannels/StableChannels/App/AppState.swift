@@ -410,7 +410,7 @@ class AppState {
                     self.dropDatabaseServices()
                 },
                 onWipePersistence: {
-                    self.wipeWalletPersistence()
+                    try self.wipeWalletPersistence()
                 }
             )
         } catch {
@@ -502,13 +502,13 @@ class AppState {
         txidResolutionService.clearResolvers()
     }
 
-    private func wipeWalletPersistence() {
-        Self.wipeAllWalletState()
+    private func wipeWalletPersistence() throws {
+        try Self.wipeAllWalletState()
     }
 
-    static func wipeAllWalletState() {
+    static func wipeAllWalletState() throws {
         let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
-        try? NodeService.wipeWalletData(keychain: keychain)
+        try NodeService.wipeWalletData(keychain: keychain)
 
         let dir = Constants.userDataDir
         let filesToDelete = [
@@ -518,7 +518,10 @@ class AppState {
         ]
 
         for file in filesToDelete {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
+            let path = dir.appendingPathComponent(file)
+            if FileManager.default.fileExists(atPath: path.path) {
+                try FileManager.default.removeItem(at: path)
+            }
         }
 
         // Force delete both active and pending keychains
@@ -623,7 +626,7 @@ class AppState {
         // Self-healing restore recovery: Delegate to WalletLifecycleManager
         do {
             try lifecycleManager.runRecoveryIfNeeded {
-                self.wipeWalletPersistence()
+                try self.wipeWalletPersistence()
             }
         } catch {
             await MainActor.run {
@@ -778,6 +781,15 @@ class AppState {
                 phase =
                     .error(
                         "Mismatched state: Local channel database exists, but the wallet seed is missing. Please restore using your backup seed words."
+                    )
+            }
+        case .storageError(let msg):
+            AuditService.log("STARTUP_STORAGE_ERROR", data: ["error": msg])
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase =
+                    .error(
+                        "Secure storage access failed: \(msg). Please verify your device credentials and restart the app."
                     )
             }
         }

@@ -79,9 +79,9 @@ final class MnemonicMigratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
-    // MARK: - Error Handling Security Tests (Comment 3)
+    // MARK: - Error Handling Security Tests
 
-    func testLoadErrorAccessDeniedFailsClosed() throws {
+    func testLoadErrorAccessDeniedThrowsFailClosed() throws {
         let mockSvc = MockMnemonicStorage()
         mockSvc.mockLoadError = WalletKeychainError.accessDenied(errSecAuthFailed)
 
@@ -89,15 +89,19 @@ final class MnemonicMigratorTests: XCTestCase {
         try testMnemonic.write(to: path, atomically: true, encoding: .utf8)
 
         var loggedLoadFailed = false
-        let loaded = try MnemonicMigrator.loadOrMigrateMnemonic(
+        XCTAssertThrowsError(try MnemonicMigrator.loadOrMigrateMnemonic(
             keychain: mockSvc,
             legacyPath: path,
             logError: { event, _ in
                 if event == "KEYCHAIN_LOAD_FAILED" { loggedLoadFailed = true }
             }
-        )
+        )) { error in
+            guard case WalletKeychainError.accessDenied = error else {
+                XCTFail("Expected accessDenied, got \(error)")
+                return
+            }
+        }
 
-        XCTAssertNil(loaded)
         XCTAssertTrue(loggedLoadFailed)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
@@ -119,7 +123,7 @@ final class MnemonicMigratorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
-    func testLoadErrorDataConversionFailedFailsClosed() throws {
+    func testLoadErrorDataConversionFailedThrowsFailClosed() throws {
         let mockSvc = MockMnemonicStorage()
         mockSvc.mockLoadError = WalletKeychainError.dataConversionFailed
 
@@ -127,17 +131,63 @@ final class MnemonicMigratorTests: XCTestCase {
         try testMnemonic.write(to: path, atomically: true, encoding: .utf8)
 
         var loggedLoadFailed = false
-        let loaded = try MnemonicMigrator.loadOrMigrateMnemonic(
+        XCTAssertThrowsError(try MnemonicMigrator.loadOrMigrateMnemonic(
             keychain: mockSvc,
             legacyPath: path,
             logError: { event, _ in
                 if event == "KEYCHAIN_LOAD_FAILED" { loggedLoadFailed = true }
             }
-        )
+        )) { error in
+            guard case WalletKeychainError.dataConversionFailed = error else {
+                XCTFail("Expected dataConversionFailed, got \(error)")
+                return
+            }
+        }
 
-        XCTAssertNil(loaded)
         XCTAssertTrue(loggedLoadFailed)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+    }
+
+    func testMigrationFailureThrowsFailClosed() throws {
+        let mockSvc = MockMnemonicStorage()
+        mockSvc.mockStoreError = WalletKeychainError.accessDenied(errSecAuthFailed)
+
+        let path = tempDirURL.appendingPathComponent("seed_phrase")
+        try testMnemonic.write(to: path, atomically: true, encoding: .utf8)
+
+        var loggedMigrationFailed = false
+        XCTAssertThrowsError(try MnemonicMigrator.loadOrMigrateMnemonic(
+            keychain: mockSvc,
+            legacyPath: path,
+            logError: { event, _ in
+                if event == "KEYCHAIN_MIGRATION_FAILED" { loggedMigrationFailed = true }
+            }
+        )) { error in
+            guard case WalletKeychainError.accessDenied = error else {
+                XCTFail("Expected accessDenied, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertTrue(loggedMigrationFailed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+    }
+
+    func testInternalWhitespaceCanonicalization() throws {
+        try testKeychain.storeMnemonic(testMnemonic)
+
+        let path = tempDirURL.appendingPathComponent("seed_phrase")
+        let nonCanonical = "abandon   abandon \n abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        try nonCanonical.write(to: path, atomically: true, encoding: .utf8)
+
+        let loaded = try MnemonicMigrator.loadOrMigrateMnemonic(
+            keychain: testKeychain,
+            legacyPath: path,
+            logError: nil
+        )
+
+        XCTAssertEqual(loaded, testMnemonic)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 }
 
@@ -145,10 +195,14 @@ final class MnemonicMigratorTests: XCTestCase {
 
 private final class MockMnemonicStorage: MnemonicStorageProtocol {
     var mockLoadError: Error?
+    var mockStoreError: Error?
     var mockMnemonic: String?
     var mockPendingMnemonic: String?
 
     func storeMnemonic(_ mnemonic: String) throws {
+        if let error = mockStoreError {
+            throw error
+        }
         mockMnemonic = mnemonic
     }
 
@@ -166,7 +220,10 @@ private final class MockMnemonicStorage: MnemonicStorageProtocol {
         mockMnemonic = nil
     }
 
-    func hasMnemonic() -> Bool {
+    func hasMnemonic() throws -> Bool {
+        if let error = mockLoadError {
+            throw error
+        }
         return mockMnemonic != nil
     }
 
@@ -185,7 +242,7 @@ private final class MockMnemonicStorage: MnemonicStorageProtocol {
         mockPendingMnemonic = nil
     }
 
-    func hasPendingMnemonic() -> Bool {
+    func hasPendingMnemonic() throws -> Bool {
         return mockPendingMnemonic != nil
     }
 }
