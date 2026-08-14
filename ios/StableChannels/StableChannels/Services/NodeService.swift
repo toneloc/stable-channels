@@ -143,12 +143,14 @@ class NodeService: NodeServiceProtocol {
     private var _channels: [ChannelDetails] = []
     private(set) var savedMnemonic: String?
     private var eventTask: Task<Void, Never>?
+    private let keychain: any MnemonicStorageProtocol
 
     weak var databaseService: DatabaseService?
 
-    init() {
+    init(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) {
+        self.keychain = keychain
         // Pre-load saved mnemonic from Keychain (or migrate legacy plaintext file)
-        savedMnemonic = try? MnemonicMigrator.loadOrMigrateMnemonic()
+        savedMnemonic = try? MnemonicMigrator.loadOrMigrateMnemonic(keychain: keychain)
     }
 
     // MARK: - Lifecycle
@@ -242,10 +244,10 @@ class NodeService: NodeServiceProtocol {
             words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
             do {
-                if let migrated = try MnemonicMigrator.loadOrMigrateMnemonic() {
+                if let migrated = try MnemonicMigrator.loadOrMigrateMnemonic(keychain: keychain) {
                     words = migrated
                 } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
-                    try Self.wipeWalletData()
+                    try Self.wipeWalletData(keychain: keychain)
                     words = generateEntropyMnemonic(wordCount: nil)
                 } else {
                     words = ""
@@ -260,7 +262,7 @@ class NodeService: NodeServiceProtocol {
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
             do {
-                try WalletKeychainService.shared.storeMnemonic(words)
+                try keychain.storeMnemonic(words)
                 self.savedMnemonic = words
                 nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
 
@@ -646,7 +648,7 @@ class NodeService: NodeServiceProtocol {
 
     /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)
     /// so a fresh wallet can be created without descriptor conflicts.
-    static func wipeWalletData() throws {
+    static func wipeWalletData(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) throws {
         let dir = Constants.userDataDir
         let filesToDelete = [
             "keys_seed",
@@ -658,7 +660,7 @@ class NodeService: NodeServiceProtocol {
         for file in filesToDelete {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
         }
-        try WalletKeychainService.shared.deleteMnemonic()
+        try keychain.deleteMnemonic()
     }
 }
 
