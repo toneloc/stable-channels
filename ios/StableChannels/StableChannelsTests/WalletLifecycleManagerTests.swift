@@ -18,7 +18,14 @@ final class WalletLifecycleManagerTests: XCTestCase {
         manager = WalletLifecycleManager(
             keychain: mockStorage,
             userDataDir: tempDirURL,
-            appGroupIdentifier: testAppGroup
+            appGroupIdentifier: testAppGroup,
+            validator: { mnemonic in
+                let words = mnemonic.split(whereSeparator: \.isWhitespace)
+                guard [12, 15, 18, 21, 24].contains(words.count) else { return false }
+                guard !mnemonic.contains("foo") else { return false }
+                guard !mnemonic.hasSuffix("abandon abandon") else { return false }
+                return true
+            }
         )
     }
 

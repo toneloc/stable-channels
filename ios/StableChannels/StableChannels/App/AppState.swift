@@ -91,7 +91,7 @@ class AppState {
     var confirmationUpdateEpoch: Int = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
-    private let lifecycleManager = WalletLifecycleManager()
+    private var lifecycleManager: WalletLifecycleManager!
 
     // MARK: - State
 
@@ -317,6 +317,13 @@ class AppState {
         let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
         AuditService.setLogPath(auditPath)
 
+        // Initialize WalletLifecycleManager with injected BIP-39 validator
+        self.lifecycleManager = WalletLifecycleManager(
+            validator: { mnemonic in
+                AppState.deriveNodeId(mnemonic: mnemonic) != nil
+            }
+        )
+
         // Hook WalletKeychainService logging into AuditService
         WalletKeychainService.onLog = { event, data in
             AuditService.log(event, data: data)
@@ -532,7 +539,7 @@ class AppState {
     /// Derive the node_id a mnemonic maps to by building (never starting) a
     /// throwaway node in a temp directory. Returns nil on any failure so the
     /// restore guard fails open.
-    nonisolated static func deriveNodeId(mnemonic: String) -> String? {
+    private nonisolated static func deriveNodeId(mnemonic: String) -> String? {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
