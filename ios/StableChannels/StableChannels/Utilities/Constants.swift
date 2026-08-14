@@ -115,7 +115,7 @@ enum Constants {
         PriceFeedConfig(
             name: "Coinlore",
             urlFormat: "https://api.coinlore.net/api/ticker/?id=90",
-            jsonPath: ["price_usd"]
+            jsonPath: ["0", "price_usd"]
         ),
         PriceFeedConfig(
             name: "Bybit",

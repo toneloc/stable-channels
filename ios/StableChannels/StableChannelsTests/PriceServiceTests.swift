@@ -114,6 +114,34 @@ final class PriceServiceExtractionTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testExtractPrice_topLevelArray_objectItem() throws {
+        // Simulates Coinlore & Gate.io top-level array responses
+        let json: [Any] = [
+            ["id": "90", "price_usd": "63100.50"]
+        ]
+        let result = PriceService.extractPrice(from: json, path: ["0", "price_usd"])
+        XCTAssertNotNil(result)
+        XCTAssertEqual(try XCTUnwrap(result), 63100.50, accuracy: 0.01)
+    }
+
+    func testExtractPrice_topLevelArray_primitiveItem() throws {
+        // Simulates Bitfinex array of tickers
+        let json: [Any] = [100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 63050.25]
+        let result = PriceService.extractPrice(from: json, path: ["6"])
+        XCTAssertNotNil(result)
+        XCTAssertEqual(try XCTUnwrap(result), 63050.25, accuracy: 0.01)
+    }
+
+    func testFilterJSON_topLevelArray() {
+        // Simulates CoinDCX top-level array of markets
+        let json: [Any] = [
+            ["market": "ETHUSDT", "last_price": "3100.00"],
+            ["market": "BTCUSDT", "last_price": "63200.50"]
+        ]
+        let result = PriceService.filterJSON(json, filterKey: "market", filterValue: "BTCUSDT")
+        XCTAssertEqual(result?["last_price"] as? String, "63200.50")
+    }
+
     func testDefaultFeeds_nonEmpty() {
         let feeds = Constants.defaultPriceFeeds
         XCTAssertGreaterThan(feeds.count, 0)

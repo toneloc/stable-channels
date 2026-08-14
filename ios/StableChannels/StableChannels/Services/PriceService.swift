@@ -122,19 +122,18 @@ class PriceService {
                     continue
                 }
 
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    return nil
-                }
+                let jsonObject = try JSONSerialization.jsonObject(with: data)
 
                 // Apply feed-level filter if specified (for APIs returning multiple pairs)
-                let filteredJSON: [String: Any]
+                let targetJSON: Any
                 if let filterKey = feed.filterKey, let filterValue = feed.filterValue {
-                    filteredJSON = Self.filterJSON(json, filterKey: filterKey, filterValue: filterValue) ?? json
+                    targetJSON = Self
+                        .filterJSON(jsonObject, filterKey: filterKey, filterValue: filterValue) ?? jsonObject
                 } else {
-                    filteredJSON = json
+                    targetJSON = jsonObject
                 }
 
-                return extractPrice(from: filteredJSON, path: feed.jsonPath)
+                return extractPrice(from: targetJSON, path: feed.jsonPath)
             } catch {
                 if attempt < Constants.priceFetchMaxRetries - 1 {
                     try? await Task.sleep(nanoseconds: Constants.priceFetchRetryDelayMs * 1_000_000)
@@ -146,7 +145,7 @@ class PriceService {
 
     /// Filter a JSON response to find the entry matching filterKey == filterValue.
     /// Handles both array-of-dicts and dict-of-dicts structures.
-    static func filterJSON(_ json: [String: Any], filterKey: String, filterValue: String) -> [String: Any]? {
+    static func filterJSON(_ json: Any, filterKey: String, filterValue: String) -> [String: Any]? {
         // Search all values recursively for a matching entry
         if let match = findMatchingEntry(in: json, filterKey: filterKey, filterValue: filterValue) {
             return match
@@ -176,7 +175,7 @@ class PriceService {
         return nil
     }
 
-    static func extractPrice(from json: [String: Any], path: [String]) -> Double? {
+    static func extractPrice(from json: Any, path: [String]) -> Double? {
         var current: Any = json
         for key in path {
             // Handle numeric keys (array indices)
