@@ -233,9 +233,13 @@ struct ErrorDisplayView: View {
 
             if message.contains("Mismatched state") {
                 Button("Reset and Restore") {
-                    try? AppState.wipeAllWalletState()
-                    appState.phase = .loading
-                    Task { await appState.start() }
+                    do {
+                        try AppState.wipeAllWalletState()
+                        appState.phase = .loading
+                        Task { await appState.start() }
+                    } catch {
+                        appState.phase = .error("Unable to reset wallet securely: \(error.localizedDescription)")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
