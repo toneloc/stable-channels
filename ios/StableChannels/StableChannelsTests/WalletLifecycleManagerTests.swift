@@ -227,12 +227,35 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertNil(mockStorage.mockPendingMnemonic)
         XCTAssertNil(ud?.string(forKey: "restore_phase"))
     }
+
+    func testRecoveryKeychainErrorPreservesRestorePhase() throws {
+        let ud = UserDefaults(suiteName: testAppGroup)
+        ud?.set(RestorePhase.pendingValidation.rawValue, forKey: "restore_phase")
+        mockStorage.mockPendingLoadError = WalletKeychainError.accessDenied(errSecAuthFailed)
+
+        XCTAssertThrowsError(try manager.runRecoveryIfNeeded(onWipePersistence: {}))
+
+        // Must preserve restore_phase so recovery retries when Keychain access is restored
+        XCTAssertEqual(ud?.string(forKey: "restore_phase"), RestorePhase.pendingValidation.rawValue)
+    }
+
+    func testRecoveryKeyNotFoundClearsDanglingPhase() throws {
+        let ud = UserDefaults(suiteName: testAppGroup)
+        ud?.set(RestorePhase.pendingValidation.rawValue, forKey: "restore_phase")
+        // No pending mnemonic stored (keyNotFound)
+
+        try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        // Dangling phase should be cleared safely
+        XCTAssertNil(ud?.string(forKey: "restore_phase"))
+    }
 }
 
 // MARK: - Mock Storage
 
 private final class MockLifecycleMnemonicStorage: MnemonicStorageProtocol {
     var mockLoadError: Error?
+    var mockPendingLoadError: Error?
     var mockMnemonic: String?
     var mockPendingMnemonic: String?
 
@@ -266,6 +289,9 @@ private final class MockLifecycleMnemonicStorage: MnemonicStorageProtocol {
     }
 
     func loadPendingMnemonic() throws -> String {
+        if let error = mockPendingLoadError {
+            throw error
+        }
         if let pending = mockPendingMnemonic {
             return pending
         }

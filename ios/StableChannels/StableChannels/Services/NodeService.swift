@@ -135,8 +135,17 @@ class NodeService: NodeServiceProtocol {
 
     init(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) {
         self.keychain = keychain
-        // Pre-load saved mnemonic directly from Keychain if present
-        savedMnemonic = try? keychain.loadMnemonic()
+        do {
+            savedMnemonic = try keychain.loadMnemonic()
+        } catch WalletKeychainError.keyNotFound {
+            savedMnemonic = nil
+        } catch {
+            AuditService.log(
+                "KEYCHAIN_LOAD_FAILED",
+                data: ["error": error.localizedDescription, "where": "NodeService.init"]
+            )
+            savedMnemonic = nil
+        }
     }
 
     // MARK: - Lifecycle
