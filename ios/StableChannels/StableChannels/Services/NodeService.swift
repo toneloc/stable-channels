@@ -133,7 +133,8 @@ class NodeService: NodeServiceProtocol {
     weak var databaseService: DatabaseService?
 
     init() {
-        savedMnemonic = MnemonicMigrator.loadOrMigrateMnemonic()
+        // Pre-load saved mnemonic from Keychain (or migrate legacy plaintext file)
+        savedMnemonic = try? MnemonicMigrator.loadOrMigrateMnemonic()
     }
 
     // MARK: - Lifecycle
@@ -227,12 +228,8 @@ class NodeService: NodeServiceProtocol {
             words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
         } else {
             do {
-                words = try WalletKeychainService.shared.loadMnemonic()
-            } catch WalletKeychainError.keyNotFound {
-                // Legacy migration fallback or new wallet generation
-                if let savedPlaintext = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
-                   !savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    words = savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let migrated = try MnemonicMigrator.loadOrMigrateMnemonic() {
+                    words = migrated
                 } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
                     try Self.wipeWalletData()
                     words = generateEntropyMnemonic(wordCount: nil)
@@ -240,7 +237,7 @@ class NodeService: NodeServiceProtocol {
                     words = ""
                 }
             } catch {
-                AuditService.log("KEYCHAIN_LOAD_FAILED", data: ["error": error.localizedDescription])
+                AuditService.log("MIGRATION_OR_LOAD_FAILED", data: ["error": error.localizedDescription])
                 throw error
             }
         }
