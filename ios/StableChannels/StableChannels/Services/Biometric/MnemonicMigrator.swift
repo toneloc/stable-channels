@@ -12,7 +12,8 @@ enum MnemonicMigrator {
         logError: ((String, [String: Any]) -> Void)? = { event, data in AuditService.log(event, data: data) }
     ) -> String? {
         // 1. Encrypted-first: an existing Keychain seed is authoritative.
-        if let keychainMnemonic = try? keychain.loadMnemonic() {
+        do {
+            let keychainMnemonic = try keychain.loadMnemonic()
             // Reconcile lingering legacy plaintext file if present
             if let plaintext = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) {
                 let trimmed = plaintext.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -27,6 +28,11 @@ enum MnemonicMigrator {
                 }
             }
             return keychainMnemonic
+        } catch WalletKeychainError.keyNotFound {
+            // Keychain is genuinely empty; plaintext migration is allowed.
+        } catch {
+            logError?("KEYCHAIN_LOAD_FAILED", ["error": error.localizedDescription])
+            return nil // Fail closed: leave both stores untouched
         }
 
         // 2. Keychain empty — migrate plaintext if present.

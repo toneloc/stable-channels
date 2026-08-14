@@ -234,7 +234,7 @@ class NodeService: NodeServiceProtocol {
                    !savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     words = savedPlaintext.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
-                    Self.wipeWalletData()
+                    try Self.wipeWalletData()
                     words = generateEntropyMnemonic(wordCount: nil)
                 } else {
                     words = ""
@@ -610,7 +610,7 @@ class NodeService: NodeServiceProtocol {
 
     /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)
     /// so a fresh wallet can be created without descriptor conflicts.
-    static func wipeWalletData() {
+    static func wipeWalletData() throws {
         let dir = Constants.userDataDir
         let filesToDelete = [
             "keys_seed",
@@ -622,7 +622,7 @@ class NodeService: NodeServiceProtocol {
         for file in filesToDelete {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
         }
-        WalletKeychainService.shared.deleteMnemonic()
+        try WalletKeychainService.shared.deleteMnemonic()
     }
 }
 
