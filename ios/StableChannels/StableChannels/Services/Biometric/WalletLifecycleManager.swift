@@ -38,23 +38,12 @@ final class WalletLifecycleManager {
         keychain: any MnemonicStorageProtocol = WalletKeychainService.shared,
         userDataDir: URL = Constants.userDataDir,
         appGroupIdentifier: String = Constants.appGroupIdentifier,
-        validator: @escaping (String) -> Bool = { mnemonic in
-            let words = mnemonic.split(whereSeparator: \.isWhitespace)
-            guard [12, 15, 18, 21, 24].contains(words.count) else { return false }
-            return AppState.deriveNodeId(mnemonic: mnemonic) != nil
-        }
+        validator: @escaping (String) -> Bool
     ) {
         self.keychain = keychain
         self.userDataDir = userDataDir
         self.appGroupIdentifier = appGroupIdentifier
         self.validator = validator
-    }
-
-    /// Evaluates if a given mnemonic string matches valid BIP-39 word counts (12, 15, 18, 21, 24 words).
-    static func isValidMnemonicFormat(_ mnemonic: String) -> Bool {
-        let words = mnemonic.split(whereSeparator: \.isWhitespace)
-        let validCounts = [12, 15, 18, 21, 24]
-        return validCounts.contains(words.count)
     }
 
     /// Evaluates the possible database and seed startup states
