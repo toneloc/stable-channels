@@ -166,7 +166,7 @@ enum Constants {
             name: "BTCTurk",
             urlFormat: "https://api.btcturk.com/api/v2/ticker",
             jsonPath: ["last"],
-            filterKey: "pairNormalized",
+            filterKey: "pair",
             filterValue: "BTCUSDT"
         ),
         PriceFeedConfig(
