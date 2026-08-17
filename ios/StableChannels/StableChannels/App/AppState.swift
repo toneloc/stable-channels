@@ -357,12 +357,7 @@ class AppState {
 
         do {
             try initializeDatabaseServices()
-            try await nodeService.start(
-                network: .bitcoin,
-                esploraURL: chainURL,
-                mnemonic: words,
-                lspConfig: activeLSP
-            )
+            try await startNodeWithFailover(mnemonic: words)
 
             let nodeId = nodeService.nodeId
             if !nodeId.isEmpty {
@@ -619,12 +614,7 @@ class AppState {
             purgeEmptyNetworkGraph()
 
             do {
-                try await nodeService.start(
-                    network: .bitcoin,
-                    esploraURL: chainURL,
-                    mnemonic: "", // Uses existing seed from data dir
-                    lspConfig: activeLSP
-                )
+                try await startNodeWithFailover(mnemonic: "")
                 // Store node_id in shared UserDefaults for NSE and push registration
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
@@ -664,12 +654,7 @@ class AppState {
             // New wallet — auto-create
             await MainActor.run { phase = .syncing }
             do {
-                try await nodeService.start(
-                    network: .bitcoin,
-                    esploraURL: chainURL,
-                    mnemonic: "",
-                    lspConfig: activeLSP
-                )
+                try await startNodeWithFailover(mnemonic: "")
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -858,12 +843,7 @@ class AppState {
         }
         restoreGossipToDB()
         do {
-            try await nodeService.start(
-                network: .bitcoin,
-                esploraURL: chainURL,
-                mnemonic: "",
-                lspConfig: activeLSP
-            )
+            try await startNodeWithFailover(mnemonic: "")
             refreshBalances()
             blockHeightService.start()
             mempoolWebSocketService.connect()
@@ -2556,6 +2536,54 @@ class AppState {
                     "error": error.localizedDescription
                 ])
                 isSweeping = false
+            }
+        }
+    }
+
+    /// Starts the node with the current chainURL, and automatically falls back to the
+    /// secondary Esplora source (e.g. mempool.space) if primary startup encounters an
+    /// Esplora fee-rate estimation failure or network timeout.
+    private func startNodeWithFailover(mnemonic: String = "") async throws {
+        let initialURL = chainURL
+        do {
+            try await nodeService.start(
+                network: .bitcoin,
+                esploraURL: initialURL,
+                mnemonic: mnemonic,
+                lspConfig: activeLSP
+            )
+        } catch {
+            AuditService.log("NODE_START_INITIAL_FAILED", data: [
+                "esploraURL": initialURL,
+                "error": error.localizedDescription
+            ])
+
+            let fallbackURL = (initialURL == Constants.primaryChainURL)
+                ? Constants.fallbackChainURL
+                : Constants.primaryChainURL
+
+            // Brief backoff before retry to clear transient network sockets
+            try? await Task.sleep(nanoseconds: 300_000_000)
+
+            do {
+                try await nodeService.start(
+                    network: .bitcoin,
+                    esploraURL: fallbackURL,
+                    mnemonic: mnemonic,
+                    lspConfig: activeLSP
+                )
+                self.chainURL = fallbackURL
+                AuditService.log("NODE_START_FAILOVER_SUCCESS", data: [
+                    "primary": initialURL,
+                    "using": fallbackURL
+                ])
+            } catch let fallbackError {
+                AuditService.log("NODE_START_FAILOVER_FAILED", data: [
+                    "primary": initialURL,
+                    "fallback": fallbackURL,
+                    "error": fallbackError.localizedDescription
+                ])
+                throw fallbackError
             }
         }
     }

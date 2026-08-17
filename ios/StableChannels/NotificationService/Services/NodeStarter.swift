@@ -65,23 +65,41 @@ final class DefaultNodeStarter: NodeStarter {
             )
         )
 
-        let builder = LDKNode.Builder.fromConfig(config: config)
-        builder.setChainSourceEsplora(
-            serverUrl: "https://blockstream.info/api",
-            config: syncConfig
-        )
+        let primaryURL = "https://blockstream.info/api"
+        let fallbackURL = "https://mempool.space/api"
 
-        let node = try builder.build(nodeEntropy: nodeEntropy)
+        do {
+            let builder = LDKNode.Builder.fromConfig(config: config)
+            builder.setChainSourceEsplora(
+                serverUrl: primaryURL,
+                config: syncConfig
+            )
+            let node = try builder.build(nodeEntropy: nodeEntropy)
+            let memAfterBuild = Diagnostics.residentMemoryBytes()
+            logger.log("Mem after build: \(memAfterBuild / 1024 / 1024) MB")
 
-        let memAfterBuild = Diagnostics.residentMemoryBytes()
-        logger.log("Mem after build: \(memAfterBuild / 1024 / 1024) MB")
+            try node.start()
 
-        try node.start()
+            let memAfterStart = Diagnostics.residentMemoryBytes()
+            logger.log("Mem after start: \(memAfterStart / 1024 / 1024) MB")
+            return node
+        } catch {
+            logger
+                .log(
+                    "Primary Esplora failed during start: \(error.localizedDescription). Retrying with fallback: \(fallbackURL)"
+                )
+            let fallbackBuilder = LDKNode.Builder.fromConfig(config: config)
+            fallbackBuilder.setChainSourceEsplora(
+                serverUrl: fallbackURL,
+                config: syncConfig
+            )
+            let fallbackNode = try fallbackBuilder.build(nodeEntropy: nodeEntropy)
+            try fallbackNode.start()
 
-        let memAfterStart = Diagnostics.residentMemoryBytes()
-        logger.log("Mem after start: \(memAfterStart / 1024 / 1024) MB")
-
-        return node
+            let memAfterStart = Diagnostics.residentMemoryBytes()
+            logger.log("Mem after fallback start: \(memAfterStart / 1024 / 1024) MB")
+            return fallbackNode
+        }
     }
 
     func connectToLSP(node: LDKNode.Node) throws {
