@@ -232,6 +232,11 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             return false
         }
 
+        // SYNC_V1 changes the backing allocation. Never derive that allocation from the
+        // indefinitely cached channel price, and do not hold a SQLite write lock while fetching.
+        let finalPrice = priceFetcher.fetchPrice()
+        guard PriceOracle.isPlausibleBitcoinPrice(finalPrice) else { return false }
+
         guard let db = openDB() else { return false }
         defer { sqlite3_close(db) }
 
@@ -239,7 +244,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
         // Read current state
         var selectStmt: OpaquePointer?
-        let selectSql = "SELECT stable_sats, receiver_sats, latest_price FROM channels WHERE user_channel_id = ?"
+        let selectSql = "SELECT receiver_sats FROM channels WHERE user_channel_id = ?"
         guard sqlite3_prepare_v2(db, selectSql, -1, &selectStmt, nil) == SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return false
@@ -256,23 +261,10 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return false
         }
-        let currentBacking = UInt64(sqlite3_column_int64(selectStmt, 0))
-        let receiverSats = UInt64(sqlite3_column_int64(selectStmt, 1))
-        let price = sqlite3_column_double(selectStmt, 2)
+        let receiverSats = UInt64(sqlite3_column_int64(selectStmt, 0))
         sqlite3_finalize(selectStmt)
 
-        // Calculate new backing
-        var finalPrice = price
-        if finalPrice <= 0 {
-            finalPrice = priceFetcher.fetchPrice()
-        }
-
-        let newBacking: UInt64
-        if finalPrice > 0 {
-            newBacking = UInt64(max(0.0, expectedUSD / finalPrice * Self.satsInBTC))
-        } else {
-            newBacking = currentBacking
-        }
+        let newBacking = UInt64(max(0.0, expectedUSD / finalPrice * Self.satsInBTC))
         let newNative = receiverSats >= newBacking ? receiverSats - newBacking : 0
 
         // Update

@@ -1,0 +1,31 @@
+name: iOS Tests
+
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-tests.yml"
+
+concurrency:
+  group: ios-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run iOS unit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ios/StableChannels/StableChannels.xcodeproj \
+            -scheme StableChannels \
+            -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO

@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		02EB2F2AFFACF5F588CF7912 /* CodeScanner in Frameworks */ = {isa = PBXBuildFile; productRef = C5B41595048B8AA9D3617B42 /* CodeScanner */; };
 		05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0446A88D1E083A380EDC5436 /* PriceService.swift */; };
+		49A0F0023029000000000001 /* PriceOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A0F0013029000000000001 /* PriceOracle.swift */; };
+		49A0F0033029000000000001 /* PriceOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A0F0013029000000000001 /* PriceOracle.swift */; };
 		06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B785A33E02FD999CB62019AD /* StableChannelsApp.swift */; };
 		1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 379669F5815ECD9926C3A5D2 /* LSPConfig.swift */; };
 		10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */; };
@@ -183,6 +185,7 @@
 
 /* Begin PBXFileReference section */
 		0446A88D1E083A380EDC5436 /* PriceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceService.swift; sourceTree = "<group>"; };
+		49A0F0013029000000000001 /* PriceOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceOracle.swift; sourceTree = "<group>"; };
 		07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		134775C01F3C51CA39B262FC /* LSPSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPSettingsView.swift; sourceTree = "<group>"; };
 		24158DEF5FC6BF7AE004C56B /* StableChannels.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StableChannels.entitlements; sourceTree = "<group>"; };
@@ -599,6 +602,7 @@
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
+				49A0F0013029000000000001 /* PriceOracle.swift */,
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
@@ -921,6 +925,7 @@
 				8A8A0B0C2BA8736EC140DD0E /* PriceChartView.swift in Sources */,
 				4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */,
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
+				49A0F0023029000000000001 /* PriceOracle.swift in Sources */,
 				49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */,
 				37DA6E9D4F5D4BF36DD86BC8 /* ReceiveView.swift in Sources */,
 				B4C85619D6A5506E1BD9FC11 /* SellView.swift in Sources */,
@@ -985,6 +990,7 @@
 				4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */,
 				499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */,
 				4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */,
+				49A0F0033029000000000001 /* PriceOracle.swift in Sources */,
 				4991278C2FFEB51600D9C81F /* PaymentDatabase.swift in Sources */,
 				499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */,
 				6CC27037A08B1EC6BC4E3B4F /* NotificationService.swift in Sources */,

@@ -5,7 +5,19 @@ class PriceService {
     var currentPrice: Double = 0.0
     private(set) var lastUpdate: Date = .distantPast
     private(set) var isUpdating = false
+    private(set) var isTrustedForAccounting = false
+    private(set) var isQuarantined = false
+    private(set) var activeSource: PriceOracleSource?
     private var refreshTask: Task<Void, Never>?
+
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = Constants.priceFetchTimeoutSecs
+        configuration.timeoutIntervalForResource = Constants.priceFetchTimeoutSecs
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }()
 
     // MARK: - Public
 
@@ -25,37 +37,84 @@ class PriceService {
         refreshTask = nil
     }
 
-    /// Fetch the median price from multiple feeds.
+    /// The last accepted value remains available for display, but accounting fails closed once
+    /// it is stale or quarantined by the large-move circuit breaker.
+    var accountingPrice: Double {
+        guard isTrustedForAccounting,
+              !isQuarantined,
+              Date().timeIntervalSince(lastUpdate) <= PriceOracle.maximumTrustedPriceAge else {
+            return 0
+        }
+        return currentPrice
+    }
+
+    var isPriceStale: Bool {
+        Date().timeIntervalSince(lastUpdate) > PriceOracle.maximumTrustedPriceAge
+    }
+
+    func seedDisplayPrice(_ price: Double) {
+        guard currentPrice <= 0, PriceOracle.isPlausibleBitcoinPrice(price) else { return }
+        currentPrice = price
+        isTrustedForAccounting = false
+    }
+
+    /// Fetch a direct-USD consensus, falling back to peg-normalized USDT only when USD quorum fails.
     func fetchPrice() async {
         guard !isUpdating else { return }
         await MainActor.run { isUpdating = true }
 
-        let feeds = Constants.defaultPriceFeeds
-        var prices: [Double] = []
-
-        await withTaskGroup(of: (String, Double?).self) { group in
-            for feed in feeds {
-                group.addTask {
-                    let price = await Self.fetchSingleFeed(feed)
-                    return (feed.name, price)
-                }
-            }
-
-            for await (_, price) in group {
-                if let p = price, p > 0 {
-                    prices.append(p)
-                }
-            }
+        let lastTrustedPrice = await MainActor.run { () -> Double? in
+            guard !self.isPriceStale,
+                  PriceOracle.isPlausibleBitcoinPrice(self.currentPrice) else { return nil }
+            return self.currentPrice
         }
 
-        let median = Self.median(prices)
-
-        await MainActor.run {
-            if median > 0 {
-                self.currentPrice = median
-                self.lastUpdate = Date()
+        let usdPrices = await Self.fetchFeeds(PriceOracle.directUSDFeeds)
+        do {
+            let result: PriceOracleResult
+            do {
+                result = try PriceOracle.resolve(
+                    usdPrices: usdPrices,
+                    usdtPrices: [],
+                    pegPrices: [],
+                    lastTrustedPrice: lastTrustedPrice
+                )
+            } catch let failure as PriceOracleFailure where !failure.quarantinesPrice {
+                print("[PriceOracle] direct USD unavailable: \(failure); trying USDT fallback")
+                async let usdtPrices = Self.fetchFeeds(PriceOracle.bitcoinUSDTFeeds)
+                async let pegPrices = Self.fetchFeeds(PriceOracle.usdtUSDFeeds)
+                let (fetchedUSDTPrices, fetchedPegPrices) = await (usdtPrices, pegPrices)
+                result = try PriceOracle.resolve(
+                    usdPrices: [],
+                    usdtPrices: fetchedUSDTPrices,
+                    pegPrices: fetchedPegPrices,
+                    lastTrustedPrice: lastTrustedPrice
+                )
             }
-            self.isUpdating = false
+
+            await MainActor.run {
+                self.currentPrice = result.price
+                self.lastUpdate = Date()
+                self.isQuarantined = false
+                self.isTrustedForAccounting = true
+                self.activeSource = result.source
+                self.isUpdating = false
+            }
+            let pegDetail = result.usdtUSD.map { String(format: ", USDT/USD=%.6f", $0) } ?? ""
+            print(
+                "[PriceOracle] accepted \(result.source.rawValue) price from " +
+                    "\(result.agreeingFeedNames.count) feeds\(pegDetail)"
+            )
+        } catch {
+            let quarantines = (error as? PriceOracleFailure)?.quarantinesPrice == true
+            await MainActor.run {
+                if quarantines {
+                    self.isQuarantined = true
+                }
+                self.isTrustedForAccounting = !self.isQuarantined && !self.isPriceStale
+                self.isUpdating = false
+            }
+            print("[PriceOracle] rejected refresh: \(error)")
         }
     }
 
@@ -71,7 +130,7 @@ class PriceService {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await Self.session.data(from: url)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 return []
             }
@@ -111,68 +170,47 @@ class PriceService {
 
     // MARK: - Private
 
+    private static func fetchFeeds(_ feeds: [PriceFeedConfig]) async -> [NamedPrice] {
+        await withTaskGroup(of: NamedPrice?.self, returning: [NamedPrice].self) { group in
+            for feed in feeds {
+                group.addTask {
+                    guard let price = await fetchSingleFeed(feed) else { return nil }
+                    return NamedPrice(feedName: feed.name, value: price)
+                }
+            }
+
+            var prices: [NamedPrice] = []
+            for await result in group {
+                if let result { prices.append(result) }
+            }
+            return prices
+        }
+    }
+
     private static func fetchSingleFeed(_ feed: PriceFeedConfig) async -> Double? {
-        guard let url = URL(string: feed.urlFormat) else { return nil }
+        let urlString = feed.urlFormat
+            .replacingOccurrences(of: "{currency_lc}", with: "usd")
+            .replacingOccurrences(of: "{currency}", with: "USD")
+        guard let url = URL(string: urlString) else { return nil }
 
-        for attempt in 0..<Constants.priceFetchMaxRetries {
-            do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                guard let httpResponse = response as? HTTPURLResponse,
-                      (200..<300).contains(httpResponse.statusCode) else {
-                    continue
-                }
-
-                let jsonObject = try JSONSerialization.jsonObject(with: data)
-
-                // Apply feed-level filter if specified (for APIs returning multiple pairs)
-                let targetJSON: Any
-                if let filterKey = feed.filterKey, let filterValue = feed.filterValue {
-                    targetJSON = Self
-                        .filterJSON(jsonObject, filterKey: filterKey, filterValue: filterValue) ?? jsonObject
-                } else {
-                    targetJSON = jsonObject
-                }
-
-                return extractPrice(from: targetJSON, path: feed.jsonPath)
-            } catch {
-                if attempt < Constants.priceFetchMaxRetries - 1 {
-                    try? await Task.sleep(nanoseconds: Constants.priceFetchRetryDelayMs * 1_000_000)
-                }
+        do {
+            let (data, response) = try await session.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  (200..<300).contains(httpResponse.statusCode) else {
+                print("[PriceOracle] \(feed.name) failed: non-2xx response")
+                return nil
             }
+            let jsonObject = try JSONSerialization.jsonObject(with: data)
+            guard let price = extractPrice(from: jsonObject, path: feed.jsonPath) else {
+                print("[PriceOracle] \(feed.name) failed: invalid response path")
+                return nil
+            }
+            print("[PriceOracle] \(feed.name) succeeded")
+            return price
+        } catch {
+            print("[PriceOracle] \(feed.name) failed: \(error.localizedDescription)")
+            return nil
         }
-        return nil
-    }
-
-    /// Filter a JSON response to find the entry matching filterKey == filterValue.
-    /// Handles both array-of-dicts and dict-of-dicts structures.
-    static func filterJSON(_ json: Any, filterKey: String, filterValue: String) -> [String: Any]? {
-        // Search all values recursively for a matching entry
-        if let match = findMatchingEntry(in: json, filterKey: filterKey, filterValue: filterValue) {
-            return match
-        }
-        return nil
-    }
-
-    private static func findMatchingEntry(in json: Any, filterKey: String, filterValue: String) -> [String: Any]? {
-        if let dict = json as? [String: Any] {
-            // Check if this dict matches
-            if let val = dict[filterKey] as? String, val == filterValue {
-                return dict
-            }
-            // Recurse into values
-            for (_, v) in dict {
-                if let found = findMatchingEntry(in: v, filterKey: filterKey, filterValue: filterValue) {
-                    return found
-                }
-            }
-        } else if let array = json as? [Any] {
-            for item in array {
-                if let found = findMatchingEntry(in: item, filterKey: filterKey, filterValue: filterValue) {
-                    return found
-                }
-            }
-        }
-        return nil
     }
 
     static func extractPrice(from json: Any, path: [String]) -> Double? {
@@ -205,13 +243,6 @@ class PriceService {
     }
 
     static func median(_ values: [Double]) -> Double {
-        guard !values.isEmpty else { return 0 }
-        let sorted = values.sorted()
-        let count = sorted.count
-        if count % 2 == 0 {
-            return (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0
-        } else {
-            return sorted[count / 2]
-        }
+        PriceOracle.median(values) ?? 0
     }
 }

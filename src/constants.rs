@@ -61,13 +61,10 @@ pub const DEFAULT_LSP_ADDRESS: &str = "stablechannels.com:9735";
 // ============================================================================
 
 /// Price cache refresh interval (in seconds)
-pub const PRICE_CACHE_REFRESH_SECS: u64 = 5;
+pub const PRICE_CACHE_REFRESH_SECS: u64 = 15;
 
-/// Price fetch retry delay (in milliseconds)
-pub const PRICE_FETCH_RETRY_DELAY_MS: u64 = 300;
-
-/// Price fetch maximum retry attempts
-pub const PRICE_FETCH_MAX_RETRIES: usize = 3;
+/// Per-feed network timeout. Feed diversity provides retries without serially waiting on one host.
+pub const PRICE_FETCH_TIMEOUT_SECS: u64 = 3;
 
 /// Background sync intervals (in seconds)
 pub const ONCHAIN_WALLET_SYNC_INTERVAL_SECS: u64 = 120;
@@ -190,24 +187,109 @@ pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
             vec!["last"],
         ),
         PriceFeedConfig::new(
-            "CoinGecko",
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            vec!["bitcoin", "usd"],
-        ),
-        PriceFeedConfig::new(
             "Kraken",
             "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD",
             vec!["result", "XXBTZUSD", "c"],
         ),
         PriceFeedConfig::new(
             "Coinbase",
-            "https://api.coinbase.com/v2/prices/spot?currency=USD",
+            "https://api.coinbase.com/v2/prices/BTC-USD/spot",
             vec!["data", "amount"],
         ),
         PriceFeedConfig::new(
-            "Blockchain.com",
-            "https://blockchain.info/ticker",
-            vec!["USD", "last"],
+            "Bitfinex",
+            "https://api-pub.bitfinex.com/v2/ticker/tBTCUSD",
+            vec!["6"],
+        ),
+        PriceFeedConfig::new(
+            "Gemini",
+            "https://api.gemini.com/v1/pubticker/btcusd",
+            vec!["last"],
+        ),
+        PriceFeedConfig::new(
+            "Bullish",
+            "https://api.exchange.bullish.com/trading-api/v1/markets/BTCUSD/tick",
+            vec!["last"],
+        ),
+    ]
+}
+
+pub fn get_fallback_usdt_price_feeds() -> Vec<PriceFeedConfig> {
+    vec![
+        PriceFeedConfig::new(
+            "Binance BTC/USDT",
+            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            vec!["price"],
+        ),
+        PriceFeedConfig::new(
+            "Bybit BTC/USDT",
+            "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
+            vec!["result", "list", "0", "lastPrice"],
+        ),
+        PriceFeedConfig::new(
+            "Huobi BTC/USDT",
+            "https://api.huobi.pro/market/detail/merged?symbol=btcusdt",
+            vec!["tick", "close"],
+        ),
+        PriceFeedConfig::new(
+            "KuCoin BTC/USDT",
+            "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=BTC-USDT",
+            vec!["data", "price"],
+        ),
+        PriceFeedConfig::new(
+            "Gate.io BTC/USDT",
+            "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT",
+            vec!["0", "last"],
+        ),
+        PriceFeedConfig::new(
+            "MEXC BTC/USDT",
+            "https://api.mexc.com/api/v3/ticker/price?symbol=BTCUSDT",
+            vec!["price"],
+        ),
+        PriceFeedConfig::new(
+            "Luno BTC/USDT",
+            "https://api.luno.com/api/1/ticker?pair=XBTUSDT",
+            vec!["last_trade"],
+        ),
+        PriceFeedConfig::new(
+            "CoinDCX BTC/USDT",
+            "https://public.coindcx.com/market_data/trade_history?pair=B-BTC_USDT&limit=1",
+            vec!["0", "p"],
+        ),
+        PriceFeedConfig::new(
+            "BTCTurk BTC/USDT",
+            "https://api.btcturk.com/api/v2/ticker?pairSymbol=BTCUSDT",
+            vec!["data", "0", "last"],
+        ),
+    ]
+}
+
+pub fn get_usdt_usd_price_feeds() -> Vec<PriceFeedConfig> {
+    vec![
+        PriceFeedConfig::new(
+            "Coinbase USDT/USD",
+            "https://api.coinbase.com/v2/prices/USDT-USD/spot",
+            vec!["data", "amount"],
+        ),
+        PriceFeedConfig::new(
+            "Kraken USDT/USD",
+            "https://api.kraken.com/0/public/Ticker?pair=USDTUSD",
+            vec!["result", "USDTZUSD", "c"],
+        ),
+        PriceFeedConfig::new(
+            "Bitstamp USDT/USD",
+            "https://www.bitstamp.net/api/v2/ticker/usdtusd/",
+            vec!["last"],
+        ),
+        PriceFeedConfig::new(
+            "Bitfinex USDT/USD",
+            "https://api-pub.bitfinex.com/v2/ticker/tUSTUSD",
+            vec!["6"],
+        ),
+        PriceFeedConfig::new(
+            "CoinGecko USDT/USD",
+            "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd",
+            vec!["tether", "usd"],
         ),
     ]
 }
@@ -260,7 +342,10 @@ mod tests {
     #[test]
     fn test_default_price_feeds_not_empty() {
         let feeds = get_default_price_feeds();
-        assert!(!feeds.is_empty());
+        assert_eq!(feeds.len(), 6);
+        assert!(feeds.iter().all(|feed| !feed.url_format.contains("USDT")));
+        assert_eq!(get_fallback_usdt_price_feeds().len(), 9);
+        assert_eq!(get_usdt_usd_price_feeds().len(), 5);
     }
 
     #[test]

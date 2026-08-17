@@ -90,6 +90,7 @@ class AppState {
 
     var stableChannel: StableChannel = .default
     var btcPrice: Double { priceService.currentPrice }
+    var accountingBTCPrice: Double { priceService.accountingPrice }
     var statusMessage: String = ""
     var paymentFlash: Bool = false
     var isChannelClosing: Bool = false
@@ -589,7 +590,7 @@ class AppState {
 
         // Seed price from cache so UI can compute native USD immediately
         if stableChannel.latestPrice > 0 {
-            priceService.currentPrice = stableChannel.latestPrice
+            priceService.seedDisplayPrice(stableChannel.latestPrice)
         }
 
         // Start price fetching
@@ -1491,7 +1492,14 @@ class AppState {
             guard parsed.type == Constants.syncMessageType else { continue }
 
             let oldExpected = stableChannel.expectedUSD.amount
-            let price = stableChannel.latestPrice
+            let price = accountingBTCPrice
+            guard price > 0 else {
+                AuditService.log("SYNC_V1_DEFERRED", data: [
+                    "reason": "untrusted_price",
+                    "payment_hash": paymentHash
+                ])
+                return false
+            }
             StabilityService.applyTrade(&stableChannel, newExpectedUSD: parsed.expectedUSD, price: price)
             saveChannelToDB()
 
@@ -2109,8 +2117,13 @@ class AppState {
     private func runStabilityCheck() {
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
-        let price = btcPrice
-        guard price > 0 else { return }
+        let price = accountingBTCPrice
+        guard price > 0 else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": priceService.isQuarantined ? "quarantined_price" : "stale_price"
+            ])
+            return
+        }
 
         refreshBalances()
         updateStableBalances()

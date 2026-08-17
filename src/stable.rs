@@ -4,7 +4,7 @@ use crate::constants::{
     STABILITY_PAYMENT_CLOCK_SKEW_SECS, STABILITY_PAYMENT_COOLDOWN_SECS,
     STABILITY_PAYMENT_MESSAGE_TYPE, STABILITY_THRESHOLD_PERCENT, STABILITY_THRESHOLD_USD,
 };
-use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
+use crate::price_feeds::get_fresh_cached_price_no_fetch;
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
 use rand::RngCore;
@@ -487,8 +487,8 @@ pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) ->
 
 /// Get the current BTC/USD price, preferring cached value when available
 pub fn get_current_price(agent: &Agent) -> f64 {
-    // First try the cached price
-    let cached_price = get_cached_price();
+    // Accounting callers may only consume a fresh, non-quarantined cache value.
+    let cached_price = get_fresh_cached_price_no_fetch();
 
     // Use the cached price if valid
     if cached_price > 0.0 {

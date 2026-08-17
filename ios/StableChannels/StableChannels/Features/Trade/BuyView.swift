@@ -27,6 +27,8 @@ struct BuyView: View {
         appState.stableChannel.expectedUSD.amount
     }
 
+    private var tradePrice: Double { appState.accountingBTCPrice }
+
     private var amountUSD: Double {
         Double(amountStr) ?? 0
     }
@@ -44,13 +46,13 @@ struct BuyView: View {
     }
 
     private var btcAmount: Double {
-        guard appState.btcPrice > 0 else { return 0 }
-        return amountUSD / appState.btcPrice
+        guard tradePrice > 0 else { return 0 }
+        return amountUSD / tradePrice
     }
 
     private var btcAmountFinal: Double {
-        guard appState.btcPrice > 0 else { return 0 }
-        return netAmountUSD / appState.btcPrice
+        guard tradePrice > 0 else { return 0 }
+        return netAmountUSD / tradePrice
     }
 
     var body: some View {
@@ -116,12 +118,18 @@ struct BuyView: View {
                     .foregroundStyle(.red)
             }
 
+            if tradePrice <= 0 {
+                Text("A fresh BTC/USD consensus is required before trading")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             Spacer()
 
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(amountUSD <= 0 || amountUSD > maxBuyUSD)
+                .disabled(amountUSD <= 0 || amountUSD > maxBuyUSD || tradePrice <= 0)
         }
     }
 
@@ -144,7 +152,7 @@ struct BuyView: View {
                 )
                 confirmRow(
                     String(localized: "label_btc_price", defaultValue: "BTC Price"),
-                    appState.btcPrice.usdFormatted
+                    tradePrice.usdFormatted
                 )
                 Divider()
                 confirmRow(
@@ -178,7 +186,7 @@ struct BuyView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(isExecuting)
+            .disabled(isExecuting || tradePrice <= 0)
         }
     }
 
@@ -246,7 +254,12 @@ struct BuyView: View {
         errorMessage = nil
         appState.ensureLSPConnected()
         let sc = appState.stableChannel
-        let price = appState.btcPrice
+        let price = tradePrice
+        guard price > 0 else {
+            errorMessage = "A fresh BTC/USD consensus is required before trading"
+            isExecuting = false
+            return
+        }
         do {
             guard let result = try appState.tradeService?.executeBuy(
                 sc: sc,

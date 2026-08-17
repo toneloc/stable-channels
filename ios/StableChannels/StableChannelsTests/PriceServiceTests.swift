@@ -4,166 +4,135 @@ import XCTest
 final class PriceServiceExtractionTests: XCTestCase {
     func testExtractPrice_objectPath() {
         let json: [String: Any] = ["data": ["amount": "63000.975"]]
-        let result = PriceService.extractPrice(from: json, path: ["data", "amount"])
-        XCTAssertNotNil(result); XCTAssertEqual(result, 63000.975)
+        XCTAssertEqual(PriceService.extractPrice(from: json, path: ["data", "amount"]), 63000.975)
     }
 
-    func testExtractPrice_nestedObject() {
-        let json: [String: Any] = ["bitcoin": ["usd": 63007]]
-        let result = PriceService.extractPrice(from: json, path: ["bitcoin", "usd"])
-        XCTAssertNotNil(result); XCTAssertEqual(result, 63007)
+    func testExtractPrice_arrayPath() {
+        let json: [Any] = [["p": 63_100.50]]
+        XCTAssertEqual(PriceService.extractPrice(from: json, path: ["0", "p"]), 63_100.50)
     }
 
-    func testExtractPrice_numericString() throws {
-        let json: [String: Any] = ["lastPrice": "63069.67000000"]
-        let result = PriceService.extractPrice(from: json, path: ["lastPrice"])
-        XCTAssertNotNil(result); XCTAssertEqual(try XCTUnwrap(result), 63069.67, accuracy: 0.01)
-    }
-
-    func testExtractPrice_arrayIndex() throws {
-        let json: [String: Any] = ["c": ["63029.80", "0.01579728"]]
-        let result = PriceService.extractPrice(from: json, path: ["c"])
-        XCTAssertNotNil(result); XCTAssertEqual(try XCTUnwrap(result), 63029.80, accuracy: 0.01)
-    }
-
-    func testExtractPrice_numericArrayIndex() {
-        let array: [Any] = [63074, 63081, 4.7897, -373]
-        let json: [String: Any] = ["result": array]
-        let result = PriceService.extractPrice(from: json, path: ["result", "6"])
-        // Index 6 doesn't exist — should return nil
-        XCTAssertNil(result)
-    }
-
-    func testExtractPrice_nestedArrayIndex() throws {
-        let json: [String: Any] = ["data": [["last": "63100.50"]]]
-        let result = PriceService.extractPrice(from: json, path: ["data", "0", "last"])
-        XCTAssertNotNil(result); XCTAssertEqual(try XCTUnwrap(result), 63100.50, accuracy: 0.01)
-    }
-
-    func testExtractPrice_integerValue() {
-        let json: [String: Any] = ["USD": ["last": 63044]]
-        let result = PriceService.extractPrice(from: json, path: ["USD", "last"])
-        XCTAssertNotNil(result); XCTAssertEqual(result, 63044)
-    }
-
-    func testExtractPrice_missingKey() {
-        let json: [String: Any] = ["data": ["amount": "63000.975"]]
-        let result = PriceService.extractPrice(from: json, path: ["data", "nonexistent"])
-        XCTAssertNil(result)
-    }
-
-    func testExtractPrice_deepNested() throws {
+    func testExtractPrice_krakenArrayValue() {
         let json: [String: Any] = [
-            "result": [
-                "XXBTZUSD": [
-                    "c": ["63029.80000", "0.01579728"]
-                ]
-            ]
+            "result": ["XXBTZUSD": ["c": ["63029.80000", "0.01579728"]]]
         ]
-        let result = PriceService.extractPrice(from: json, path: ["result", "XXBTZUSD", "c"])
-        XCTAssertNotNil(result); XCTAssertEqual(try XCTUnwrap(result), 63029.80, accuracy: 0.01)
+        XCTAssertEqual(
+            PriceService.extractPrice(from: json, path: ["result", "XXBTZUSD", "c"]),
+            63_029.80
+        )
     }
 
-    func testMedian_oddCount() {
-        let values = [1.0, 3.0, 2.0]
-        XCTAssertEqual(PriceService.median(values), 2.0)
+    func testExtractPrice_missingOrOutOfRangePathReturnsNil() {
+        XCTAssertNil(PriceService.extractPrice(from: ["data": ["amount": "1"]], path: ["missing"]))
+        XCTAssertNil(PriceService.extractPrice(from: [1, 2], path: ["2"]))
     }
 
-    func testMedian_evenCount() {
-        let values = [1.0, 4.0, 2.0, 3.0]
-        XCTAssertEqual(PriceService.median(values), 2.5)
+    func testMedian() {
+        XCTAssertEqual(PriceService.median([]), 0)
+        XCTAssertEqual(PriceService.median([3, 1, 2]), 2)
+        XCTAssertEqual(PriceService.median([4, 1, 3, 2]), 2.5)
+    }
+}
+
+final class PriceOracleTests: XCTestCase {
+    private func named(_ values: [Double], prefix: String = "feed") -> [NamedPrice] {
+        values.enumerated().map { NamedPrice(feedName: "\(prefix)-\($0.offset)", value: $0.element) }
     }
 
-    func testMedian_empty() {
-        XCTAssertEqual(PriceService.median([]), 0.0)
+    func testDirectUSDConsensusIsPreferred() throws {
+        let result = try PriceOracle.resolve(
+            usdPrices: named([64_000, 64_050, 63_950]),
+            usdtPrices: named([80_000, 80_100, 79_900], prefix: "usdt"),
+            pegPrices: named([1.0, 1.0, 1.0], prefix: "peg"),
+            lastTrustedPrice: 64_000
+        )
+
+        XCTAssertEqual(result.source, .directUSD)
+        XCTAssertEqual(result.price, 64_000)
+        XCTAssertNil(result.usdtUSD)
     }
 
-    func testMedian_singleValue() {
-        XCTAssertEqual(PriceService.median([5.0]), 5.0)
+    func testUSDTFallbackUsesMeasuredPeg() throws {
+        let result = try PriceOracle.resolve(
+            usdPrices: named([64_000, 64_050]),
+            usdtPrices: named([64_064, 64_074, 64_054], prefix: "usdt"),
+            pegPrices: named([0.999, 0.9991, 0.9989], prefix: "peg"),
+            lastTrustedPrice: 64_000
+        )
+
+        XCTAssertEqual(result.source, .normalizedUSDT)
+        XCTAssertEqual(try XCTUnwrap(result.usdtUSD), 0.999, accuracy: 0.000_001)
+        XCTAssertEqual(result.price, 63_999.936, accuracy: 1.0)
     }
 
-    func testFilterJSON_arrayOfDicts() {
-        let json: [String: Any] = [
-            "data": [
-                ["pair": "BTCUSDT", "last_price": "63104.01"],
-                ["pair": "ETHUSDT", "last_price": "3100.50"]
-            ]
-        ]
-        let result = PriceService.filterJSON(json, filterKey: "pair", filterValue: "BTCUSDT")
-        XCTAssertEqual(result?["last_price"] as? String, "63104.01")
-    }
-
-    func testFilterJSON_nestedDict() {
-        let json: [String: Any] = [
-            "tickers": [
-                ["pairNormalized": "BTCUSDT", "last": "63000"],
-                ["pairNormalized": "ETHUSDT", "last": "3100"]
-            ]
-        ]
-        let result = PriceService.filterJSON(json, filterKey: "pairNormalized", filterValue: "BTCUSDT")
-        XCTAssertEqual(result?["last"] as? String, "63000")
-    }
-
-    func testFilterJSON_noMatch() {
-        let json: [String: Any] = [
-            "data": [
-                ["pair": "ETHUSDT", "last_price": "3100.50"]
-            ]
-        ]
-        let result = PriceService.filterJSON(json, filterKey: "pair", filterValue: "BTCUSDT")
-        XCTAssertNil(result)
-    }
-
-    func testExtractPrice_topLevelArray_objectItem() throws {
-        // Simulates Coinlore & Gate.io top-level array responses
-        let json: [Any] = [
-            ["id": "90", "price_usd": "63100.50"]
-        ]
-        let result = PriceService.extractPrice(from: json, path: ["0", "price_usd"])
-        XCTAssertNotNil(result)
-        XCTAssertEqual(try XCTUnwrap(result), 63100.50, accuracy: 0.01)
-    }
-
-    func testExtractPrice_topLevelArray_primitiveItem() throws {
-        // Simulates Bitfinex array of tickers
-        let json: [Any] = [100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 63050.25]
-        let result = PriceService.extractPrice(from: json, path: ["6"])
-        XCTAssertNotNil(result)
-        XCTAssertEqual(try XCTUnwrap(result), 63050.25, accuracy: 0.01)
-    }
-
-    func testFilterJSON_topLevelArray() {
-        // Simulates CoinDCX top-level array of markets
-        let json: [Any] = [
-            ["market": "ETHUSDT", "last_price": "3100.00"],
-            ["market": "BTCUSDT", "last_price": "63200.50"]
-        ]
-        let result = PriceService.filterJSON(json, filterKey: "market", filterValue: "BTCUSDT")
-        XCTAssertEqual(result?["last_price"] as? String, "63200.50")
-    }
-
-    func testDefaultFeeds_nonEmpty() {
-        let feeds = Constants.defaultPriceFeeds
-        XCTAssertGreaterThan(feeds.count, 0)
-
-        // All feeds must have name, urlFormat, and jsonPath
-        for feed in feeds {
-            XCTAssertFalse(feed.name.isEmpty)
-            XCTAssertFalse(feed.urlFormat.isEmpty)
-            XCTAssertFalse(feed.jsonPath.isEmpty)
+    func testUSDTFallbackRejectsDepeg() {
+        XCTAssertThrowsError(
+            try PriceOracle.resolve(
+                usdPrices: named([64_000]),
+                usdtPrices: named([64_500, 64_520, 64_480], prefix: "usdt"),
+                pegPrices: named([0.98, 0.981, 0.979], prefix: "peg"),
+                lastTrustedPrice: 64_000
+            )
+        ) { error in
+            guard case PriceOracleFailure.invalidUSDTPeg = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
         }
     }
 
-    func testDefaultFeeds_noBitstamp() {
-        let names = Constants.defaultPriceFeeds.map(\.name)
-        XCTAssertFalse(names.contains("Bitstamp"), "Bitstamp should be removed (DNS down)")
+    func testUSDTFallbackRequiresThreePegFeeds() {
+        XCTAssertThrowsError(
+            try PriceOracle.resolve(
+                usdPrices: [],
+                usdtPrices: named([64_000, 64_010, 63_990], prefix: "usdt"),
+                pegPrices: named([1.0, 1.0], prefix: "peg"),
+                lastTrustedPrice: nil
+            )
+        )
     }
 
-    func testDefaultFeeds_containsTopExchanges() {
-        let names = Constants.defaultPriceFeeds.map(\.name)
-        let required = ["Binance", "Kraken", "Coinbase", "Bitfinex", "Coinlore", "Bybit"]
-        for exchange in required {
-            XCTAssertTrue(names.contains(exchange), "Missing feed: \(exchange)")
+    func testConsensusRejectsSingleSurvivingFeed() {
+        XCTAssertThrowsError(
+            try PriceOracle.validateBitcoinConsensus(named([64_000]), lastTrustedPrice: nil)
+        )
+    }
+
+    func testConsensusDropsOutlier() throws {
+        let result = try PriceOracle.validateBitcoinConsensus(
+            named([64_000, 64_100, 63_900, 500_000]),
+            lastTrustedPrice: 64_000
+        )
+        XCTAssertEqual(result.feeds.count, 3)
+        XCTAssertEqual(result.price, 64_000)
+    }
+
+    func testLargeMoveQuarantinesPrice() {
+        XCTAssertThrowsError(
+            try PriceOracle.validateBitcoinConsensus(
+                named([80_000, 80_100, 79_900]),
+                lastTrustedPrice: 64_000
+            )
+        ) { error in
+            guard let failure = error as? PriceOracleFailure else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(failure.quarantinesPrice)
         }
+    }
+
+    func testPrimaryFeedListContainsOnlySixDirectUSDMarkets() {
+        XCTAssertEqual(PriceOracle.directUSDFeeds.count, 6)
+        XCTAssertEqual(
+            Set(PriceOracle.directUSDFeeds.map(\.name)),
+            Set(["Bitstamp", "Kraken", "Coinbase", "Bitfinex", "Gemini", "Bullish"])
+        )
+        XCTAssertFalse(PriceOracle.directUSDFeeds.contains { $0.urlFormat.uppercased().contains("USDT") })
+    }
+
+    func testFallbackIncludesRegionalSinglePairFeeds() {
+        let names = Set(PriceOracle.bitcoinUSDTFeeds.map(\.name))
+        XCTAssertTrue(names.contains("CoinDCX BTC/USDT"))
+        XCTAssertTrue(names.contains("Luno BTC/USDT"))
+        XCTAssertTrue(names.contains("BTCTurk BTC/USDT"))
     }
 }

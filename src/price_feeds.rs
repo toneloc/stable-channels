@@ -1,20 +1,24 @@
 use crate::constants::{
-    PRICE_CACHE_REFRESH_SECS, PRICE_FETCH_MAX_RETRIES, PRICE_FETCH_RETRY_DELAY_MS,
+    get_fallback_usdt_price_feeds, get_usdt_usd_price_feeds, PRICE_CACHE_REFRESH_SECS,
+    PRICE_FETCH_TIMEOUT_SECS,
 };
-use retry::{delay::Fixed, retry};
 use serde_json::Value;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use ureq::Agent;
 
 const MIN_PLAUSIBLE_BTC_USD_PRICE: f64 = 1_000.0;
 const MAX_PLAUSIBLE_BTC_USD_PRICE: f64 = 10_000_000.0;
-const MIN_AGREEING_PRICE_FEEDS: usize = 2;
+const MIN_AGREEING_PRICE_FEEDS: usize = 3;
 const MAX_FEED_DEVIATION_RATIO: f64 = 0.05;
 const MAX_MEDIAN_MOVE_RATIO: f64 = 0.10;
 const MAX_TRUSTED_PRICE_AGE_SECS: u64 = 60;
+const MIN_AGREEING_PEG_FEEDS: usize = 3;
+const MAX_USDT_PEG_DEVIATION_FROM_DOLLAR: f64 = 0.005;
+const MAX_PEG_FEED_DEVIATION_RATIO: f64 = 0.0025;
 
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
@@ -148,8 +152,8 @@ pub fn refresh_cached_price() -> Result<f64, String> {
     }
 
     let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .timeout_connect(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
         .build();
     let result = get_latest_price_classified(&agent);
 
@@ -184,8 +188,8 @@ pub fn set_price_feeds() -> Vec<PriceFeed> {
 /// ureq agent with bounded connect + overall timeouts so a hung/geo-blocked endpoint can't stall the caller.
 pub fn bounded_agent() -> Agent {
     ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
+        .timeout_connect(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
         .build()
 }
 
@@ -194,11 +198,11 @@ fn is_plausible_price(price: f64) -> bool {
         && (MIN_PLAUSIBLE_BTC_USD_PRICE..=MAX_PLAUSIBLE_BTC_USD_PRICE).contains(&price)
 }
 
-fn parse_price_value(value: &Value) -> Option<f64> {
+fn parse_numeric_value(value: &Value) -> Option<f64> {
     let price = value
         .as_f64()
         .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))?;
-    is_plausible_price(price).then_some(price)
+    (price.is_finite() && price > 0.0).then_some(price)
 }
 
 fn calculate_median_price(prices: &[(String, f64)]) -> Option<f64> {
@@ -277,75 +281,126 @@ fn validate_price_consensus(
     Ok(median)
 }
 
+fn validate_usdt_peg(prices: &[(String, f64)]) -> Result<f64, PriceRefreshError> {
+    let near_dollar: Vec<(String, f64)> = prices
+        .iter()
+        .filter(|(_, price)| {
+            price.is_finite()
+                && *price > 0.0
+                && (*price - 1.0).abs() <= MAX_USDT_PEG_DEVIATION_FROM_DOLLAR
+        })
+        .cloned()
+        .collect();
+    let mut values: Vec<f64> = near_dollar.iter().map(|(_, price)| *price).collect();
+    values.sort_by(f64::total_cmp);
+    let initial_median = median_values(&values)
+        .ok_or_else(|| PriceRefreshError::transient("No valid USDT/USD peg prices returned"))?;
+    let agreeing: Vec<f64> = values
+        .into_iter()
+        .filter(|price| {
+            ((*price - initial_median).abs() / initial_median) <= MAX_PEG_FEED_DEVIATION_RATIO
+        })
+        .collect();
+
+    if agreeing.len() < MIN_AGREEING_PEG_FEEDS {
+        return Err(PriceRefreshError::transient(format!(
+            "USDT fallback requires at least {MIN_AGREEING_PEG_FEEDS} agreeing peg feeds; got {}",
+            agreeing.len()
+        )));
+    }
+    median_values(&agreeing)
+        .ok_or_else(|| PriceRefreshError::transient("Agreeing USDT/USD feeds produced no median"))
+}
+
+fn median_values(sorted_values: &[f64]) -> Option<f64> {
+    let midpoint = sorted_values.len() / 2;
+    if sorted_values.len().is_multiple_of(2) {
+        let lower = *sorted_values.get(midpoint.checked_sub(1)?)?;
+        let upper = *sorted_values.get(midpoint)?;
+        Some(lower + (upper - lower) / 2.0)
+    } else {
+        sorted_values.get(midpoint).copied()
+    }
+}
+
+fn fetch_single_price(agent: &Agent, price_feed: &PriceFeed) -> Option<f64> {
+    let url = price_feed
+        .url_format
+        .replace("{currency_lc}", "usd")
+        .replace("{currency}", "USD");
+
+    let response = match agent.get(&url).call() {
+        Ok(response) if (200..300).contains(&response.status()) => response,
+        Ok(response) => {
+            eprintln!(
+                "Feed {} failed: HTTP {}",
+                price_feed.name,
+                response.status()
+            );
+            return None;
+        }
+        Err(error) => {
+            eprintln!("Feed {} unreachable: {}", price_feed.name, error);
+            return None;
+        }
+    };
+    let json: Value = match response.into_json() {
+        Ok(json) => json,
+        Err(error) => {
+            eprintln!(
+                "Feed {} returned unparseable JSON: {}",
+                price_feed.name, error
+            );
+            return None;
+        }
+    };
+    let mut data = &json;
+    for key in &price_feed.json_path {
+        let next = if let Ok(index) = key.parse::<usize>() {
+            data.as_array().and_then(|array| array.get(index))
+        } else {
+            data.get(key)
+        };
+        let Some(next) = next else {
+            eprintln!(
+                "Key '{}' not found in response from {}",
+                key, price_feed.name
+            );
+            return None;
+        };
+        data = next;
+    }
+
+    if let Some(first) = data.as_array().and_then(|array| array.first()) {
+        data = first;
+    }
+    let price = parse_numeric_value(data);
+    if price.is_some() {
+        println!("Price feed {} succeeded", price_feed.name);
+    } else {
+        eprintln!("Price data for {} is missing or malformed", price_feed.name);
+    }
+    price
+}
+
 pub fn fetch_prices(
     agent: &Agent,
     price_feeds: &[PriceFeed],
 ) -> Result<Vec<(String, f64)>, Box<dyn Error>> {
-    let mut prices = Vec::new();
-
-    'feeds: for price_feed in price_feeds {
-        let url: String = price_feed
-            .url_format
-            .replace("{currency_lc}", "usd")
-            .replace("{currency}", "USD");
-
-        let response = match retry(
-            Fixed::from_millis(PRICE_FETCH_RETRY_DELAY_MS).take(PRICE_FETCH_MAX_RETRIES),
-            || match agent.get(&url).call() {
-                Ok(resp) => {
-                    if resp.status() >= 200 && resp.status() < 300 {
-                        Ok(resp)
-                    } else {
-                        Err(format!("Received status code: {}", resp.status()))
-                    }
+    let prices = Mutex::new(Vec::new());
+    thread::scope(|scope| {
+        for price_feed in price_feeds.iter().cloned() {
+            let agent = agent.clone();
+            let prices = &prices;
+            scope.spawn(move || {
+                if let Some(price) = fetch_single_price(&agent, &price_feed) {
+                    prices.lock().unwrap().push((price_feed.name, price));
                 }
-                Err(e) => Err(e.to_string()),
-            },
-        ) {
-            Ok(resp) => resp,
-            Err(e) => {
-                eprintln!("Feed {} unreachable: {}", price_feed.name, e);
-                continue 'feeds;
-            }
-        };
-
-        let json: Value = match response.into_json() {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Feed {} returned unparseable JSON: {}", price_feed.name, e);
-                continue 'feeds;
-            }
-        };
-        let mut data = &json;
-
-        for key in &price_feed.json_path {
-            if let Some(inner_data) = data.get(key) {
-                data = inner_data;
-            } else {
-                eprintln!(
-                    "Key '{}' not found in the response from {}",
-                    key, price_feed.name
-                );
-                continue 'feeds;
-            }
+            });
         }
-
-        // If the value is an array (e.g., Kraken "c": ["<last>", "<vol>"]), take the first item.
-        if let Some(arr) = data.as_array() {
-            if let Some(first) = arr.first() {
-                data = first;
-            }
-        }
-
-        if let Some(price) = parse_price_value(data) {
-            prices.push((price_feed.name.clone(), price));
-        } else {
-            eprintln!(
-                "Price data for {} is missing, malformed, or outside the plausibility band",
-                price_feed.name
-            );
-        }
-    }
+    });
+    let mut prices = prices.into_inner().unwrap();
+    prices.sort_by(|left, right| left.0.cmp(&right.0));
 
     if prices.is_empty() {
         return Err("No valid prices fetched.".into());
@@ -355,25 +410,53 @@ pub fn fetch_prices(
 }
 
 fn get_latest_price_classified(agent: &Agent) -> Result<f64, PriceRefreshError> {
-    let price_feeds = set_price_feeds();
-    let prices = fetch_prices(agent, &price_feeds)
-        .map_err(|error| PriceRefreshError::transient(error.to_string()))?;
-
-    for (feed_name, price) in &prices {
-        println!("{:<25} ${:>1.2}", feed_name, price);
-    }
-
     let last_trusted_price = {
         let cache = PRICE_CACHE.lock().unwrap();
         trusted_price_reference(cache.price, cache.last_update.elapsed())
     };
-    let median_price = validate_price_consensus(&prices, last_trusted_price).map_err(|error| {
-        eprintln!("Rejected BTC/USD price update: {error}");
-        error
-    })?;
+    let usd_prices = fetch_prices(agent, &get_default_price_feeds()).unwrap_or_default();
+    match validate_price_consensus(&usd_prices, last_trusted_price) {
+        Ok(price) => {
+            println!(
+                "Accepted direct USD consensus from {} feeds",
+                usd_prices.len()
+            );
+            return Ok(price);
+        }
+        Err(error) if error.quarantines_price() => return Err(error),
+        Err(error) => eprintln!("Direct USD consensus unavailable: {error}; trying USDT fallback"),
+    }
 
-    println!("\nMedian BTC/USD price:     ${:.2}\n", median_price);
-    Ok(median_price)
+    let usdt_feeds = get_fallback_usdt_price_feeds();
+    let peg_feeds = get_usdt_usd_price_feeds();
+    let usdt_names: std::collections::HashSet<String> =
+        usdt_feeds.iter().map(|feed| feed.name.clone()).collect();
+    let peg_names: std::collections::HashSet<String> =
+        peg_feeds.iter().map(|feed| feed.name.clone()).collect();
+    let mut fallback_feeds = usdt_feeds;
+    fallback_feeds.extend(peg_feeds);
+    let fallback_prices = fetch_prices(agent, &fallback_feeds).unwrap_or_default();
+    let usdt_prices: Vec<(String, f64)> = fallback_prices
+        .iter()
+        .filter(|(name, _)| usdt_names.contains(name))
+        .cloned()
+        .collect();
+    let peg_prices: Vec<(String, f64)> = fallback_prices
+        .iter()
+        .filter(|(name, _)| peg_names.contains(name))
+        .cloned()
+        .collect();
+    let peg = validate_usdt_peg(&peg_prices)?;
+    let normalized_prices: Vec<(String, f64)> = usdt_prices
+        .into_iter()
+        .map(|(name, price)| (name, price * peg))
+        .collect();
+    let price = validate_price_consensus(&normalized_prices, last_trusted_price)?;
+    println!(
+        "Accepted peg-normalized USDT consensus from {} feeds (USDT/USD={peg:.6})",
+        normalized_prices.len()
+    );
+    Ok(price)
 }
 
 pub fn get_latest_price(agent: &Agent) -> Result<f64, Box<dyn Error>> {
@@ -540,22 +623,20 @@ mod tests {
     }
 
     #[test]
-    fn test_price_parser_rejects_non_finite_and_non_positive_values() {
+    fn test_numeric_parser_rejects_non_finite_and_non_positive_values() {
         for value in [
             Value::String("NaN".to_string()),
             Value::String("inf".to_string()),
             Value::String("-inf".to_string()),
             Value::String("0".to_string()),
             Value::String("-1".to_string()),
-            Value::String("999.99".to_string()),
-            Value::String("10000000.01".to_string()),
             Value::Null,
         ] {
-            assert_eq!(parse_price_value(&value), None);
+            assert_eq!(parse_numeric_value(&value), None);
         }
 
         assert_eq!(
-            parse_price_value(&Value::String("50000.5".to_string())),
+            parse_numeric_value(&Value::String("50000.5".to_string())),
             Some(50000.5)
         );
     }
@@ -577,15 +658,15 @@ mod tests {
     }
 
     #[test]
-    fn test_price_consensus_requires_two_agreeing_feeds() {
+    fn test_price_consensus_requires_three_agreeing_feeds() {
         let single = vec![("only".to_string(), 60_000.0)];
         assert!(validate_price_consensus(&single, None).is_err());
 
-        let split = vec![
+        let two = vec![
             ("low".to_string(), 40_000.0),
-            ("high".to_string(), 80_000.0),
+            ("nearby".to_string(), 40_100.0),
         ];
-        assert!(validate_price_consensus(&split, None).is_err());
+        assert!(validate_price_consensus(&two, None).is_err());
     }
 
     #[test]
@@ -593,25 +674,34 @@ mod tests {
         let prices = vec![
             ("a".to_string(), 65_900.0),
             ("b".to_string(), 66_000.0),
+            ("c".to_string(), 66_100.0),
             ("outlier".to_string(), 1_000_000.0),
         ];
-        assert_eq!(validate_price_consensus(&prices, None), Ok(65_950.0));
+        assert_eq!(validate_price_consensus(&prices, None), Ok(66_000.0));
     }
 
     #[test]
     fn test_price_consensus_rejects_large_move_from_last_trusted_price() {
-        let prices = vec![("a".to_string(), 65_900.0), ("b".to_string(), 66_000.0)];
+        let prices = vec![
+            ("a".to_string(), 65_900.0),
+            ("b".to_string(), 66_000.0),
+            ("c".to_string(), 66_100.0),
+        ];
         let error = validate_price_consensus(&prices, Some(50_000.0)).unwrap_err();
         assert_eq!(error.kind, PriceRefreshErrorKind::LargeMove);
         assert_eq!(
             validate_price_consensus(&prices, Some(65_000.0)),
-            Ok(65_950.0)
+            Ok(66_000.0)
         );
     }
 
     #[test]
     fn large_move_anchor_expires_instead_of_wedging_forever() {
-        let prices = vec![("a".to_string(), 65_900.0), ("b".to_string(), 66_000.0)];
+        let prices = vec![
+            ("a".to_string(), 65_900.0),
+            ("b".to_string(), 66_000.0),
+            ("c".to_string(), 66_100.0),
+        ];
         let recent =
             trusted_price_reference(50_000.0, Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS));
         assert_eq!(recent, Some(50_000.0));
@@ -622,7 +712,38 @@ mod tests {
             Duration::from_secs(MAX_TRUSTED_PRICE_AGE_SECS + 1),
         );
         assert_eq!(expired, None);
-        assert_eq!(validate_price_consensus(&prices, expired), Ok(65_950.0));
+        assert_eq!(validate_price_consensus(&prices, expired), Ok(66_000.0));
+    }
+
+    #[test]
+    fn usdt_peg_requires_three_agreeing_sources_near_one_dollar() {
+        let valid = vec![
+            ("a".to_string(), 0.9990),
+            ("b".to_string(), 0.9991),
+            ("c".to_string(), 0.9989),
+        ];
+        assert_eq!(validate_usdt_peg(&valid), Ok(0.9990));
+
+        let depegged = vec![
+            ("a".to_string(), 0.98),
+            ("b".to_string(), 0.981),
+            ("c".to_string(), 0.979),
+        ];
+        assert!(validate_usdt_peg(&depegged).is_err());
+        assert!(validate_usdt_peg(&valid[..2]).is_err());
+    }
+
+    #[test]
+    fn normalized_usdt_consensus_uses_measured_peg() {
+        let peg = 0.999;
+        let prices = vec![
+            ("a".to_string(), 64_064.0 * peg),
+            ("b".to_string(), 64_074.0 * peg),
+            ("c".to_string(), 64_054.0 * peg),
+        ];
+        assert!(
+            (validate_price_consensus(&prices, Some(64_000.0)).unwrap() - 63_999.936).abs() < 1.0
+        );
     }
 
     #[test]

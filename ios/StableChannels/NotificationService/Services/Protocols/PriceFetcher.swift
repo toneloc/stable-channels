@@ -7,80 +7,103 @@ protocol PriceFetcher {
 
 /// Concrete implementation fetching from multiple sources
 struct ConcurrentPriceFetcher: PriceFetcher {
-    private static let sources: [(String, (Data) -> Double?)] = [
-        ("https://www.bitstamp.net/api/v2/ticker/btcusd/", { data in
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let s = json["last"] as? String, let p = Double(s) {
-                return p
-            }
-            return nil
-        }),
-        ("https://api.coinbase.com/v2/prices/spot?currency=USD", { data in
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let d = json["data"] as? [String: Any],
-               let s = d["amount"] as? String, let p = Double(s) {
-                return p
-            }
-            return nil
-        }),
-        ("https://blockchain.info/ticker", { data in
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let usd = json["USD"] as? [String: Any],
-               let p = usd["last"] as? Double {
-                return p
-            }
-            return nil
-        }),
-        ("https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD", { data in
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let result = json["result"] as? [String: Any],
-               let pair = result["XXBTZUSD"] as? [String: Any],
-               let c = pair["c"] as? [Any],
-               let s = c.first as? String, let p = Double(s) {
-                return p
-            }
-            return nil
-        }),
-        ("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", { data in
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let btc = json["bitcoin"] as? [String: Any],
-               let p = btc["usd"] as? Double {
-                return p
-            }
-            return nil
-        })
-    ]
-
     func fetchPrice() -> Double {
+        let usdPrices = Self.fetchFeeds(PriceOracle.directUSDFeeds)
+        do {
+            return try PriceOracle.resolve(
+                usdPrices: usdPrices,
+                usdtPrices: [],
+                pegPrices: [],
+                lastTrustedPrice: nil
+            ).price
+        } catch let failure as PriceOracleFailure where !failure.quarantinesPrice {
+            print("[PriceOracle:NSE] direct USD unavailable: \(failure); trying USDT fallback")
+            let fallbackPrices = Self.fetchFeeds(PriceOracle.bitcoinUSDTFeeds + PriceOracle.usdtUSDFeeds)
+            let usdtNames = Set(PriceOracle.bitcoinUSDTFeeds.map(\.name))
+            let pegNames = Set(PriceOracle.usdtUSDFeeds.map(\.name))
+            do {
+                return try PriceOracle.resolve(
+                    usdPrices: [],
+                    usdtPrices: fallbackPrices.filter { usdtNames.contains($0.feedName) },
+                    pegPrices: fallbackPrices.filter { pegNames.contains($0.feedName) },
+                    lastTrustedPrice: nil
+                ).price
+            } catch {
+                print("[PriceOracle:NSE] rejected fallback: \(error)")
+                return 0
+            }
+        } catch {
+            print("[PriceOracle:NSE] rejected refresh: \(error)")
+            return 0
+        }
+    }
+
+    private static func fetchFeeds(_ feeds: [PriceFeedConfig]) -> [NamedPrice] {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 3
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.waitsForConnectivity = false
+        let session = URLSession(configuration: configuration)
+
         let lock = NSLock()
-        var prices: [Double] = []
+        var prices: [NamedPrice] = []
         let group = DispatchGroup()
 
-        func append(_ p: Double) {
-            lock.lock()
-            prices.append(p)
-            lock.unlock()
-        }
-
-        // All requests fire concurrently
-        for (url, parser) in Self.sources {
+        for feed in feeds {
             group.enter()
-            guard let url = URL(string: url) else {
+            let urlString = feed.urlFormat
+                .replacingOccurrences(of: "{currency_lc}", with: "usd")
+                .replacingOccurrences(of: "{currency}", with: "USD")
+            guard let url = URL(string: urlString) else {
                 group.leave()
                 continue
             }
-            URLSession.shared.dataTask(with: url) { data, _, _ in
+            session.dataTask(with: url) { data, response, error in
                 defer { group.leave() }
-                if let data, let price = parser(data) {
-                    append(price)
+                guard error == nil,
+                      let http = response as? HTTPURLResponse,
+                      (200 ..< 300).contains(http.statusCode),
+                      let data,
+                      let json = try? JSONSerialization.jsonObject(with: data),
+                      let value = extractPrice(from: json, path: feed.jsonPath) else {
+                    print("[PriceOracle:NSE] \(feed.name) failed")
+                    return
                 }
+                lock.lock()
+                prices.append(NamedPrice(feedName: feed.name, value: value))
+                lock.unlock()
+                print("[PriceOracle:NSE] \(feed.name) succeeded")
             }.resume()
         }
 
-        _ = group.wait(timeout: .now() + 8)
+        _ = group.wait(timeout: .now() + 4)
+        session.invalidateAndCancel()
+        lock.lock()
+        let snapshot = prices
+        lock.unlock()
+        return snapshot
+    }
 
-        guard !prices.isEmpty else { return 0 }
-        let sorted = prices.sorted()
-        return sorted[sorted.count / 2] // median
+    private static func extractPrice(from json: Any, path: [String]) -> Double? {
+        var current: Any = json
+        for key in path {
+            if let index = Int(key), let array = current as? [Any], array.indices.contains(index) {
+                current = array[index]
+            } else if let dictionary = current as? [String: Any], let next = dictionary[key] {
+                current = next
+            } else {
+                return nil
+            }
+        }
+
+        if let array = current as? [Any], let first = array.first {
+            current = first
+        }
+
+        if let value = current as? Double { return value }
+        if let value = current as? Int { return Double(value) }
+        if let value = current as? String { return Double(value) }
+        return nil
     }
 }

@@ -1001,7 +1001,11 @@ class AppState(private val context: Context) : ViewModel() {
         val (type, expectedUsd, _) = parsed
         if (type != Constants.SYNC_MESSAGE_TYPE) return false
 
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) {
+            AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
+            return false
+        }
         val sc = StabilityService.applyTrade(_stableChannel.value, expectedUsd, price)
         _stableChannel.value = sc
         saveChannelToDB()
@@ -1590,10 +1594,10 @@ class AppState(private val context: Context) : ViewModel() {
         refreshBalances()
         updateStableBalances()
         val sc = _stableChannel.value
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
 
-        if (priceService.isPriceStale()) {
-            AuditService.log("STABILITY_SKIP", mapOf("reason" to "stale_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
+        if (price <= 0.0) {
+            AuditService.log("STABILITY_SKIP", mapOf("reason" to "untrusted_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
             return
         }
 
