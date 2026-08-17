@@ -132,7 +132,7 @@ final class PriceOracleTests: XCTestCase {
     func testFallbackIncludesRegionalSinglePairFeeds() {
         let names = Set(PriceOracle.bitcoinUSDTFeeds.map(\.name))
         XCTAssertTrue(names.contains("CoinDCX BTC/USDT"))
-        XCTAssertTrue(names.contains("Luno BTC/USDT"))
         XCTAssertTrue(names.contains("BTCTurk BTC/USDT"))
+        XCTAssertFalse(names.contains("Luno BTC/USDT"))
     }
 }

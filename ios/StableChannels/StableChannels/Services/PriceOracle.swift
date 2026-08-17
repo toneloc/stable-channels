@@ -129,11 +129,6 @@ enum PriceOracle {
             jsonPath: ["price"]
         ),
         PriceFeedConfig(
-            name: "Luno BTC/USDT",
-            urlFormat: "https://api.luno.com/api/1/ticker?pair=XBTUSDT",
-            jsonPath: ["last_trade"]
-        ),
-        PriceFeedConfig(
             name: "CoinDCX BTC/USDT",
             urlFormat: "https://public.coindcx.com/market_data/trade_history?pair=B-BTC_USDT&limit=1",
             jsonPath: ["0", "p"]
