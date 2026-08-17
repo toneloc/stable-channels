@@ -18,8 +18,15 @@ concurrency:
 jobs:
   test:
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode 16.4
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          xcodebuild -version
+          xcrun simctl list devices available
 
       - name: Run iOS unit tests
         run: |
@@ -27,5 +34,6 @@ jobs:
           xcodebuild test \
             -project ios/StableChannels/StableChannels.xcodeproj \
             -scheme StableChannels \
-            -destination 'platform=iOS Simulator,OS=latest,name=iPhone 16' \
+            -destination 'platform=iOS Simulator,OS=18.5,name=iPhone 16' \
+            -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO

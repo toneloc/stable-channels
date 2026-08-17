@@ -120,6 +120,22 @@ final class PriceOracleTests: XCTestCase {
         }
     }
 
+    func testFreshAnchorCanProtectNotificationExtension() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let anchor = PriceOracleAnchor(price: 64_000, acceptedAt: now.addingTimeInterval(-60))
+
+        XCTAssertEqual(PriceOracleAnchorStore.freshPrice(from: anchor, now: now), 64_000)
+    }
+
+    func testStaleOrFutureAnchorIsRejected() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let stale = PriceOracleAnchor(price: 64_000, acceptedAt: now.addingTimeInterval(-61))
+        let future = PriceOracleAnchor(price: 64_000, acceptedAt: now.addingTimeInterval(1))
+
+        XCTAssertNil(PriceOracleAnchorStore.freshPrice(from: stale, now: now))
+        XCTAssertNil(PriceOracleAnchorStore.freshPrice(from: future, now: now))
+    }
+
     func testPrimaryFeedListContainsOnlySixDirectUSDMarkets() {
         XCTAssertEqual(PriceOracle.directUSDFeeds.count, 6)
         XCTAssertEqual(

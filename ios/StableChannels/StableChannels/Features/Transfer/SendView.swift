@@ -54,9 +54,7 @@ struct SendView: View {
     }
 
     private var manualAmountMsat: UInt64 {
-        guard appState.btcPrice > 0, let usd = Double(amountUSDStr), usd > 0 else { return 0 }
-        let btc = usd / appState.btcPrice
-        return UInt64(btc * Double(Constants.satsInBTC) * 1000)
+        convertedMsat(fromUSD: amountUSDStr, price: appState.accountingBTCPrice) ?? 0
     }
 
     /// Sats being sent (from invoice or manual entry)
@@ -68,8 +66,7 @@ struct SendView: View {
             }
             return manualAmountMsat / 1000
         case .bolt12, .onchain:
-            guard let usd = Double(amountSats), usd > 0, appState.btcPrice > 0 else { return 0 }
-            return UInt64(usd / appState.btcPrice * Double(Constants.satsInBTC))
+            return convertedSats(fromUSD: amountSats, price: appState.accountingBTCPrice) ?? 0
         case .unknown:
             return 0
         }
@@ -79,6 +76,31 @@ struct SendView: View {
         let price = appState.btcPrice
         guard price > 0, displaySats > 0 else { return nil }
         return Double(displaySats) / Double(Constants.satsInBTC) * price
+    }
+
+    private func convertedSats(fromUSD value: String, price: Double) -> UInt64? {
+        guard price > 0, let usd = Double(value), usd > 0 else { return nil }
+        let sats = usd / price * Double(Constants.satsInBTC)
+        guard sats.isFinite, sats >= 1, sats < Double(UInt64.max) else { return nil }
+        return UInt64(sats)
+    }
+
+    private func convertedMsat(fromUSD value: String, price: Double) -> UInt64? {
+        guard price > 0, let usd = Double(value), usd > 0 else { return nil }
+        let msat = usd / price * Double(Constants.satsInBTC) * 1_000
+        guard msat.isFinite, msat >= 1, msat < Double(UInt64.max) else { return nil }
+        return UInt64(msat)
+    }
+
+    private func untrustedPriceError() -> NSError {
+        NSError(
+            domain: "PriceOracle",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: String(
+                localized: "error_price_unavailable",
+                defaultValue: "The BTC price is unavailable or stale. Refresh and try again."
+            )]
+        )
     }
 
     private var onchainFeeEstimateText: String {
@@ -430,19 +452,23 @@ struct SendView: View {
         defer { isSending = false }
 
         do {
-            let price = appState.btcPrice
-
             switch detectedType {
             case .bolt11:
                 let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: trimmed)
                 let invoiceMsat = bolt11.amountMilliSatoshis() ?? 0
                 let paymentId: PaymentId
                 let actualMsat: UInt64
+                let price: Double
                 if invoiceMsat > 0 {
+                    price = appState.btcPrice
                     paymentId = try appState.nodeService.sendPayment(invoice: bolt11)
                     actualMsat = invoiceMsat
                 } else {
-                    actualMsat = manualAmountMsat
+                    price = appState.accountingBTCPrice
+                    guard let converted = convertedMsat(fromUSD: amountUSDStr, price: price) else {
+                        throw untrustedPriceError()
+                    }
+                    actualMsat = converted
                     paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: actualMsat)
                 }
                 let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (
@@ -462,8 +488,10 @@ struct SendView: View {
                 sentAmountSats = actualMsat / 1000
 
             case .bolt12:
-                let sats = displaySats
-                guard sats > 0 else { return }
+                let price = appState.accountingBTCPrice
+                guard let sats = convertedSats(fromUSD: amountSats, price: price) else {
+                    throw untrustedPriceError()
+                }
                 let offer = try Offer.fromStr(offerStr: trimmed)
                 let msat = sats * 1000
                 let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
@@ -481,8 +509,10 @@ struct SendView: View {
                 sentAmountSats = sats
 
             case .onchain:
-                let sats = displaySats
-                guard sats > 0 else { return }
+                let price = appState.accountingBTCPrice
+                guard let sats = convertedSats(fromUSD: amountSats, price: price) else {
+                    throw untrustedPriceError()
+                }
                 let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
                 // Route through splice-out if channel exists
                 if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }) {

@@ -8,26 +8,29 @@ protocol PriceFetcher {
 /// Concrete implementation fetching from multiple sources
 struct ConcurrentPriceFetcher: PriceFetcher {
     func fetchPrice() -> Double {
+        let lastTrustedPrice = PriceOracleAnchorStore.freshPrice(suiteName: Constants.appGroup)
         let usdPrices = Self.fetchFeeds(PriceOracle.directUSDFeeds)
         do {
-            return try PriceOracle.resolve(
+            let result = try PriceOracle.resolve(
                 usdPrices: usdPrices,
                 usdtPrices: [],
                 pegPrices: [],
-                lastTrustedPrice: nil
-            ).price
+                lastTrustedPrice: lastTrustedPrice
+            )
+            return accept(result)
         } catch let failure as PriceOracleFailure where !failure.quarantinesPrice {
             print("[PriceOracle:NSE] direct USD unavailable: \(failure); trying USDT fallback")
             let fallbackPrices = Self.fetchFeeds(PriceOracle.bitcoinUSDTFeeds + PriceOracle.usdtUSDFeeds)
             let usdtNames = Set(PriceOracle.bitcoinUSDTFeeds.map(\.name))
             let pegNames = Set(PriceOracle.usdtUSDFeeds.map(\.name))
             do {
-                return try PriceOracle.resolve(
+                let result = try PriceOracle.resolve(
                     usdPrices: [],
                     usdtPrices: fallbackPrices.filter { usdtNames.contains($0.feedName) },
                     pegPrices: fallbackPrices.filter { pegNames.contains($0.feedName) },
-                    lastTrustedPrice: nil
-                ).price
+                    lastTrustedPrice: lastTrustedPrice
+                )
+                return accept(result)
             } catch {
                 print("[PriceOracle:NSE] rejected fallback: \(error)")
                 return 0
@@ -36,6 +39,11 @@ struct ConcurrentPriceFetcher: PriceFetcher {
             print("[PriceOracle:NSE] rejected refresh: \(error)")
             return 0
         }
+    }
+
+    private func accept(_ result: PriceOracleResult) -> Double {
+        PriceOracleAnchorStore.save(price: result.price, suiteName: Constants.appGroup)
+        return result.price
     }
 
     private static func fetchFeeds(_ feeds: [PriceFeedConfig]) -> [NamedPrice] {

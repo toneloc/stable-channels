@@ -99,6 +99,11 @@ class PriceService {
                 self.isTrustedForAccounting = true
                 self.activeSource = result.source
                 self.isUpdating = false
+                PriceOracleAnchorStore.save(
+                    price: result.price,
+                    suiteName: Constants.appGroupIdentifier,
+                    acceptedAt: self.lastUpdate
+                )
             }
             let pegDetail = result.usdtUSD.map { String(format: ", USDT/USD=%.6f", $0) } ?? ""
             print(

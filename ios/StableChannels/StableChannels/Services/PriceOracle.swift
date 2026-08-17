@@ -23,6 +23,54 @@ struct PriceOracleResult: Equatable {
     let usdtUSD: Double?
 }
 
+struct PriceOracleAnchor: Equatable {
+    let price: Double
+    let acceptedAt: Date
+}
+
+/// Persists the most recent accepted oracle value in the shared app group so the
+/// notification extension can apply the same large-move circuit breaker as the app.
+enum PriceOracleAnchorStore {
+    private static let defaultsKey = "price_oracle_anchor_v1"
+    private static let priceKey = "price"
+    private static let acceptedAtKey = "accepted_at"
+
+    static func save(price: Double, suiteName: String, acceptedAt: Date = Date()) {
+        guard PriceOracle.isPlausibleBitcoinPrice(price) else { return }
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+        defaults.set(
+            [
+                priceKey: price,
+                acceptedAtKey: acceptedAt.timeIntervalSince1970
+            ],
+            forKey: defaultsKey
+        )
+    }
+
+    static func freshPrice(suiteName: String, now: Date = Date()) -> Double? {
+        guard let defaults = UserDefaults(suiteName: suiteName),
+              let values = defaults.dictionary(forKey: defaultsKey),
+              let price = (values[priceKey] as? NSNumber)?.doubleValue,
+              let acceptedAt = (values[acceptedAtKey] as? NSNumber)?.doubleValue else {
+            return nil
+        }
+        return freshPrice(
+            from: PriceOracleAnchor(
+                price: price,
+                acceptedAt: Date(timeIntervalSince1970: acceptedAt)
+            ),
+            now: now
+        )
+    }
+
+    static func freshPrice(from anchor: PriceOracleAnchor?, now: Date = Date()) -> Double? {
+        guard let anchor, PriceOracle.isPlausibleBitcoinPrice(anchor.price) else { return nil }
+        let age = now.timeIntervalSince(anchor.acceptedAt)
+        guard age >= 0, age <= PriceOracle.maximumTrustedPriceAge else { return nil }
+        return anchor.price
+    }
+}
+
 enum PriceOracleFailure: Error, Equatable, CustomStringConvertible {
     case insufficientBitcoinConsensus(available: Int)
     case largeBitcoinMove(ratio: Double)
