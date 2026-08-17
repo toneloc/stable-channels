@@ -9,15 +9,14 @@ use ldk_server_client::error::LdkServerError;
 use ldk_server_client::ldk_server_grpc::api::{
     GetBalancesRequest, GetBalancesResponse, GetPaymentDetailsRequest, GetPaymentDetailsResponse,
     ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest,
-    ListForwardedPaymentsResponse, ListPeersRequest, ListPeersResponse, ListPaymentsRequest,
-    ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
+    ListForwardedPaymentsResponse, ListPaymentsRequest, ListPaymentsResponse, ListPeersRequest,
+    ListPeersResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
     SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord, PaymentStatus};
 use stable_channels::constants::{
-    MAX_TRADE_QUOTE_DEVIATION_PERCENT, SIGNED_STABILITY_TLV_TYPE,
-    STABILITY_PAYMENT_AUTH_TTL_SECS,
+    MAX_TRADE_QUOTE_DEVIATION_PERCENT, SIGNED_STABILITY_TLV_TYPE, STABILITY_PAYMENT_AUTH_TTL_SECS,
 };
 use stable_channels::db::{Database, InboundStabilityRegistration, PendingTradeResponse};
 use stable_channels::stable::StabilityPaymentDirection;
@@ -44,6 +43,22 @@ fn splice_balance_change(before_sats: u64, after_sats: u64) -> (&'static str, u6
     } else {
         ("unchanged", 0)
     }
+}
+
+fn durable_trade_response_is_sync(response_envelope: &str) -> bool {
+    crate::messages::parse_envelope(response_envelope)
+        .and_then(|envelope| serde_json::from_str::<serde_json::Value>(&envelope.payload).ok())
+        .and_then(|payload| {
+            payload
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|kind| kind == stable_channels::constants::SYNC_MESSAGE_TYPE)
+        })
+        .unwrap_or(false)
+}
+
+fn stability_mutation_allowed<T, E>(reservation: &Result<Option<T>, E>) -> bool {
+    matches!(reservation, Ok(None))
 }
 
 /// Reproduce the wallet's trade-fee calculation from the allocation transition. Buys reduce the
@@ -92,8 +107,7 @@ fn trade_fee_tolerance_msat(expected_msat: u64, has_signed_quote: bool) -> u64 {
 
     // Transitional legacy wallets did not sign their quote. Admit the same maximum price skew as
     // signed trades, plus one sat for whole-sat rounding, while still rejecting material underpay.
-    ((expected_msat as f64 * MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0).ceil() as u64)
-        .max(1000)
+    ((expected_msat as f64 * MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0).ceil() as u64).max(1000)
 }
 
 fn trade_reduction_exhausts_backing(
@@ -116,8 +130,7 @@ fn trade_reduction_exhausts_backing(
     {
         return false;
     }
-    (old_target.floor() as u64).saturating_sub(new_target.floor() as u64)
-        >= current_backing_sats
+    (old_target.floor() as u64).saturating_sub(new_target.floor() as u64) >= current_backing_sats
 }
 
 /// Tiny trait of the gRPC methods the manager calls, so run_tick and handlers can be unit-tested with a fake.
@@ -209,10 +222,7 @@ impl LdkServerCalls for LdkServerClient {
     ) -> Result<GetBalancesResponse, LdkServerError> {
         LdkServerClient::get_balances(self, req).await
     }
-    async fn list_peers(
-        &self,
-        req: ListPeersRequest,
-    ) -> Result<ListPeersResponse, LdkServerError> {
+    async fn list_peers(&self, req: ListPeersRequest) -> Result<ListPeersResponse, LdkServerError> {
         LdkServerClient::list_peers(self, req).await
     }
     async fn list_payments(
@@ -269,6 +279,7 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         response: &PendingTradeResponse,
     ) {
+        let is_sync = durable_trade_response_is_sync(&response.response_envelope);
         let now = Self::unix_time_secs();
         match db.reserve_trade_response_attempt(
             &response.inbound_payment_id,
@@ -302,18 +313,37 @@ impl StableChannelManager {
             .await;
         match send {
             Ok(sent) if !sent.payment_id.is_empty() => {
-                match db.mark_trade_response_in_flight(
-                    &response.inbound_payment_id,
-                    &sent.payment_id,
-                ) {
-                    Ok(true) => stable_channels::audit::audit_event(
-                        "TRADE_RESPONSE_SENT",
-                        serde_json::json!({
-                            "trade_payment_id": response.inbound_payment_id,
-                            "response_payment_id": sent.payment_id,
-                            "attempt": response.attempts.saturating_add(1),
-                        }),
-                    ),
+                match db
+                    .mark_trade_response_in_flight(&response.inbound_payment_id, &sent.payment_id)
+                {
+                    Ok(true) => {
+                        if is_sync {
+                            if let Err(error) = db.record_settlement(&sent.payment_id, "sync") {
+                                tracing::error!(
+                                    "[stable] record_settlement (durable trade sync) failed: {}",
+                                    error
+                                );
+                                stable_channels::audit::audit_event(
+                                    "DB_WRITE_FAILED",
+                                    serde_json::json!({
+                                        "op": "record_settlement",
+                                        "kind": "sync",
+                                        "payment_id": sent.payment_id,
+                                        "trade_payment_id": response.inbound_payment_id,
+                                        "error": error.to_string(),
+                                    }),
+                                );
+                            }
+                        }
+                        stable_channels::audit::audit_event(
+                            "TRADE_RESPONSE_SENT",
+                            serde_json::json!({
+                                "trade_payment_id": response.inbound_payment_id,
+                                "response_payment_id": sent.payment_id,
+                                "attempt": response.attempts.saturating_add(1),
+                            }),
+                        );
+                    }
                     Ok(false) | Err(_) => stable_channels::audit::audit_event(
                         "TRADE_RESPONSE_PAYMENT_ID_PERSIST_FAILED",
                         serde_json::json!({
@@ -351,10 +381,7 @@ impl StableChannelManager {
                 .map(|payment| payment.status)
             {
                 Some(status) if status == PaymentStatus::Succeeded as i32 => {
-                    let _ = db.mark_trade_response_delivered(
-                        &payment_id,
-                        Self::unix_time_secs(),
-                    );
+                    let _ = db.mark_trade_response_delivered(&payment_id, Self::unix_time_secs());
                 }
                 Some(status) if status == PaymentStatus::Failed as i32 => {
                     let _ = db.mark_trade_response_failed(&payment_id, Self::unix_time_secs());
@@ -454,6 +481,570 @@ impl StableChannelManager {
                 }),
             ),
         }
+    }
+
+    async fn reject_reserved_trade(
+        &self,
+        ldk: &dyn LdkServerCalls,
+        trade_id: &str,
+        payment_id: &str,
+        request_hash: &str,
+        channel_id: &str,
+        reason: TradeRejectionReason,
+    ) {
+        let decided_at = Self::unix_time_secs();
+        let payload = crate::messages::build_trade_rejected_payload(
+            channel_id,
+            trade_id,
+            payment_id,
+            request_hash,
+            reason,
+            decided_at.max(0) as u64,
+        );
+        let signature = match ldk
+            .sign_message(SignMessageRequest {
+                message: payload.as_bytes().to_vec().into(),
+            })
+            .await
+        {
+            Ok(response) => response.signature,
+            Err(error) => {
+                stable_channels::audit::audit_event(
+                    "TRADE_REJECTION_SIGN_FAILED",
+                    serde_json::json!({
+                        "trade_id": trade_id,
+                        "reason_code": reason.as_str(),
+                        "error": error.to_string(),
+                    }),
+                );
+                return;
+            }
+        };
+        let envelope = crate::messages::build_envelope(payload, signature);
+        match self.db.reject_trade_reservation(
+            trade_id,
+            payment_id,
+            request_hash,
+            reason.as_str(),
+            decided_at,
+            &envelope,
+        ) {
+            Ok(true) => stable_channels::audit::audit_event(
+                "TRADE_REJECTION_QUEUED",
+                serde_json::json!({
+                    "trade_id": trade_id,
+                    "trade_payment_id": payment_id,
+                    "request_hash": request_hash,
+                    "reason_code": reason.as_str(),
+                }),
+            ),
+            Ok(false) => {}
+            Err(error) => stable_channels::audit::audit_event(
+                "DB_WRITE_FAILED",
+                serde_json::json!({
+                    "op": "reject_trade_reservation",
+                    "trade_id": trade_id,
+                    "error": error.to_string(),
+                }),
+            ),
+        }
+    }
+
+    async fn handle_trade_proposal(
+        &mut self,
+        payload: &crate::messages::TradePayload,
+        envelope: &crate::messages::SignedEnvelope,
+        chan: &Channel,
+        inbound_payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
+        let Some(trade_id) = payload
+            .trade_id
+            .as_deref()
+            .filter(|value| stable_channels::trade::is_trade_id(value))
+        else {
+            return;
+        };
+        let Some(proposal_payment_id) =
+            inbound_payment_id.filter(|value| stable_channels::trade::is_payment_id(value))
+        else {
+            return;
+        };
+        let proposal_hash = stable_channels::trade::request_hash(envelope.payload.as_bytes());
+        if let Ok(Some(existing)) = self.db.trade_reservation_by_trade_id(trade_id) {
+            if existing.proposal_payment_id == proposal_payment_id
+                && existing.proposal_hash == proposal_hash
+                && existing.outcome == "reserved"
+            {
+                let _ = self.db.requeue_exact_trade_response(
+                    &existing.proposal_payment_id,
+                    trade_id,
+                    &proposal_hash,
+                    Self::unix_time_secs(),
+                );
+            }
+            return;
+        }
+
+        macro_rules! reject_proposal {
+            ($reason:expr) => {{
+                self.reject_correlated_trade(
+                    ldk,
+                    proposal_payment_id,
+                    trade_id,
+                    &proposal_hash,
+                    &chan.channel_id,
+                    &chan.user_channel_id,
+                    &chan.counterparty_node_id,
+                    $reason,
+                )
+                .await;
+                return;
+            }};
+        }
+
+        let Some(peer_user_channel_id) = payload
+            .user_channel_id
+            .as_deref()
+            .filter(|value| stable_channels::trade::is_user_channel_id(value))
+        else {
+            reject_proposal!(TradeRejectionReason::InvalidConfirmation);
+        };
+        if amount_msat != Some(1)
+            || payload.channel_id.as_deref() != Some(chan.channel_id.as_str())
+            || payload.proposal_payment_id.is_some()
+            || payload.proposal_hash.is_some()
+            || payload.confirmation_id.is_some()
+            || payload.fee_msat.is_some()
+        {
+            reject_proposal!(TradeRejectionReason::InvalidConfirmation);
+        }
+        let Some(base_sync_version) = payload.base_sync_version else {
+            reject_proposal!(TradeRejectionReason::StaleState);
+        };
+        if payload
+            .replaces_trade_id
+            .as_deref()
+            .is_some_and(|value| !stable_channels::trade::is_trade_id(value))
+        {
+            reject_proposal!(TradeRejectionReason::InvalidConfirmation);
+        }
+        let now = Self::unix_time_secs();
+        if payload.ts == 0
+            || now < 0
+            || (now as u64).abs_diff(payload.ts) > 300
+            || !payload.expected_usd.is_finite()
+            || payload.expected_usd < 0.0
+        {
+            reject_proposal!(TradeRejectionReason::StaleRequest);
+        }
+        if let Ok(Some(active_trade_id)) = self.db.active_trade_reservation(&chan.channel_id, now) {
+            if payload.replaces_trade_id.as_deref() != Some(active_trade_id.as_str()) {
+                reject_proposal!(TradeRejectionReason::ChannelBusy);
+            }
+        } else if payload.replaces_trade_id.is_some() {
+            reject_proposal!(TradeRejectionReason::StaleState);
+        }
+        let Some(target_uid) = parse_user_channel_id(&chan.user_channel_id) else {
+            reject_proposal!(TradeRejectionReason::InternalFailure);
+        };
+        let Some(current) = self
+            .stable_channels
+            .iter()
+            .find(|channel| channel.user_channel_id == target_uid)
+            .cloned()
+        else {
+            reject_proposal!(TradeRejectionReason::InternalFailure);
+        };
+        let current_version = match self.db.candidate_sync_version(&chan.user_channel_id) {
+            Ok(candidate) => candidate.saturating_sub(1),
+            Err(_) => reject_proposal!(TradeRejectionReason::InternalFailure),
+        };
+        if base_sync_version != current_version {
+            reject_proposal!(TradeRejectionReason::StaleState);
+        }
+        match self.db.load_channel(&chan.user_channel_id) {
+            Ok(Some(durable))
+                if stable_channels::trade::target_matches(
+                    durable.expected_usd,
+                    current.expected_usd.0,
+                ) && durable.backing_sats == current.backing_sats => {}
+            Ok(Some(_)) => reject_proposal!(TradeRejectionReason::StaleState),
+            _ => reject_proposal!(TradeRejectionReason::InternalFailure),
+        }
+        let new_expected =
+            stable_channels::stable::normalize_trade_expected_usd(payload.expected_usd);
+        if stable_channels::trade::target_matches(current.expected_usd.0, new_expected) {
+            reject_proposal!(TradeRejectionReason::InvalidAmount);
+        }
+        let Some(wallet_quote) = payload.quote_price else {
+            reject_proposal!(TradeRejectionReason::InvalidQuote);
+        };
+        if !wallet_quote.is_finite()
+            || wallet_quote <= 0.0
+            || !btc_price.is_finite()
+            || btc_price <= 0.0
+        {
+            reject_proposal!(TradeRejectionReason::InvalidQuote);
+        }
+        let quote_deviation_percent = ((wallet_quote - btc_price) / btc_price * 100.0).abs();
+        if quote_deviation_percent > MAX_TRADE_QUOTE_DEVIATION_PERCENT {
+            reject_proposal!(TradeRejectionReason::QuoteDeviation);
+        }
+        let Some(fee_msat) =
+            expected_trade_fee_msat(current.expected_usd.0, new_expected, btc_price)
+        else {
+            reject_proposal!(TradeRejectionReason::InvalidFee);
+        };
+        let (our_sats, their_sats) = channel_peer_balances(chan);
+        let projected_receiver_sats = their_sats.saturating_sub(fee_msat / 1000);
+        let receiver_usd =
+            USD::from_bitcoin(Bitcoin::from_sats(projected_receiver_sats), btc_price).0;
+        if new_expected > receiver_usd {
+            reject_proposal!(TradeRejectionReason::InsufficientCapacity);
+        }
+        let mut reserved = current.clone();
+        reserved.stable_provider_btc = Bitcoin::from_sats(our_sats.saturating_add(fee_msat / 1000));
+        reserved.stable_receiver_btc = Bitcoin::from_sats(projected_receiver_sats);
+        reserved.stable_provider_usd = USD::from_bitcoin(reserved.stable_provider_btc, btc_price);
+        reserved.stable_receiver_usd = USD::from_bitcoin(reserved.stable_receiver_btc, btc_price);
+        reserved.latest_price = btc_price;
+        if !stable_channels::stable::apply_trade(&mut reserved, new_expected, btc_price) {
+            let reason = if new_expected < current.expected_usd.0
+                && (new_expected == 0.0
+                    || trade_reduction_exhausts_backing(
+                        current.backing_sats,
+                        current.expected_usd.0,
+                        new_expected,
+                        btc_price,
+                    )) {
+                TradeRejectionReason::SettlementRequired
+            } else {
+                TradeRejectionReason::UnsafeAllocation
+            };
+            reject_proposal!(reason);
+        }
+        let native_sats = projected_receiver_sats.saturating_sub(reserved.backing_sats);
+        let confirmation_id = hex::encode(rand::random::<[u8; 32]>());
+        let confirmed_at = now.max(0) as u64;
+        let expires_at =
+            confirmed_at.saturating_add(stable_channels::constants::TRADE_CONFIRMATION_TTL_SECS);
+        let confirmation_payload = crate::messages::build_confirm_trade_payload(
+            &chan.channel_id,
+            peer_user_channel_id,
+            trade_id,
+            proposal_payment_id,
+            &proposal_hash,
+            &confirmation_id,
+            reserved.expected_usd.0,
+            btc_price,
+            fee_msat,
+            base_sync_version,
+            confirmed_at,
+            expires_at,
+        );
+        let signature = match ldk
+            .sign_message(SignMessageRequest {
+                message: confirmation_payload.as_bytes().to_vec().into(),
+            })
+            .await
+        {
+            Ok(response) => response.signature,
+            Err(_) => reject_proposal!(TradeRejectionReason::InternalFailure),
+        };
+        let confirmation_envelope =
+            crate::messages::build_envelope(confirmation_payload, signature);
+        match self.db.reserve_trade_proposal(
+            proposal_payment_id,
+            trade_id,
+            &proposal_hash,
+            &chan.channel_id,
+            &chan.user_channel_id,
+            peer_user_channel_id,
+            &chan.counterparty_node_id,
+            &confirmation_id,
+            reserved.expected_usd.0,
+            reserved.backing_sats,
+            native_sats,
+            btc_price,
+            fee_msat,
+            base_sync_version,
+            now,
+            expires_at.min(i64::MAX as u64) as i64,
+            payload.replaces_trade_id.as_deref(),
+            &confirmation_envelope,
+        ) {
+            Ok(true) => stable_channels::audit::audit_event(
+                "TRADE_RESERVED",
+                serde_json::json!({
+                    "trade_id": trade_id,
+                    "proposal_payment_id": proposal_payment_id,
+                    "proposal_hash": proposal_hash,
+                    "confirmation_id": confirmation_id,
+                    "fee_msat": fee_msat,
+                    "expires_at": expires_at,
+                }),
+            ),
+            Ok(false) => reject_proposal!(TradeRejectionReason::StaleState),
+            Err(_) => reject_proposal!(TradeRejectionReason::InternalFailure),
+        }
+    }
+
+    async fn handle_trade_execution(
+        &mut self,
+        payload: &crate::messages::TradePayload,
+        envelope: &crate::messages::SignedEnvelope,
+        chan: &Channel,
+        inbound_payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        settled_at: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+    ) {
+        let Some(trade_id) = payload
+            .trade_id
+            .as_deref()
+            .filter(|value| stable_channels::trade::is_trade_id(value))
+        else {
+            return;
+        };
+        let Some(execution_payment_id) =
+            inbound_payment_id.filter(|value| stable_channels::trade::is_payment_id(value))
+        else {
+            return;
+        };
+        let execution_hash = stable_channels::trade::request_hash(envelope.payload.as_bytes());
+        let Ok(Some(reservation)) = self.db.trade_reservation_by_trade_id(trade_id) else {
+            self.reject_correlated_trade(
+                ldk,
+                execution_payment_id,
+                trade_id,
+                &execution_hash,
+                &chan.channel_id,
+                &chan.user_channel_id,
+                &chan.counterparty_node_id,
+                TradeRejectionReason::InvalidConfirmation,
+            )
+            .await;
+            return;
+        };
+        let settled_at = settled_at
+            .unwrap_or_else(|| Self::unix_time_secs().max(0) as u64)
+            .min(i64::MAX as u64) as i64;
+        if reservation.outcome == "accepted"
+            && reservation.execution_payment_id.as_deref() == Some(execution_payment_id)
+            && reservation.execution_hash.as_deref() == Some(execution_hash.as_str())
+        {
+            let _ = self.db.requeue_exact_trade_response(
+                &reservation.proposal_payment_id,
+                trade_id,
+                &execution_hash,
+                Self::unix_time_secs(),
+            );
+            return;
+        }
+        if !matches!(reservation.outcome.as_str(), "reserved" | "expired") {
+            return;
+        }
+        let valid = amount_msat == Some(reservation.fee_msat)
+            && payload.fee_msat == Some(reservation.fee_msat)
+            && payload.channel_id.as_deref() == Some(reservation.channel_id.as_str())
+            && payload.user_channel_id.as_deref()
+                == Some(reservation.peer_user_channel_id.as_str())
+            && payload.proposal_payment_id.as_deref()
+                == Some(reservation.proposal_payment_id.as_str())
+            && payload.proposal_hash.as_deref() == Some(reservation.proposal_hash.as_str())
+            && payload.confirmation_id.as_deref() == Some(reservation.confirmation_id.as_str())
+            && stable_channels::trade::target_matches(
+                payload.expected_usd,
+                reservation.expected_usd,
+            )
+            && payload
+                .quote_price
+                .is_some_and(|price| price.to_bits() == reservation.quote_price.to_bits())
+            && payload.ts != 0;
+        if !valid {
+            self.reject_reserved_trade(
+                ldk,
+                trade_id,
+                execution_payment_id,
+                &execution_hash,
+                &reservation.channel_id,
+                TradeRejectionReason::InvalidConfirmation,
+            )
+            .await;
+            return;
+        }
+        if settled_at > reservation.expires_at {
+            self.reject_reserved_trade(
+                ldk,
+                trade_id,
+                execution_payment_id,
+                &execution_hash,
+                &reservation.channel_id,
+                TradeRejectionReason::ConfirmationExpired,
+            )
+            .await;
+            return;
+        }
+        let acceptance_payload = crate::messages::build_trade_sync_payload(
+            &reservation.channel_id,
+            &reservation.peer_user_channel_id,
+            reservation.expected_usd,
+            reservation.backing_sats,
+            reservation.sync_version,
+            trade_id,
+            execution_payment_id,
+            &execution_hash,
+        );
+        let signature = match ldk
+            .sign_message(SignMessageRequest {
+                message: acceptance_payload.as_bytes().to_vec().into(),
+            })
+            .await
+        {
+            Ok(response) => response.signature,
+            Err(_) => {
+                self.reject_reserved_trade(
+                    ldk,
+                    trade_id,
+                    execution_payment_id,
+                    &execution_hash,
+                    &reservation.channel_id,
+                    TradeRejectionReason::InternalFailure,
+                )
+                .await;
+                return;
+            }
+        };
+        let response_envelope = crate::messages::build_envelope(acceptance_payload, signature);
+        let decided_at = Self::unix_time_secs();
+        match self.db.execute_trade_reservation(
+            trade_id,
+            &reservation.confirmation_id,
+            execution_payment_id,
+            &execution_hash,
+            settled_at,
+            decided_at,
+            &response_envelope,
+        ) {
+            Ok(true) => {
+                let committed = self
+                    .db
+                    .load_channel(&reservation.user_channel_id)
+                    .ok()
+                    .flatten();
+                if let Some(target_uid) = parse_user_channel_id(&reservation.user_channel_id) {
+                    if let Some(in_memory) = self
+                        .stable_channels
+                        .iter_mut()
+                        .find(|channel| channel.user_channel_id == target_uid)
+                    {
+                        let expected_usd = committed
+                            .as_ref()
+                            .map(|row| row.expected_usd)
+                            .unwrap_or(reservation.expected_usd);
+                        let backing_sats = committed
+                            .as_ref()
+                            .map(|row| row.backing_sats)
+                            .unwrap_or(reservation.backing_sats);
+                        let native_sats = committed
+                            .as_ref()
+                            .map(|row| row.native_sats)
+                            .unwrap_or(reservation.native_sats);
+                        in_memory.expected_usd = USD(expected_usd);
+                        in_memory.backing_sats = backing_sats;
+                        in_memory.native_sats = native_sats;
+                        in_memory.native_channel_btc = Bitcoin::from_sats(native_sats);
+                    }
+                }
+                stable_channels::audit::audit_event(
+                    "TRADE_ACCEPTED",
+                    serde_json::json!({
+                        "trade_id": trade_id,
+                        "trade_payment_id": execution_payment_id,
+                        "request_hash": execution_hash,
+                        "expected_usd": reservation.expected_usd,
+                        "backing_sats": reservation.backing_sats,
+                        "sync_version": reservation.sync_version,
+                    }),
+                );
+            }
+            Ok(false) => {
+                self.reject_reserved_trade(
+                    ldk,
+                    trade_id,
+                    execution_payment_id,
+                    &execution_hash,
+                    &reservation.channel_id,
+                    TradeRejectionReason::StaleState,
+                )
+                .await;
+            }
+            Err(_) => {
+                self.reject_reserved_trade(
+                    ldk,
+                    trade_id,
+                    execution_payment_id,
+                    &execution_hash,
+                    &reservation.channel_id,
+                    TradeRejectionReason::InternalFailure,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn handle_trade_cancellation(
+        &mut self,
+        payload: &crate::messages::TradePayload,
+        envelope: &crate::messages::SignedEnvelope,
+        chan: &Channel,
+        inbound_payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+    ) {
+        let (Some(trade_id), Some(cancel_payment_id)) =
+            (payload.trade_id.as_deref(), inbound_payment_id)
+        else {
+            return;
+        };
+        if amount_msat != Some(1)
+            || !stable_channels::trade::is_trade_id(trade_id)
+            || !stable_channels::trade::is_payment_id(cancel_payment_id)
+            || payload
+                .confirmation_id
+                .as_deref()
+                .is_some_and(|value| !stable_channels::trade::is_confirmation_id(value))
+        {
+            return;
+        }
+        let Ok(Some(reservation)) = self.db.trade_reservation_by_trade_id(trade_id) else {
+            return;
+        };
+        if reservation.outcome != "reserved"
+            || reservation.channel_id != chan.channel_id
+            || payload
+                .confirmation_id
+                .as_deref()
+                .is_some_and(|value| reservation.confirmation_id != value)
+            || payload.proposal_payment_id.as_deref()
+                != Some(reservation.proposal_payment_id.as_str())
+            || payload.proposal_hash.as_deref() != Some(reservation.proposal_hash.as_str())
+        {
+            return;
+        }
+        let request_hash = stable_channels::trade::request_hash(envelope.payload.as_bytes());
+        self.reject_reserved_trade(
+            ldk,
+            trade_id,
+            cancel_payment_id,
+            &request_hash,
+            &reservation.channel_id,
+            TradeRejectionReason::ClientCancelled,
+        )
+        .await;
     }
 
     /// Consume an asynchronous failure for an outbound stability payment. The database performs
@@ -648,7 +1239,10 @@ impl StableChannelManager {
 
         EditOutcome {
             ok: true,
-            status: format!("Set expected_usd={} on channel {}", expected_usd_f, channel_id),
+            status: format!(
+                "Set expected_usd={} on channel {}",
+                expected_usd_f, channel_id
+            ),
         }
     }
 
@@ -677,7 +1271,8 @@ impl StableChannelManager {
         if let Err(e) = self.db.mark_channel_closed(&user_channel_id) {
             tracing::error!(
                 "[stable] handle_channel_closed: db.mark_channel_closed failed for {}: {}",
-                user_channel_id, e
+                user_channel_id,
+                e
             );
             stable_channels::audit::audit_event(
                 "DB_WRITE_FAILED",
@@ -698,11 +1293,7 @@ impl StableChannelManager {
     }
 
     /// Rebuild the in-memory stable-channel list at startup from sqlite joined with the live snapshot, dropping vanished channels.
-    pub async fn reconcile_from_grpc(
-        &mut self,
-        ldk: &dyn LdkServerCalls,
-        btc_price: f64,
-    ) {
+    pub async fn reconcile_from_grpc(&mut self, ldk: &dyn LdkServerCalls, btc_price: f64) {
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r.channels,
             Err(e) => {
@@ -752,7 +1343,8 @@ impl StableChannelManager {
                 if let Err(e) = self.db.mark_channel_closed(&record.user_channel_id) {
                     tracing::error!(
                         "[stable] reconcile: db.mark_channel_closed({}) failed: {}",
-                        record.user_channel_id, e
+                        record.user_channel_id,
+                        e
                     );
                     stable_channels::audit::audit_event(
                         "DB_WRITE_FAILED",
@@ -889,12 +1481,7 @@ impl StableChannelManager {
             .iter()
             .any(|sc| sc.user_channel_id == target_uid)
         {
-            self.handle_channel_ready_splice(
-                target_uid,
-                funding_txo.as_deref(),
-                ldk,
-                btc_price,
-            )
+            self.handle_channel_ready_splice(target_uid, funding_txo.as_deref(), ldk, btc_price)
                 .await;
             return;
         }
@@ -902,10 +1489,7 @@ impl StableChannelManager {
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r.channels,
             Err(e) => {
-                tracing::error!(
-                    "[stable] handle_channel_ready: list_channels failed: {}",
-                    e
-                );
+                tracing::error!("[stable] handle_channel_ready: list_channels failed: {}", e);
                 stable_channels::audit::audit_event(
                     "LDK_CALL_FAILED",
                     serde_json::json!({ "op": "list_channels", "context": "handle_channel_ready", "user_channel_id": user_channel_id, "channel_id": channel_id, "error": e.to_string() }),
@@ -991,6 +1575,26 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
+        self.handle_payment_received_at(
+            custom_records,
+            payment_id,
+            amount_msat,
+            None,
+            ldk,
+            btc_price,
+        )
+        .await;
+    }
+
+    pub async fn handle_payment_received_at(
+        &mut self,
+        custom_records: Vec<CustomTlvRecord>,
+        payment_id: Option<String>,
+        amount_msat: Option<u64>,
+        settled_at: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
         if let Some(record) = custom_records
             .iter()
             .find(|record| record.type_num == SIGNED_STABILITY_TLV_TYPE)
@@ -1037,18 +1641,22 @@ impl StableChannelManager {
                 // stability payment. The trade settlement is recorded INSIDE the handler, only
                 // after the signature verifies — a forged or unsigned envelope from any peer no
                 // longer writes a settlement row before it is authenticated.
-                self.handle_trade_payment(
+                self.handle_trade_payment_at(
                     &raw,
                     payment_id.as_deref(),
                     amount_msat,
+                    settled_at,
                     ldk,
                     btc_price,
                 )
-                    .await;
+                .await;
             } else if rec.value.as_ref() == [1u8] {
                 if let Some(pid) = payment_id.as_deref() {
                     if let Err(e) = self.db.record_settlement(pid, "stability") {
-                        tracing::error!("[stable] record_settlement (inbound stability) failed: {}", e);
+                        tracing::error!(
+                            "[stable] record_settlement (inbound stability) failed: {}",
+                            e
+                        );
                         stable_channels::audit::audit_event(
                             "DB_WRITE_FAILED",
                             serde_json::json!({ "op": "record_settlement", "kind": "stability", "payment_id": pid, "error": e.to_string() }),
@@ -1059,8 +1667,13 @@ impl StableChannelManager {
                 // books NOW: with stale backing_sats the channel still reads above par
                 // (double-charge risk) and the balance-truth backstop would misread the
                 // user's payment as an unreconciled spend and deduct expected_usd.
-                self.reconcile_incoming_stability(payment_id.as_deref(), amount_msat, ldk, btc_price)
-                    .await;
+                self.reconcile_incoming_stability(
+                    payment_id.as_deref(),
+                    amount_msat,
+                    ldk,
+                    btc_price,
+                )
+                .await;
             } else {
                 stable_channels::audit::audit_event(
                     "LEGACY_STABILITY_MARKER_INVALID",
@@ -1088,9 +1701,7 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
-        if record.value.len()
-            > stable_channels::constants::MAX_SIGNED_STABILITY_TLV_VALUE_BYTES
-        {
+        if record.value.len() > stable_channels::constants::MAX_SIGNED_STABILITY_TLV_VALUE_BYTES {
             stable_channels::audit::audit_event(
                 "STABILITY_PAYMENT_PAYLOAD_INVALID",
                 serde_json::json!({
@@ -1342,9 +1953,7 @@ impl StableChannelManager {
             );
             return;
         }
-        if payload.expected_usd.to_bits()
-            != self.stable_channels[idx].expected_usd.0.to_bits()
-        {
+        if payload.expected_usd.to_bits() != self.stable_channels[idx].expected_usd.0.to_bits() {
             // The signed amount and local equilibrium bound the economic transition. A target
             // difference between independent peers is useful telemetry, but is not a reason to
             // discard an already-settled authenticated payment.
@@ -1373,39 +1982,35 @@ impl StableChannelManager {
         let amount_sats = received_msat / 1000;
         let mut allocation_expected_usd = self.stable_channels[idx].expected_usd.0;
         let mut backing_before = self.stable_channels[idx].backing_sats;
-        let Some(mut backing_after) =
-            stable_channels::stable::backing_after_user_to_lsp_stability(
-                backing_before,
-                allocation_expected_usd,
-                btc_price,
-                amount_sats,
-                their_sats,
-            )
-        else {
+        let Some(mut backing_after) = stable_channels::stable::backing_after_user_to_lsp_stability(
+            backing_before,
+            allocation_expected_usd,
+            btc_price,
+            amount_sats,
+            their_sats,
+        ) else {
             invalidate("allocation");
             return;
         };
         let mut native_after = their_sats.saturating_sub(backing_after);
-        let amount_usd = amount_sats as f64
-            / stable_channels::constants::SATS_IN_BTC as f64
-            * btc_price;
+        let amount_usd =
+            amount_sats as f64 / stable_channels::constants::SATS_IN_BTC as f64 * btc_price;
         let persist = |backing_sats_before, backing_sats_after, native_sats_after| {
-            self.db.record_signed_stability_payment_and_update_allocation(
-                payment_id,
-                &payload.settlement_id,
-                received_msat,
-                Some(amount_usd),
-                Some(btc_price),
-                &canonical_user_channel_id,
-                backing_sats_before,
-                backing_sats_after,
-                native_sats_after,
-            )
+            self.db
+                .record_signed_stability_payment_and_update_allocation(
+                    payment_id,
+                    &payload.settlement_id,
+                    received_msat,
+                    Some(amount_usd),
+                    Some(btc_price),
+                    &canonical_user_channel_id,
+                    backing_sats_before,
+                    backing_sats_after,
+                    native_sats_after,
+                )
         };
         let persisted = match persist(backing_before, backing_after, native_after) {
-            Err(ref error)
-                if stable_channels::db::is_stale_inbound_stability_allocation(error) =>
-            {
+            Err(ref error) if stable_channels::db::is_stale_inbound_stability_allocation(error) => {
                 let durable = match self.db.load_channel(&canonical_user_channel_id) {
                     Ok(Some(channel)) => channel,
                     Ok(None) => return,
@@ -1528,11 +2133,7 @@ impl StableChannelManager {
         );
     }
 
-    async fn retry_pending_signed_stability(
-        &mut self,
-        ldk: &dyn LdkServerCalls,
-        btc_price: f64,
-    ) {
+    async fn retry_pending_signed_stability(&mut self, ldk: &dyn LdkServerCalls, btc_price: f64) {
         if !btc_price.is_finite() || btc_price <= 0.0 {
             return;
         }
@@ -1614,9 +2215,10 @@ impl StableChannelManager {
             if sc.expected_usd.0 < 0.01 {
                 continue;
             }
-            let Some(c) = channels.iter().find(|c| {
-                parse_user_channel_id(&c.user_channel_id) == Some(sc.user_channel_id)
-            }) else {
+            let Some(c) = channels
+                .iter()
+                .find(|c| parse_user_channel_id(&c.user_channel_id) == Some(sc.user_channel_id))
+            else {
                 continue;
             };
             let (_, their_sats) = channel_peer_balances(c);
@@ -1734,6 +2336,7 @@ impl StableChannelManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        let _ = self.db.expire_trade_reservations(now);
 
         let percent_threshold = stable_channels::constants::STABILITY_THRESHOLD_PERCENT;
         let dollar_threshold = stable_channels::constants::STABILITY_THRESHOLD_USD;
@@ -1747,7 +2350,25 @@ impl StableChannelManager {
             if sc.expected_usd.0 < 0.01 {
                 continue;
             }
-            let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };
+            let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else {
+                continue;
+            };
+            // The confirmed allocation and fee are locked for the short review window.
+            let reservation = self.db.active_trade_reservation(&c.channel_id, now);
+            if !stability_mutation_allowed(&reservation) {
+                if let Err(error) = reservation {
+                    stable_channels::audit::audit_event(
+                        "DB_READ_FAILED",
+                        serde_json::json!({
+                            "op": "active_trade_reservation",
+                            "context": "stability_tick",
+                            "channel_id": c.channel_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                }
+                continue;
+            }
 
             let (our_sats, their_sats) = channel_peer_balances(c);
             sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
@@ -1816,14 +2437,25 @@ impl StableChannelManager {
             let percent_from_par = (((stable_usd_value - target) / target) * 100.0).abs();
             let dollars_from_par = (stable_usd_value - target).abs();
 
-            if percent_from_par < percent_threshold
-                || dollars_from_par < dollar_threshold
-            {
+            if percent_from_par < percent_threshold || dollars_from_par < dollar_threshold {
                 continue;
             }
             if sc.risk_level > stable_channels::constants::MAX_RISK_LEVEL {
-                let (lo, lv) = self.stability_throttle.get(&sc.user_channel_id).cloned().unwrap_or_default();
-                if stability_should_log(&lo, "high_risk", lv, stable_usd_value, target, dollar_threshold, percent_threshold, false) {
+                let (lo, lv) = self
+                    .stability_throttle
+                    .get(&sc.user_channel_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if stability_should_log(
+                    &lo,
+                    "high_risk",
+                    lv,
+                    stable_usd_value,
+                    target,
+                    dollar_threshold,
+                    percent_threshold,
+                    false,
+                ) {
                     stable_channels::audit::audit_event(
                         "STABILITY_SKIP_HIGH_RISK",
                         serde_json::json!({
@@ -1832,13 +2464,29 @@ impl StableChannelManager {
                             "risk_level": sc.risk_level,
                         }),
                     );
-                    self.stability_throttle.insert(sc.user_channel_id, ("high_risk".to_string(), stable_usd_value));
+                    self.stability_throttle.insert(
+                        sc.user_channel_id,
+                        ("high_risk".to_string(), stable_usd_value),
+                    );
                 }
                 continue;
             }
             if now - sc.last_stability_payment < cooldown {
-                let (lo, lv) = self.stability_throttle.get(&sc.user_channel_id).cloned().unwrap_or_default();
-                if stability_should_log(&lo, "cooldown", lv, stable_usd_value, target, dollar_threshold, percent_threshold, false) {
+                let (lo, lv) = self
+                    .stability_throttle
+                    .get(&sc.user_channel_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if stability_should_log(
+                    &lo,
+                    "cooldown",
+                    lv,
+                    stable_usd_value,
+                    target,
+                    dollar_threshold,
+                    percent_threshold,
+                    false,
+                ) {
                     stable_channels::audit::audit_event(
                         "STABILITY_COOLDOWN",
                         serde_json::json!({
@@ -1848,7 +2496,10 @@ impl StableChannelManager {
                             "cooldown_secs": cooldown,
                         }),
                     );
-                    self.stability_throttle.insert(sc.user_channel_id, ("cooldown".to_string(), stable_usd_value));
+                    self.stability_throttle.insert(
+                        sc.user_channel_id,
+                        ("cooldown".to_string(), stable_usd_value),
+                    );
                 }
                 continue;
             }
@@ -1924,8 +2575,7 @@ impl StableChannelManager {
                         }
                     };
                     let envelope = match stable_channels::stable::build_stability_signed_envelope(
-                        payload,
-                        signature,
+                        payload, signature,
                     ) {
                         Ok(envelope) => envelope,
                         Err(error) => {
@@ -1964,8 +2614,7 @@ impl StableChannelManager {
                     let expected_usd_for_db = sc.expected_usd.0;
                     let note_for_db = sc.note.clone();
                     let backing_before = sc.backing_sats;
-                    let backing_after =
-                        ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+                    let backing_after = ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
                     let native_before = sc.native_sats;
                     let last_stability_payment_before = sc.last_stability_payment;
                     let counterparty_for_db = sc.counterparty.to_string();
@@ -2006,7 +2655,7 @@ impl StableChannelManager {
                                             serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": "duplicate payment id or invalid rollback metadata" }),
                                         );
                                         false
-                                    },
+                                    }
                                     Err(e) => {
                                         tracing::error!(
                                             "[stable] record_settlement (stability) failed: {}",
@@ -2017,7 +2666,7 @@ impl StableChannelManager {
                                             serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
                                         );
                                         false
-                                    },
+                                    }
                                 }
                             };
                             sc.last_stability_payment = now;
@@ -2028,14 +2677,19 @@ impl StableChannelManager {
                             }
                             self.stability_throttle.insert(
                                 sc.user_channel_id,
-                                (if persisted { "payment_sent" } else { "payment_persist_failed" }.to_string(), stable_usd_value),
+                                (
+                                    if persisted {
+                                        "payment_sent"
+                                    } else {
+                                        "payment_persist_failed"
+                                    }
+                                    .to_string(),
+                                    stable_usd_value,
+                                ),
                             );
-                        },
+                        }
                         Err(e) => {
-                            tracing::warn!(
-                                "[stable] run_tick: spontaneous_send failed: {}",
-                                e
-                            );
+                            tracing::warn!("[stable] run_tick: spontaneous_send failed: {}", e);
                             stable_channels::audit::audit_event(
                                 "STABILITY_PAYMENT_FAILED",
                                 serde_json::json!({
@@ -2045,14 +2699,30 @@ impl StableChannelManager {
                                     "error": e.to_string(),
                                 }),
                             );
-                            self.stability_throttle.insert(sc.user_channel_id, ("payment_failed".to_string(), stable_usd_value));
+                            self.stability_throttle.insert(
+                                sc.user_channel_id,
+                                ("payment_failed".to_string(), stable_usd_value),
+                            );
                             // Do not bump last_stability_payment so retry can fire.
-                        },
+                        }
                     }
                 } else {
                     // User above par: CHECK_ONLY. The LSP can only push value, not pull, so do nothing here (no cooldown bump).
-                    let (lo, lv) = self.stability_throttle.get(&sc.user_channel_id).cloned().unwrap_or_default();
-                    if stability_should_log(&lo, "check_only", lv, stable_usd_value, target, dollar_threshold, percent_threshold, true) {
+                    let (lo, lv) = self
+                        .stability_throttle
+                        .get(&sc.user_channel_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    if stability_should_log(
+                        &lo,
+                        "check_only",
+                        lv,
+                        stable_usd_value,
+                        target,
+                        dollar_threshold,
+                        percent_threshold,
+                        true,
+                    ) {
                         stable_channels::audit::audit_event(
                             "STABILITY_CHECK_ONLY",
                             serde_json::json!({
@@ -2063,7 +2733,10 @@ impl StableChannelManager {
                                 "expected_usd": target,
                             }),
                         );
-                        self.stability_throttle.insert(sc.user_channel_id, ("check_only".to_string(), stable_usd_value));
+                        self.stability_throttle.insert(
+                            sc.user_channel_id,
+                            ("check_only".to_string(), stable_usd_value),
+                        );
                     }
                 }
             } else {
@@ -2071,8 +2744,21 @@ impl StableChannelManager {
                 p.notify(&sc.counterparty.to_string(), direction);
                 drop(p);
                 let key = format!("push_queued:{}", direction);
-                let (lo, lv) = self.stability_throttle.get(&sc.user_channel_id).cloned().unwrap_or_default();
-                if stability_should_log(&lo, &key, lv, stable_usd_value, target, dollar_threshold, percent_threshold, true) {
+                let (lo, lv) = self
+                    .stability_throttle
+                    .get(&sc.user_channel_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if stability_should_log(
+                    &lo,
+                    &key,
+                    lv,
+                    stable_usd_value,
+                    target,
+                    dollar_threshold,
+                    percent_threshold,
+                    true,
+                ) {
                     stable_channels::audit::audit_event(
                         "STABILITY_PUSH_QUEUED",
                         serde_json::json!({
@@ -2084,7 +2770,8 @@ impl StableChannelManager {
                             "expected_usd": target,
                         }),
                     );
-                    self.stability_throttle.insert(sc.user_channel_id, (key, stable_usd_value));
+                    self.stability_throttle
+                        .insert(sc.user_channel_id, (key, stable_usd_value));
                 }
             }
         }
@@ -2178,10 +2865,7 @@ impl StableChannelManager {
                         "sync",
                         &format!("{}", user_channel_id),
                     ) {
-                        tracing::error!(
-                            "[stable] record_settlement (outbound sync) failed: {}",
-                            e
-                        );
+                        tracing::error!("[stable] record_settlement (outbound sync) failed: {}", e);
                         stable_channels::audit::audit_event(
                             "DB_WRITE_FAILED",
                             serde_json::json!({ "op": "record_settlement", "kind": "sync", "payment_id": resp.payment_id, "user_channel_id": format!("{}", user_channel_id), "error": e.to_string() }),
@@ -2199,7 +2883,7 @@ impl StableChannelManager {
                     }),
                 );
                 true
-            },
+            }
             Err(e) => {
                 stable_channels::audit::audit_event(
                     "SYNC_MESSAGE_FAILED",
@@ -2544,12 +3228,28 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
+        self.handle_trade_payment_at(raw, inbound_payment_id, amount_msat, None, ldk, btc_price)
+            .await;
+    }
+
+    async fn handle_trade_payment_at(
+        &mut self,
+        raw: &str,
+        inbound_payment_id: Option<&str>,
+        amount_msat: Option<u64>,
+        settled_at: Option<u64>,
+        ldk: &dyn LdkServerCalls,
+        btc_price: f64,
+    ) {
         let Some(envelope) = crate::messages::parse_envelope(raw) else {
             stable_channels::audit::audit_event("TRADE_PARSE_SIGNED_FAILED", serde_json::json!({}));
             return;
         };
         let Some(payload) = crate::messages::parse_trade_payload(&envelope.payload) else {
-            stable_channels::audit::audit_event("TRADE_PARSE_PAYLOAD_FAILED", serde_json::json!({}));
+            stable_channels::audit::audit_event(
+                "TRADE_PARSE_PAYLOAD_FAILED",
+                serde_json::json!({}),
+            );
             return;
         };
         if payload.kind != stable_channels::constants::TRADE_MESSAGE_TYPE {
@@ -2591,13 +3291,18 @@ impl StableChannelManager {
         };
         // channel_id is authoritative when present; only requests that omit it may use the
         // legacy node-local user_channel_id fallback.
-        let chan = channels.into_iter().find(|c| match payload.channel_id.as_deref() {
-            Some(channel_id) => c.channel_id == channel_id,
-            None => payload.user_channel_id.as_deref().is_some_and(|user_channel_id| {
-                let wanted = parse_user_channel_id(user_channel_id);
-                wanted.is_some() && wanted == parse_user_channel_id(&c.user_channel_id)
-            }),
-        });
+        let chan = channels
+            .into_iter()
+            .find(|c| match payload.channel_id.as_deref() {
+                Some(channel_id) => c.channel_id == channel_id,
+                None => payload
+                    .user_channel_id
+                    .as_deref()
+                    .is_some_and(|user_channel_id| {
+                        let wanted = parse_user_channel_id(user_channel_id);
+                        wanted.is_some() && wanted == parse_user_channel_id(&c.user_channel_id)
+                    }),
+            });
         let Some(chan) = chan else {
             stable_channels::audit::audit_event(
                 "TRADE_CHANNEL_NOT_FOUND",
@@ -2640,6 +3345,51 @@ impl StableChannelManager {
                     serde_json::json!({ "op": "record_settlement", "kind": "trade", "payment_id": pid, "error": e.to_string() }),
                 );
             }
+        }
+
+        if let Some(phase) = payload.phase.as_deref() {
+            match phase {
+                "propose" => {
+                    self.handle_trade_proposal(
+                        &payload,
+                        &envelope,
+                        &chan,
+                        inbound_payment_id,
+                        amount_msat,
+                        ldk,
+                        btc_price,
+                    )
+                    .await;
+                }
+                "execute" => {
+                    self.handle_trade_execution(
+                        &payload,
+                        &envelope,
+                        &chan,
+                        inbound_payment_id,
+                        amount_msat,
+                        settled_at,
+                        ldk,
+                    )
+                    .await;
+                }
+                "cancel" => {
+                    self.handle_trade_cancellation(
+                        &payload,
+                        &envelope,
+                        &chan,
+                        inbound_payment_id,
+                        amount_msat,
+                        ldk,
+                    )
+                    .await;
+                }
+                _ => stable_channels::audit::audit_event(
+                    "TRADE_PHASE_INVALID",
+                    serde_json::json!({ "phase": phase, "channel_id": chan.channel_id }),
+                ),
+            }
+            return;
         }
 
         // A trade id opts into durable correlated results. Legacy mobile-shaped requests continue
@@ -2782,19 +3532,16 @@ impl StableChannelManager {
             {
                 reject_correlated!(TradeRejectionReason::InvalidQuote);
             }
-            let Some(expected_fee_msat) = expected_trade_fee_msat(
-                current.expected_usd.0,
-                new_expected,
-                quote_price,
-            ) else {
+            let Some(expected_fee_msat) =
+                expected_trade_fee_msat(current.expected_usd.0, new_expected, quote_price)
+            else {
                 reject_correlated!(TradeRejectionReason::InvalidFee);
             };
             let tolerance_msat = trade_fee_tolerance_msat(expected_fee_msat, true);
             if received_msat.abs_diff(expected_fee_msat) > tolerance_msat {
                 reject_correlated!(TradeRejectionReason::InvalidFee);
             }
-            let quote_deviation_percent =
-                ((quote_price - btc_price) / btc_price * 100.0).abs();
+            let quote_deviation_percent = ((quote_price - btc_price) / btc_price * 100.0).abs();
             if quote_deviation_percent > MAX_TRADE_QUOTE_DEVIATION_PERCENT {
                 reject_correlated!(TradeRejectionReason::QuoteDeviation);
             }
@@ -2807,10 +3554,8 @@ impl StableChannelManager {
             let mut updated = current.clone();
             updated.stable_provider_btc = Bitcoin::from_sats(our_sats);
             updated.stable_receiver_btc = Bitcoin::from_sats(their_sats);
-            updated.stable_provider_usd =
-                USD::from_bitcoin(updated.stable_provider_btc, btc_price);
-            updated.stable_receiver_usd =
-                USD::from_bitcoin(updated.stable_receiver_btc, btc_price);
+            updated.stable_provider_usd = USD::from_bitcoin(updated.stable_provider_btc, btc_price);
+            updated.stable_receiver_usd = USD::from_bitcoin(updated.stable_receiver_btc, btc_price);
             updated.latest_price = btc_price;
             if !stable_channels::stable::apply_trade(&mut updated, new_expected, btc_price) {
                 let reason = if new_expected < current.expected_usd.0
@@ -2820,18 +3565,14 @@ impl StableChannelManager {
                             current.expected_usd.0,
                             new_expected,
                             btc_price,
-                        ))
-                {
+                        )) {
                     TradeRejectionReason::SettlementRequired
                 } else {
                     TradeRejectionReason::UnsafeAllocation
                 };
                 reject_correlated!(reason);
             }
-            let sync_version = match self
-                .db
-                .candidate_sync_version(&format!("{}", target_uid))
-            {
+            let sync_version = match self.db.candidate_sync_version(&format!("{}", target_uid)) {
                 Ok(version) => version,
                 Err(_) => reject_correlated!(TradeRejectionReason::InternalFailure),
             };
@@ -2858,8 +3599,7 @@ impl StableChannelManager {
                 Ok(response) => response.signature,
                 Err(_) => reject_correlated!(TradeRejectionReason::InternalFailure),
             };
-            let response_envelope =
-                crate::messages::build_envelope(acceptance_payload, signature);
+            let response_envelope = crate::messages::build_envelope(acceptance_payload, signature);
             let native_sats = their_sats.saturating_sub(updated.backing_sats);
             match self.db.persist_trade_acceptance(
                 inbound_payment_id,
@@ -2921,7 +3661,10 @@ impl StableChannelManager {
         }
 
         let Some(target_uid) = parse_user_channel_id(&chan.user_channel_id) else {
-            stable_channels::audit::audit_event("TRADE_CHANNEL_UID_UNPARSEABLE", serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": chan.user_channel_id.clone() }));
+            stable_channels::audit::audit_event(
+                "TRADE_CHANNEL_UID_UNPARSEABLE",
+                serde_json::json!({ "channel_id": chan.channel_id.clone(), "user_channel_id": chan.user_channel_id.clone() }),
+            );
             return;
         };
         let Some(current_expected_usd) = self
@@ -2940,11 +3683,9 @@ impl StableChannelManager {
             stable_channels::stable::normalize_trade_expected_usd(payload.expected_usd);
 
         let fee_price = payload.quote_price.unwrap_or(btc_price);
-        let Some(expected_fee_msat) = expected_trade_fee_msat(
-            current_expected_usd,
-            new_expected,
-            fee_price,
-        ) else {
+        let Some(expected_fee_msat) =
+            expected_trade_fee_msat(current_expected_usd, new_expected, fee_price)
+        else {
             stable_channels::audit::audit_event(
                 "TRADE_FEE_INVALID",
                 serde_json::json!({
@@ -3005,8 +3746,7 @@ impl StableChannelManager {
 
                 // Both peers run their own price feed. Admit small observation-time differences,
                 // but reject a quote far enough away to change the economic trade materially.
-                let quote_deviation_percent =
-                    ((quote_price - btc_price) / btc_price * 100.0).abs();
+                let quote_deviation_percent = ((quote_price - btc_price) / btc_price * 100.0).abs();
                 if quote_deviation_percent > MAX_TRADE_QUOTE_DEVIATION_PERCENT {
                     stable_channels::audit::audit_event(
                         "TRADE_QUOTE_DEVIATION_EXCEEDED",
@@ -3205,13 +3945,21 @@ fn parse_user_channel_id(s: &str) -> Option<u128> {
 
 /// Whether a throttled stability event should log this tick: on outcome change, or (if tracking value) a significant value move.
 pub(crate) fn stability_should_log(
-    last_outcome: &str, outcome: &str,
-    last_value: f64, value: f64, target: f64,
-    usd_threshold: f64, pct_threshold: f64,
+    last_outcome: &str,
+    outcome: &str,
+    last_value: f64,
+    value: f64,
+    target: f64,
+    usd_threshold: f64,
+    pct_threshold: f64,
     track_value: bool,
 ) -> bool {
-    if last_outcome != outcome { return true; }
-    if !track_value { return false; }
+    if last_outcome != outcome {
+        return true;
+    }
+    if !track_value {
+        return false;
+    }
     let d = (value - last_value).abs();
     d > usd_threshold && (d / target * 100.0) > pct_threshold
 }
@@ -3245,9 +3993,9 @@ mod tests {
         ListPaymentsRequest, ListPaymentsResponse, ListPeersRequest, ListPeersResponse,
     };
     use ldk_server_client::ldk_server_grpc::types::{
-        Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment, HtlcLocator,
-        PageToken, Payment as GrpcPayment, PaymentStatus,
-        PendingSweepBalance as GrpcPendingSweepBalance, Peer as GrpcPeer,
+        Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment, HtlcLocator, PageToken,
+        Payment as GrpcPayment, PaymentStatus, Peer as GrpcPeer,
+        PendingSweepBalance as GrpcPendingSweepBalance,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
@@ -3297,14 +4045,26 @@ mod tests {
             self.verify_should_pass = false;
             self
         }
-        pub fn with_forwarded(self, f: Vec<GrpcForwardedPayment>) -> Self { *self.forwarded.lock().unwrap() = f; self }
+        pub fn with_forwarded(self, f: Vec<GrpcForwardedPayment>) -> Self {
+            *self.forwarded.lock().unwrap() = f;
+            self
+        }
         pub fn with_forward_cursor(self, token: PageToken) -> Self {
             *self.forward_next_page_token.lock().unwrap() = Some(token);
             self
         }
-        pub fn with_sweeps(self, s: Vec<GrpcPendingSweepBalance>) -> Self { *self.sweeps.lock().unwrap() = s; self }
-        pub fn with_peers(self, p: Vec<GrpcPeer>) -> Self { *self.peers.lock().unwrap() = p; self }
-        pub fn with_payments(self, p: Vec<GrpcPayment>) -> Self { *self.payments.lock().unwrap() = p; self }
+        pub fn with_sweeps(self, s: Vec<GrpcPendingSweepBalance>) -> Self {
+            *self.sweeps.lock().unwrap() = s;
+            self
+        }
+        pub fn with_peers(self, p: Vec<GrpcPeer>) -> Self {
+            *self.peers.lock().unwrap() = p;
+            self
+        }
+        pub fn with_payments(self, p: Vec<GrpcPayment>) -> Self {
+            *self.payments.lock().unwrap() = p;
+            self
+        }
     }
 
     #[async_trait]
@@ -3350,28 +4110,46 @@ mod tests {
                 valid: self.verify_should_pass,
             })
         }
-        async fn list_forwarded_payments(&self, _req: ListForwardedPaymentsRequest)
-            -> Result<ListForwardedPaymentsResponse, LdkServerError> {
+        async fn list_forwarded_payments(
+            &self,
+            _req: ListForwardedPaymentsRequest,
+        ) -> Result<ListForwardedPaymentsResponse, LdkServerError> {
             self.forward_calls.fetch_add(1, Ordering::SeqCst);
             Ok(ListForwardedPaymentsResponse {
                 forwarded_payments: self.forwarded.lock().unwrap().clone(),
                 next_page_token: self.forward_next_page_token.lock().unwrap().clone(),
             })
         }
-        async fn get_balances(&self, _req: GetBalancesRequest)
-            -> Result<GetBalancesResponse, LdkServerError> {
-            Ok(GetBalancesResponse { pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(), ..Default::default() })
+        async fn get_balances(
+            &self,
+            _req: GetBalancesRequest,
+        ) -> Result<GetBalancesResponse, LdkServerError> {
+            Ok(GetBalancesResponse {
+                pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(),
+                ..Default::default()
+            })
         }
-        async fn list_peers(&self, _req: ListPeersRequest)
-            -> Result<ListPeersResponse, LdkServerError> {
-            Ok(ListPeersResponse { peers: self.peers.lock().unwrap().clone() })
+        async fn list_peers(
+            &self,
+            _req: ListPeersRequest,
+        ) -> Result<ListPeersResponse, LdkServerError> {
+            Ok(ListPeersResponse {
+                peers: self.peers.lock().unwrap().clone(),
+            })
         }
-        async fn list_payments(&self, _req: ListPaymentsRequest)
-            -> Result<ListPaymentsResponse, LdkServerError> {
-            Ok(ListPaymentsResponse { payments: self.payments.lock().unwrap().clone(), next_page_token: None })
+        async fn list_payments(
+            &self,
+            _req: ListPaymentsRequest,
+        ) -> Result<ListPaymentsResponse, LdkServerError> {
+            Ok(ListPaymentsResponse {
+                payments: self.payments.lock().unwrap().clone(),
+                next_page_token: None,
+            })
         }
-        async fn get_payment_details(&self, req: GetPaymentDetailsRequest)
-            -> Result<GetPaymentDetailsResponse, LdkServerError> {
+        async fn get_payment_details(
+            &self,
+            req: GetPaymentDetailsRequest,
+        ) -> Result<GetPaymentDetailsResponse, LdkServerError> {
             Ok(GetPaymentDetailsResponse {
                 payment: self
                     .payments
@@ -3395,8 +4173,11 @@ mod tests {
         let peers = fake.list_peers(ListPeersRequest {}).await.unwrap().peers;
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].node_id, "02aa");
-        let fwd = fake.list_forwarded_payments(ListForwardedPaymentsRequest { page_token: None })
-            .await.unwrap().forwarded_payments;
+        let fwd = fake
+            .list_forwarded_payments(ListForwardedPaymentsRequest { page_token: None })
+            .await
+            .unwrap()
+            .forwarded_payments;
         assert!(fwd.is_empty());
     }
 
@@ -3447,16 +4228,31 @@ mod tests {
         let mut mgr = make_manager();
         // Seed an existing record so handle_channel_closed has something to remove.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(10.0), Some("note".to_string()),
-            &fake as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            Some("note".to_string()),
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         assert_eq!(mgr.stable_channels.len(), 1);
 
-        mgr.handle_channel_closed("".to_string(), USER_CHANNEL_ID_HEX.to_string(), None, None, 0, None);
+        mgr.handle_channel_closed(
+            "".to_string(),
+            USER_CHANNEL_ID_HEX.to_string(),
+            None,
+            None,
+            0,
+            None,
+        );
         assert_eq!(mgr.stable_channels.len(), 0);
     }
 
@@ -3464,18 +4260,27 @@ mod tests {
     async fn reconcile_drops_channels_no_longer_on_server() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(10.0), None,
-            &fake as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         assert_eq!(mgr.stable_channels.len(), 1);
 
         // LDK Server no longer reports the channel.
         let empty_server = FakeLdkServer::new(vec![]);
-        mgr.reconcile_from_grpc(&empty_server as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_from_grpc(&empty_server as &dyn LdkServerCalls, 100_000.0)
+            .await;
         assert_eq!(mgr.stable_channels.len(), 0);
     }
 
@@ -3483,20 +4288,33 @@ mod tests {
     async fn reconcile_refreshes_known_channel() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(10.0), None,
-            &fake as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         // Same channel, different balance: outbound drops from 50_000 to 30_000 sats.
         let fake2 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 30_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            30_000_000,
+            true,
         )]);
-        mgr.reconcile_from_grpc(&fake2 as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_from_grpc(&fake2 as &dyn LdkServerCalls, 100_000.0)
+            .await;
         assert_eq!(mgr.stable_channels.len(), 1);
         // outbound dropped from 50_000 to 30_000 sats; receiver got 20_000 more.
         assert_eq!(mgr.stable_channels[0].stable_receiver_btc.sats, 70_000);
@@ -3521,17 +4339,34 @@ mod tests {
 
         // The live LDK Server still reports the channel.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
 
-        assert_eq!(mgr.stable_channels.len(), 1, "channel must be hydrated from db");
+        assert_eq!(
+            mgr.stable_channels.len(),
+            1,
+            "channel must be hydrated from db"
+        );
         let sc = &mgr.stable_channels[0];
         assert_eq!(sc.expected_usd.0, 25.0, "persisted expected_usd preserved");
         assert_eq!(sc.backing_sats, 40_000, "persisted backing_sats preserved");
-        assert_eq!(sc.note.as_deref(), Some("persisted"), "persisted note preserved");
-        assert_eq!(sc.counterparty.to_string(), COUNTERPARTY_HEX, "counterparty resolved from live channel");
+        assert_eq!(
+            sc.note.as_deref(),
+            Some("persisted"),
+            "persisted note preserved"
+        );
+        assert_eq!(
+            sc.counterparty.to_string(),
+            COUNTERPARTY_HEX,
+            "counterparty resolved from live channel"
+        );
         assert_eq!(
             fake.sends.lock().unwrap().len(),
             1,
@@ -3661,29 +4496,52 @@ mod tests {
     async fn reconcile_if_empty_hydrates_then_leaves_populated_untouched() {
         // Simulate the cold-start skip: empty in-memory Vec, persisted row, live channel present.
         let mut mgr = make_manager();
-        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, 25.0, 40_000, 10_000, Some("persisted")).unwrap();
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_HEX,
+                25.0,
+                40_000,
+                10_000,
+                Some("persisted"),
+            )
+            .unwrap();
         assert_eq!(mgr.stable_channels.len(), 0, "fresh manager starts empty");
 
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         // Empty vec -> self-heal repopulates from truth.
-        mgr.reconcile_if_empty(&fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_if_empty(&fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
         assert_eq!(mgr.stable_channels.len(), 1, "empty list is hydrated");
 
         // Populated vec -> guard skips reconcile, so a transient empty snapshot can't wipe it.
         let empty_server = FakeLdkServer::new(vec![]);
-        mgr.reconcile_if_empty(&empty_server as &dyn LdkServerCalls, 100_000.0).await;
-        assert_eq!(mgr.stable_channels.len(), 1, "populated list is left untouched");
+        mgr.reconcile_if_empty(&empty_server as &dyn LdkServerCalls, 100_000.0)
+            .await;
+        assert_eq!(
+            mgr.stable_channels.len(),
+            1,
+            "populated list is left untouched"
+        );
     }
 
     #[tokio::test]
     async fn handle_channel_ready_auto_registers_new_channel() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
@@ -3691,7 +4549,8 @@ mod tests {
             None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
         assert_eq!(mgr.stable_channels.len(), 1);
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
     }
@@ -3700,8 +4559,12 @@ mod tests {
     async fn handle_channel_ready_is_idempotent() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
@@ -3709,14 +4572,16 @@ mod tests {
             None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
             USER_CHANNEL_ID_HEX.to_string(),
             None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
         assert_eq!(mgr.stable_channels.len(), 1);
     }
 
@@ -3724,9 +4589,24 @@ mod tests {
     async fn payment_received_trade_tlv_applies() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 8.0);
         let records = vec![CustomTlvRecord {
@@ -3757,9 +4637,20 @@ mod tests {
     async fn payment_received_no_tlv_is_noop() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![]);
-        seed_channel(&mut mgr, 1u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 5.0, 5_000, 45_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            1u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            5.0,
+            5_000,
+            45_000,
+            50_000,
+            100_000.0,
+        );
 
-        mgr.handle_payment_received(vec![], None, None, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.handle_payment_received(vec![], None, None, &fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6); // untouched
         assert!(mgr.db.list_settlements().unwrap().is_empty());
@@ -3769,16 +4660,38 @@ mod tests {
     async fn payment_received_marker_records_settlement() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         let records = vec![CustomTlvRecord {
             type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
             value: vec![1u8].into(),
         }];
         let before = mgr.stable_channels[0].expected_usd.0;
-        mgr.handle_payment_received(records, Some("pay_settlement_1".to_string()), None, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.handle_payment_received(
+            records,
+            Some("pay_settlement_1".to_string()),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         // the 1-byte marker is not an envelope, so it records stability and applies no trade
         assert_eq!(
@@ -3792,13 +4705,21 @@ mod tests {
     async fn seed_forwarded_fixture() -> (StableChannelManager, FakeLdkServer) {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(10.0), None,
-            &fake as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         assert_eq!(mgr.stable_channels.len(), 1);
         assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
         assert_eq!(mgr.stable_channels[0].native_sats, 40_000);
@@ -3810,8 +4731,12 @@ mod tests {
         let (mut mgr, fake) = seed_forwarded_fixture().await;
         // Forward 45k out: 40k native + 5k stable. Post-forward user side = 5_000 (LSP 95_000).
         *fake.channels.lock().unwrap() = vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )];
 
         mgr.handle_payment_forwarded(
@@ -3825,15 +4750,19 @@ mod tests {
             0,          // fee_msat
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
 
         // 5_000 overflow sats * $100k / 1e8 = $5.00 deducted: $10 -> $5.
         let exp = mgr.stable_channels[0].expected_usd.0;
-        assert!((exp - 5.0).abs() < 0.01, "expected_usd should drop to ~5.0, got {}", exp);
+        assert!(
+            (exp - 5.0).abs() < 0.01,
+            "expected_usd should drop to ~5.0, got {}",
+            exp
+        );
         // native_sats and native_channel_btc must agree after reconcile.
         assert_eq!(
-            mgr.stable_channels[0].native_channel_btc.sats,
-            mgr.stable_channels[0].native_sats,
+            mgr.stable_channels[0].native_channel_btc.sats, mgr.stable_channels[0].native_sats,
             "native_channel_btc must match native_sats after a forward",
         );
     }
@@ -3892,8 +4821,12 @@ mod tests {
         let (mut mgr, fake) = seed_forwarded_fixture().await;
         // Forward 20k out, fully covered by the 40k native buffer. Post-forward user side = 30_000 (LSP 70_000).
         *fake.channels.lock().unwrap() = vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 70_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            70_000_000,
+            true,
         )];
 
         mgr.handle_payment_forwarded(
@@ -3907,16 +4840,20 @@ mod tests {
             0,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
 
         let exp = mgr.stable_channels[0].expected_usd.0;
-        assert!((exp - 10.0).abs() < 0.01, "expected_usd must stay ~10.0, got {}", exp);
+        assert!(
+            (exp - 10.0).abs() < 0.01,
+            "expected_usd must stay ~10.0, got {}",
+            exp
+        );
         // Native buffer shrank by the spend: 40_000 - 20_000 = 20_000.
         assert_eq!(mgr.stable_channels[0].native_sats, 20_000);
         // native_sats and native_channel_btc must agree after reconcile.
         assert_eq!(
-            mgr.stable_channels[0].native_channel_btc.sats,
-            mgr.stable_channels[0].native_sats,
+            mgr.stable_channels[0].native_channel_btc.sats, mgr.stable_channels[0].native_sats,
             "native_channel_btc must match native_sats after a forward",
         );
     }
@@ -3926,8 +4863,12 @@ mod tests {
         let mut mgr = make_manager();
         // Untracked channel: a forward on an unknown channel must not panic or invent a record.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.handle_payment_forwarded(
             USER_CHANNEL_ID_DECIMAL.to_string(),
@@ -3940,7 +4881,8 @@ mod tests {
             0,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
         assert!(mgr.stable_channels.is_empty());
     }
 
@@ -3949,10 +4891,25 @@ mod tests {
         let mut mgr = make_manager();
         // Post-forward channel snapshot: their = 5,000 sats (our 95k via outbound 95M msat).
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )]);
         // expected $10 -> backing 10,000; native 40,000; receiver 50,000 at $100k.
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
 
         // Forward 45,000 sats out: pre = 5,000 + 45,000 = 50,000, native 40,000, overflow 5,000 = $5.
         mgr.handle_payment_forwarded(
@@ -3970,7 +4927,11 @@ mod tests {
         .await;
 
         let sends = fake.sends.lock().unwrap();
-        assert_eq!(sends.len(), 1, "a SYNC should be sent after a stable deduction");
+        assert_eq!(
+            sends.len(),
+            1,
+            "a SYNC should be sent after a stable deduction"
+        );
         assert_eq!(sends[0].amount_msat, 1);
         assert_eq!(
             sends[0].custom_tlvs[0].type_num,
@@ -3982,8 +4943,12 @@ mod tests {
     async fn payment_forwarded_audit_records_both_legs() {
         let (mut mgr, fake) = seed_forwarded_fixture().await;
         *fake.channels.lock().unwrap() = vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )];
         mgr.handle_payment_forwarded(
             USER_CHANNEL_ID_DECIMAL.to_string(),
@@ -3996,7 +4961,8 @@ mod tests {
             0,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
         let page = mgr
             .db
             .list_ledger_events(&stable_channels::ledger::LedgerQuery {
@@ -4010,8 +4976,14 @@ mod tests {
             .iter()
             .find(|event| event.event_type == "PAYMENT_FORWARDED")
             .expect("PAYMENT_FORWARDED must be emitted");
-        assert_eq!(data.detail["prev_user_channel_id"], USER_CHANNEL_ID_DECIMAL, "inbound leg must be recorded");
-        assert_eq!(data.detail["next_user_channel_id"], "outbound-ucid", "outbound leg must be recorded");
+        assert_eq!(
+            data.detail["prev_user_channel_id"], USER_CHANNEL_ID_DECIMAL,
+            "inbound leg must be recorded"
+        );
+        assert_eq!(
+            data.detail["next_user_channel_id"], "outbound-ucid",
+            "outbound leg must be recorded"
+        );
         assert_eq!(data.detail["prev_node_id"], "prev-node-pubkey");
         assert_eq!(data.detail["next_node_id"], "next-node-pubkey");
     }
@@ -4020,8 +4992,12 @@ mod tests {
     async fn run_tick_skips_zero_target() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         // expected_usd defaulted to 0; tick must not attempt any send.
         mgr.handle_channel_ready(
@@ -4030,15 +5006,15 @@ mod tests {
             None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
-        ).await;
+        )
+        .await;
 
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
-        ));
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         assert!(fake.sends.lock().unwrap().is_empty());
     }
 
@@ -4046,13 +5022,21 @@ mod tests {
     async fn run_tick_skips_cooldown_active() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(10.0), None,
-            &fake as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         // Pretend we just paid: bump last_stability_payment to "now".
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4062,16 +5046,19 @@ mod tests {
 
         // Force a large drift by swapping in a channel with no outbound capacity.
         let fake2 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 0, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            0,
+            true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
-        ));
-        mgr.run_tick(&fake2 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake2 as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         assert!(
             fake2.sends.lock().unwrap().is_empty(),
             "cooldown should suppress send"
@@ -4083,27 +5070,38 @@ mod tests {
         let mut mgr = make_manager();
         // Channel exists, set expected_usd = 50.
         let fake_initial = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(50.0), None,
-            &fake_initial as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         // Price drops 20% to 80_000 (receiver USD below 50), peer connected.
         let fake_drift = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
 
-        mgr.run_tick(&fake_drift as &dyn LdkServerCalls, &push, 80_000.0).await;
+        mgr.run_tick(&fake_drift as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
 
         let sends = fake_drift.sends.lock().unwrap();
         assert_eq!(sends.len(), 1, "expected one stability payment");
@@ -4135,34 +5133,47 @@ mod tests {
             fake_drift.sign_calls.lock().unwrap().as_slice(),
             [envelope.payload.as_bytes()]
         );
-        assert!(mgr.stable_channels[0].last_stability_payment > 0,
-            "cooldown timestamp should be set");
+        assert!(
+            mgr.stable_channels[0].last_stability_payment > 0,
+            "cooldown timestamp should be set"
+        );
     }
 
     #[tokio::test]
     async fn run_tick_send_failure_keeps_cooldown_unset() {
         let mut mgr = make_manager();
         let fake_initial = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(50.0), None,
-            &fake_initial as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         let fake_drift = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )])
         .with_send_failure();
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
 
-        mgr.run_tick(&fake_drift as &dyn LdkServerCalls, &push, 80_000.0).await;
+        mgr.run_tick(&fake_drift as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
 
         assert_eq!(
             mgr.stable_channels[0].last_stability_payment, 0,
@@ -4174,27 +5185,38 @@ mod tests {
     async fn run_tick_pushes_when_offline_and_drift_exceeds_threshold() {
         let mut mgr = make_manager();
         let fake_initial = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(50.0), None,
-            &fake_initial as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         // Peer disconnected: is_usable=false.
         let fake_offline = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, false,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            false,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
 
-        mgr.run_tick(&fake_offline as &dyn LdkServerCalls, &push, 80_000.0).await;
+        mgr.run_tick(&fake_offline as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
 
         let sends = fake_offline.sends.lock().unwrap();
         assert!(sends.is_empty(), "must not send when peer offline");
@@ -4208,43 +5230,91 @@ mod tests {
     async fn run_tick_check_only_when_connected_and_user_above_par() {
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         // expected_usd=50 at price 100k -> backing_sats = 50_000
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         // Price RISES to 120k: stable_usd_value = 50_000/1e8*120k = $60 > $50 target -> user_to_lsp.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 120_000.0).await;
-        assert!(fake.sends.lock().unwrap().is_empty(), "LSP must NOT send when user is above par (CHECK_ONLY)");
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 120_000.0)
+            .await;
+        assert!(
+            fake.sends.lock().unwrap().is_empty(),
+            "LSP must NOT send when user is above par (CHECK_ONLY)"
+        );
     }
 
     #[tokio::test]
     async fn run_tick_resets_backing_to_equilibrium_after_send() {
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         // expected_usd=50 at price 100k -> backing_sats = 50_000
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         // Price DROPS to 80k: stable_usd_value = 50_000/1e8*80k = $40 < $50 -> lsp_to_user -> send.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
 
-        assert_eq!(fake.sends.lock().unwrap().len(), 1, "should send in lsp_to_user direction");
+        assert_eq!(
+            fake.sends.lock().unwrap().len(),
+            1,
+            "should send in lsp_to_user direction"
+        );
         // backing reset to target/price = 50/80000*1e8 = 62_500 (NOT left at stale 50_000).
-        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500, "backing must reset to equilibrium, preventing oscillation");
+        assert_eq!(
+            mgr.stable_channels[0].backing_sats, 62_500,
+            "backing must reset to equilibrium, preventing oscillation"
+        );
     }
 
     #[tokio::test]
@@ -4274,9 +5344,10 @@ mod tests {
             50_000_000,
             true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
 
         mgr.run_tick(&drift as &dyn LdkServerCalls, &push, 80_000.0)
             .await;
@@ -4306,16 +5377,33 @@ mod tests {
     #[tokio::test]
     async fn run_tick_skips_high_risk_channel() {
         let mut mgr = make_manager();
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, 0, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            50.0,
+            50_000,
+            0,
+            50_000,
+            100_000.0,
+        );
         mgr.stable_channels[0].risk_level = stable_channels::constants::MAX_RISK_LEVEL + 1;
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         // Price drops 20% -> would normally pay lsp_to_user; high risk must skip.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
         assert!(
             fake.sends.lock().unwrap().is_empty(),
             "a channel above MAX_RISK_LEVEL must not trigger a stability send"
@@ -4326,27 +5414,59 @@ mod tests {
     async fn backstop_deducts_and_syncs_after_two_low_ticks() {
         let mut mgr = make_manager();
         // expected $10 -> backing 10_000; receiver 50_000 (native 40_000) at $100k.
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         // Live balance dropped to 5_000 (< backing 10_000): a spend the forwarded event missed.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )]);
 
         // Tick 1: debounce only.
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
-        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "tick 1 must not deduct");
-        assert!(fake.sends.lock().unwrap().is_empty(), "tick 1 must not SYNC");
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
+        assert!(
+            (mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6,
+            "tick 1 must not deduct"
+        );
+        assert!(
+            fake.sends.lock().unwrap().is_empty(),
+            "tick 1 must not SYNC"
+        );
 
         // Tick 2: act.
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         let exp = mgr.stable_channels[0].expected_usd.0;
-        assert!((exp - 5.0).abs() < 0.01, "tick 2 must deduct ~$5 (10_000-5_000 sats), got {}", exp);
+        assert!(
+            (exp - 5.0).abs() < 0.01,
+            "tick 2 must deduct ~$5 (10_000-5_000 sats), got {}",
+            exp
+        );
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1, "tick 2 must send exactly one SYNC");
-        assert_eq!(sends[0].custom_tlvs.len(), 1, "SYNC must carry exactly one stable TLV");
+        assert_eq!(
+            sends[0].custom_tlvs.len(),
+            1,
+            "SYNC must carry exactly one stable TLV"
+        );
         assert_eq!(
             sends[0].custom_tlvs[0].type_num,
             stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
@@ -4357,64 +5477,138 @@ mod tests {
     #[tokio::test]
     async fn backstop_single_tick_dip_does_not_deduct() {
         let mut mgr = make_manager();
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         // Tick 1: transient dip to 5_000 (in-flight outbound HTLC; outbound_capacity excludes it).
         let dip = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )]);
-        mgr.run_tick(&dip as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&dip as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         // Tick 2: balance restored to 50_000 (HTLC resolved without spending stable).
         let restored = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.run_tick(&restored as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&restored as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
 
-        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a transient dip must not deduct");
-        assert!(restored.sends.lock().unwrap().is_empty(), "no SYNC for a transient dip");
+        assert!(
+            (mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6,
+            "a transient dip must not deduct"
+        );
+        assert!(
+            restored.sends.lock().unwrap().is_empty(),
+            "no SYNC for a transient dip"
+        );
     }
 
     #[tokio::test]
     async fn backstop_noop_when_balance_healthy() {
         let mut mgr = make_manager();
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         // Healthy: their 50_000 >= backing 10_000.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
-        assert!(fake.sends.lock().unwrap().is_empty(), "no backstop action when healthy");
+        assert!(
+            fake.sends.lock().unwrap().is_empty(),
+            "no backstop action when healthy"
+        );
     }
 
     #[tokio::test]
     async fn reconcile_hydrates_channel_with_decimal_user_channel_id() {
         let mut mgr = make_manager();
         // Persist a row whose user_channel_id is the realistic decimal form.
-        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 12.0, 30_000, 5_000, Some("dec")).unwrap();
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                12.0,
+                30_000,
+                5_000,
+                Some("dec"),
+            )
+            .unwrap();
 
         // The live channel reports the SAME decimal user_channel_id (as real gRPC does).
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
 
-        assert_eq!(mgr.stable_channels.len(), 1, "decimal-id channel MUST hydrate (not be dropped)");
+        assert_eq!(
+            mgr.stable_channels.len(),
+            1,
+            "decimal-id channel MUST hydrate (not be dropped)"
+        );
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 12.0);
         // The in-memory u128 must equal the decimal parse, not a hex misparse.
-        assert_eq!(mgr.stable_channels[0].user_channel_id, 189476124653200987495269098788434301048u128);
+        assert_eq!(
+            mgr.stable_channels[0].user_channel_id,
+            189476124653200987495269098788434301048u128
+        );
     }
 
     #[test]
     fn parse_user_channel_id_prefers_decimal() {
-        assert_eq!(parse_user_channel_id("189476124653200987495269098788434301048"),
-                   Some(189476124653200987495269098788434301048u128));
+        assert_eq!(
+            parse_user_channel_id("189476124653200987495269098788434301048"),
+            Some(189476124653200987495269098788434301048u128)
+        );
         // hex fallback still works for 0x-prefixed values
         assert_eq!(parse_user_channel_id("0x01"), Some(1));
     }
@@ -4466,7 +5660,9 @@ mod tests {
     async fn fake_sign_and_verify_behaviour() {
         let fake = FakeLdkServer::new(vec![]);
         let sig = fake
-            .sign_message(SignMessageRequest { message: b"hello".to_vec().into() })
+            .sign_message(SignMessageRequest {
+                message: b"hello".to_vec().into(),
+            })
             .await
             .unwrap();
         assert_eq!(sig.signature, "fake-sig");
@@ -4554,7 +5750,17 @@ mod tests {
         let mut mgr = make_manager();
         // Seed channel with backing_sats=0 so stable_usd_value = stable_receiver_usd (live balance).
         // receiver_sats=50_000 at 100k = $50; expected=50. Price drops to 80k -> $40 < $50 (20% drift).
-        seed_channel(&mut mgr, 1u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 0, 0, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            1u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            50.0,
+            0,
+            0,
+            50_000,
+            100_000.0,
+        );
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -4563,21 +5769,29 @@ mod tests {
         mgr.stable_channels[0].last_stability_payment = now + 100;
         // Channel with 50k their side; price 80k -> drift 20% -> exceeds threshold -> hits cooldown gate.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
-        ));
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
-        let cd = events.iter().find(|(e, _)| e == "STABILITY_COOLDOWN")
+        let cd = events
+            .iter()
+            .find(|(e, _)| e == "STABILITY_COOLDOWN")
             .expect("STABILITY_COOLDOWN should be emitted on a cooldown-blocked tick");
-        assert!(cd.1.get("user_channel_id").is_some(), "must carry user_channel_id");
+        assert!(
+            cd.1.get("user_channel_id").is_some(),
+            "must carry user_channel_id"
+        );
         assert!(cd.1.get("channel_id").is_some(), "must carry channel_id");
     }
 
@@ -4707,7 +5921,11 @@ mod tests {
         lsp_price: f64,
     ) -> TradeRejectionReason {
         let before = manager.stable_channels.first().map(|channel| {
-            (channel.expected_usd.0, channel.backing_sats, channel.native_sats)
+            (
+                channel.expected_usd.0,
+                channel.backing_sats,
+                channel.native_sats,
+            )
         });
         let durable_before = manager
             .db
@@ -4730,9 +5948,16 @@ mod tests {
             )
             .await;
         let after = manager.stable_channels.first().map(|channel| {
-            (channel.expected_usd.0, channel.backing_sats, channel.native_sats)
+            (
+                channel.expected_usd.0,
+                channel.backing_sats,
+                channel.native_sats,
+            )
         });
-        assert_eq!(after, before, "rejection must not mutate in-memory allocation");
+        assert_eq!(
+            after, before,
+            "rejection must not mutate in-memory allocation"
+        );
         assert_eq!(
             manager
                 .db
@@ -4806,10 +6031,7 @@ mod tests {
             expected_trade_fee_msat(50.0, 99.5, 100_000.0),
             Some(500_000)
         );
-        assert_eq!(
-            expected_trade_fee_msat(50.0, 50.0, 100_000.0),
-            Some(1)
-        );
+        assert_eq!(expected_trade_fee_msat(50.0, 50.0, 100_000.0), Some(1));
         assert_eq!(trade_fee_tolerance_msat(114_000, true), 1_000);
 
         // At this boundary the wallet's original gross fee floors to 113 sats, while recovering
@@ -4821,7 +6043,10 @@ mod tests {
         let reconstructed = expected_trade_fee_msat(0.0, signed_net_target, 65_000.0).unwrap();
         assert_eq!(wallet_fee_msat, 113_000);
         assert_eq!(reconstructed, 114_000);
-        assert!(wallet_fee_msat.abs_diff(reconstructed) <= trade_fee_tolerance_msat(reconstructed, true));
+        assert!(
+            wallet_fee_msat.abs_diff(reconstructed)
+                <= trade_fee_tolerance_msat(reconstructed, true)
+        );
     }
 
     #[tokio::test]
@@ -4870,31 +6095,25 @@ mod tests {
         let request_hash = stable_channels::trade::request_hash(signed.payload.as_bytes());
         let fee = expected_trade_fee_msat(50.0, 60.0, 100_000.0).unwrap();
 
-        mgr.handle_trade_payment(
-            &envelope,
-            Some(&payment_id),
-            Some(fee),
-            &fake,
-            100_000.0,
-        )
-        .await;
+        mgr.handle_trade_payment(&envelope, Some(&payment_id), Some(fee), &fake, 100_000.0)
+            .await;
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 60.0);
-        assert_eq!(mgr.db.get_sync_version(USER_CHANNEL_ID_DECIMAL).unwrap(), Some(1));
+        assert_eq!(
+            mgr.db.get_sync_version(USER_CHANNEL_ID_DECIMAL).unwrap(),
+            Some(1)
+        );
         assert!(mgr
             .db
             .trade_decision_by_payment(&payment_id)
             .unwrap()
             .is_some());
 
-        mgr.handle_trade_payment(
-            &envelope,
-            Some(&payment_id),
-            Some(fee),
-            &fake,
-            100_000.0,
-        )
-        .await;
-        assert_eq!(mgr.db.get_sync_version(USER_CHANNEL_ID_DECIMAL).unwrap(), Some(1));
+        mgr.handle_trade_payment(&envelope, Some(&payment_id), Some(fee), &fake, 100_000.0)
+            .await;
+        assert_eq!(
+            mgr.db.get_sync_version(USER_CHANNEL_ID_DECIMAL).unwrap(),
+            Some(1)
+        );
         StableChannelManager::retry_pending_trade_responses(mgr.db.as_ref(), &fake).await;
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
@@ -4907,6 +6126,233 @@ mod tests {
         assert_eq!(value["trade_payment_id"], payment_id);
         assert_eq!(value["request_hash"], request_hash);
         assert_eq!(value["expected_usd"], 60.0);
+    }
+
+    #[tokio::test]
+    async fn swept_two_phase_trade_uses_in_time_settlement_for_execution() {
+        let (mut mgr, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
+        let trade_id = "a1".repeat(32);
+        let proposal_payment_id = "a2".repeat(32);
+        let wallet_user_channel_id = "42";
+        let proposal_payload = serde_json::json!({
+            "type": "TRADE_V1",
+            "phase": "propose",
+            "channel_id": CHANNEL_ID_HEX,
+            "user_channel_id": wallet_user_channel_id,
+            "trade_id": trade_id,
+            "expected_usd": 60.0,
+            "quote_price": 100_000.0,
+            "base_sync_version": 0,
+            "ts": test_unix_now(),
+        })
+        .to_string();
+        let proposal = serde_json::json!({
+            "payload": proposal_payload,
+            "signature": "wallet-sig",
+        })
+        .to_string();
+        mgr.handle_trade_payment(
+            &proposal,
+            Some(&proposal_payment_id),
+            Some(1),
+            &fake,
+            100_000.0,
+        )
+        .await;
+
+        let reservation = mgr
+            .db
+            .trade_reservation_by_trade_id(&trade_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reservation.outcome, "reserved");
+        assert_eq!(reservation.user_channel_id, USER_CHANNEL_ID_DECIMAL);
+        assert_eq!(reservation.peer_user_channel_id, wallet_user_channel_id);
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
+        assert_eq!(
+            mgr.db.get_sync_version(USER_CHANNEL_ID_DECIMAL).unwrap(),
+            Some(0)
+        );
+
+        StableChannelManager::retry_pending_trade_responses(mgr.db.as_ref(), &fake).await;
+        {
+            let sends = fake.sends.lock().unwrap();
+            assert_eq!(sends.len(), 1);
+            let raw = std::str::from_utf8(sends[0].custom_tlvs[0].value.as_ref()).unwrap();
+            let response = crate::messages::parse_envelope(raw).unwrap();
+            let confirmation: stable_channels::trade::ConfirmTradeV1 =
+                serde_json::from_str(&response.payload).unwrap();
+            assert_eq!(confirmation.user_channel_id, wallet_user_channel_id);
+        }
+
+        let execution_payment_id = "a3".repeat(32);
+        let execution_payload = serde_json::json!({
+            "type": "TRADE_V1",
+            "phase": "execute",
+            "channel_id": reservation.channel_id,
+            "user_channel_id": reservation.peer_user_channel_id,
+            "trade_id": reservation.trade_id,
+            "proposal_payment_id": reservation.proposal_payment_id,
+            "proposal_hash": reservation.proposal_hash,
+            "confirmation_id": reservation.confirmation_id,
+            "expected_usd": reservation.expected_usd,
+            "quote_price": reservation.quote_price,
+            "fee_msat": reservation.fee_msat,
+            "ts": test_unix_now(),
+        })
+        .to_string();
+        let execution_hash = stable_channels::trade::request_hash(execution_payload.as_bytes());
+        let execution = serde_json::json!({
+            "payload": execution_payload,
+            "signature": "wallet-sig",
+        })
+        .to_string();
+        assert_eq!(
+            mgr.db
+                .expire_trade_reservations(reservation.expires_at)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            mgr.db
+                .trade_reservation_by_trade_id(&trade_id)
+                .unwrap()
+                .unwrap()
+                .outcome,
+            "expired"
+        );
+        mgr.handle_trade_payment_at(
+            &execution,
+            Some(&execution_payment_id),
+            Some(reservation.fee_msat),
+            Some(reservation.expires_at as u64),
+            &fake,
+            120_000.0,
+        )
+        .await;
+
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 60.0);
+        assert_eq!(
+            mgr.db.get_sync_version(USER_CHANNEL_ID_DECIMAL).unwrap(),
+            Some(1)
+        );
+        let terminal = mgr
+            .db
+            .trade_reservation_by_trade_id(&trade_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.outcome, "accepted");
+        assert_eq!(
+            terminal.execution_payment_id.as_deref(),
+            Some(execution_payment_id.as_str())
+        );
+        assert_eq!(
+            terminal.execution_hash.as_deref(),
+            Some(execution_hash.as_str())
+        );
+
+        StableChannelManager::retry_pending_trade_responses(mgr.db.as_ref(), &fake).await;
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 2);
+        let raw = std::str::from_utf8(sends[1].custom_tlvs[0].value.as_ref()).unwrap();
+        let response = crate::messages::parse_envelope(raw).unwrap();
+        let sync: serde_json::Value = serde_json::from_str(&response.payload).unwrap();
+        assert_eq!(sync["type"], "SYNC_V1");
+        assert_eq!(sync["user_channel_id"], wallet_user_channel_id);
+        assert_eq!(sync["trade_payment_id"], execution_payment_id);
+        assert_eq!(sync["request_hash"], execution_hash);
+        drop(sends);
+        assert!(mgr
+            .db
+            .list_settlements()
+            .unwrap()
+            .contains(&("fake-payment-id".to_string(), "sync".to_string())));
+    }
+
+    #[tokio::test]
+    async fn two_phase_full_peg_absorbs_lsp_drift_before_confirmation() {
+        let (mut mgr, fake) = correlated_rejection_context(34.8404, 55_278, 68_550);
+        let trade_id = "b1".repeat(32);
+        let proposal_payment_id = "b2".repeat(32);
+        let proposal_payload = serde_json::json!({
+            "type": "TRADE_V1",
+            "phase": "propose",
+            "channel_id": CHANNEL_ID_HEX,
+            "user_channel_id": "42",
+            "trade_id": trade_id,
+            "expected_usd": 43.1366,
+            "quote_price": 63_052.275,
+            "base_sync_version": 0,
+            "ts": test_unix_now(),
+        })
+        .to_string();
+        let proposal = serde_json::json!({
+            "payload": proposal_payload,
+            "signature": "wallet-sig",
+        })
+        .to_string();
+
+        mgr.handle_trade_payment(
+            &proposal,
+            Some(&proposal_payment_id),
+            Some(1),
+            &fake,
+            63_052.275,
+        )
+        .await;
+
+        let reservation = mgr
+            .db
+            .trade_reservation_by_trade_id(&trade_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reservation.outcome, "reserved");
+        assert_eq!(reservation.fee_msat, 132_000);
+        assert_eq!(reservation.backing_sats, 68_418);
+        assert_eq!(reservation.native_sats, 0);
+    }
+
+    #[tokio::test]
+    async fn two_phase_full_peg_absorbs_sub_cent_usd_headroom_before_sat_flooring() {
+        let (mut mgr, fake) = correlated_rejection_context(0.0, 0, 67_735);
+        let trade_id = "b3".repeat(32);
+        let proposal_payment_id = "b4".repeat(32);
+        let proposal_payload = serde_json::json!({
+            "type": "TRADE_V1",
+            "phase": "propose",
+            "channel_id": CHANNEL_ID_HEX,
+            "user_channel_id": "42",
+            "trade_id": trade_id,
+            "expected_usd": 42.2532,
+            "quote_price": 63_024.5675,
+            "base_sync_version": 0,
+            "ts": test_unix_now(),
+        })
+        .to_string();
+        let proposal = serde_json::json!({
+            "payload": proposal_payload,
+            "signature": "wallet-sig",
+        })
+        .to_string();
+
+        mgr.handle_trade_payment(
+            &proposal,
+            Some(&proposal_payment_id),
+            Some(1),
+            &fake,
+            63_024.15,
+        )
+        .await;
+
+        let reservation = mgr
+            .db
+            .trade_reservation_by_trade_id(&trade_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reservation.outcome, "reserved");
+        assert_eq!(reservation.fee_msat, 677_000);
+        assert_eq!(reservation.backing_sats, 67_058);
+        assert_eq!(reservation.native_sats, 0);
     }
 
     #[tokio::test]
@@ -4931,10 +6377,7 @@ mod tests {
 
         StableChannelManager::retry_pending_trade_responses(manager.db.as_ref(), &fake).await;
         assert_eq!(
-            manager
-                .db
-                .in_flight_trade_response_payment_ids()
-                .unwrap(),
+            manager.db.in_flight_trade_response_payment_ids().unwrap(),
             vec!["fake-payment-id".to_string()]
         );
         fake.payments.lock().unwrap().push(GrpcPayment {
@@ -4996,7 +6439,14 @@ mod tests {
         mgr.handle_trade_payment(&envelope, Some(&payment_id), Some(1), &fake, 100_000.0)
             .await;
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
-        assert_eq!(mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap().expected_usd, 50.0);
+        assert_eq!(
+            mgr.db
+                .load_channel(USER_CHANNEL_ID_DECIMAL)
+                .unwrap()
+                .unwrap()
+                .expected_usd,
+            50.0
+        );
         StableChannelManager::retry_pending_trade_responses(mgr.db.as_ref(), &fake).await;
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
@@ -5014,12 +6464,8 @@ mod tests {
         let payment_id = "6".repeat(64);
 
         let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            50.0,
-            Some(100_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 50.0, Some(100_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(&mut manager, &fake, &envelope, &payment_id, 1, 100_000.0)
                 .await,
@@ -5047,12 +6493,8 @@ mod tests {
         );
 
         let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            60.0,
-            Some(100_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 60.0, Some(100_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(&mut manager, &fake, &envelope, &payment_id, 1, 100_000.0)
                 .await,
@@ -5060,12 +6502,7 @@ mod tests {
         );
 
         let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            60.0,
-            Some(-1.0),
-            test_unix_now(),
-        );
+        let envelope = correlated_trade_envelope_at(&trade_id, 60.0, Some(-1.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(&mut manager, &fake, &envelope, &payment_id, 1, 100_000.0)
                 .await,
@@ -5073,12 +6510,8 @@ mod tests {
         );
 
         let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            60.0,
-            Some(90_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 60.0, Some(90_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(
                 &mut manager,
@@ -5093,12 +6526,8 @@ mod tests {
         );
 
         let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            110.0,
-            Some(100_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 110.0, Some(100_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(
                 &mut manager,
@@ -5113,12 +6542,8 @@ mod tests {
         );
 
         let (mut manager, fake) = correlated_rejection_context(100.0, 100_000, 200_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            0.0,
-            Some(90_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 0.0, Some(90_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(
                 &mut manager,
@@ -5133,12 +6558,8 @@ mod tests {
         );
 
         let (mut manager, fake) = correlated_rejection_context(10.0, 49_000, 50_000);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            20.0,
-            Some(100_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 20.0, Some(100_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(
                 &mut manager,
@@ -5161,12 +6582,8 @@ mod tests {
             100_000_000,
             true,
         )]);
-        let envelope = correlated_trade_envelope_at(
-            &trade_id,
-            20.0,
-            Some(100_000.0),
-            test_unix_now(),
-        );
+        let envelope =
+            correlated_trade_envelope_at(&trade_id, 20.0, Some(100_000.0), test_unix_now());
         assert_eq!(
             correlated_rejection_reason(&mut manager, &fake, &envelope, &payment_id, 1, 100_000.0)
                 .await,
@@ -5254,18 +6671,27 @@ mod tests {
     async fn trade_applies_valid_target() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
     }
@@ -5294,23 +6720,11 @@ mod tests {
         );
 
         let tiny = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.01);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &tiny,
-            &fake as &dyn LdkServerCalls,
-            110_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &tiny, &fake as &dyn LdkServerCalls, 110_000.0).await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 100_009);
 
         let noop = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 100.01);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &noop,
-            &fake as &dyn LdkServerCalls,
-            90_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &noop, &fake as &dyn LdkServerCalls, 90_000.0).await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 100_009);
     }
 
@@ -5338,13 +6752,7 @@ mod tests {
         );
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 99.0);
 
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 100.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 10);
@@ -5377,13 +6785,7 @@ mod tests {
             );
             let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 0.0);
 
-            handle_trade_with_valid_fee(
-                &mut mgr,
-                &env,
-                &fake as &dyn LdkServerCalls,
-                price,
-            )
-            .await;
+            handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, price).await;
 
             if should_apply {
                 assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
@@ -5421,13 +6823,7 @@ mod tests {
         );
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 0.009);
 
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_001.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_001.0).await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 0);
@@ -5464,14 +6860,8 @@ mod tests {
             49_950,
         );
 
-        mgr.handle_trade_message(
-            &env,
-            None,
-            Some(1),
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        mgr.handle_trade_message(&env, None, Some(1), &fake as &dyn LdkServerCalls, 100_000.0)
+            .await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 0);
@@ -5510,13 +6900,7 @@ mod tests {
             100_400.0,
             49_551,
         );
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert_eq!(mgr.stable_channels[0].backing_sats, 49_750);
         assert_eq!(mgr.stable_channels[0].native_sats, 250);
@@ -5560,13 +6944,7 @@ mod tests {
             100_000.0,
             49_995,
         );
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
@@ -5603,13 +6981,7 @@ mod tests {
             100_000.0,
             49_000,
         );
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 49.95);
         assert_eq!(mgr.stable_channels[0].backing_sats, 49_950);
@@ -5620,18 +6992,28 @@ mod tests {
     async fn trade_rejects_invalid_signature() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
-        )]).with_verify_failure();
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 3.0, 3_000, 47_000, 50_000, 100_000.0);
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )])
+        .with_verify_failure();
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            3.0,
+            3_000,
+            47_000,
+            50_000,
+            100_000.0,
+        );
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 3.0).abs() < 1e-6); // unchanged
     }
@@ -5640,18 +7022,27 @@ mod tests {
     async fn trade_rejects_over_balance() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 999.0);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 0.0).abs() < 1e-6); // unchanged
     }
@@ -5661,19 +7052,28 @@ mod tests {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         let target = 50.001;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 0);
@@ -5685,19 +7085,28 @@ mod tests {
         let mut mgr = make_manager();
         // Live receiver side = 50_000 sats at $100k -> receiver_usd = $50.00 exactly.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         let target = 50.01;
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, target);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
         assert_eq!(mgr.stable_channels[0].backing_sats, 0);
@@ -5708,16 +7117,20 @@ mod tests {
     async fn trade_channel_not_found_is_noop() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 5.0, 5_000, 45_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            5.0,
+            5_000,
+            45_000,
+            50_000,
+            100_000.0,
+        );
 
         let env = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6); // unchanged
     }
@@ -5726,20 +7139,29 @@ mod tests {
     async fn trade_rejects_stale_ts() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         // A captured signed trade replayed a day later must be rejected (replay protection).
         let stale = test_unix_now() - 86_400;
         let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, stale);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
         assert!(
             (mgr.stable_channels[0].expected_usd.0 - 0.0).abs() < 1e-6,
@@ -5754,44 +7176,75 @@ mod tests {
         stable_channels::audit::enable_test_capture();
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
         let stale = test_unix_now() - 86_400;
         let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, stale);
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
-        let stale_ev = events.iter().find(|(e, _)| e == "TRADE_STALE")
+        let stale_ev = events
+            .iter()
+            .find(|(e, _)| e == "TRADE_STALE")
             .expect("TRADE_STALE must be emitted for a stale signed trade");
-        assert!(stale_ev.1.get("user_channel_id").is_some(), "TRADE_STALE must carry user_channel_id");
+        assert!(
+            stale_ev.1.get("user_channel_id").is_some(),
+            "TRADE_STALE must carry user_channel_id"
+        );
     }
 
     #[tokio::test]
     async fn trade_accepts_fresh_ts() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 0.0, 0, 50_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            0.0,
+            0,
+            50_000,
+            50_000,
+            100_000.0,
+        );
 
         // A trade signed just now is within the window and applies normally.
-        let env = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 10.0, test_unix_now());
-        handle_trade_with_valid_fee(
-            &mut mgr,
-            &env,
-            &fake as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
+        let env = trade_envelope_with_ts(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            10.0,
+            test_unix_now(),
+        );
+        handle_trade_with_valid_fee(&mut mgr, &env, &fake as &dyn LdkServerCalls, 100_000.0).await;
 
-        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a fresh signed trade must apply");
+        assert!(
+            (mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6,
+            "a fresh signed trade must apply"
+        );
     }
 
     #[test]
@@ -5806,10 +7259,25 @@ mod tests {
         let mut mgr = make_manager();
         // Post-splice snapshot: their = 5,000 (our 95k via outbound 95M msat).
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )]);
         // expected $10 -> backing 10,000; receiver was 50,000.
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
 
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
@@ -5822,7 +7290,11 @@ mod tests {
 
         // backing 10,000 vs new receiver 5,000 -> overflow 5,000 = $5 -> expected $5.
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6);
-        assert_eq!(fake.sends.lock().unwrap().len(), 1, "splice-out should SYNC");
+        assert_eq!(
+            fake.sends.lock().unwrap().len(),
+            1,
+            "splice-out should SYNC"
+        );
     }
 
     #[tokio::test]
@@ -5830,9 +7302,24 @@ mod tests {
         let mut mgr = make_manager();
         // Post-splice snapshot: their grew to 80,000 (our 20k via outbound 20M msat).
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 20_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            20_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
 
         mgr.handle_channel_ready(
             CHANNEL_ID_HEX.to_string(),
@@ -5844,16 +7331,35 @@ mod tests {
         .await;
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6); // unchanged
-        assert_eq!(fake.sends.lock().unwrap().len(), 0, "splice-in must not SYNC");
+        assert_eq!(
+            fake.sends.lock().unwrap().len(),
+            0,
+            "splice-in must not SYNC"
+        );
     }
 
     #[tokio::test]
     async fn splice_replay_does_not_double_deduct() {
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
         )]);
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
+        seed_channel(
+            &mut mgr,
+            189476124653200987495269098788434301048u128,
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            10.0,
+            10_000,
+            40_000,
+            50_000,
+            100_000.0,
+        );
 
         for _ in 0..2 {
             mgr.handle_channel_ready(
@@ -5867,7 +7373,11 @@ mod tests {
         }
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 5.0).abs() < 1e-6); // deducted once, not twice
-        assert_eq!(fake.sends.lock().unwrap().len(), 1, "second pass deducts nothing, no second SYNC");
+        assert_eq!(
+            fake.sends.lock().unwrap().len(),
+            1,
+            "second pass deducts nothing, no second SYNC"
+        );
     }
 
     #[tokio::test]
@@ -5884,13 +7394,21 @@ mod tests {
 
         let mut mgr = make_manager();
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
-            100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
         mgr.edit_stable_channel(
-            CHANNEL_ID_HEX, Some(7.5), None,
-            &fake as &dyn LdkServerCalls, 100_000.0,
-        ).await;
+            CHANNEL_ID_HEX,
+            Some(7.5),
+            None,
+            &fake as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
 
         let contents = std::fs::read_to_string(&path).unwrap_or_default();
         assert!(
@@ -5928,9 +7446,16 @@ mod tests {
         // open_in_memory() is #[cfg(test)]-gated in the shared crate, unreachable across this crate boundary; use the tempdir pattern from make_manager() instead.
         let dir = tempdir().unwrap();
         let db = stable_channels::db::Database::open(dir.path()).unwrap();
-        let fake = FakeLdkServer::new(vec![]).with_forwarded(vec![fwd("aa", "bb", 1000), fwd("cc", "dd", 2000)]);
-        assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await.emitted, 2); // both unseen
-        assert_eq!(crate::backfill::backfill_forwards(&fake, &db).await.emitted, 0); // both now seen
+        let fake = FakeLdkServer::new(vec![])
+            .with_forwarded(vec![fwd("aa", "bb", 1000), fwd("cc", "dd", 2000)]);
+        assert_eq!(
+            crate::backfill::backfill_forwards(&fake, &db).await.emitted,
+            2
+        ); // both unseen
+        assert_eq!(
+            crate::backfill::backfill_forwards(&fake, &db).await.emitted,
+            0
+        ); // both now seen
     }
 
     #[tokio::test]
@@ -5950,10 +7475,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_reconstructs_channel_payment_forward_peer_and_sweep() {
-        use ldk_server_client::ldk_server_grpc::types::{
-            pending_sweep_balance, PendingBroadcast,
-        };
-        use stable_channels::ledger::{LedgerQuery, LedgerCompleteness};
+        use ldk_server_client::ldk_server_grpc::types::{pending_sweep_balance, PendingBroadcast};
+        use stable_channels::ledger::{LedgerCompleteness, LedgerQuery};
 
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let dir = tempdir().unwrap();
@@ -5985,7 +7508,10 @@ mod tests {
         }])
         .with_sweeps(vec![GrpcPendingSweepBalance {
             balance_type: Some(pending_sweep_balance::BalanceType::PendingBroadcast(
-                PendingBroadcast { channel_id: Some(CHANNEL_ID_HEX.into()), amount_satoshis: 777 },
+                PendingBroadcast {
+                    channel_id: Some(CHANNEL_ID_HEX.into()),
+                    amount_satoshis: 777,
+                },
             )),
         }]);
 
@@ -5997,18 +7523,33 @@ mod tests {
         assert_eq!(counts.sweeps, 1);
         assert_eq!(counts.failed_scopes, 0);
 
-        let page = db.list_ledger_events(&LedgerQuery {
-            completeness: Some("reconstructed".into()),
-            limit: 50,
-            ..Default::default()
-        }).unwrap();
+        let page = db
+            .list_ledger_events(&LedgerQuery {
+                completeness: Some("reconstructed".into()),
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(page.events.len(), 5);
-        assert!(page.events.iter().all(|event| event.completeness == LedgerCompleteness::Reconstructed));
-        let payment = page.events.iter().find(|event| event.event_type == "PAYMENT_RECONSTRUCTED").unwrap();
+        assert!(page
+            .events
+            .iter()
+            .all(|event| event.completeness == LedgerCompleteness::Reconstructed));
+        let payment = page
+            .events
+            .iter()
+            .find(|event| event.event_type == "PAYMENT_RECONSTRUCTED")
+            .unwrap();
         assert_eq!(payment.status, "completed");
         assert_eq!(payment.detail["ldk_status"], "SUCCEEDED");
-        assert_eq!(payment.detail["channel_association"], "unavailable_from_ldk");
-        assert!(!payment.refs.iter().any(|reference| reference.role.contains("channel")));
+        assert_eq!(
+            payment.detail["channel_association"],
+            "unavailable_from_ldk"
+        );
+        assert!(!payment
+            .refs
+            .iter()
+            .any(|reference| reference.role.contains("channel")));
 
         let replay_counts = crate::backfill::reconcile_event_history(&fake, &db).await;
         assert_eq!(replay_counts.channels, 0);
@@ -6080,8 +7621,8 @@ mod tests {
     #[tokio::test]
     async fn sweep_reconstruction_identity_survives_unrelated_list_shifts() {
         use ldk_server_client::ldk_server_grpc::types::{
-            pending_sweep_balance, AwaitingThresholdConfirmations,
-            BroadcastAwaitingConfirmation, PendingBroadcast,
+            pending_sweep_balance, AwaitingThresholdConfirmations, BroadcastAwaitingConfirmation,
+            PendingBroadcast,
         };
 
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
@@ -6108,16 +7649,19 @@ mod tests {
                 ),
             ),
         };
-        let fake = FakeLdkServer::new(vec![])
-            .with_sweeps(vec![pending, broadcast.clone()]);
+        let fake = FakeLdkServer::new(vec![]).with_sweeps(vec![pending, broadcast.clone()]);
         assert_eq!(
-            crate::backfill::reconcile_event_history(&fake, &db).await.sweeps,
+            crate::backfill::reconcile_event_history(&fake, &db)
+                .await
+                .sweeps,
             2
         );
 
         *fake.sweeps.lock().unwrap() = vec![broadcast];
         assert_eq!(
-            crate::backfill::reconcile_event_history(&fake, &db).await.sweeps,
+            crate::backfill::reconcile_event_history(&fake, &db)
+                .await
+                .sweeps,
             0,
             "removing an earlier sweep must not make the remaining sweep look new"
         );
@@ -6136,7 +7680,9 @@ mod tests {
             ),
         }];
         assert_eq!(
-            crate::backfill::reconcile_event_history(&fake, &db).await.sweeps,
+            crate::backfill::reconcile_event_history(&fake, &db)
+                .await
+                .sweeps,
             1,
             "the same sweep changing confirmation state must remain visible"
         );
@@ -6144,22 +7690,67 @@ mod tests {
 
     #[test]
     fn should_log_on_outcome_change() {
-        assert!(stability_should_log("", "check_only", 0.0, 90.0, 90.0, 0.25, 1.0, true));
-        assert!(stability_should_log("cooldown", "check_only", 90.0, 90.0, 90.0, 0.25, 1.0, true));
+        assert!(stability_should_log(
+            "",
+            "check_only",
+            0.0,
+            90.0,
+            90.0,
+            0.25,
+            1.0,
+            true
+        ));
+        assert!(stability_should_log(
+            "cooldown",
+            "check_only",
+            90.0,
+            90.0,
+            90.0,
+            0.25,
+            1.0,
+            true
+        ));
     }
 
     #[test]
     fn should_log_on_significant_value_move_when_tracking() {
         // same outcome, move > $0.25 and > 1% -> true
-        assert!(stability_should_log("check_only", "check_only", 90.0, 92.0, 90.0, 0.25, 1.0, true));
+        assert!(stability_should_log(
+            "check_only",
+            "check_only",
+            90.0,
+            92.0,
+            90.0,
+            0.25,
+            1.0,
+            true
+        ));
         // same outcome, sub-threshold move -> false
-        assert!(!stability_should_log("check_only", "check_only", 90.0, 90.10, 90.0, 0.25, 1.0, true));
+        assert!(!stability_should_log(
+            "check_only",
+            "check_only",
+            90.0,
+            90.10,
+            90.0,
+            0.25,
+            1.0,
+            true
+        ));
     }
 
     #[test]
     fn no_value_trigger_when_not_tracking() {
         // same outcome, huge move, but track_value=false -> false
-        assert!(!stability_should_log("high_risk", "high_risk", 90.0, 200.0, 90.0, 0.25, 1.0, false));
+        assert!(!stability_should_log(
+            "high_risk",
+            "high_risk",
+            90.0,
+            200.0,
+            90.0,
+            0.25,
+            1.0,
+            false
+        ));
     }
 
     #[tokio::test]
@@ -6167,21 +7758,44 @@ mod tests {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         stable_channels::audit::enable_test_capture();
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 120_000.0).await; // above par -> CHECK_ONLY (emit)
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 120_000.0).await; // identical -> throttled
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 120_000.0)
+            .await; // above par -> CHECK_ONLY (emit)
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 120_000.0)
+            .await; // identical -> throttled
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
-        let n = events.iter().filter(|(e, _)| e == "STABILITY_CHECK_ONLY").count();
+        let n = events
+            .iter()
+            .filter(|(e, _)| e == "STABILITY_CHECK_ONLY")
+            .count();
         assert_eq!(n, 1, "identical repeated ticks must emit CHECK_ONLY once");
     }
 
@@ -6243,9 +7857,10 @@ mod tests {
             100_000.0,
         )
         .await;
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0)
             .await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
@@ -6295,7 +7910,10 @@ mod tests {
             std::str::from_utf8(record.value.as_ref()).unwrap(),
         )
         .unwrap();
-        assert_eq!(verify_calls[0].message.as_ref(), envelope.payload.as_bytes());
+        assert_eq!(
+            verify_calls[0].message.as_ref(),
+            envelope.payload.as_bytes()
+        );
         drop(verify_calls);
         assert_eq!(
             mgr.db
@@ -6415,10 +8033,8 @@ mod tests {
     async fn signed_stability_migrates_a_legacy_noncanonical_channel_row() {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let mut mgr = manager_at_par_for_signed_stability().await;
-        let legacy_user_channel_id = format!(
-            "{:032x}",
-            USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap()
-        );
+        let legacy_user_channel_id =
+            format!("{:032x}", USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap());
         mgr.db
             .save_channel(
                 CHANNEL_ID_HEX,
@@ -6429,7 +8045,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
+        assert!(mgr
+            .db
+            .load_channel(USER_CHANNEL_ID_DECIMAL)
+            .unwrap()
+            .is_none());
 
         let settlement_id = "99".repeat(32);
         let record = signed_stability_record(
@@ -6635,9 +8255,10 @@ mod tests {
             Some("pending")
         );
 
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0)
             .await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 9_091);
@@ -6696,21 +8317,40 @@ mod tests {
         let mut mgr = make_manager();
         // $10 target at $100k: equilibrium backing = 10_000 sats; user side 50_000 -> native 40_000.
         let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         // Snapshot balances at par (no drift at $100k, so nothing fires).
-        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
         assert_eq!(mgr.stable_channels[0].stable_receiver_btc.sats, 50_000);
 
         // Price rises to $110k: user is $1 above par and settles 909 sats to the LSP.
         // Live user side drops 50_000 -> 49_091 (our side gains).
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_909_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
         )]);
         mgr.handle_payment_received(
             vec![stability_marker()],
@@ -6725,10 +8365,19 @@ mod tests {
         // Amount-proportional: backing 10_000 minus the 909 sats actually paid = 9_091,
         // one sat above the truncated equilibrium (9_090) — that residual sat is the honest
         // rounding remainder the wallet under-paid, not stolen surplus.
-        assert_eq!(sc.backing_sats, 9_091, "backing is reduced by the settled amount");
+        assert_eq!(
+            sc.backing_sats, 9_091,
+            "backing is reduced by the settled amount"
+        );
         // Native absorbs only rounding, never the settlement: 49_091 - 9_091 = 40_000.
-        assert_eq!(sc.native_sats, 40_000, "native sats must be preserved across the settlement");
-        assert!(sc.backing_sats <= sc.stable_receiver_btc.sats, "backing may never exceed live balance");
+        assert_eq!(
+            sc.native_sats, 40_000,
+            "native sats must be preserved across the settlement"
+        );
+        assert!(
+            sc.backing_sats <= sc.stable_receiver_btc.sats,
+            "backing may never exceed live balance"
+        );
     }
 
     #[tokio::test]
@@ -6739,21 +8388,40 @@ mod tests {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
         // Snapshot at par: backing = 10_000 sats, user side = 50_000.
-        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
 
         // Price rises to $110k: the honest owed amount is ~910 sats. The attacker instead
         // keysends 1 sat with the same marker. The user paying 1 sat raises the LSP's
         // outbound by 1 sat (50_000_000 -> 50_001_000), so the user side drops 50_000 -> 49_999.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_001_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_001_000,
+            true,
         )]);
         mgr.handle_payment_received(
             vec![stability_marker()],
@@ -6767,9 +8435,18 @@ mod tests {
         let sc = &mgr.stable_channels[0];
         // Only 1 sat of drift settled: 10_000 - 1 = 9_999. The surplus stays owed as backing,
         // NOT erased to the $110k equilibrium of 9_090.
-        assert_eq!(sc.backing_sats, 9_999, "a 1-sat payment settles only 1 sat of drift");
-        assert_ne!(sc.backing_sats, 9_090, "backing must NOT collapse to equilibrium for a token payment");
-        assert_eq!(sc.native_sats, 40_000, "the surplus is not reclassified as free native BTC");
+        assert_eq!(
+            sc.backing_sats, 9_999,
+            "a 1-sat payment settles only 1 sat of drift"
+        );
+        assert_ne!(
+            sc.backing_sats, 9_090,
+            "backing must NOT collapse to equilibrium for a token payment"
+        );
+        assert_eq!(
+            sc.native_sats, 40_000,
+            "the surplus is not reclassified as free native BTC"
+        );
     }
 
     #[tokio::test]
@@ -6777,29 +8454,54 @@ mod tests {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
         )]);
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
-        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
 
         // User settles 909 sats; books reconciled at receive.
         let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_909_000, true,
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_909_000,
+            true,
         )]);
         mgr.handle_payment_received(
-            vec![stability_marker()], Some("pay-2".to_string()), Some(909_000),
-            &fake as &dyn LdkServerCalls, 110_000.0,
-        ).await;
+            vec![stability_marker()],
+            Some("pay-2".to_string()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
         let expected_before = mgr.stable_channels[0].expected_usd.0;
 
         // Two ticks at the new price: without receive-time reconcile the backstop
         // would read the settled sats as an unreconciled spend and deduct expected_usd.
         stable_channels::audit::enable_test_capture();
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0).await;
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0).await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0)
+            .await;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0)
+            .await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
 
@@ -6822,34 +8524,84 @@ mod tests {
         // Two identical channels: an identical balance drop on both is unattributable.
         let mk = |outbound_msat: u64| {
             vec![
-                make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, outbound_msat, true),
-                make_channel(CHAN2_ID, UID2_HEX, COUNTERPARTY_HEX, 100_000, outbound_msat, true),
+                make_channel(
+                    CHANNEL_ID_HEX,
+                    USER_CHANNEL_ID_HEX,
+                    COUNTERPARTY_HEX,
+                    100_000,
+                    outbound_msat,
+                    true,
+                ),
+                make_channel(
+                    CHAN2_ID,
+                    UID2_HEX,
+                    COUNTERPARTY_HEX,
+                    100_000,
+                    outbound_msat,
+                    true,
+                ),
             ]
         };
         let fake0 = FakeLdkServer::new(mk(50_000_000));
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
-        mgr.edit_stable_channel(CHAN2_ID, Some(10.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
-        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0).await;
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        mgr.edit_stable_channel(
+            CHAN2_ID,
+            Some(10.0),
+            None,
+            &fake0 as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake0 as &dyn LdkServerCalls, &push, 100_000.0)
+            .await;
         let backing_before: Vec<u64> = mgr.stable_channels.iter().map(|s| s.backing_sats).collect();
 
         let fake = FakeLdkServer::new(mk(50_909_000));
         stable_channels::audit::enable_test_capture();
         mgr.handle_payment_received(
-            vec![stability_marker()], Some("pay-3".to_string()), Some(909_000),
-            &fake as &dyn LdkServerCalls, 110_000.0,
-        ).await;
+            vec![stability_marker()],
+            Some("pay-3".to_string()),
+            Some(909_000),
+            &fake as &dyn LdkServerCalls,
+            110_000.0,
+        )
+        .await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
 
         let backing_after: Vec<u64> = mgr.stable_channels.iter().map(|s| s.backing_sats).collect();
-        assert_eq!(backing_before, backing_after, "ambiguous attribution must not touch the books");
+        assert_eq!(
+            backing_before, backing_after,
+            "ambiguous attribution must not touch the books"
+        );
         assert!(
-            events.iter().any(|(e, d)| e == "STABILITY_RECEIVE_UNATTRIBUTED"
-                && d.get("candidates").and_then(|v| v.as_u64()) == Some(2)),
+            events
+                .iter()
+                .any(|(e, d)| e == "STABILITY_RECEIVE_UNATTRIBUTED"
+                    && d.get("candidates").and_then(|v| v.as_u64()) == Some(2)),
             "the miss must be audited with the candidate count"
         );
+    }
+
+    #[test]
+    fn stability_reservation_guard_fails_closed() {
+        assert!(stability_mutation_allowed(&Ok::<Option<&str>, &str>(None)));
+        assert!(!stability_mutation_allowed(&Ok::<Option<&str>, &str>(
+            Some("trade-id")
+        )));
+        assert!(!stability_mutation_allowed(&Err::<Option<&str>, &str>(
+            "database locked"
+        )));
     }
 }

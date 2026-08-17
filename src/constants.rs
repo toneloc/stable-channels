@@ -17,6 +17,9 @@ pub const MAX_SIGNED_STABILITY_TLV_VALUE_BYTES: usize = 8 * 1024;
 /// Trade message type identifier
 pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
+/// Signed LSP reservation returned for an upgraded desktop trade proposal.
+pub const CONFIRM_TRADE_MESSAGE_TYPE: &str = "CONFIRM_TRADE_V1";
+
 /// Sync message type identifier (LSP → user expected_usd sync after stable deductions)
 pub const SYNC_MESSAGE_TYPE: &str = "SYNC_V1";
 
@@ -85,6 +88,12 @@ pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 60;
 
 /// A correlated trade becomes locally uncertain after this long, but remains late-resolvable.
 pub const TRADE_RESULT_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// A desktop quote reservation is deliberately short lived.
+pub const TRADE_CONFIRMATION_TTL_SECS: u64 = 60;
+
+/// Do not start the fee payment when too little of the reservation remains.
+pub const TRADE_CONFIRMATION_SEND_MARGIN_SECS: u64 = 10;
 
 /// The LSP retries durable result delivery throughout this window.
 pub const TRADE_RESPONSE_RETRY_WINDOW_SECS: u64 = 14 * 24 * 60 * 60;

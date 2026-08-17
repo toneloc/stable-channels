@@ -24,13 +24,61 @@ pub struct TradePayload {
     /// Desktop correlation id. Omitted by legacy Android/iOS clients.
     #[serde(default)]
     pub trade_id: Option<String>,
+    /// Missing means the legacy fee-first path. Upgraded desktop uses propose/execute/cancel.
+    #[serde(default)]
+    pub phase: Option<String>,
     pub expected_usd: f64,
     /// Wallet BTC/USD quote. The LSP uses it only for slippage and fee validation.
     #[serde(default)]
     pub quote_price: Option<f64>,
+    #[serde(default)]
+    pub base_sync_version: Option<u64>,
+    #[serde(default)]
+    pub replaces_trade_id: Option<String>,
+    #[serde(default)]
+    pub proposal_payment_id: Option<String>,
+    #[serde(default)]
+    pub proposal_hash: Option<String>,
+    #[serde(default)]
+    pub confirmation_id: Option<String>,
+    #[serde(default)]
+    pub fee_msat: Option<u64>,
     /// Unix seconds the wallet signed at; 0 if absent (un-upgraded wallet). Drives replay freshness.
     #[serde(default)]
     pub ts: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_confirm_trade_payload(
+    channel_id: &str,
+    user_channel_id: &str,
+    trade_id: &str,
+    proposal_payment_id: &str,
+    proposal_hash: &str,
+    confirmation_id: &str,
+    expected_usd: f64,
+    quote_price: f64,
+    fee_msat: u64,
+    base_sync_version: u64,
+    confirmed_at: u64,
+    expires_at: u64,
+) -> String {
+    serde_json::to_string(&stable_channels::trade::ConfirmTradeV1 {
+        kind: stable_channels::constants::CONFIRM_TRADE_MESSAGE_TYPE.to_owned(),
+        channel_id: channel_id.to_owned(),
+        user_channel_id: user_channel_id.to_owned(),
+        trade_id: trade_id.to_owned(),
+        proposal_payment_id: proposal_payment_id.to_owned(),
+        proposal_hash: proposal_hash.to_owned(),
+        confirmation_id: confirmation_id.to_owned(),
+        expected_usd,
+        quote_price,
+        fee_msat,
+        base_sync_version,
+        confirmed_at,
+        expires_at,
+    })
+    .unwrap_or_default()
 }
 
 /// RegisterPush signed body. Field declaration order IS the canonical serialization order;
@@ -266,5 +314,37 @@ mod tests {
         assert_eq!(value["reason_code"], "insufficient_capacity");
         assert_eq!(value["decided_at"], 1786310000_u64);
         assert_eq!(value.as_object().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn upgraded_phases_and_confirmation_round_trip() {
+        let id = "11".repeat(32);
+        let proposal = format!(
+            r#"{{"type":"TRADE_V1","phase":"propose","channel_id":"{}","trade_id":"{}","expected_usd":12.5,"quote_price":100000.0,"base_sync_version":3,"ts":10}}"#,
+            "22".repeat(32),
+            id
+        );
+        let parsed = parse_trade_payload(&proposal).unwrap();
+        assert_eq!(parsed.phase.as_deref(), Some("propose"));
+        assert_eq!(parsed.base_sync_version, Some(3));
+
+        let payload = build_confirm_trade_payload(
+            &"22".repeat(32),
+            "7",
+            &id,
+            &"33".repeat(32),
+            &"44".repeat(32),
+            &"55".repeat(32),
+            12.5,
+            100_000.0,
+            1_000,
+            3,
+            100,
+            160,
+        );
+        let confirmation: stable_channels::trade::ConfirmTradeV1 =
+            serde_json::from_str(&payload).unwrap();
+        assert!(confirmation.has_valid_shape());
+        assert_eq!(confirmation.fee_msat, 1_000);
     }
 }

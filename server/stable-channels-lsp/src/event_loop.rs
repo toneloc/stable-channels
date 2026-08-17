@@ -51,7 +51,7 @@ async fn run(state: AppState) {
             Ok(s) => {
                 backoff = Duration::from_secs(1);
                 s
-            },
+            }
             Err(e) => {
                 if gap_correlation_id.is_none() {
                     let correlation_id = format!("event-stream-gap-{}", now_millis());
@@ -77,7 +77,7 @@ async fn run(state: AppState) {
                 tokio::time::sleep(backoff).await;
                 backoff = std::cmp::min(backoff * 2, Duration::from_secs(60));
                 continue;
-            },
+            }
         };
         info!("[event_loop] subscribed");
         stable_channels::audit::audit_event(
@@ -106,7 +106,8 @@ async fn run(state: AppState) {
             let counts = crate::backfill::reconcile_event_history(
                 state.ldk_server.as_ref(),
                 state.db.as_ref(),
-            ).await;
+            )
+            .await;
             let reconciliation_complete =
                 counts.failed_scopes == 0 && counts.incomplete_scopes == 0;
             stable_channels::audit::audit_event(
@@ -165,7 +166,7 @@ async fn dispatch(
         Err(e) => {
             warn!("[event_loop] item error: {}", e);
             return DispatchOutcome::Reconnect;
-        },
+        }
     };
     let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
     let mut mgr = state.stable_manager.lock().await;
@@ -222,13 +223,21 @@ async fn dispatch(
                     ),
                 );
             }
-        },
+        }
         Some(EventVariant::PaymentReceived(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
-            mgr.handle_payment_received(e.custom_records, payment_id, amount_msat, ldk, btc_price)
-                .await;
-        },
+            let settled_at = e.payment.as_ref().map(|p| p.latest_update_timestamp);
+            mgr.handle_payment_received_at(
+                e.custom_records,
+                payment_id,
+                amount_msat,
+                settled_at,
+                ldk,
+                btc_price,
+            )
+            .await;
+        }
         Some(EventVariant::PaymentForwarded(e)) => {
             if let Some(fp) = e.forwarded_payment {
                 // ForwardedPayment now carries per-HTLC locators; take the first of each list as the representative channel/node.
@@ -237,7 +246,8 @@ async fn dispatch(
                 let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
                 let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
                 mgr.handle_payment_forwarded(
-                    prev.and_then(|h| h.user_channel_id.clone()).unwrap_or_default(),
+                    prev.and_then(|h| h.user_channel_id.clone())
+                        .unwrap_or_default(),
                     next.and_then(|h| h.user_channel_id.clone()),
                     prev_channel_id,
                     next_channel_id,
@@ -250,12 +260,18 @@ async fn dispatch(
                 )
                 .await;
             }
-        },
+        }
         Some(EventVariant::PaymentSuccessful(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
-            let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
+            let direction = e.payment.as_ref().map(|p| {
+                if p.direction == 1 {
+                    "outbound"
+                } else {
+                    "inbound"
+                }
+            });
             let mut settlement_handled = false;
             if let Some(payment_id) = payment_id.as_deref() {
                 match state.db.mark_trade_response_delivered(
@@ -276,11 +292,7 @@ async fn dispatch(
                         return DispatchOutcome::Reconnect;
                     }
                 }
-                let known_settlement = state
-                    .db
-                    .settlement_exists(payment_id)
-                    .ok()
-                    .unwrap_or(false);
+                let known_settlement = state.db.settlement_exists(payment_id).ok().unwrap_or(false);
                 match state.db.mark_settlement_succeeded(
                     payment_id,
                     amount_msat,
@@ -289,7 +301,7 @@ async fn dispatch(
                 ) {
                     Ok(true) => settlement_handled = true,
                     Ok(false) if known_settlement => settlement_handled = true,
-                    Ok(false) => {},
+                    Ok(false) => {}
                     Err(error) => {
                         stable_channels::audit::audit_event(
                             "DB_WRITE_FAILED",
@@ -300,7 +312,7 @@ async fn dispatch(
                             }),
                         );
                         return DispatchOutcome::Reconnect;
-                    },
+                    }
                 }
             }
             if !settlement_handled {
@@ -314,12 +326,18 @@ async fn dispatch(
                     }),
                 );
             }
-        },
+        }
         Some(EventVariant::PaymentFailed(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
-            let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
+            let direction = e.payment.as_ref().map(|p| {
+                if p.direction == 1 {
+                    "outbound"
+                } else {
+                    "inbound"
+                }
+            });
             if let Some(payment_id) = payment_id.as_deref() {
                 if let Err(error) = state.db.mark_trade_response_failed(
                     payment_id,
@@ -343,7 +361,8 @@ async fn dispatch(
                 .as_ref()
                 .map(|rollback| rollback.user_channel_id.clone())
                 .or_else(|| {
-                    payment_id.as_deref()
+                    payment_id
+                        .as_deref()
                         .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten())
                 });
             stable_channels::audit::audit_event(
@@ -357,7 +376,7 @@ async fn dispatch(
                     "stability_rollback_applied": rollback.map(|rollback| rollback.applied),
                 }),
             );
-        },
+        }
         Some(EventVariant::PaymentClaimable(e)) => {
             let payment_id = e.payment.as_ref().map(|p| p.id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
@@ -366,8 +385,8 @@ async fn dispatch(
                 "PAYMENT_CLAIMABLE",
                 claimable_audit_data(payment_id.as_deref(), amount_msat, has_custom_records),
             );
-        },
-        _ => {},
+        }
+        _ => {}
     }
     DispatchOutcome::Continue
 }

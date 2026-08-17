@@ -561,7 +561,12 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
 									.as_ref()
 									.map(|k| format_payment_kind(k))
 									.unwrap_or_else(|| "Unknown".to_string());
-								ui.label(payment_type);
+								let settlement_kind = app
+									.state
+									.settlement_kinds
+									.as_ref()
+									.and_then(|kinds| kinds.get(&payment.id).copied());
+								ui.label(payment_type_label_str(&payment_type, settlement_kind));
 								ui.end_row();
 
 								// Amount (unit-aware, pre-formatted above)

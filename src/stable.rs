@@ -423,6 +423,15 @@ pub fn trade_backing_after_delta(
     }
     let current_target_sats = current_target_sats_f.floor() as u64;
     let new_target_sats = new_target_sats_f.floor() as u64;
+
+    // A signed target within one cent of the post-fee receiver's USD value is a full peg. Compare
+    // the USD values directly: flooring the target to whole sats first can turn a sub-cent gap
+    // into a one-cent sat residue and leave native BTC behind. Absorb peer-local backing drift at
+    // this boundary; the strict capacity check above still rejects targets above the receiver.
+    if receiver_usd - new_expected_usd < 0.01 {
+        return Some(receiver_sats);
+    }
+
     let mut backing_sats = if new_expected_usd >= current_expected_usd {
         current_backing_sats.checked_add(new_target_sats.checked_sub(current_target_sats)?)?
     } else {
@@ -1662,6 +1671,29 @@ mod tests {
         assert_eq!(sc.backing_sats, 57_444);
         assert_eq!(sc.native_sats, 0);
         assert_eq!(sc.native_channel_btc.sats, 0);
+    }
+
+    #[test]
+    fn full_peg_absorbs_existing_peer_drift_at_post_fee_capacity() {
+        let backing = trade_backing_after_delta(68_418, 55_278, 34.8404, 43.1366, 63_052.275);
+
+        assert_eq!(backing, Some(68_418));
+    }
+
+    #[test]
+    fn full_peg_uses_signed_usd_headroom_before_sat_flooring() {
+        // Production-shaped boundary: the signed target is less than one cent below capacity,
+        // but flooring it to 67_042 sats would leave 16 sats worth slightly more than one cent.
+        let backing = trade_backing_after_delta(67_058, 0, 0.0, 42.2532, 63_024.15);
+
+        assert_eq!(backing, Some(67_058));
+    }
+
+    #[test]
+    fn full_peg_does_not_absorb_an_actionable_cent() {
+        let backing = trade_backing_after_delta(100_000, 0, 0.0, 99.99, 100_000.0);
+
+        assert_eq!(backing, Some(99_990));
     }
 
     #[test]
