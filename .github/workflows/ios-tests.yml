@@ -22,9 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Select Xcode 16.4
+      - name: Select Xcode 26.3
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version
           xcrun simctl list devices available
 
@@ -34,6 +34,6 @@ jobs:
           xcodebuild test \
             -project ios/StableChannels/StableChannels.xcodeproj \
             -scheme StableChannels \
-            -destination 'platform=iOS Simulator,OS=18.5,name=iPhone 16' \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 17' \
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO
