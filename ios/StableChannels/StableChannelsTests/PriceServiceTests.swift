@@ -151,4 +151,16 @@ final class PriceOracleTests: XCTestCase {
         XCTAssertTrue(names.contains("Luno BTC/USDT"))
         XCTAssertTrue(names.contains("BTCTurk BTC/USDT"))
     }
+
+    func testPegGateSurvivesDirectUSDHostOutage() {
+        // The USDT fallback's peg gate needs minimumAgreeingPegFeeds. If too many peg feeds
+        // share hosts with the direct-USD tier, the fallback fails exactly when the primary
+        // tier is unreachable — the outage it exists to survive.
+        func host(_ url: String) -> String {
+            URL(string: url)?.host ?? ""
+        }
+        let usdHosts = Set(PriceOracle.directUSDFeeds.map { host($0.urlFormat) })
+        let disjoint = PriceOracle.usdtUSDFeeds.filter { !usdHosts.contains(host($0.urlFormat)) }
+        XCTAssertGreaterThanOrEqual(disjoint.count, PriceOracle.minimumAgreeingPegFeeds)
+    }
 }

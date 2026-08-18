@@ -63,7 +63,12 @@ object PriceOracle {
         PriceFeedConfig("Kraken USDT/USD", "https://api.kraken.com/0/public/Ticker?pair=USDTUSD", listOf("result", "USDTZUSD", "c")),
         PriceFeedConfig("Bitstamp USDT/USD", "https://www.bitstamp.net/api/v2/ticker/usdtusd/", listOf("last")),
         PriceFeedConfig("Bitfinex USDT/USD", "https://api-pub.bitfinex.com/v2/ticker/tUSTUSD", listOf("6")),
-        PriceFeedConfig("CoinGecko USDT/USD", "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd", listOf("tether", "usd"))
+        PriceFeedConfig("CoinGecko USDT/USD", "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd", listOf("tether", "usd")),
+        // Disjoint-host peg sources: the four exchange peg feeds above share hosts with the
+        // direct-USD tier, so without these the fallback's peg gate would fail exactly when
+        // the primary tier is unreachable — the outage the fallback exists to survive.
+        PriceFeedConfig("Crypto.com USDT/USD", "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD", listOf("result", "data", "0", "a")),
+        PriceFeedConfig("OKX USDT/USD", "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD", listOf("data", "0", "last"))
     )
 
     fun resolve(

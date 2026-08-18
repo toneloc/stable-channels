@@ -297,6 +297,19 @@ pub fn get_usdt_usd_price_feeds() -> Vec<PriceFeedConfig> {
             "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd",
             vec!["tether", "usd"],
         ),
+        // Disjoint-host peg sources: the four exchange peg feeds above share hosts with the
+        // direct-USD tier, so without these the fallback's peg gate would fail exactly when
+        // the primary tier is unreachable — the outage the fallback exists to survive.
+        PriceFeedConfig::new(
+            "Crypto.com USDT/USD",
+            "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD",
+            vec!["result", "data", "0", "a"],
+        ),
+        PriceFeedConfig::new(
+            "OKX USDT/USD",
+            "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD",
+            vec!["data", "0", "last"],
+        ),
     ]
 }
 
@@ -351,7 +364,30 @@ mod tests {
         assert_eq!(feeds.len(), 6);
         assert!(feeds.iter().all(|feed| !feed.url_format.contains("USDT")));
         assert_eq!(get_fallback_usdt_price_feeds().len(), 9);
-        assert_eq!(get_usdt_usd_price_feeds().len(), 5);
+        assert_eq!(get_usdt_usd_price_feeds().len(), 7);
+    }
+
+    #[test]
+    fn usdt_peg_gate_survives_direct_usd_host_outage() {
+        // The USDT fallback's peg gate needs 3 agreeing feeds. If too many peg feeds share
+        // hosts with the direct-USD tier, the fallback fails exactly when the primary tier
+        // is unreachable — the outage it exists to survive.
+        fn host(url: &str) -> String {
+            url.split('/').nth(2).unwrap_or("").to_string()
+        }
+        let usd_hosts: std::collections::HashSet<String> = get_default_price_feeds()
+            .iter()
+            .map(|feed| host(&feed.url_format))
+            .collect();
+        let disjoint = get_usdt_usd_price_feeds()
+            .iter()
+            .filter(|feed| !usd_hosts.contains(&host(&feed.url_format)))
+            .count();
+        // 3 = MIN_AGREEING_PEG_FEEDS in price_feeds.rs
+        assert!(
+            disjoint >= 3,
+            "peg gate needs >=3 feeds on hosts disjoint from the direct-USD tier; got {disjoint}"
+        );
     }
 
     #[test]

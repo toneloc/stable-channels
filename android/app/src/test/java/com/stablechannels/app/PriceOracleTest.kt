@@ -73,6 +73,17 @@ class PriceOracleTest {
     }
 
     @Test
+    fun `peg gate survives direct USD host outage`() {
+        // The USDT fallback's peg gate needs MINIMUM_AGREEING_PEG_FEEDS. If too many peg feeds
+        // share hosts with the direct-USD tier, the fallback fails exactly when the primary
+        // tier is unreachable — the outage it exists to survive.
+        fun host(url: String) = url.substringAfter("//").substringBefore("/")
+        val usdHosts = PriceOracle.DIRECT_USD_FEEDS.map { host(it.urlFormat) }.toSet()
+        val disjoint = PriceOracle.USDT_USD_FEEDS.count { host(it.urlFormat) !in usdHosts }
+        assertTrue(disjoint >= PriceOracle.MINIMUM_AGREEING_PEG_FEEDS)
+    }
+
+    @Test
     fun `fresh anchor protects the background service`() {
         val nowMs = 1_000_000L
         assertEquals(

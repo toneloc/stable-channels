@@ -218,6 +218,19 @@ enum PriceOracle {
             name: "CoinGecko USDT/USD",
             urlFormat: "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd",
             jsonPath: ["tether", "usd"]
+        ),
+        // Disjoint-host peg sources: the four exchange peg feeds above share hosts with the
+        // direct-USD tier, so without these the fallback's peg gate would fail exactly when
+        // the primary tier is unreachable — the outage the fallback exists to survive.
+        PriceFeedConfig(
+            name: "Crypto.com USDT/USD",
+            urlFormat: "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD",
+            jsonPath: ["result", "data", "0", "a"]
+        ),
+        PriceFeedConfig(
+            name: "OKX USDT/USD",
+            urlFormat: "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD",
+            jsonPath: ["data", "0", "last"]
         )
     ]
 
