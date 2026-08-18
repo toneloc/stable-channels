@@ -101,6 +101,23 @@ private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): 
     }
 }
 
+/** USD → sats through a trusted accounting price, with finiteness/overflow guards (iOS parity). */
+internal fun accountingSatsFromUSD(usd: Double, accountingPrice: Double): Long? {
+    if (accountingPrice <= 0.0 || usd <= 0.0) return null
+    val sats = usd / accountingPrice * Constants.SATS_IN_BTC
+    if (!sats.isFinite() || sats < 1.0 || sats >= Long.MAX_VALUE.toDouble()) return null
+    return sats.toLong()
+}
+
+internal fun accountingMsatFromUSD(usd: Double, accountingPrice: Double): Long? {
+    if (accountingPrice <= 0.0 || usd <= 0.0) return null
+    val msat = usd / accountingPrice * Constants.SATS_IN_BTC * 1_000
+    if (!msat.isFinite() || msat < 1.0 || msat >= Long.MAX_VALUE.toDouble()) return null
+    return msat.toLong()
+}
+
+private const val UNTRUSTED_PRICE_MESSAGE = "A trusted BTC/USD price is required"
+
 @Composable
 fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var input by remember { mutableStateOf("") }
@@ -654,7 +671,13 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             paymentId = appState.nodeService.sendPayment(invoice)
                                             actualMsat = invoiceMsat
                                         } else {
-                                            actualMsat = manualAmountMsat
+                                            // Money movement converts USD at the trusted accounting
+                                            // price, never the raw display price (iOS parity).
+                                            if (enteredUSD <= 0) throw Exception("Enter amount")
+                                            actualMsat = accountingMsatFromUSD(
+                                                enteredUSD,
+                                                appState.priceService.currentAccountingPrice()
+                                            ) ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                             paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
                                         }
                                         appState.databaseService?.recordPayment(
@@ -666,8 +689,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         result = "Sending payment..."
                                     }
                                     InputType.BOLT12 -> {
-                                        val sats = manualAmountSats
-                                        if (sats <= 0) throw Exception("Enter amount")
+                                        if (enteredUSD <= 0) throw Exception("Enter amount")
+                                        val sats = accountingSatsFromUSD(
+                                            enteredUSD,
+                                            appState.priceService.currentAccountingPrice()
+                                        ) ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
                                         val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
                                         appState.databaseService?.recordPayment(
@@ -679,8 +705,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         result = "Bolt12 payment sent"
                                     }
                                     InputType.ONCHAIN -> {
-                                        val sats = manualAmountSats
-                                        if (sats <= 0) throw Exception("Enter amount")
+                                        if (enteredUSD <= 0) throw Exception("Enter amount")
+                                        val sats = accountingSatsFromUSD(
+                                            enteredUSD,
+                                            appState.priceService.currentAccountingPrice()
+                                        ) ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
                                         if (hasChannel) {
                                             if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")

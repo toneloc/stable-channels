@@ -15,6 +15,7 @@ import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.NamedPrice
 import com.stablechannels.app.util.PriceFeedConfig
 import com.stablechannels.app.util.PriceOracle
+import com.stablechannels.app.util.PriceOracleAnchorStore
 import com.stablechannels.app.util.PriceOracleException
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -834,9 +835,12 @@ class StabilityProcessingService : Service() {
         loadChannelStateFromDB()?.userChannelId?.takeIf { it.isNotEmpty() }
 
     private fun fetchMedianPrice(): Double {
+        // Anchor to the app's last accepted price so the large-move circuit breaker also
+        // protects the unattended path (mirrors the iOS notification extension).
+        val lastTrustedPrice = PriceOracleAnchorStore.freshPrice(this)
         val usdPrices = fetchOracleFeeds(PriceOracle.DIRECT_USD_FEEDS)
-        return try {
-            PriceOracle.resolve(usdPrices, emptyList(), emptyList(), null).price
+        val price = try {
+            PriceOracle.resolve(usdPrices, emptyList(), emptyList(), lastTrustedPrice).price
         } catch (error: PriceOracleException) {
             if (error.quarantinesPrice) {
                 Log.w(TAG, "Rejected direct USD price: ${error.message}")
@@ -851,13 +855,17 @@ class StabilityProcessingService : Service() {
                     emptyList(),
                     fallback.filter { it.feedName in usdtNames },
                     fallback.filter { it.feedName in pegNames },
-                    null
+                    lastTrustedPrice
                 ).price
             } catch (fallbackError: Exception) {
                 Log.w(TAG, "Rejected USDT fallback: ${fallbackError.message}")
-                0.0
+                return 0.0
             }
         }
+        if (price > 0.0) {
+            PriceOracleAnchorStore.save(this, price)
+        }
+        return price
     }
 
     private fun fetchOracleFeeds(feeds: List<PriceFeedConfig>): List<NamedPrice> {

@@ -301,7 +301,12 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 successTxid = txid
                             } else {
                                 val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
-                                val sats = if (price > 0) (usd / price * Constants.SATS_IN_BTC).toLong() else throw Exception("No price available")
+                                // Money movement converts USD at the trusted accounting price,
+                                // never the raw display price (iOS parity).
+                                val sats = accountingSatsFromUSD(
+                                    usd,
+                                    appState.priceService.currentAccountingPrice()
+                                ) ?: throw Exception("A trusted BTC/USD price is required")
                                 if (hasChannel) {
                                     if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value
