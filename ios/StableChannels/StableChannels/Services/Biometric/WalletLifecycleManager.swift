@@ -32,7 +32,7 @@ final class WalletLifecycleManager {
     private let keychain: any MnemonicStorageProtocol
     private let userDataDir: URL
     private let appGroupIdentifier: String
-    private let validator: (String) -> Bool
+    private let validator: (String) async -> Bool
 
     private static let restorePhaseKey = "restore_phase"
 
@@ -40,7 +40,7 @@ final class WalletLifecycleManager {
         keychain: any MnemonicStorageProtocol = WalletKeychainService.shared,
         userDataDir: URL = Constants.userDataDir,
         appGroupIdentifier: String = Constants.appGroupIdentifier,
-        validator: @escaping (String) -> Bool
+        validator: @escaping (String) async -> Bool
     ) {
         self.keychain = keychain
         self.userDataDir = userDataDir
@@ -92,9 +92,16 @@ final class WalletLifecycleManager {
         }
     }
 
-    /// Runs recovery if an interrupted restore transaction is detected
+    /// Runs recovery if an interrupted restore transaction is detected.
+    /// The pending Keychain slot is the authoritative signal: Keychain writes are
+    /// synchronous and durable, while the UserDefaults phase marker can be lost to
+    /// an unflushed cache on a hard kill. A pending seed without a marker is still
+    /// evidence of an in-flight restore and must never be treated as a new wallet.
     func runRecoveryIfNeeded(onWipePersistence: () throws -> Void) throws {
-        guard let phase = getRestorePhase() else { return }
+        guard let phase = getRestorePhase() else {
+            try recoverMarkerlessPendingIfNeeded()
+            return
+        }
 
         AuditService.log("RESTORE_INTERRUPTED_RECOVERY_START", data: ["phase": phase.rawValue])
         do {
@@ -178,11 +185,16 @@ final class WalletLifecycleManager {
         _ mnemonic: String,
         onStopNode: () -> Void,
         onWipePersistence: () throws -> Void
-    ) throws {
+    ) async throws {
         let canonical = MnemonicMigrator.canonicalizeMnemonic(mnemonic)
-        guard validator(canonical) else {
+        // The validator builds a full node to derive an identity — run it off the
+        // main actor. Its failure can mean a bad checksum OR an environment error,
+        // so the message must not claim the phrase itself is wrong.
+        guard await validator(canonical) else {
             AuditService.log("RESTORE_INVALID_MNEMONIC", data: [:])
-            throw WalletRestoreError.invalidMnemonic("Invalid BIP-39 mnemonic phrase. Check words and checksum.")
+            throw WalletRestoreError.invalidMnemonic(
+                "The recovery phrase could not be validated. Check each word and try again."
+            )
         }
 
         // 1. Store and verify pending seed (abort if write fails - active wallet is untouched)
@@ -218,6 +230,35 @@ final class WalletLifecycleManager {
             AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
         }
         clearRestorePhase()
+    }
+
+    /// Reconstructs the restore state when the phase marker was lost but a pending
+    /// seed survives in the Keychain.
+    private func recoverMarkerlessPendingIfNeeded() throws {
+        let pending: String
+        do {
+            pending = try keychain.loadPendingMnemonic()
+        } catch WalletKeychainError.keyNotFound {
+            return
+        }
+        guard !pending.isEmpty else { return }
+
+        // Fail closed on operational Keychain errors: promoting over a live wallet
+        // that merely could not be read would destroy the wrong identity.
+        let hasActive = try keychain.hasMnemonic()
+        if hasActive {
+            // The active seed survived, so the staged restore never reached the
+            // wipe — the pending copy is abandoned staging. Remove it.
+            AuditService.log("RESTORE_MARKERLESS_PENDING_CLEARED", data: [:])
+            try? keychain.deletePendingMnemonic()
+        } else {
+            // No active seed but a verified pending seed exists: the wipe ran and
+            // the marker was lost. Promote the pending seed rather than letting
+            // startup read this as a brand-new wallet and orphan the restore.
+            AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
+            try keychain.storeMnemonic(pending)
+            try? keychain.deletePendingMnemonic()
+        }
     }
 
     // MARK: - Durable State Helpers
