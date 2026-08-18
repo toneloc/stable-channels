@@ -4,6 +4,10 @@ struct PriceFeedConfig: Codable, Equatable {
     let name: String
     let urlFormat: String
     let jsonPath: [String]
+
+    func extractPrice(from json: Any) -> Double? {
+        PriceOracle.extractPrice(from: json, path: jsonPath)
+    }
 }
 
 struct NamedPrice: Equatable {

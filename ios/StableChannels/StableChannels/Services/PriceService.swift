@@ -163,7 +163,7 @@ class PriceService {
                 return nil
             }
             let jsonObject = try JSONSerialization.jsonObject(with: data)
-            guard let price = PriceOracle.extractPrice(from: jsonObject, path: feed.jsonPath) else {
+            guard let price = feed.extractPrice(from: jsonObject) else {
                 print("[PriceOracle] \(feed.name) failed: invalid response path")
                 return nil
             }
@@ -173,13 +173,5 @@ class PriceService {
             print("[PriceOracle] \(feed.name) failed: \(error.localizedDescription)")
             return nil
         }
-    }
-
-    static func extractPrice(from json: Any, path: [String]) -> Double? {
-        PriceOracle.extractPrice(from: json, path: path)
-    }
-
-    static func median(_ values: [Double]) -> Double {
-        PriceOracle.median(values) ?? 0
     }
 }

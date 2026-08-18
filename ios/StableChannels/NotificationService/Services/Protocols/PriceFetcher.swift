@@ -74,7 +74,7 @@ struct ConcurrentPriceFetcher: PriceFetcher {
                       (200 ..< 300).contains(http.statusCode),
                       let data,
                       let json = try? JSONSerialization.jsonObject(with: data),
-                      let value = PriceOracle.extractPrice(from: json, path: feed.jsonPath) else {
+                      let value = feed.extractPrice(from: json) else {
                     print("[PriceOracle:NSE] \(feed.name) failed")
                     return
                 }

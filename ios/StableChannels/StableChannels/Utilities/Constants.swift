@@ -81,13 +81,6 @@ enum Constants {
     static let minChannelLifetime: UInt32 = 100
     static let maxProportionalLSPFeeLimitPPMMsat: UInt64 = 10_000_000
 
-    // MARK: - Price Feeds
-
-    /// Direct BTC/USD books are the only feeds allowed to define the primary dollar index.
-    static let defaultPriceFeeds = PriceOracle.directUSDFeeds
-    static let fallbackUSDTPriceFeeds = PriceOracle.bitcoinUSDTFeeds
-    static let usdtUSDPriceFeeds = PriceOracle.usdtUSDFeeds
-
     // MARK: - RGS (Rapid Gossip Sync) Servers
 
     enum RGSServer {

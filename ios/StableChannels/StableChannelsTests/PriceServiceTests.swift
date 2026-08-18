@@ -4,12 +4,18 @@ import XCTest
 final class PriceServiceExtractionTests: XCTestCase {
     func testExtractPrice_objectPath() {
         let json: [String: Any] = ["data": ["amount": "63000.975"]]
-        XCTAssertEqual(PriceService.extractPrice(from: json, path: ["data", "amount"]), 63000.975)
+        XCTAssertEqual(PriceOracle.extractPrice(from: json, path: ["data", "amount"]), 63000.975)
     }
 
     func testExtractPrice_arrayPath() {
         let json: [Any] = [["p": 63_100.50]]
-        XCTAssertEqual(PriceService.extractPrice(from: json, path: ["0", "p"]), 63_100.50)
+        XCTAssertEqual(PriceOracle.extractPrice(from: json, path: ["0", "p"]), 63_100.50)
+    }
+
+    func testExtractPrice_viaPriceFeedConfig() {
+        let feed = PriceFeedConfig(name: "TestFeed", urlFormat: "", jsonPath: ["0", "p"])
+        let json: [Any] = [["p": 63_100.50]]
+        XCTAssertEqual(feed.extractPrice(from: json), 63_100.50)
     }
 
     func testExtractPrice_krakenArrayValue() {
@@ -17,20 +23,20 @@ final class PriceServiceExtractionTests: XCTestCase {
             "result": ["XXBTZUSD": ["c": ["63029.80000", "0.01579728"]]]
         ]
         XCTAssertEqual(
-            PriceService.extractPrice(from: json, path: ["result", "XXBTZUSD", "c"]),
+            PriceOracle.extractPrice(from: json, path: ["result", "XXBTZUSD", "c"]),
             63_029.80
         )
     }
 
     func testExtractPrice_missingOrOutOfRangePathReturnsNil() {
-        XCTAssertNil(PriceService.extractPrice(from: ["data": ["amount": "1"]], path: ["missing"]))
-        XCTAssertNil(PriceService.extractPrice(from: [1, 2], path: ["2"]))
+        XCTAssertNil(PriceOracle.extractPrice(from: ["data": ["amount": "1"]], path: ["missing"]))
+        XCTAssertNil(PriceOracle.extractPrice(from: [1, 2], path: ["2"]))
     }
 
     func testMedian() {
-        XCTAssertEqual(PriceService.median([]), 0)
-        XCTAssertEqual(PriceService.median([3, 1, 2]), 2)
-        XCTAssertEqual(PriceService.median([4, 1, 3, 2]), 2.5)
+        XCTAssertNil(PriceOracle.median([]))
+        XCTAssertEqual(PriceOracle.median([3, 1, 2]), 2)
+        XCTAssertEqual(PriceOracle.median([4, 1, 3, 2]), 2.5)
     }
 }
 
