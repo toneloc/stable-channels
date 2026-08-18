@@ -251,14 +251,38 @@ final class WalletLifecycleManager {
             // wipe — the pending copy is abandoned staging. Remove it.
             AuditService.log("RESTORE_MARKERLESS_PENDING_CLEARED", data: [:])
             try? keychain.deletePendingMnemonic()
-        } else {
-            // No active seed but a verified pending seed exists: the wipe ran and
-            // the marker was lost. Promote the pending seed rather than letting
-            // startup read this as a brand-new wallet and orphan the restore.
-            AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
-            try keychain.storeMnemonic(pending)
-            try? keychain.deletePendingMnemonic()
+            return
         }
+
+        // "No active Keychain seed" does NOT prove the wipe completed: a legacy
+        // wallet's identity lives in keys_seed/seed_phrase with its channel
+        // database, and never had a Keychain entry at all. Promoting the pending
+        // replacement over surviving legacy artifacts would open the old channel
+        // database under a different identity. Only promote when nothing of the
+        // old wallet remains; otherwise fail closed and preserve the evidence —
+        // the legacy wallet keeps working, and the pending slot stays for the
+        // user's next explicit restore.
+        let legacyArtifacts = ["keys_seed", "seed_phrase", "ldk_node_data.sqlite"]
+            .filter { name in
+                FileManager.default.fileExists(
+                    atPath: userDataDir.appendingPathComponent(name).path
+                )
+            }
+        guard legacyArtifacts.isEmpty else {
+            AuditService.log(
+                "RESTORE_MARKERLESS_PENDING_BLOCKED_BY_LEGACY",
+                data: ["artifacts": legacyArtifacts.joined(separator: ",")]
+            )
+            return
+        }
+
+        // No active seed, no legacy artifacts, but a verified pending seed exists:
+        // the wipe ran and the marker was lost. Promote the pending seed rather
+        // than letting startup read this as a brand-new wallet and orphan the
+        // restore.
+        AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
+        try keychain.storeMnemonic(pending)
+        try? keychain.deletePendingMnemonic()
     }
 
     // MARK: - Durable State Helpers
