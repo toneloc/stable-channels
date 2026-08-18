@@ -360,6 +360,84 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertThrowsError(try manager.runRecoveryIfNeeded(onWipePersistence: {}))
         XCTAssertEqual(mockStorage.mockPendingMnemonic, otherMnemonic)
     }
+
+    func testMarkerlessPendingNeverPromotesOverLegacyWallet() throws {
+        // Regression: a legacy wallet has keys_seed + channel DB but NO Keychain
+        // mnemonic. A restore staged a replacement into the pending slot, then the
+        // marker was lost before the wipe. "No active Keychain seed" must NOT be
+        // read as "wipe completed" — promoting here would open the legacy channel
+        // database under the replacement identity.
+        try Data("legacy-entropy".utf8)
+            .write(to: tempDirURL.appendingPathComponent("keys_seed"))
+        try Data("db".utf8)
+            .write(to: tempDirURL.appendingPathComponent("ldk_node_data.sqlite"))
+        mockStorage.mockMnemonic = nil
+        mockStorage.mockPendingMnemonic = otherMnemonic
+
+        try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        // Fail closed: nothing promoted, evidence preserved.
+        XCTAssertNil(mockStorage.mockMnemonic)
+        XCTAssertEqual(mockStorage.mockPendingMnemonic, otherMnemonic)
+    }
+}
+
+// MARK: - BIP-39 Validation
+
+final class BIP39Tests: XCTestCase {
+    func testAcceptsValidTwelveWordVector() {
+        // Standard all-zero-entropy vector.
+        XCTAssertTrue(BIP39.isValid(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ))
+    }
+
+    func testAcceptsValidTwentyFourWordVector() {
+        XCTAssertTrue(BIP39.isValid(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon "
+                + "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+        ))
+    }
+
+    func testRejectsAllZooPhrase() {
+        // Common misconception: 12x"zoo" is NOT checksum-valid (the real all-ones
+        // vector ends in "wrong"). The lifecycle tests only accept it because they
+        // inject a mock validator; the production validator must reject it.
+        XCTAssertFalse(BIP39.isValid("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo"))
+        XCTAssertTrue(BIP39.isValid("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"))
+    }
+
+    func testToleratesWhitespaceAndCase() {
+        XCTAssertTrue(BIP39.isValid(
+            "  Abandon ABANDON abandon\nabandon abandon abandon abandon abandon abandon abandon abandon about "
+        ))
+    }
+
+    func testRejectsBadChecksum() {
+        // 12th word 'abandon' instead of 'about' breaks the checksum. Before
+        // in-app validation this phrase crashed the process in the LDKNode
+        // binding's `try!` path.
+        XCTAssertFalse(BIP39.isValid(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon"
+        ))
+    }
+
+    func testRejectsNonWordlistWord() {
+        XCTAssertFalse(BIP39.isValid("foo foo foo foo foo foo foo foo foo foo foo foo"))
+    }
+
+    func testRejectsWrongWordCount() {
+        XCTAssertFalse(BIP39.isValid("abandon abandon abandon"))
+        XCTAssertFalse(BIP39.isValid(""))
+    }
+
+    func testWordListIntegrity() {
+        XCTAssertEqual(BIP39WordList.english.count, 2048)
+        XCTAssertEqual(BIP39WordList.english.first, "abandon")
+        XCTAssertEqual(BIP39WordList.english.last, "zoo")
+        XCTAssertEqual(BIP39WordList.english, BIP39WordList.english.sorted())
+        XCTAssertEqual(Set(BIP39WordList.english).count, 2048)
+    }
 }
 
 // MARK: - Mock Storage

@@ -515,6 +515,10 @@ class AppState {
     /// throwaway node in a temp directory. Returns nil on any failure so the
     /// restore guard fails open.
     private nonisolated static func deriveNodeId(mnemonic: String) -> String? {
+        // LDKNode's generated binding aborts the process (try!) on an invalid
+        // mnemonic — full wordlist + checksum validation MUST run first. This
+        // also makes the restore validator's `deriveNodeId != nil` check safe.
+        guard BIP39.isValid(mnemonic) else { return nil }
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }

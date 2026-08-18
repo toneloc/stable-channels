@@ -126,6 +126,8 @@
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
 		6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */; };
+		49BB390A0000000000000002 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
+		49BB390A0000000000000004 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
 		64791A21EBEE43769493F7F3 /* WalletKeychainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64791A21EBEE43769493F7F4 /* WalletKeychainServiceTests.swift */; };
 		6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6EF4DE5A43647E46CAAD52B /* TradeService.swift */; };
 		6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */; };
@@ -317,6 +319,8 @@
 		7DB261201C1C656BAAED5283 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		7E0FAABBD08BCBF20220C850 /* SendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendView.swift; sourceTree = "<group>"; };
 		82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicUtils.swift; sourceTree = "<group>"; };
+		49BB390A0000000000000001 /* BIP39.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BIP39.swift; sourceTree = "<group>"; };
+		49BB390A0000000000000003 /* BIP39WordList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BIP39WordList.swift; sourceTree = "<group>"; };
 		840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FundWalletView.swift; sourceTree = "<group>"; };
 		8811E90D4B2B5C5C51093A95 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedWordGridView.swift; sourceTree = "<group>"; };
@@ -664,6 +668,8 @@
 		AD3E779FC98D09AA36FFCAE9 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				49BB390A0000000000000001 /* BIP39.swift */,
+				49BB390A0000000000000003 /* BIP39WordList.swift */,
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
 				496A44452FCD5845005AF12F /* InputSanitizer.swift */,
@@ -998,6 +1004,8 @@
 				1A972F89DB503A5171D1525C /* KeychainService.swift in Sources */,
 				8C6EB05C5C93E0A887851D5D /* RateLimitService.swift in Sources */,
 				6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */,
+				49BB390A0000000000000002 /* BIP39.swift in Sources */,
+				49BB390A0000000000000004 /* BIP39WordList.swift in Sources */,
 				FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */,
 				C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */,
 				495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */,
