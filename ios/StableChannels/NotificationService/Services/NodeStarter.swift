@@ -4,8 +4,19 @@ import SQLite3
 
 /// Protocol for starting an LDK node
 protocol NodeStarter {
-    func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node
+    func buildNode(dataDir: URL, logger: Logger, primaryURL: String, fallbackURL: String) throws -> LDKNode.Node
     func connectToLSP(node: LDKNode.Node) throws
+}
+
+extension NodeStarter {
+    func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node {
+        try buildNode(
+            dataDir: dataDir,
+            logger: logger,
+            primaryURL: Constants.primaryChainURL,
+            fallbackURL: Constants.fallbackChainURL
+        )
+    }
 }
 
 /// Concrete implementation of NodeStarter
@@ -13,7 +24,12 @@ final class DefaultNodeStarter: NodeStarter {
     private static let lspPubkey = Constants.lspPubkey
     private static let lspAddress = Constants.lspAddress
 
-    func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node {
+    func buildNode(
+        dataDir: URL,
+        logger: Logger,
+        primaryURL: String = Constants.primaryChainURL,
+        fallbackURL: String = Constants.fallbackChainURL
+    ) throws -> LDKNode.Node {
         let memBefore = Diagnostics.residentMemoryBytes()
         logger.log("Mem before build: \(memBefore / 1024 / 1024) MB")
 
@@ -64,9 +80,6 @@ final class DefaultNodeStarter: NodeStarter {
                 perRequestTimeoutSecs: 15
             )
         )
-
-        let primaryURL = "https://blockstream.info/api"
-        let fallbackURL = "https://mempool.space/api"
 
         do {
             let builder = LDKNode.Builder.fromConfig(config: config)

@@ -8,6 +8,8 @@ enum Constants {
     static let syncMessageType = "SYNC_V1"
     static let satsInBTC: Double = 100_000_000.0
     static let stabilityThresholdPercent: Double = 0.1
+    static let primaryChainURL = "https://blockstream.info/api"
+    static let fallbackChainURL = "https://mempool.space/api"
 }
 
 enum Diagnostics {
