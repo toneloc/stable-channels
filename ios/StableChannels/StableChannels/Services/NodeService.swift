@@ -282,19 +282,24 @@ class NodeService: NodeServiceProtocol {
         // Save mnemonic to Keychain and derive node entropy
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
+            // LDKNode's generated binding aborts the process (try!) on an invalid
+            // mnemonic. `words` can come from mutable storage (Keychain, plaintext
+            // file), so a corrupted value must fail closed here, not crash-loop.
+            guard BIP39.isValid(words) else {
+                AuditService.log("SEED_INVALID_BIP39", data: [:])
+                throw NodeServiceError.invalidStoredMnemonic
+            }
             do {
-                try keychain.storeMnemonic(words)
-                self.savedMnemonic = words
-                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
-
-                // Keep the plaintext seed file in sync as ROLLBACK INSURANCE: older builds
-                // treat "no seed files" as a brand-new wallet and wipe the channel database
-                // before generating a new identity — the historic force-close class, but
-                // worse, because the monitors are destroyed first. Plaintext deletion ships
-                // in a later release, once no earlier build remains installable (staged
-                // rollout, step 1 of 2). This file IS the phase-1 safety mechanism, so a
-                // failed write aborts startup rather than running uninsured; the abort is
-                // transient and retried on the next launch.
+                // ROLLBACK INSURANCE is written FIRST: older builds treat "no seed
+                // files" as a brand-new wallet and wipe the channel database before
+                // generating a new identity — the historic force-close class, but
+                // worse, because the monitors are destroyed first. Ordering ahead of
+                // the Keychain store keeps every failure coherent: if this write
+                // fails, nothing has been committed and the next launch retries the
+                // same path cleanly; if the Keychain store below fails, plaintext-only
+                // is the legacy-valid state the migrator already handles. Plaintext
+                // deletion ships in a later release, once no earlier build remains
+                // installable (staged rollout, step 1 of 2).
                 do {
                     try MnemonicMigrator.syncRollbackCopy(words: words, legacyPath: seedPhrasePath)
                 } catch {
@@ -303,6 +308,9 @@ class NodeService: NodeServiceProtocol {
                     ])
                     throw error
                 }
+                try keychain.storeMnemonic(words)
+                self.savedMnemonic = words
+                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
             } catch {
                 AuditService.log("KEYCHAIN_STORE_FAILED", data: ["error": error.localizedDescription])
                 throw error
@@ -723,8 +731,8 @@ enum NodeServiceError: LocalizedError {
     case notRunning
     case alreadyRunning
     case dataDirLocked
-    case staleLightningSync
     case invalidFeeRate
+    case invalidStoredMnemonic
 
     var errorDescription: String? {
         switch self {
@@ -734,6 +742,7 @@ enum NodeServiceError: LocalizedError {
         case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
         case .invalidFeeRate:
             return "Fee rate must be between \(Int(Constants.minAllowedFeeRateSatVb)) and \(Int(Constants.maxAllowedFeeRateSatVb)) sat/vB"
+        case .invalidStoredMnemonic: return "The stored wallet seed failed validation."
         }
     }
 }
