@@ -305,11 +305,11 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                             } else {
                                 val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
                                 // Money movement converts USD at the trusted accounting price,
-                                // never the raw display price (iOS parity).
-                                val sats = accountingSatsFromUSD(
-                                    usd,
-                                    appState.priceService.currentAccountingPrice()
-                                ) ?: throw Exception("A trusted BTC/USD price is required")
+                                // never the raw display price (iOS parity). The same captured
+                                // price is recorded so history reflects the rate actually used.
+                                val accountingPrice = appState.priceService.currentAccountingPrice()
+                                val sats = accountingSatsFromUSD(usd, accountingPrice)
+                                    ?: throw Exception("A trusted BTC/USD price is required")
                                 if (hasChannel) {
                                     if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value
@@ -327,8 +327,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     appState.databaseService?.recordPayment(
                                         paymentId = txid, paymentType = "onchain", direction = "sent",
                                         amountMsat = sats * 1000,
-                                        amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
-                                        btcPrice = if (price > 0) price else null,
+                                        amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                        btcPrice = accountingPrice,
                                         txid = txid, address = addr
                                     )
                                     appState.refreshBalances()

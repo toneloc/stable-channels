@@ -28,6 +28,14 @@ class PriceService(private val appContext: Context? = null) {
         .callTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
+    /** Longer-lived client for historical-chart backfill: the ~30-day hourly OHLC payload is far
+     *  larger than a ticker response, so the short per-feed timeout would silently truncate it to
+     *  an empty chart on a slow connection (iOS chartSession parity). */
+    private val chartClient = client.newBuilder()
+        .readTimeout(Constants.CHART_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .callTimeout(Constants.CHART_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .build()
+
     private val _currentPrice = MutableStateFlow(0.0)
     val currentPrice: StateFlow<Double> = _currentPrice
 
@@ -204,7 +212,7 @@ class PriceService(private val appContext: Context? = null) {
         val url = "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=$sinceTs"
         return try {
             val request = Request.Builder().url(url).build()
-            val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
+            val response = withContext(Dispatchers.IO) { chartClient.newCall(request).execute() }
             val body = response.body?.string() ?: return emptyList()
             val json = JSONObject(body)
             val result = json.optJSONObject("result") ?: return emptyList()
