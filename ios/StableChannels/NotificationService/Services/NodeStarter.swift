@@ -27,6 +27,18 @@ extension NodeStarter {
     }
 }
 
+enum NodeStarterError: Error {
+    /// A stored seed failed BIP-39 validation. LDKNode's binding aborts the
+    /// process (`try!`) on an invalid mnemonic; in the NSE that means iOS
+    /// launch-throttling silently kills push processing, so fail closed instead.
+    case invalidStoredMnemonic
+    /// keys_seed is absent. `NodeEntropy.fromSeedPath` is read-OR-GENERATE, so
+    /// calling it with a missing file would mint a fresh identity into the live
+    /// data dir — the silent wrong-identity class. Fail closed instead.
+    case missingSeedFile
+}
+}
+
 /// Concrete implementation of NodeStarter
 final class DefaultNodeStarter: NodeStarter {
     private static let lspPubkey = Constants.lspPubkey
@@ -71,6 +83,12 @@ final class DefaultNodeStarter: NodeStarter {
         let nodeEntropy: NodeEntropy
         do {
             let words = try keychain.loadMnemonic()
+            // LDKNode's binding aborts the process (try!) on an invalid mnemonic —
+            // validate before it can. A corrupted stored seed must fail closed.
+            guard BIP39.isValid(words) else {
+                logger.log("ERROR: SEED_INVALID_BIP39 - keychain")
+                throw NodeStarterError.invalidStoredMnemonic
+            }
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
         } catch WalletKeychainError.keyNotFound {
             // Mnemonic not in Keychain: fallback check legacy plaintext file or keys_seed
@@ -79,15 +97,30 @@ final class DefaultNodeStarter: NodeStarter {
                 encoding: .utf8
             ),
                 !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let trimmed = plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard BIP39.isValid(trimmed) else {
+                    logger.log("ERROR: SEED_INVALID_BIP39 - plaintext")
+                    throw NodeStarterError.invalidStoredMnemonic
+                }
                 logger.log("NOTICE: SEED_PLAINTEXT_FALLBACK - legacy_pending_migration")
                 nodeEntropy = NodeEntropy.fromBip39Mnemonic(
-                    mnemonic: plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines),
+                    mnemonic: trimmed,
                     passphrase: nil
                 )
             } else {
                 let keySeedPath = dataDir.appendingPathComponent("keys_seed")
+                // fromSeedPath is read-OR-GENERATE: with the file absent it would
+                // write a fresh random identity into the live data dir. Never let
+                // that happen from the unattended path.
+                guard FileManager.default.fileExists(atPath: keySeedPath.path) else {
+                    logger.log("ERROR: SEED_FILE_MISSING - keys_seed")
+                    throw NodeStarterError.missingSeedFile
+                }
                 nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
             }
+        } catch let error as NodeStarterError {
+            // Already logged at the throw site; don't mislabel as a Keychain failure.
+            throw error
         } catch {
             // Unrecoverable Keychain access failure (e.g. locked, missing group entitlements):
             // Fail immediately instead of generating a new wallet seed or using a wrong fallback keys_seed!
