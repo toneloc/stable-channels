@@ -19,18 +19,6 @@ class PriceService {
         return URLSession(configuration: configuration)
     }()
 
-    /// Longer-lived session for historical-chart backfill. The ~30-day hourly OHLC payload is far
-    /// larger than a ticker response, so the short per-feed timeout would silently truncate it to an
-    /// empty chart on a slow cellular link.
-    private static let chartSession: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = Constants.chartFetchTimeoutSecs
-        configuration.timeoutIntervalForResource = Constants.chartFetchTimeoutSecs
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }()
-
     // MARK: - Public
 
     /// Start auto-refreshing prices every N seconds.
@@ -137,52 +125,9 @@ class PriceService {
 
     // MARK: - Kraken OHLC Backfill
 
-    /// Fetch hourly OHLC candles from Kraken for the last ~30 days.
-    /// Returns array of (unix_timestamp, close_price).
+    /// Delegated to PriceChartService for Single Responsibility separation.
     func fetchKrakenOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)] {
-        let sinceTs = since ?? (Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600)
-        guard let url = URL(string: "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=\(sinceTs)")
-        else {
-            return []
-        }
-
-        do {
-            let (data, response) = try await Self.chartSession.data(from: url)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return []
-            }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [String: Any],
-                  let candles = result["XXBTZUSD"] as? [[Any]] else {
-                return []
-            }
-
-            return candles.compactMap { candle -> (Int64, Double)? in
-                guard candle.count >= 5 else { return nil }
-                let ts: Int64
-                if let t = candle[0] as? Int64 {
-                    ts = t
-                } else if let t = candle[0] as? Int {
-                    ts = Int64(t)
-                } else if let t = candle[0] as? Double {
-                    ts = Int64(t)
-                } else {
-                    return nil
-                }
-
-                let closeStr: String
-                if let s = candle[4] as? String {
-                    closeStr = s
-                } else {
-                    return nil
-                }
-                guard let close = Double(closeStr) else { return nil }
-
-                return (ts, close)
-            }
-        } catch {
-            return []
-        }
+        await PriceChartService.shared.fetchKrakenOHLC(since: since)
     }
 
     // MARK: - Private
@@ -218,7 +163,7 @@ class PriceService {
                 return nil
             }
             let jsonObject = try JSONSerialization.jsonObject(with: data)
-            guard let price = extractPrice(from: jsonObject, path: feed.jsonPath) else {
+            guard let price = PriceOracle.extractPrice(from: jsonObject, path: feed.jsonPath) else {
                 print("[PriceOracle] \(feed.name) failed: invalid response path")
                 return nil
             }
@@ -231,32 +176,7 @@ class PriceService {
     }
 
     static func extractPrice(from json: Any, path: [String]) -> Double? {
-        var current: Any = json
-        for key in path {
-            // Handle numeric keys (array indices)
-            if let index = Int(key), let array = current as? [Any], array.indices.contains(index) {
-                current = array[index]
-            } else if let dict = current as? [String: Any], let next = dict[key] {
-                current = next
-            } else {
-                return nil
-            }
-        }
-
-        // Handle array values (e.g. Kraken's "c": ["<last>", "<vol>"])
-        if let array = current as? [Any], let first = array.first {
-            current = first
-        }
-
-        if let price = current as? Double {
-            return price
-        } else if let price = current as? Int {
-            return Double(price)
-        } else if let priceStr = current as? String, let price = Double(priceStr) {
-            return price
-        }
-
-        return nil
+        PriceOracle.extractPrice(from: json, path: path)
     }
 
     static func median(_ values: [Double]) -> Double {

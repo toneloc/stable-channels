@@ -251,6 +251,75 @@ enum PriceOracle {
         )
     ]
 
+    // MARK: - Consensus Delegation
+
+    static func resolve(
+        usdPrices: [NamedPrice],
+        usdtPrices: [NamedPrice],
+        pegPrices: [NamedPrice],
+        lastTrustedPrice: Double?
+    ) throws -> PriceOracleResult {
+        try BitcoinConsensus.resolve(
+            usdPrices: usdPrices,
+            usdtPrices: usdtPrices,
+            pegPrices: pegPrices,
+            lastTrustedPrice: lastTrustedPrice
+        )
+    }
+
+    static func validateBitcoinConsensus(
+        _ prices: [NamedPrice],
+        lastTrustedPrice: Double?
+    ) throws -> (price: Double, feeds: [NamedPrice]) {
+        try BitcoinConsensus.validateBitcoinConsensus(prices, lastTrustedPrice: lastTrustedPrice)
+    }
+
+    static func validateUSDTPeg(_ prices: [NamedPrice]) throws -> (price: Double, feeds: [NamedPrice]) {
+        try BitcoinConsensus.validateUSDTPeg(prices)
+    }
+
+    static func isPlausibleBitcoinPrice(_ price: Double) -> Bool {
+        BitcoinConsensus.isPlausibleBitcoinPrice(price)
+    }
+
+    static func median(_ values: [Double]) -> Double? {
+        BitcoinConsensus.median(values)
+    }
+
+    // MARK: - Generic JSON Extraction
+
+    static func extractPrice(from json: Any, path: [String]) -> Double? {
+        var current: Any = json
+        for key in path {
+            if let index = Int(key), let array = current as? [Any], array.indices.contains(index) {
+                current = array[index]
+            } else if let dict = current as? [String: Any], let next = dict[key] {
+                current = next
+            } else {
+                return nil
+            }
+        }
+
+        // Handle array values (e.g. Kraken's "c": ["<last>", "<vol>"])
+        if let array = current as? [Any], let first = array.first {
+            current = first
+        }
+
+        if let price = current as? Double {
+            return price
+        } else if let price = current as? Int {
+            return Double(price)
+        } else if let priceStr = current as? String, let price = Double(priceStr) {
+            return price
+        }
+
+        return nil
+    }
+}
+
+// MARK: - Bitcoin Consensus Algorithm
+
+enum BitcoinConsensus {
     static func resolve(
         usdPrices: [NamedPrice],
         usdtPrices: [NamedPrice],
@@ -289,16 +358,16 @@ enum PriceOracle {
             throw PriceOracleFailure.insufficientBitcoinConsensus(available: 0)
         }
         let agreeing = plausible.filter {
-            relativeDeviation($0.value, initialMedian) <= maximumFeedDeviationRatio
+            relativeDeviation($0.value, initialMedian) <= PriceOracle.maximumFeedDeviationRatio
         }
-        guard agreeing.count >= minimumAgreeingFeeds,
+        guard agreeing.count >= PriceOracle.minimumAgreeingFeeds,
               let acceptedMedian = median(agreeing.map(\.value)) else {
             throw PriceOracleFailure.insufficientBitcoinConsensus(available: agreeing.count)
         }
         if let lastTrustedPrice,
            isPlausibleBitcoinPrice(lastTrustedPrice) {
             let move = relativeDeviation(acceptedMedian, lastTrustedPrice)
-            if move > maximumMedianMoveRatio {
+            if move > PriceOracle.maximumMedianMoveRatio {
                 throw PriceOracleFailure.largeBitcoinMove(ratio: move)
             }
         }
@@ -307,15 +376,15 @@ enum PriceOracle {
 
     static func validateUSDTPeg(_ prices: [NamedPrice]) throws -> (price: Double, feeds: [NamedPrice]) {
         let nearDollar = prices.filter {
-            $0.value.isFinite && abs($0.value - 1.0) <= maximumUSDTPegDeviationFromDollar
+            $0.value.isFinite && abs($0.value - 1.0) <= PriceOracle.maximumUSDTPegDeviationFromDollar
         }
         guard let initialMedian = median(nearDollar.map(\.value)) else {
             throw PriceOracleFailure.invalidUSDTPeg(available: 0)
         }
         let agreeing = nearDollar.filter {
-            relativeDeviation($0.value, initialMedian) <= maximumPegFeedDeviationRatio
+            relativeDeviation($0.value, initialMedian) <= PriceOracle.maximumPegFeedDeviationRatio
         }
-        guard agreeing.count >= minimumAgreeingPegFeeds,
+        guard agreeing.count >= PriceOracle.minimumAgreeingPegFeeds,
               let acceptedMedian = median(agreeing.map(\.value)) else {
             throw PriceOracleFailure.invalidUSDTPeg(available: agreeing.count)
         }
@@ -323,7 +392,7 @@ enum PriceOracle {
     }
 
     static func isPlausibleBitcoinPrice(_ price: Double) -> Bool {
-        price.isFinite && (minimumBitcoinUSD ... maximumBitcoinUSD).contains(price)
+        price.isFinite && (PriceOracle.minimumBitcoinUSD ... PriceOracle.maximumBitcoinUSD).contains(price)
     }
 
     static func median(_ values: [Double]) -> Double? {

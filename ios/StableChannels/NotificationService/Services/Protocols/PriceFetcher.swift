@@ -74,7 +74,7 @@ struct ConcurrentPriceFetcher: PriceFetcher {
                       (200 ..< 300).contains(http.statusCode),
                       let data,
                       let json = try? JSONSerialization.jsonObject(with: data),
-                      let value = extractPrice(from: json, path: feed.jsonPath) else {
+                      let value = PriceOracle.extractPrice(from: json, path: feed.jsonPath) else {
                     print("[PriceOracle:NSE] \(feed.name) failed")
                     return
                 }
@@ -91,27 +91,5 @@ struct ConcurrentPriceFetcher: PriceFetcher {
         let snapshot = prices
         lock.unlock()
         return snapshot
-    }
-
-    private static func extractPrice(from json: Any, path: [String]) -> Double? {
-        var current: Any = json
-        for key in path {
-            if let index = Int(key), let array = current as? [Any], array.indices.contains(index) {
-                current = array[index]
-            } else if let dictionary = current as? [String: Any], let next = dictionary[key] {
-                current = next
-            } else {
-                return nil
-            }
-        }
-
-        if let array = current as? [Any], let first = array.first {
-            current = first
-        }
-
-        if let value = current as? Double { return value }
-        if let value = current as? Int { return Double(value) }
-        if let value = current as? String { return Double(value) }
-        return nil
     }
 }
