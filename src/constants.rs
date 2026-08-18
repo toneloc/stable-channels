@@ -63,8 +63,14 @@ pub const DEFAULT_LSP_ADDRESS: &str = "stablechannels.com:9735";
 /// Price cache refresh interval (in seconds)
 pub const PRICE_CACHE_REFRESH_SECS: u64 = 15;
 
-/// Per-feed network timeout. Feed diversity provides retries without serially waiting on one host.
+/// Per-feed connect timeout — fail fast on an unreachable or geo-blocked host so feed
+/// diversity provides the retry rather than serially waiting on one dead host.
 pub const PRICE_FETCH_TIMEOUT_SECS: u64 = 3;
+
+/// Per-feed overall request budget (connect + TLS + response body). Must exceed the connect
+/// timeout: on a congested or filtered link a feed can consume most of the connect budget and
+/// still need time to deliver its body, which the now-required 3-feed quorum depends on.
+pub const PRICE_FETCH_TOTAL_TIMEOUT_SECS: u64 = 8;
 
 /// Background sync intervals (in seconds)
 pub const ONCHAIN_WALLET_SYNC_INTERVAL_SECS: u64 = 120;
