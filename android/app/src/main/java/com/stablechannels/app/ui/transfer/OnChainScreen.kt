@@ -40,7 +40,12 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // Amount derivation and send enablement track the trusted accounting price, so an untrusted
+    // oracle state is visible (blank sats, disabled button) before tapping — iOS parity.
+    val accountingBtcPrice by appState.priceService.accountingPrice.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
+    val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
+    val satsFromUSD = accountingSatsFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
     val feeVbytes = if (sendAll) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
@@ -237,8 +242,6 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     )
                 }
 
-                val usd = amountUSDStr.toDoubleOrNull() ?: 0.0
-                val satsFromUSD = if (btcPrice > 0 && usd > 0) (usd / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
                 if (satsFromUSD > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text("~ ${satsFromUSD.satsFormatted()} sats", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -339,7 +342,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                         isSending = false
                     }
                 },
-                enabled = !isSending && address.isNotBlank(),
+                enabled = !isSending && address.isNotBlank() && (sendAll || satsFromUSD > 0),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (isSending) CircularProgressIndicator(Modifier.size(20.dp))

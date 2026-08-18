@@ -133,6 +133,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val activity = context.findActivity()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // Amount derivation and send enablement track the trusted accounting price, so an untrusted
+    // oracle state is visible (blank sats, disabled button) before tapping — iOS parity.
+    val accountingBtcPrice by appState.priceService.accountingPrice.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val lastPaymentResult by appState.lastPaymentResult.collectAsState()
@@ -172,10 +175,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val isAmountlessBolt11 = inputType == InputType.BOLT11 && parsedBolt11Msat == null && input.isNotBlank()
 
     val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
-    val manualAmountMsat: Long = run {
-        if (btcPrice <= 0 || enteredUSD <= 0) return@run 0L
-        (enteredUSD / btcPrice * Constants.SATS_IN_BTC * 1000).toLong()
-    }
+    val manualAmountMsat: Long = accountingMsatFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
     val manualAmountSats = manualAmountMsat / 1000
 
     val needsAmount = when {
