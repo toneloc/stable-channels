@@ -56,6 +56,74 @@ class PriceOracleTest {
     }
 
     @Test
+    fun `USDT fallback rejects aggregator-only peg consensus`() {
+        val aggregators = listOf(
+            NamedPrice("CoinGecko USDT/USD", 1.0000),
+            NamedPrice("CoinPaprika USDT/USD", 1.0001),
+            NamedPrice("Coinlore USDT/USD", 0.9999)
+        )
+
+        assertThrows(PriceOracleException::class.java) {
+            PriceOracle.validateUsdtPeg(aggregators)
+        }
+    }
+
+    @Test
+    fun `USDT fallback rejects stale aggregators during exchange depeg`() {
+        val prices = listOf(
+            NamedPrice("Coinbase USDT/USD", 0.9800),
+            NamedPrice("Kraken USDT/USD", 0.9801),
+            NamedPrice("Bitstamp USDT/USD", 0.9799),
+            NamedPrice("Bitfinex USDT/USD", 0.9800),
+            NamedPrice("Crypto.com USDT/USD", 0.9802),
+            NamedPrice("OKX USDT/USD", 0.9798),
+            NamedPrice("CoinGecko USDT/USD", 1.0000),
+            NamedPrice("CoinPaprika USDT/USD", 1.0001),
+            NamedPrice("Coinlore USDT/USD", 0.9999)
+        )
+
+        assertThrows(PriceOracleException::class.java) {
+            PriceOracle.validateUsdtPeg(prices)
+        }
+    }
+
+    @Test
+    fun `aggregators cannot outvote exchange peg consensus`() {
+        val prices = listOf(
+            NamedPrice("Coinbase USDT/USD", 0.9800),
+            NamedPrice("Kraken USDT/USD", 0.9801),
+            NamedPrice("Bitstamp USDT/USD", 0.9799),
+            NamedPrice("Bitfinex USDT/USD", 1.0000),
+            NamedPrice("Crypto.com USDT/USD", 1.0001),
+            NamedPrice("CoinGecko USDT/USD", 1.0000),
+            NamedPrice("CoinPaprika USDT/USD", 1.0001),
+            NamedPrice("Coinlore USDT/USD", 0.9999)
+        )
+
+        assertThrows(PriceOracleException::class.java) {
+            PriceOracle.validateUsdtPeg(prices)
+        }
+    }
+
+    @Test
+    fun `USDT fallback accepts two exchanges with aggregator confirmation`() {
+        val prices = listOf(
+            NamedPrice("Crypto.com USDT/USD", 0.9990),
+            NamedPrice("OKX USDT/USD", 0.9991),
+            NamedPrice("CoinGecko USDT/USD", 0.9989)
+        )
+
+        val result = PriceOracle.validateUsdtPeg(prices)
+        assertEquals(0.99905, result.first, 0.000001)
+    }
+
+    @Test
+    fun `aggregator peg classification matches configured feeds`() {
+        val configured = PriceOracle.USDT_USD_FEEDS.map { it.name }.toSet()
+        assertTrue(PriceOracle.AGGREGATOR_PEG_FEED_NAMES.all { it in configured })
+    }
+
+    @Test
     fun `large move quarantines prior price`() {
         val error = assertThrows(PriceOracleException::class.java) {
             PriceOracle.validateBitcoinConsensus(

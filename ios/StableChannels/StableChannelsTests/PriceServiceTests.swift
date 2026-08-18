@@ -86,6 +86,63 @@ final class PriceOracleTests: XCTestCase {
         }
     }
 
+    func testUSDTFallbackRejectsAggregatorOnlyPegConsensus() {
+        let aggregators = [
+            NamedPrice(feedName: "CoinGecko USDT/USD", value: 1.0000),
+            NamedPrice(feedName: "CoinPaprika USDT/USD", value: 1.0001),
+            NamedPrice(feedName: "Coinlore USDT/USD", value: 0.9999)
+        ]
+
+        XCTAssertThrowsError(try PriceOracle.validateUSDTPeg(aggregators))
+    }
+
+    func testUSDTFallbackRejectsStaleAggregatorsDuringExchangeDepeg() {
+        let prices = [
+            NamedPrice(feedName: "Coinbase USDT/USD", value: 0.9800),
+            NamedPrice(feedName: "Kraken USDT/USD", value: 0.9801),
+            NamedPrice(feedName: "Bitstamp USDT/USD", value: 0.9799),
+            NamedPrice(feedName: "Bitfinex USDT/USD", value: 0.9800),
+            NamedPrice(feedName: "Crypto.com USDT/USD", value: 0.9802),
+            NamedPrice(feedName: "OKX USDT/USD", value: 0.9798),
+            NamedPrice(feedName: "CoinGecko USDT/USD", value: 1.0000),
+            NamedPrice(feedName: "CoinPaprika USDT/USD", value: 1.0001),
+            NamedPrice(feedName: "Coinlore USDT/USD", value: 0.9999)
+        ]
+
+        XCTAssertThrowsError(try PriceOracle.validateUSDTPeg(prices))
+    }
+
+    func testAggregatorsCannotOutvoteExchangePegConsensus() {
+        let prices = [
+            NamedPrice(feedName: "Coinbase USDT/USD", value: 0.9800),
+            NamedPrice(feedName: "Kraken USDT/USD", value: 0.9801),
+            NamedPrice(feedName: "Bitstamp USDT/USD", value: 0.9799),
+            NamedPrice(feedName: "Bitfinex USDT/USD", value: 1.0000),
+            NamedPrice(feedName: "Crypto.com USDT/USD", value: 1.0001),
+            NamedPrice(feedName: "CoinGecko USDT/USD", value: 1.0000),
+            NamedPrice(feedName: "CoinPaprika USDT/USD", value: 1.0001),
+            NamedPrice(feedName: "Coinlore USDT/USD", value: 0.9999)
+        ]
+
+        XCTAssertThrowsError(try PriceOracle.validateUSDTPeg(prices))
+    }
+
+    func testUSDTFallbackAcceptsTwoExchangesWithAggregatorConfirmation() throws {
+        let prices = [
+            NamedPrice(feedName: "Crypto.com USDT/USD", value: 0.9990),
+            NamedPrice(feedName: "OKX USDT/USD", value: 0.9991),
+            NamedPrice(feedName: "CoinGecko USDT/USD", value: 0.9989)
+        ]
+
+        let result = try PriceOracle.validateUSDTPeg(prices)
+        XCTAssertEqual(result.price, 0.99905, accuracy: 0.000_001)
+    }
+
+    func testAggregatorPegClassificationMatchesConfiguredFeeds() {
+        let configured = Set(PriceOracle.usdtUSDFeeds.map(\.name))
+        XCTAssertTrue(PriceOracle.aggregatorPegFeedNames.isSubset(of: configured))
+    }
+
     func testUSDTFallbackRequiresThreePegFeeds() {
         XCTAssertThrowsError(
             try PriceOracle.resolve(

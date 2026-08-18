@@ -37,6 +37,8 @@ enum class Phase {
     LOADING, ONBOARDING, SYNCING, WALLET, ERROR
 }
 
+private class RetryableSyncException(message: String) : Exception(message)
+
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
@@ -1004,7 +1006,9 @@ class AppState(private val context: Context) : ViewModel() {
         val price = priceService.currentAccountingPrice()
         if (price <= 0.0) {
             AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
-            return false
+            // Propagate to the event collector so it completes the ack with false and LDK
+            // re-delivers this authenticated sync after the price oracle recovers.
+            throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
         }
         val sc = StabilityService.applyTrade(_stableChannel.value, expectedUsd, price)
         _stableChannel.value = sc

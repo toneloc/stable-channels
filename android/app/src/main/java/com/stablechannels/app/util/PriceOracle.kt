@@ -34,8 +34,14 @@ object PriceOracle {
     const val MAXIMUM_TRUSTED_PRICE_AGE_SECS = 60L
 
     const val MINIMUM_AGREEING_PEG_FEEDS = 3
+    const val MINIMUM_AGREEING_EXCHANGE_PEG_FEEDS = 2
     const val MAXIMUM_USDT_PEG_DEVIATION_FROM_DOLLAR = 0.005
     const val MAXIMUM_PEG_FEED_DEVIATION_RATIO = 0.0025
+    val AGGREGATOR_PEG_FEED_NAMES = setOf(
+        "CoinGecko USDT/USD",
+        "CoinPaprika USDT/USD",
+        "Coinlore USDT/USD"
+    )
 
     val DIRECT_USD_FEEDS = listOf(
         PriceFeedConfig("Bitstamp", "https://www.bitstamp.net/api/v2/ticker/btcusd/", listOf("last")),
@@ -140,21 +146,37 @@ object PriceOracle {
     }
 
     fun validateUsdtPeg(prices: List<NamedPrice>): Pair<Double, List<NamedPrice>> {
-        val nearDollar = prices.filter {
-            it.value.isFinite() && abs(it.value - 1.0) <= MAXIMUM_USDT_PEG_DEVIATION_FROM_DOLLAR
+        // Establish the observed market consensus before checking the desired $1 band.
+        // Pre-filtering by the peg can discard live exchange evidence of a depeg and leave
+        // only slower aggregators reporting a stale value near $1.
+        val plausible = prices.filter { it.value.isFinite() && it.value > 0.0 }
+        val exchangePrices = plausible.filter { it.feedName !in AGGREGATOR_PEG_FEED_NAMES }
+        val initialExchangeMedian = median(exchangePrices.map { it.value })
+            ?: throw PriceOracleException("No valid exchange USDT/USD peg prices were returned")
+        val agreeingExchangePrices = exchangePrices.filter {
+            relativeDeviation(it.value, initialExchangeMedian) <= MAXIMUM_PEG_FEED_DEVIATION_RATIO
         }
-        val initialMedian = median(nearDollar.map { it.value })
-            ?: throw PriceOracleException("No valid USDT/USD peg prices were returned")
-        val agreeing = nearDollar.filter {
-            relativeDeviation(it.value, initialMedian) <= MAXIMUM_PEG_FEED_DEVIATION_RATIO
+        if (agreeingExchangePrices.size < MINIMUM_AGREEING_EXCHANGE_PEG_FEEDS) {
+            throw PriceOracleException(
+                "USDT fallback requires at least $MINIMUM_AGREEING_EXCHANGE_PEG_FEEDS agreeing exchange peg feeds; got ${agreeingExchangePrices.size}"
+            )
+        }
+        val acceptedExchangeMedian = median(agreeingExchangePrices.map { it.value })
+            ?: throw PriceOracleException("Agreeing exchange USDT/USD feeds produced no median")
+        if (abs(acceptedExchangeMedian - 1.0) > MAXIMUM_USDT_PEG_DEVIATION_FROM_DOLLAR) {
+            throw PriceOracleException("Exchange USDT/USD consensus is outside the allowed peg band")
+        }
+
+        // Aggregators may confirm the exchange-anchored result, but never select or move it.
+        val agreeing = plausible.filter {
+            relativeDeviation(it.value, acceptedExchangeMedian) <= MAXIMUM_PEG_FEED_DEVIATION_RATIO
         }
         if (agreeing.size < MINIMUM_AGREEING_PEG_FEEDS) {
             throw PriceOracleException(
                 "USDT fallback requires at least $MINIMUM_AGREEING_PEG_FEEDS agreeing peg feeds; got ${agreeing.size}"
             )
         }
-        return (median(agreeing.map { it.value })
-            ?: throw PriceOracleException("Agreeing USDT/USD feeds produced no median")) to agreeing
+        return acceptedExchangeMedian to agreeing
     }
 
     fun isPlausibleBitcoinPrice(price: Double): Boolean =

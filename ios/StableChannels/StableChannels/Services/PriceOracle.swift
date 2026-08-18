@@ -113,8 +113,14 @@ enum PriceOracle {
     static let maximumTrustedPriceAge: TimeInterval = 60
 
     static let minimumAgreeingPegFeeds = 3
+    static let minimumAgreeingExchangePegFeeds = 2
     static let maximumUSDTPegDeviationFromDollar = 0.005
     static let maximumPegFeedDeviationRatio = 0.0025
+    static let aggregatorPegFeedNames: Set<String> = [
+        "CoinGecko USDT/USD",
+        "CoinPaprika USDT/USD",
+        "Coinlore USDT/USD"
+    ]
 
     static let directUSDFeeds: [PriceFeedConfig] = [
         PriceFeedConfig(
@@ -379,20 +385,33 @@ enum BitcoinPriceConsensus {
     }
 
     static func validateUSDTPeg(_ prices: [NamedPrice]) throws -> (price: Double, feeds: [NamedPrice]) {
-        let nearDollar = prices.filter {
-            $0.value.isFinite && abs($0.value - 1.0) <= PriceOracle.maximumUSDTPegDeviationFromDollar
+        // Establish the observed market consensus before checking the desired $1 band.
+        // Pre-filtering by the peg can discard live exchange evidence of a depeg and leave
+        // only slower aggregators reporting a stale value near $1.
+        let plausible = prices.filter { $0.value.isFinite && $0.value > 0 }
+        let exchangePrices = plausible.filter {
+            !PriceOracle.aggregatorPegFeedNames.contains($0.feedName)
         }
-        guard let initialMedian = median(nearDollar.map(\.value)) else {
+        guard let initialExchangeMedian = median(exchangePrices.map(\.value)) else {
             throw PriceOracleFailure.invalidUSDTPeg(available: 0)
         }
-        let agreeing = nearDollar.filter {
-            relativeDeviation($0.value, initialMedian) <= PriceOracle.maximumPegFeedDeviationRatio
+        let agreeingExchangePrices = exchangePrices.filter {
+            relativeDeviation($0.value, initialExchangeMedian) <= PriceOracle.maximumPegFeedDeviationRatio
         }
-        guard agreeing.count >= PriceOracle.minimumAgreeingPegFeeds,
-              let acceptedMedian = median(agreeing.map(\.value)) else {
+        guard agreeingExchangePrices.count >= PriceOracle.minimumAgreeingExchangePegFeeds,
+              let acceptedExchangeMedian = median(agreeingExchangePrices.map(\.value)),
+              abs(acceptedExchangeMedian - 1.0) <= PriceOracle.maximumUSDTPegDeviationFromDollar else {
+            throw PriceOracleFailure.invalidUSDTPeg(available: agreeingExchangePrices.count)
+        }
+
+        // Aggregators may confirm the exchange-anchored result, but never select or move it.
+        let agreeing = plausible.filter {
+            relativeDeviation($0.value, acceptedExchangeMedian) <= PriceOracle.maximumPegFeedDeviationRatio
+        }
+        guard agreeing.count >= PriceOracle.minimumAgreeingPegFeeds else {
             throw PriceOracleFailure.invalidUSDTPeg(available: agreeing.count)
         }
-        return (acceptedMedian, agreeing)
+        return (acceptedExchangeMedian, agreeing)
     }
 
     static func isPlausibleBitcoinPrice(_ price: Double) -> Bool {

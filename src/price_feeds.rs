@@ -17,8 +17,14 @@ const MAX_FEED_DEVIATION_RATIO: f64 = 0.05;
 const MAX_MEDIAN_MOVE_RATIO: f64 = 0.10;
 const MAX_TRUSTED_PRICE_AGE_SECS: u64 = 60;
 const MIN_AGREEING_PEG_FEEDS: usize = 3;
+const MIN_AGREEING_EXCHANGE_PEG_FEEDS: usize = 2;
 const MAX_USDT_PEG_DEVIATION_FROM_DOLLAR: f64 = 0.005;
 const MAX_PEG_FEED_DEVIATION_RATIO: f64 = 0.0025;
+const AGGREGATOR_PEG_FEED_NAMES: [&str; 3] = [
+    "CoinGecko USDT/USD",
+    "CoinPaprika USDT/USD",
+    "Coinlore USDT/USD",
+];
 
 lazy_static::lazy_static! {
     static ref PRICE_CACHE: Arc<Mutex<PriceCache>> = Arc::new(Mutex::new(PriceCache {
@@ -282,34 +288,67 @@ fn validate_price_consensus(
 }
 
 fn validate_usdt_peg(prices: &[(String, f64)]) -> Result<f64, PriceRefreshError> {
-    let near_dollar: Vec<(String, f64)> = prices
+    // Find the market consensus before checking whether USDT is near $1. Filtering by the
+    // desired answer first could discard live exchange evidence of a depeg and leave only
+    // slower aggregators reporting a stale $1 value.
+    let plausible: Vec<(String, f64)> = prices
         .iter()
-        .filter(|(_, price)| {
-            price.is_finite()
-                && *price > 0.0
-                && (*price - 1.0).abs() <= MAX_USDT_PEG_DEVIATION_FROM_DOLLAR
-        })
+        .filter(|(_, price)| price.is_finite() && *price > 0.0)
         .cloned()
         .collect();
-    let mut values: Vec<f64> = near_dollar.iter().map(|(_, price)| *price).collect();
-    values.sort_by(f64::total_cmp);
-    let initial_median = median_values(&values)
-        .ok_or_else(|| PriceRefreshError::transient("No valid USDT/USD peg prices returned"))?;
-    let agreeing: Vec<f64> = values
+    let exchange_prices: Vec<(String, f64)> = plausible
+        .iter()
+        .filter(|(name, _)| !AGGREGATOR_PEG_FEED_NAMES.contains(&name.as_str()))
+        .cloned()
+        .collect();
+    let mut exchange_values: Vec<f64> = exchange_prices.iter().map(|(_, price)| *price).collect();
+    exchange_values.sort_by(f64::total_cmp);
+    let initial_exchange_median = median_values(&exchange_values).ok_or_else(|| {
+        PriceRefreshError::transient("No valid exchange USDT/USD peg prices returned")
+    })?;
+    let agreeing_exchange_prices: Vec<(String, f64)> = exchange_prices
         .into_iter()
-        .filter(|price| {
-            ((*price - initial_median).abs() / initial_median) <= MAX_PEG_FEED_DEVIATION_RATIO
+        .filter(|(_, price)| {
+            ((*price - initial_exchange_median).abs() / initial_exchange_median)
+                <= MAX_PEG_FEED_DEVIATION_RATIO
         })
         .collect();
+    if agreeing_exchange_prices.len() < MIN_AGREEING_EXCHANGE_PEG_FEEDS {
+        return Err(PriceRefreshError::transient(format!(
+            "USDT fallback requires at least {MIN_AGREEING_EXCHANGE_PEG_FEEDS} agreeing exchange peg feeds; got {}",
+            agreeing_exchange_prices.len()
+        )));
+    }
 
+    let mut agreeing_exchange_values: Vec<f64> = agreeing_exchange_prices
+        .iter()
+        .map(|(_, price)| *price)
+        .collect();
+    agreeing_exchange_values.sort_by(f64::total_cmp);
+    let accepted_exchange_median = median_values(&agreeing_exchange_values).ok_or_else(|| {
+        PriceRefreshError::transient("Agreeing exchange USDT/USD feeds produced no median")
+    })?;
+    if (accepted_exchange_median - 1.0).abs() > MAX_USDT_PEG_DEVIATION_FROM_DOLLAR {
+        return Err(PriceRefreshError::transient(format!(
+            "Exchange USDT/USD consensus {accepted_exchange_median:.6} is outside the allowed peg band"
+        )));
+    }
+
+    // Aggregators may confirm the exchange-anchored result, but never select or move it.
+    let agreeing: Vec<(String, f64)> = plausible
+        .into_iter()
+        .filter(|(_, price)| {
+            ((*price - accepted_exchange_median).abs() / accepted_exchange_median)
+                <= MAX_PEG_FEED_DEVIATION_RATIO
+        })
+        .collect();
     if agreeing.len() < MIN_AGREEING_PEG_FEEDS {
         return Err(PriceRefreshError::transient(format!(
             "USDT fallback requires at least {MIN_AGREEING_PEG_FEEDS} agreeing peg feeds; got {}",
             agreeing.len()
         )));
     }
-    median_values(&agreeing)
-        .ok_or_else(|| PriceRefreshError::transient("Agreeing USDT/USD feeds produced no median"))
+    Ok(accepted_exchange_median)
 }
 
 fn median_values(sorted_values: &[f64]) -> Option<f64> {
@@ -731,6 +770,73 @@ mod tests {
         ];
         assert!(validate_usdt_peg(&depegged).is_err());
         assert!(validate_usdt_peg(&valid[..2]).is_err());
+    }
+
+    #[test]
+    fn usdt_peg_rejects_aggregator_only_consensus() {
+        let aggregators = vec![
+            ("CoinGecko USDT/USD".to_string(), 1.0000),
+            ("CoinPaprika USDT/USD".to_string(), 1.0001),
+            ("Coinlore USDT/USD".to_string(), 0.9999),
+        ];
+
+        assert!(validate_usdt_peg(&aggregators).is_err());
+    }
+
+    #[test]
+    fn usdt_peg_rejects_stale_aggregators_during_exchange_depeg() {
+        let prices = vec![
+            ("Coinbase USDT/USD".to_string(), 0.9800),
+            ("Kraken USDT/USD".to_string(), 0.9801),
+            ("Bitstamp USDT/USD".to_string(), 0.9799),
+            ("Bitfinex USDT/USD".to_string(), 0.9800),
+            ("Crypto.com USDT/USD".to_string(), 0.9802),
+            ("OKX USDT/USD".to_string(), 0.9798),
+            ("CoinGecko USDT/USD".to_string(), 1.0000),
+            ("CoinPaprika USDT/USD".to_string(), 1.0001),
+            ("Coinlore USDT/USD".to_string(), 0.9999),
+        ];
+
+        assert!(validate_usdt_peg(&prices).is_err());
+    }
+
+    #[test]
+    fn aggregators_cannot_outvote_exchange_peg_consensus() {
+        let prices = vec![
+            ("Coinbase USDT/USD".to_string(), 0.9800),
+            ("Kraken USDT/USD".to_string(), 0.9801),
+            ("Bitstamp USDT/USD".to_string(), 0.9799),
+            ("Bitfinex USDT/USD".to_string(), 1.0000),
+            ("Crypto.com USDT/USD".to_string(), 1.0001),
+            ("CoinGecko USDT/USD".to_string(), 1.0000),
+            ("CoinPaprika USDT/USD".to_string(), 1.0001),
+            ("Coinlore USDT/USD".to_string(), 0.9999),
+        ];
+
+        assert!(validate_usdt_peg(&prices).is_err());
+    }
+
+    #[test]
+    fn usdt_peg_accepts_two_exchanges_with_aggregator_confirmation() {
+        let prices = vec![
+            ("Crypto.com USDT/USD".to_string(), 0.9990),
+            ("OKX USDT/USD".to_string(), 0.9991),
+            ("CoinGecko USDT/USD".to_string(), 0.9989),
+        ];
+
+        assert_eq!(validate_usdt_peg(&prices), Ok(0.99905));
+    }
+
+    #[test]
+    fn aggregator_peg_classification_matches_configured_feeds() {
+        let configured: std::collections::HashSet<String> = get_usdt_usd_price_feeds()
+            .into_iter()
+            .map(|feed| feed.name)
+            .collect();
+
+        for aggregator in AGGREGATOR_PEG_FEED_NAMES {
+            assert!(configured.contains(aggregator));
+        }
     }
 
     #[test]
