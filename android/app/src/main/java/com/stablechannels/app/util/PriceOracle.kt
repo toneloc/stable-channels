@@ -56,7 +56,6 @@ object PriceOracle {
         PriceFeedConfig("KuCoin BTC/USDT", "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=BTC-USDT", listOf("data", "price")),
         PriceFeedConfig("Gate.io BTC/USDT", "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT", listOf("0", "last")),
         PriceFeedConfig("MEXC BTC/USDT", "https://api.mexc.com/api/v3/ticker/price?symbol=BTCUSDT", listOf("price")),
-        PriceFeedConfig("Luno BTC/USDT", "https://api.luno.com/api/1/ticker?pair=XBTUSDT", listOf("last_trade")),
         PriceFeedConfig("CoinDCX BTC/USDT", "https://public.coindcx.com/market_data/trade_history?pair=B-BTC_USDT&limit=1", listOf("0", "p")),
         PriceFeedConfig("BTCTurk BTC/USDT", "https://api.btcturk.com/api/v2/ticker?pairSymbol=BTCUSDT", listOf("data", "0", "last"))
     )

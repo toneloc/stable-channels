@@ -263,7 +263,7 @@ enum PriceOracle {
         pegPrices: [NamedPrice],
         lastTrustedPrice: Double?
     ) throws -> PriceOracleResult {
-        try BitcoinConsensus.resolve(
+        try BitcoinPriceConsensus.resolve(
             usdPrices: usdPrices,
             usdtPrices: usdtPrices,
             pegPrices: pegPrices,
@@ -275,19 +275,19 @@ enum PriceOracle {
         _ prices: [NamedPrice],
         lastTrustedPrice: Double?
     ) throws -> (price: Double, feeds: [NamedPrice]) {
-        try BitcoinConsensus.validateBitcoinConsensus(prices, lastTrustedPrice: lastTrustedPrice)
+        try BitcoinPriceConsensus.validateBitcoinConsensus(prices, lastTrustedPrice: lastTrustedPrice)
     }
 
     static func validateUSDTPeg(_ prices: [NamedPrice]) throws -> (price: Double, feeds: [NamedPrice]) {
-        try BitcoinConsensus.validateUSDTPeg(prices)
+        try BitcoinPriceConsensus.validateUSDTPeg(prices)
     }
 
     static func isPlausibleBitcoinPrice(_ price: Double) -> Bool {
-        BitcoinConsensus.isPlausibleBitcoinPrice(price)
+        BitcoinPriceConsensus.isPlausibleBitcoinPrice(price)
     }
 
     static func median(_ values: [Double]) -> Double? {
-        BitcoinConsensus.median(values)
+        BitcoinPriceConsensus.median(values)
     }
 
     // MARK: - Generic JSON Extraction
@@ -321,9 +321,9 @@ enum PriceOracle {
     }
 }
 
-// MARK: - Bitcoin Consensus Algorithm
+// MARK: - Bitcoin Price Consensus Algorithm
 
-enum BitcoinConsensus {
+enum BitcoinPriceConsensus {
     static func resolve(
         usdPrices: [NamedPrice],
         usdtPrices: [NamedPrice],

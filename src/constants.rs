@@ -260,11 +260,6 @@ pub fn get_fallback_usdt_price_feeds() -> Vec<PriceFeedConfig> {
             vec!["price"],
         ),
         PriceFeedConfig::new(
-            "Luno BTC/USDT",
-            "https://api.luno.com/api/1/ticker?pair=XBTUSDT",
-            vec!["last_trade"],
-        ),
-        PriceFeedConfig::new(
             "CoinDCX BTC/USDT",
             "https://public.coindcx.com/market_data/trade_history?pair=B-BTC_USDT&limit=1",
             vec!["0", "p"],
@@ -385,7 +380,24 @@ mod tests {
         let feeds = get_default_price_feeds();
         assert_eq!(feeds.len(), 6);
         assert!(feeds.iter().all(|feed| !feed.url_format.contains("USDT")));
-        assert_eq!(get_fallback_usdt_price_feeds().len(), 10);
+        let fallback_feeds = get_fallback_usdt_price_feeds();
+        assert_eq!(
+            fallback_feeds
+                .iter()
+                .map(|feed| feed.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Binance BTC/USDT",
+                "Binance.US BTC/USDT",
+                "Bybit BTC/USDT",
+                "Huobi BTC/USDT",
+                "KuCoin BTC/USDT",
+                "Gate.io BTC/USDT",
+                "MEXC BTC/USDT",
+                "CoinDCX BTC/USDT",
+                "BTCTurk BTC/USDT",
+            ]
+        );
         assert_eq!(get_usdt_usd_price_feeds().len(), 9);
     }
 

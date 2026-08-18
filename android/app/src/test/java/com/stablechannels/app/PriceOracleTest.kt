@@ -73,6 +73,24 @@ class PriceOracleTest {
     }
 
     @Test
+    fun `fallback list contains the supported USDT books`() {
+        assertEquals(
+            listOf(
+                "Binance BTC/USDT",
+                "Binance.US BTC/USDT",
+                "Bybit BTC/USDT",
+                "Huobi BTC/USDT",
+                "KuCoin BTC/USDT",
+                "Gate.io BTC/USDT",
+                "MEXC BTC/USDT",
+                "CoinDCX BTC/USDT",
+                "BTCTurk BTC/USDT"
+            ),
+            PriceOracle.BITCOIN_USDT_FEEDS.map { it.name }
+        )
+    }
+
+    @Test
     fun `peg gate survives direct USD host outage`() {
         // The USDT fallback's peg gate needs MINIMUM_AGREEING_PEG_FEEDS. If too many peg feeds
         // share hosts with the direct-USD tier, the fallback fails exactly when the primary
