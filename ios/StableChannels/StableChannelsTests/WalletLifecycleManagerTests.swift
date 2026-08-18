@@ -407,10 +407,12 @@ final class BIP39Tests: XCTestCase {
         XCTAssertTrue(BIP39.isValid("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"))
     }
 
-    func testToleratesWhitespaceAndCase() {
-        XCTAssertTrue(BIP39.isValid(
-            "  Abandon ABANDON abandon\nabandon abandon abandon abandon abandon abandon abandon abandon about "
-        ))
+    func testCanonicalizesWhitespaceAndCase() {
+        let input = "  Abandon ABANDON abandon\nabandon abandon abandon abandon abandon abandon abandon abandon about "
+        XCTAssertEqual(
+            BIP39.validatedCanonicalMnemonic(input),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
     }
 
     func testRejectsBadChecksum() {
