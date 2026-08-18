@@ -85,11 +85,11 @@ final class DefaultNodeStarter: NodeStarter {
             let words = try keychain.loadMnemonic()
             // LDKNode's binding aborts the process (try!) on an invalid mnemonic —
             // validate before it can. A corrupted stored seed must fail closed.
-            guard BIP39.isValid(words) else {
+            guard let canonicalWords = BIP39.validatedCanonicalMnemonic(words) else {
                 logger.log("ERROR: SEED_INVALID_BIP39 - keychain")
                 throw NodeStarterError.invalidStoredMnemonic
             }
-            nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+            nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
         } catch WalletKeychainError.keyNotFound {
             // Mnemonic not in Keychain: fallback check legacy plaintext file or keys_seed
             if let plaintextWords = try? String(
@@ -98,13 +98,13 @@ final class DefaultNodeStarter: NodeStarter {
             ),
                 !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let trimmed = plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard BIP39.isValid(trimmed) else {
+                guard let canonicalWords = BIP39.validatedCanonicalMnemonic(trimmed) else {
                     logger.log("ERROR: SEED_INVALID_BIP39 - plaintext")
                     throw NodeStarterError.invalidStoredMnemonic
                 }
                 logger.log("NOTICE: SEED_PLAINTEXT_FALLBACK - legacy_pending_migration")
                 nodeEntropy = NodeEntropy.fromBip39Mnemonic(
-                    mnemonic: trimmed,
+                    mnemonic: canonicalWords,
                     passphrase: nil
                 )
             } else {

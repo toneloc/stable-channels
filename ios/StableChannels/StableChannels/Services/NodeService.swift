@@ -259,7 +259,7 @@ class NodeService: NodeServiceProtocol {
             // LDKNode's generated binding aborts the process (try!) on an invalid
             // mnemonic. `words` can come from mutable storage (Keychain, plaintext
             // file), so a corrupted value must fail closed here, not crash-loop.
-            guard BIP39.isValid(words) else {
+            guard let canonicalWords = BIP39.validatedCanonicalMnemonic(words) else {
                 AuditService.log("SEED_INVALID_BIP39", data: [:])
                 throw NodeServiceError.invalidStoredMnemonic
             }
@@ -275,16 +275,16 @@ class NodeService: NodeServiceProtocol {
                 // deletion ships in a later release, once no earlier build remains
                 // installable (staged rollout, step 1 of 2).
                 do {
-                    try MnemonicMigrator.syncRollbackCopy(words: words, legacyPath: seedPhrasePath)
+                    try MnemonicMigrator.syncRollbackCopy(words: canonicalWords, legacyPath: seedPhrasePath)
                 } catch {
                     AuditService.log("SEED_ROLLBACK_COPY_WRITE_FAILED", data: [
                         "error": error.localizedDescription
                     ])
                     throw error
                 }
-                try keychain.storeMnemonic(words)
-                self.savedMnemonic = words
-                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+                try keychain.storeMnemonic(canonicalWords)
+                self.savedMnemonic = canonicalWords
+                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
             } catch {
                 AuditService.log("KEYCHAIN_STORE_FAILED", data: ["error": error.localizedDescription])
                 throw error
