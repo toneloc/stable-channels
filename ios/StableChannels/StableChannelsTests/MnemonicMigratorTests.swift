@@ -194,6 +194,45 @@ final class MnemonicMigratorTests: XCTestCase {
         // Rollback insurance: whitespace-equivalent plaintext is treated as matching and retained.
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
+
+    // MARK: - Rollback Copy Sync
+
+    func testSyncRollbackCopyCreatesMissingFile() throws {
+        let path = tempDirURL.appendingPathComponent("seed_phrase")
+
+        try MnemonicMigrator.syncRollbackCopy(words: testMnemonic, legacyPath: path)
+
+        XCTAssertEqual(
+            try String(contentsOfFile: path.path, encoding: .utf8),
+            testMnemonic
+        )
+    }
+
+    func testSyncRollbackCopyIsNoOpWhenMatching() throws {
+        let path = tempDirURL.appendingPathComponent("seed_phrase")
+        // Whitespace-equivalent content must be left untouched, not rewritten.
+        let nonCanonical = "  " + testMnemonic.replacingOccurrences(of: " ", with: "   ") + "\n"
+        try nonCanonical.write(to: path, atomically: true, encoding: .utf8)
+
+        try MnemonicMigrator.syncRollbackCopy(words: testMnemonic, legacyPath: path)
+
+        XCTAssertEqual(
+            try String(contentsOfFile: path.path, encoding: .utf8),
+            nonCanonical
+        )
+    }
+
+    func testSyncRollbackCopyFailureThrows() {
+        // The insurance file is the phase-1 rollback safety mechanism; a caller
+        // that cannot write it must be able to fail closed on the thrown error.
+        let unwritable = tempDirURL
+            .appendingPathComponent("missing-subdir")
+            .appendingPathComponent("seed_phrase")
+
+        XCTAssertThrowsError(
+            try MnemonicMigrator.syncRollbackCopy(words: testMnemonic, legacyPath: unwritable)
+        )
+    }
 }
 
 // MARK: - Mocks

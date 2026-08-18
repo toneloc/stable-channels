@@ -93,7 +93,11 @@ class AppState {
     let lspService = LSPService()
     private let lifecycleManager = WalletLifecycleManager(
         validator: { mnemonic in
-            AppState.deriveNodeId(mnemonic: mnemonic) != nil
+            // Building an LDK node to derive an identity is heavy — never on the
+            // main actor (restore UI would freeze for the whole build).
+            await Task.detached(priority: .utility) {
+                AppState.deriveNodeId(mnemonic: mnemonic) != nil
+            }.value
         }
     )
 
@@ -367,7 +371,7 @@ class AppState {
 
         // Execute staged restore transaction via decoupled WalletLifecycleManager
         do {
-            try lifecycleManager.restoreMnemonic(
+            try await lifecycleManager.restoreMnemonic(
                 words,
                 onStopNode: {
                     self.stabilityTimer?.cancel()
@@ -382,7 +386,13 @@ class AppState {
                 }
             )
         } catch {
-            NodeDirLock.shared.release()
+            // Pre-stop failures (validation, pending-slot write) throw while the
+            // node is still running — the lock must stay held then, or the NSE
+            // could start a second node on the live wallet dir (the July
+            // multi-writer force-close class).
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
             phase = .error("Restore failed: \(error.localizedDescription). Please retry.")
             statusMessage = ""
             throw error

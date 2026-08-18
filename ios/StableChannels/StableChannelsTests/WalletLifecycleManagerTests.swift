@@ -85,15 +85,18 @@ final class WalletLifecycleManagerTests: XCTestCase {
 
     // MARK: - BIP-39 Validation & Restore Flow
 
-    func testRestoreRejectsInvalidWordCountWithoutTouchingStorage() {
+    func testRestoreRejectsInvalidWordCountWithoutTouchingStorage() async {
         var nodeStopped = false
         var persistenceWiped = false
 
-        XCTAssertThrowsError(try manager.restoreMnemonic(
-            "one two three four five",
-            onStopNode: { nodeStopped = true },
-            onWipePersistence: { persistenceWiped = true }
-        )) { error in
+        do {
+            try await manager.restoreMnemonic(
+                "one two three four five",
+                onStopNode: { nodeStopped = true },
+                onWipePersistence: { persistenceWiped = true }
+            )
+            XCTFail("Expected invalidMnemonic")
+        } catch {
             guard case WalletRestoreError.invalidMnemonic = error else {
                 XCTFail("Expected invalidMnemonic, got \(error)")
                 return
@@ -106,16 +109,19 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertNil(mockStorage.mockMnemonic)
     }
 
-    func testRestoreRejectsInvalidBip39WordWithoutTouchingStorage() {
+    func testRestoreRejectsInvalidBip39WordWithoutTouchingStorage() async {
         var nodeStopped = false
         var persistenceWiped = false
         let invalidWordMnemonic = "foo foo foo foo foo foo foo foo foo foo foo foo"
 
-        XCTAssertThrowsError(try manager.restoreMnemonic(
-            invalidWordMnemonic,
-            onStopNode: { nodeStopped = true },
-            onWipePersistence: { persistenceWiped = true }
-        )) { error in
+        do {
+            try await manager.restoreMnemonic(
+                invalidWordMnemonic,
+                onStopNode: { nodeStopped = true },
+                onWipePersistence: { persistenceWiped = true }
+            )
+            XCTFail("Expected invalidMnemonic")
+        } catch {
             guard case WalletRestoreError.invalidMnemonic = error else {
                 XCTFail("Expected invalidMnemonic, got \(error)")
                 return
@@ -128,17 +134,20 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertNil(mockStorage.mockMnemonic)
     }
 
-    func testRestoreRejectsInvalidBip39ChecksumWithoutTouchingStorage() {
+    func testRestoreRejectsInvalidBip39ChecksumWithoutTouchingStorage() async {
         var nodeStopped = false
         var persistenceWiped = false
         // 12th word is 'abandon' instead of 'about', creating an invalid BIP-39 checksum
         let invalidChecksumMnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon"
 
-        XCTAssertThrowsError(try manager.restoreMnemonic(
-            invalidChecksumMnemonic,
-            onStopNode: { nodeStopped = true },
-            onWipePersistence: { persistenceWiped = true }
-        )) { error in
+        do {
+            try await manager.restoreMnemonic(
+                invalidChecksumMnemonic,
+                onStopNode: { nodeStopped = true },
+                onWipePersistence: { persistenceWiped = true }
+            )
+            XCTFail("Expected invalidMnemonic")
+        } catch {
             guard case WalletRestoreError.invalidMnemonic = error else {
                 XCTFail("Expected invalidMnemonic, got \(error)")
                 return
@@ -151,12 +160,12 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertNil(mockStorage.mockMnemonic)
     }
 
-    func testRestoreHappyPath() throws {
+    func testRestoreHappyPath() async throws {
         try mockStorage.storeMnemonic(testMnemonic)
         var nodeStopped = false
         var persistenceWiped = false
 
-        try manager.restoreMnemonic(
+        try await manager.restoreMnemonic(
             otherMnemonic,
             onStopNode: { nodeStopped = true },
             onWipePersistence: {
@@ -173,16 +182,21 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertFalse(UserDefaults(suiteName: testAppGroup)?.bool(forKey: "restore_in_progress") ?? false)
     }
 
-    func testRestoreWipeFailureRetainsPhase() throws {
+    func testRestoreWipeFailureRetainsPhase() async throws {
         try mockStorage.storeMnemonic(testMnemonic)
 
         enum TestError: Error { case wipeFailed }
 
-        XCTAssertThrowsError(try manager.restoreMnemonic(
-            otherMnemonic,
-            onStopNode: {},
-            onWipePersistence: { throw TestError.wipeFailed }
-        ))
+        do {
+            try await manager.restoreMnemonic(
+                otherMnemonic,
+                onStopNode: {},
+                onWipePersistence: { throw TestError.wipeFailed }
+            )
+            XCTFail("Expected wipe failure to propagate")
+        } catch {
+            // expected
+        }
 
         // Phase must be retained so recovery triggers on next launch
         XCTAssertEqual(
@@ -267,13 +281,13 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertEqual(ud?.string(forKey: "restore_phase"), RestorePhase.pendingValidation.rawValue)
     }
 
-    func testRestoreRealWipePreservesPendingSeedAndPromotesSuccessfully() throws {
+    func testRestoreRealWipePreservesPendingSeedAndPromotesSuccessfully() async throws {
         let ud = UserDefaults(suiteName: testAppGroup)
         mockStorage.mockMnemonic = testMnemonic
 
         var wipeExecuted = false
         // Simulate real persistence wipe: wipes files and active Keychain seed, but NOT pending seed
-        try manager.restoreMnemonic(
+        try await manager.restoreMnemonic(
             otherMnemonic,
             onStopNode: {},
             onWipePersistence: {
@@ -309,6 +323,42 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
         XCTAssertNil(mockStorage.mockPendingMnemonic)
         XCTAssertNil(ud?.string(forKey: "restore_phase"))
+    }
+
+    // MARK: - Markerless Recovery (pending Keychain slot is authoritative)
+
+    func testMarkerlessPendingSeedWithoutActiveIsPromoted() throws {
+        // The UserDefaults phase marker was lost (unflushed cache on a hard kill)
+        // after the wipe: no marker, no active seed, but the pending seed survives.
+        mockStorage.mockPendingMnemonic = otherMnemonic
+        mockStorage.mockMnemonic = nil
+
+        try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
+    }
+
+    func testMarkerlessPendingSeedWithActiveIsCleared() throws {
+        // The restore never reached the wipe: active seed intact, pending is
+        // abandoned staging. It must be cleared, never promoted.
+        mockStorage.mockMnemonic = testMnemonic
+        mockStorage.mockPendingMnemonic = otherMnemonic
+
+        try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        XCTAssertEqual(mockStorage.mockMnemonic, testMnemonic)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
+    }
+
+    func testMarkerlessRecoveryFailsClosedOnKeychainError() {
+        // An operational Keychain error must not be read as "no active seed" and
+        // trigger promotion over a possibly-live wallet.
+        mockStorage.mockPendingMnemonic = otherMnemonic
+        mockStorage.mockLoadError = WalletKeychainError.accessDenied(errSecAuthFailed)
+
+        XCTAssertThrowsError(try manager.runRecoveryIfNeeded(onWipePersistence: {}))
+        XCTAssertEqual(mockStorage.mockPendingMnemonic, otherMnemonic)
     }
 }
 
