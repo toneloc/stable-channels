@@ -40,11 +40,10 @@ enum MnemonicMigrator {
                     logError?("KEYCHAIN_PLAINTEXT_MISMATCH", [:])
                     throw MnemonicMigrationError.seedMismatch
                 }
-                do {
-                    try FileManager.default.removeItem(at: legacyPath)
-                } catch {
-                    logError?("KEYCHAIN_PLAINTEXT_DELETE_FAILED", ["error": error.localizedDescription])
-                }
+                // A matching plaintext file is deliberately RETAINED as rollback insurance:
+                // older builds treat "no seed files" as a brand-new wallet and wipe the
+                // channel database. Plaintext deletion ships in a later release, once no
+                // earlier build remains installable (staged rollout, step 1 of 2).
             }
             return canonicalKeychain
         } catch WalletKeychainError.keyNotFound {
@@ -63,11 +62,8 @@ enum MnemonicMigrator {
 
         do {
             try keychain.storeMnemonic(canonicalWords)
-            do {
-                try FileManager.default.removeItem(at: legacyPath)
-            } catch {
-                logError?("KEYCHAIN_PLAINTEXT_DELETE_FAILED", ["error": error.localizedDescription])
-            }
+            // The plaintext file is deliberately RETAINED after migration (rollback
+            // insurance for older builds — see the note above). Deletion is a later release.
             return canonicalWords
         } catch {
             logError?("KEYCHAIN_MIGRATION_FAILED", ["error": error.localizedDescription])
