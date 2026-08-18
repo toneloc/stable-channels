@@ -48,6 +48,9 @@ object PriceOracle {
 
     val BITCOIN_USDT_FEEDS = listOf(
         PriceFeedConfig("Binance BTC/USDT", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", listOf("price")),
+        // Binance.com geo-blocks US IPs (HTTP 451); the separate Binance.US host restores
+        // fallback depth for US users.
+        PriceFeedConfig("Binance.US BTC/USDT", "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT", listOf("price")),
         PriceFeedConfig("Bybit BTC/USDT", "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT", listOf("result", "list", "0", "lastPrice")),
         PriceFeedConfig("Huobi BTC/USDT", "https://api.huobi.pro/market/detail/merged?symbol=btcusdt", listOf("tick", "close")),
         PriceFeedConfig("KuCoin BTC/USDT", "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=BTC-USDT", listOf("data", "price")),

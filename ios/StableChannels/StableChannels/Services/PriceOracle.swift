@@ -151,6 +151,13 @@ enum PriceOracle {
             urlFormat: "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
             jsonPath: ["price"]
         ),
+        // Binance.com geo-blocks US IPs (HTTP 451); the separate Binance.US host restores
+        // fallback depth for US users.
+        PriceFeedConfig(
+            name: "Binance.US BTC/USDT",
+            urlFormat: "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT",
+            jsonPath: ["price"]
+        ),
         PriceFeedConfig(
             name: "Bybit BTC/USDT",
             urlFormat: "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",

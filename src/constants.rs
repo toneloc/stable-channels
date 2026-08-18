@@ -227,6 +227,13 @@ pub fn get_fallback_usdt_price_feeds() -> Vec<PriceFeedConfig> {
             "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
             vec!["price"],
         ),
+        // Binance.com geo-blocks US IPs (HTTP 451); the separate Binance.US host restores
+        // fallback depth for US users.
+        PriceFeedConfig::new(
+            "Binance.US BTC/USDT",
+            "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT",
+            vec!["price"],
+        ),
         PriceFeedConfig::new(
             "Bybit BTC/USDT",
             "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
@@ -363,7 +370,7 @@ mod tests {
         let feeds = get_default_price_feeds();
         assert_eq!(feeds.len(), 6);
         assert!(feeds.iter().all(|feed| !feed.url_format.contains("USDT")));
-        assert_eq!(get_fallback_usdt_price_feeds().len(), 9);
+        assert_eq!(get_fallback_usdt_price_feeds().len(), 10);
         assert_eq!(get_usdt_usd_price_feeds().len(), 7);
     }
 
