@@ -128,6 +128,8 @@
 		6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */; };
 		49BB390A0000000000000002 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
 		49BB390A0000000000000004 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
+		49BB390A0000000000000005 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
+		49BB390A0000000000000006 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
 		64791A21EBEE43769493F7F3 /* WalletKeychainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64791A21EBEE43769493F7F4 /* WalletKeychainServiceTests.swift */; };
 		6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6EF4DE5A43647E46CAAD52B /* TradeService.swift */; };
 		6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */; };
@@ -1027,6 +1029,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				49B100D6302A493400D72430 /* WalletKeychainService.swift in Sources */,
+				49BB390A0000000000000005 /* BIP39.swift in Sources */,
+				49BB390A0000000000000006 /* BIP39WordList.swift in Sources */,
 				499127782FFEB4FB00D9C81F /* PaymentDirection.swift in Sources */,
 				4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */,
 				4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */,
