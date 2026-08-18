@@ -518,7 +518,7 @@ class AppState {
         // LDKNode's generated binding aborts the process (try!) on an invalid
         // mnemonic — full wordlist + checksum validation MUST run first. This
         // also makes the restore validator's `deriveNodeId != nil` check safe.
-        guard BIP39.isValid(mnemonic) else { return nil }
+        guard let canonicalMnemonic = BIP39.validatedCanonicalMnemonic(mnemonic) else { return nil }
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -543,7 +543,7 @@ class AppState {
             )
         )
         builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: syncConfig)
-        let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
+        let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalMnemonic, passphrase: nil)
         guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
         return node.nodeId()
     }
