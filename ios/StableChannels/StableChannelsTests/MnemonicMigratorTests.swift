@@ -23,7 +23,7 @@ final class MnemonicMigratorTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testMigrationMovesPlaintextToKeychain() throws {
+    func testMigrationCopiesPlaintextToKeychainAndRetainsFile() throws {
         let path = tempDirURL.appendingPathComponent("seed_phrase")
         try testMnemonic.write(to: path, atomically: true, encoding: .utf8)
 
@@ -35,7 +35,9 @@ final class MnemonicMigratorTests: XCTestCase {
 
         XCTAssertEqual(loaded, testMnemonic)
         XCTAssertEqual(try testKeychain.loadMnemonic(), testMnemonic)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        // Rollback insurance: the plaintext survives migration so an older build
+        // never sees "no seed files" and wipes the wallet (staged rollout, step 1).
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
     func testEncryptedFirstThrowsMismatch() throws {
@@ -63,7 +65,7 @@ final class MnemonicMigratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
-    func testLingeringMatchingPlaintextIsDeleted() throws {
+    func testLingeringMatchingPlaintextIsRetained() throws {
         try testKeychain.storeMnemonic(testMnemonic)
 
         let path = tempDirURL.appendingPathComponent("seed_phrase")
@@ -76,7 +78,8 @@ final class MnemonicMigratorTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, testMnemonic)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        // Rollback insurance: matching plaintext is kept, not cleaned up.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
     // MARK: - Error Handling Security Tests
@@ -120,7 +123,8 @@ final class MnemonicMigratorTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, testMnemonic)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        // Rollback insurance: the plaintext survives migration (staged rollout, step 1).
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
     func testLoadErrorDataConversionFailedThrowsFailClosed() throws {
@@ -187,7 +191,8 @@ final class MnemonicMigratorTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, testMnemonic)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+        // Rollback insurance: whitespace-equivalent plaintext is treated as matching and retained.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 }
 
