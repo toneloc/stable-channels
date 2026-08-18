@@ -26,6 +26,9 @@ object Constants {
 
     const val PRICE_CACHE_REFRESH_SECS: Long = 15
     const val PRICE_FETCH_TIMEOUT_SECS: Long = 3
+    /** Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
+     *  than a single-price ticker and must not share the short per-feed ticker timeout. */
+    const val CHART_FETCH_TIMEOUT_SECS: Long = 30
 
     const val ONCHAIN_WALLET_SYNC_INTERVAL_SECS: Long = 120
     const val LIGHTNING_WALLET_SYNC_INTERVAL_SECS: Long = 60

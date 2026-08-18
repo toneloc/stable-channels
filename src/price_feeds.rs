@@ -1,6 +1,6 @@
 use crate::constants::{
     get_fallback_usdt_price_feeds, get_usdt_usd_price_feeds, PRICE_CACHE_REFRESH_SECS,
-    PRICE_FETCH_TIMEOUT_SECS,
+    PRICE_FETCH_TIMEOUT_SECS, PRICE_FETCH_TOTAL_TIMEOUT_SECS,
 };
 use serde_json::Value;
 use std::error::Error;
@@ -153,7 +153,7 @@ pub fn refresh_cached_price() -> Result<f64, String> {
 
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PRICE_FETCH_TOTAL_TIMEOUT_SECS))
         .build();
     let result = get_latest_price_classified(&agent);
 
@@ -189,7 +189,7 @@ pub fn set_price_feeds() -> Vec<PriceFeed> {
 pub fn bounded_agent() -> Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
-        .timeout(Duration::from_secs(PRICE_FETCH_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PRICE_FETCH_TOTAL_TIMEOUT_SECS))
         .build()
 }
 

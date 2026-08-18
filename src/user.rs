@@ -10389,7 +10389,25 @@ impl UserApp {
         });
     }
 
-    fn execute_buy(&mut self, amount_usd: f64, _displayed_btc_price: f64) {
+    /// If the live quote drifted beyond the trade band from the price shown on the review
+    /// screen, ask the user to review again rather than silently repricing the order (which
+    /// would move a different number of sats than they consented to).
+    fn quote_moved_error(displayed_btc_price: f64, live_btc_price: f64) -> Option<String> {
+        if !displayed_btc_price.is_finite() || displayed_btc_price < 1.0 {
+            return None; // no meaningful reviewed price to compare against
+        }
+        let deviation = (live_btc_price - displayed_btc_price).abs() / displayed_btc_price;
+        if deviation > MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0 {
+            Some(format!(
+                "Price moved (${:.2} → ${:.2}) — please review the order again.",
+                displayed_btc_price, live_btc_price
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn execute_buy(&mut self, amount_usd: f64, displayed_btc_price: f64) {
         self.trade_error.clear();
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
@@ -10402,6 +10420,11 @@ impl UserApp {
 
         if btc_price < 1.0 || !btc_price.is_finite() {
             self.trade_error = "A fresh BTC/USD consensus is required".to_string();
+            return;
+        }
+
+        if let Some(err) = Self::quote_moved_error(displayed_btc_price, btc_price) {
+            self.trade_error = err;
             return;
         }
 
@@ -10452,7 +10475,7 @@ impl UserApp {
     fn execute_sell(
         &mut self,
         amount_usd: f64,
-        _displayed_btc_price: f64,
+        displayed_btc_price: f64,
         _displayed_btc_sats: u64,
     ) {
         self.trade_error.clear();
@@ -10462,6 +10485,11 @@ impl UserApp {
 
         if btc_price < 1.0 || !btc_price.is_finite() {
             self.trade_error = "A fresh BTC/USD consensus is required".to_string();
+            return;
+        }
+
+        if let Some(err) = Self::quote_moved_error(displayed_btc_price, btc_price) {
+            self.trade_error = err;
             return;
         }
 

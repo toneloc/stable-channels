@@ -2,6 +2,7 @@ package com.stablechannels.app
 
 import com.stablechannels.app.util.NamedPrice
 import com.stablechannels.app.util.PriceOracle
+import com.stablechannels.app.util.PriceOracleAnchorStore
 import com.stablechannels.app.util.PriceOracleException
 import com.stablechannels.app.util.PriceOracleSource
 import org.junit.Assert.assertEquals
@@ -69,5 +70,36 @@ class PriceOracleTest {
     fun `primary list contains only six direct USD books`() {
         assertEquals(6, PriceOracle.DIRECT_USD_FEEDS.size)
         assertTrue(PriceOracle.DIRECT_USD_FEEDS.none { it.urlFormat.uppercase().contains("USDT") })
+    }
+
+    @Test
+    fun `peg gate survives direct USD host outage`() {
+        // The USDT fallback's peg gate needs MINIMUM_AGREEING_PEG_FEEDS. If too many peg feeds
+        // share hosts with the direct-USD tier, the fallback fails exactly when the primary
+        // tier is unreachable — the outage it exists to survive.
+        fun host(url: String) = url.substringAfter("//").substringBefore("/")
+        val usdHosts = PriceOracle.DIRECT_USD_FEEDS.map { host(it.urlFormat) }.toSet()
+        val disjoint = PriceOracle.USDT_USD_FEEDS.count { host(it.urlFormat) !in usdHosts }
+        // Quorum + 2 margin: a single rate-limited or flaky disjoint host must not be
+        // able to drop the gate below quorum in the outage the fallback exists for.
+        assertTrue(disjoint >= PriceOracle.MINIMUM_AGREEING_PEG_FEEDS + 2)
+    }
+
+    @Test
+    fun `fresh anchor protects the background service`() {
+        val nowMs = 1_000_000L
+        assertEquals(
+            64_000.0,
+            PriceOracleAnchorStore.freshPrice(64_000.0, nowMs - 60_000, nowMs)!!,
+            0.0
+        )
+    }
+
+    @Test
+    fun `stale future or implausible anchor is rejected`() {
+        val nowMs = 1_000_000L
+        assertNull(PriceOracleAnchorStore.freshPrice(64_000.0, nowMs - 61_000, nowMs))
+        assertNull(PriceOracleAnchorStore.freshPrice(64_000.0, nowMs + 1_000, nowMs))
+        assertNull(PriceOracleAnchorStore.freshPrice(0.0, nowMs - 1_000, nowMs))
     }
 }

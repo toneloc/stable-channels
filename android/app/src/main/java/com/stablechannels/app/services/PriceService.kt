@@ -1,10 +1,12 @@
 package com.stablechannels.app.services
 
+import android.content.Context
 import android.util.Log
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.NamedPrice
 import com.stablechannels.app.util.PriceFeedConfig
 import com.stablechannels.app.util.PriceOracle
+import com.stablechannels.app.util.PriceOracleAnchorStore
 import com.stablechannels.app.util.PriceOracleException
 import com.stablechannels.app.util.PriceOracleSource
 import kotlinx.coroutines.*
@@ -18,12 +20,20 @@ import org.json.JSONTokener
 import java.util.Date
 import java.util.concurrent.TimeUnit
 
-class PriceService {
+class PriceService(private val appContext: Context? = null) {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .readTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .callTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .build()
+
+    /** Longer-lived client for historical-chart backfill: the ~30-day hourly OHLC payload is far
+     *  larger than a ticker response, so the short per-feed timeout would silently truncate it to
+     *  an empty chart on a slow connection (iOS chartSession parity). */
+    private val chartClient = client.newBuilder()
+        .readTimeout(Constants.CHART_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .callTimeout(Constants.CHART_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
     private val _currentPrice = MutableStateFlow(0.0)
@@ -108,6 +118,11 @@ class PriceService {
             _accountingPrice.value = result.price
             _activeSource.value = result.source
             isQuarantined = false
+            // Persist the accepted price so the background stability service inherits the
+            // large-move circuit breaker (mirrors the iOS app-group anchor).
+            appContext?.let {
+                PriceOracleAnchorStore.save(it, result.price, _lastUpdate.value.time)
+            }
             Log.d(
                 TAG,
                 "Accepted ${result.source} price from ${result.agreeingFeedNames.size} feeds" +
@@ -197,7 +212,7 @@ class PriceService {
         val url = "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=$sinceTs"
         return try {
             val request = Request.Builder().url(url).build()
-            val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
+            val response = withContext(Dispatchers.IO) { chartClient.newCall(request).execute() }
             val body = response.body?.string() ?: return emptyList()
             val json = JSONObject(body)
             val result = json.optJSONObject("result") ?: return emptyList()

@@ -41,6 +41,9 @@ enum Constants {
 
     static let priceCacheRefreshSecs: UInt64 = 15
     static let priceFetchTimeoutSecs: TimeInterval = 3
+    /// Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
+    /// than a single-price ticker and must not share the short per-feed ticker timeout.
+    static let chartFetchTimeoutSecs: TimeInterval = 30
 
     static let onchainWalletSyncIntervalSecs: UInt64 = 120
     static let lightningWalletSyncIntervalSecs: UInt64 = 60

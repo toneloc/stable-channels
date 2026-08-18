@@ -48,6 +48,9 @@ object PriceOracle {
 
     val BITCOIN_USDT_FEEDS = listOf(
         PriceFeedConfig("Binance BTC/USDT", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", listOf("price")),
+        // Binance.com geo-blocks US IPs (HTTP 451); the separate Binance.US host restores
+        // fallback depth for US users.
+        PriceFeedConfig("Binance.US BTC/USDT", "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT", listOf("price")),
         PriceFeedConfig("Bybit BTC/USDT", "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT", listOf("result", "list", "0", "lastPrice")),
         PriceFeedConfig("Huobi BTC/USDT", "https://api.huobi.pro/market/detail/merged?symbol=btcusdt", listOf("tick", "close")),
         PriceFeedConfig("KuCoin BTC/USDT", "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=BTC-USDT", listOf("data", "price")),
@@ -63,7 +66,19 @@ object PriceOracle {
         PriceFeedConfig("Kraken USDT/USD", "https://api.kraken.com/0/public/Ticker?pair=USDTUSD", listOf("result", "USDTZUSD", "c")),
         PriceFeedConfig("Bitstamp USDT/USD", "https://www.bitstamp.net/api/v2/ticker/usdtusd/", listOf("last")),
         PriceFeedConfig("Bitfinex USDT/USD", "https://api-pub.bitfinex.com/v2/ticker/tUSTUSD", listOf("6")),
-        PriceFeedConfig("CoinGecko USDT/USD", "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd", listOf("tether", "usd"))
+        PriceFeedConfig("CoinGecko USDT/USD", "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd", listOf("tether", "usd")),
+        // Disjoint-host peg sources: the four exchange peg feeds above share hosts with the
+        // direct-USD tier, so without these the fallback's peg gate would fail exactly when
+        // the primary tier is unreachable — the outage the fallback exists to survive.
+        PriceFeedConfig("Crypto.com USDT/USD", "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD", listOf("result", "data", "0", "a")),
+        PriceFeedConfig("OKX USDT/USD", "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD", listOf("data", "0", "last")),
+        // Aggregator margin feeds: keep the disjoint-host count above the quorum so one
+        // rate-limited host (CoinGecko 429s aggressively on carrier NAT) can't kill the
+        // fallback. Caveat: aggregators lag real markets by minutes during a fast depeg,
+        // so the exchange peg feeds above must stay in the list — don't let aggregators
+        // become the only disjoint hosts.
+        PriceFeedConfig("CoinPaprika USDT/USD", "https://api.coinpaprika.com/v1/tickers/usdt-tether", listOf("quotes", "USD", "price")),
+        PriceFeedConfig("Coinlore USDT/USD", "https://api.coinlore.net/api/ticker/?id=518", listOf("0", "price_usd"))
     )
 
     fun resolve(

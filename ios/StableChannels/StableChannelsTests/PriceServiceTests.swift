@@ -120,6 +120,22 @@ final class PriceOracleTests: XCTestCase {
         }
     }
 
+    func testFreshAnchorCanProtectNotificationExtension() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let anchor = PriceOracleAnchor(price: 64_000, acceptedAt: now.addingTimeInterval(-60))
+
+        XCTAssertEqual(PriceOracleAnchorStore.freshPrice(from: anchor, now: now), 64_000)
+    }
+
+    func testStaleOrFutureAnchorIsRejected() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let stale = PriceOracleAnchor(price: 64_000, acceptedAt: now.addingTimeInterval(-61))
+        let future = PriceOracleAnchor(price: 64_000, acceptedAt: now.addingTimeInterval(1))
+
+        XCTAssertNil(PriceOracleAnchorStore.freshPrice(from: stale, now: now))
+        XCTAssertNil(PriceOracleAnchorStore.freshPrice(from: future, now: now))
+    }
+
     func testPrimaryFeedListContainsOnlySixDirectUSDMarkets() {
         XCTAssertEqual(PriceOracle.directUSDFeeds.count, 6)
         XCTAssertEqual(
@@ -247,5 +263,19 @@ final class PriceOracleTests: XCTestCase {
                 .insufficientBitcoinConsensus(available: 1)
             )
         }
+    }
+
+    func testPegGateSurvivesDirectUSDHostOutage() {
+        // The USDT fallback's peg gate needs minimumAgreeingPegFeeds. If too many peg feeds
+        // share hosts with the direct-USD tier, the fallback fails exactly when the primary
+        // tier is unreachable — the outage it exists to survive.
+        func host(_ url: String) -> String {
+            URL(string: url)?.host ?? ""
+        }
+        let usdHosts = Set(PriceOracle.directUSDFeeds.map { host($0.urlFormat) })
+        let disjoint = PriceOracle.usdtUSDFeeds.filter { !usdHosts.contains(host($0.urlFormat)) }
+        // Quorum + 2 margin: a single rate-limited or flaky disjoint host must not be
+        // able to drop the gate below quorum in the outage the fallback exists for.
+        XCTAssertGreaterThanOrEqual(disjoint.count, PriceOracle.minimumAgreeingPegFeeds + 2)
     }
 }

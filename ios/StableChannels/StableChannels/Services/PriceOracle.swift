@@ -23,6 +23,54 @@ struct PriceOracleResult: Equatable {
     let usdtUSD: Double?
 }
 
+struct PriceOracleAnchor: Equatable {
+    let price: Double
+    let acceptedAt: Date
+}
+
+/// Persists the most recent accepted oracle value in the shared app group so the
+/// notification extension can apply the same large-move circuit breaker as the app.
+enum PriceOracleAnchorStore {
+    private static let defaultsKey = "price_oracle_anchor_v1"
+    private static let priceKey = "price"
+    private static let acceptedAtKey = "accepted_at"
+
+    static func save(price: Double, suiteName: String, acceptedAt: Date = Date()) {
+        guard PriceOracle.isPlausibleBitcoinPrice(price) else { return }
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+        defaults.set(
+            [
+                priceKey: price,
+                acceptedAtKey: acceptedAt.timeIntervalSince1970
+            ],
+            forKey: defaultsKey
+        )
+    }
+
+    static func freshPrice(suiteName: String, now: Date = Date()) -> Double? {
+        guard let defaults = UserDefaults(suiteName: suiteName),
+              let values = defaults.dictionary(forKey: defaultsKey),
+              let price = (values[priceKey] as? NSNumber)?.doubleValue,
+              let acceptedAt = (values[acceptedAtKey] as? NSNumber)?.doubleValue else {
+            return nil
+        }
+        return freshPrice(
+            from: PriceOracleAnchor(
+                price: price,
+                acceptedAt: Date(timeIntervalSince1970: acceptedAt)
+            ),
+            now: now
+        )
+    }
+
+    static func freshPrice(from anchor: PriceOracleAnchor?, now: Date = Date()) -> Double? {
+        guard let anchor, PriceOracle.isPlausibleBitcoinPrice(anchor.price) else { return nil }
+        let age = now.timeIntervalSince(anchor.acceptedAt)
+        guard age >= 0, age <= PriceOracle.maximumTrustedPriceAge else { return nil }
+        return anchor.price
+    }
+}
+
 enum PriceOracleFailure: Error, Equatable, CustomStringConvertible {
     case insufficientBitcoinConsensus(available: Int)
     case largeBitcoinMove(ratio: Double)
@@ -103,6 +151,13 @@ enum PriceOracle {
             urlFormat: "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
             jsonPath: ["price"]
         ),
+        // Binance.com geo-blocks US IPs (HTTP 451); the separate Binance.US host restores
+        // fallback depth for US users.
+        PriceFeedConfig(
+            name: "Binance.US BTC/USDT",
+            urlFormat: "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT",
+            jsonPath: ["price"]
+        ),
         PriceFeedConfig(
             name: "Bybit BTC/USDT",
             urlFormat: "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
@@ -165,6 +220,34 @@ enum PriceOracle {
             name: "CoinGecko USDT/USD",
             urlFormat: "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd",
             jsonPath: ["tether", "usd"]
+        ),
+        // Disjoint-host peg sources: the four exchange peg feeds above share hosts with the
+        // direct-USD tier, so without these the fallback's peg gate would fail exactly when
+        // the primary tier is unreachable — the outage the fallback exists to survive.
+        PriceFeedConfig(
+            name: "Crypto.com USDT/USD",
+            urlFormat: "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD",
+            jsonPath: ["result", "data", "0", "a"]
+        ),
+        PriceFeedConfig(
+            name: "OKX USDT/USD",
+            urlFormat: "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD",
+            jsonPath: ["data", "0", "last"]
+        ),
+        // Aggregator margin feeds: keep the disjoint-host count above the quorum so one
+        // rate-limited host (CoinGecko 429s aggressively on carrier NAT) can't kill the
+        // fallback. Caveat: aggregators lag real markets by minutes during a fast depeg,
+        // so the exchange peg feeds above must stay in the list — don't let aggregators
+        // become the only disjoint hosts.
+        PriceFeedConfig(
+            name: "CoinPaprika USDT/USD",
+            urlFormat: "https://api.coinpaprika.com/v1/tickers/usdt-tether",
+            jsonPath: ["quotes", "USD", "price"]
+        ),
+        PriceFeedConfig(
+            name: "Coinlore USDT/USD",
+            urlFormat: "https://api.coinlore.net/api/ticker/?id=518",
+            jsonPath: ["0", "price_usd"]
         )
     ]
 

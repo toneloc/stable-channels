@@ -19,6 +19,18 @@ class PriceService {
         return URLSession(configuration: configuration)
     }()
 
+    /// Longer-lived session for historical-chart backfill. The ~30-day hourly OHLC payload is far
+    /// larger than a ticker response, so the short per-feed timeout would silently truncate it to an
+    /// empty chart on a slow cellular link.
+    private static let chartSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = Constants.chartFetchTimeoutSecs
+        configuration.timeoutIntervalForResource = Constants.chartFetchTimeoutSecs
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }()
+
     // MARK: - Public
 
     /// Start auto-refreshing prices every N seconds.
@@ -99,6 +111,11 @@ class PriceService {
                 self.isTrustedForAccounting = true
                 self.activeSource = result.source
                 self.isUpdating = false
+                PriceOracleAnchorStore.save(
+                    price: result.price,
+                    suiteName: Constants.appGroupIdentifier,
+                    acceptedAt: self.lastUpdate
+                )
             }
             let pegDetail = result.usdtUSD.map { String(format: ", USDT/USD=%.6f", $0) } ?? ""
             print(
@@ -130,7 +147,7 @@ class PriceService {
         }
 
         do {
-            let (data, response) = try await Self.session.data(from: url)
+            let (data, response) = try await Self.chartSession.data(from: url)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                 return []
             }

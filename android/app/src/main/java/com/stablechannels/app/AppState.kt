@@ -55,7 +55,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     val nodeService = NodeService(context)
-    val priceService = PriceService()
+    val priceService = PriceService(context)
     var databaseService: DatabaseService? = null
         private set
     var tradeService: TradeService? = null
