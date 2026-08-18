@@ -266,19 +266,16 @@ class NodeService: NodeServiceProtocol {
                 // before generating a new identity — the historic force-close class, but
                 // worse, because the monitors are destroyed first. Plaintext deletion ships
                 // in a later release, once no earlier build remains installable (staged
-                // rollout, step 1 of 2). Failure to write the insurance copy is logged
-                // loudly but does not block the wallet — the Keychain copy is authoritative.
-                let canonicalWords = MnemonicMigrator.canonicalizeMnemonic(words)
-                let existingPlaintext = (try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8))
-                    .map(MnemonicMigrator.canonicalizeMnemonic)
-                if existingPlaintext != canonicalWords {
-                    do {
-                        try canonicalWords.write(to: seedPhrasePath, atomically: true, encoding: .utf8)
-                    } catch {
-                        AuditService.log("SEED_ROLLBACK_COPY_WRITE_FAILED", data: [
-                            "error": error.localizedDescription
-                        ])
-                    }
+                // rollout, step 1 of 2). This file IS the phase-1 safety mechanism, so a
+                // failed write aborts startup rather than running uninsured; the abort is
+                // transient and retried on the next launch.
+                do {
+                    try MnemonicMigrator.syncRollbackCopy(words: words, legacyPath: seedPhrasePath)
+                } catch {
+                    AuditService.log("SEED_ROLLBACK_COPY_WRITE_FAILED", data: [
+                        "error": error.localizedDescription
+                    ])
+                    throw error
                 }
             } catch {
                 AuditService.log("KEYCHAIN_STORE_FAILED", data: ["error": error.localizedDescription])
