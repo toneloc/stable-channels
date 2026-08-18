@@ -238,6 +238,21 @@ enum PriceOracle {
             name: "OKX USDT/USD",
             urlFormat: "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD",
             jsonPath: ["data", "0", "last"]
+        ),
+        // Aggregator margin feeds: keep the disjoint-host count above the quorum so one
+        // rate-limited host (CoinGecko 429s aggressively on carrier NAT) can't kill the
+        // fallback. Caveat: aggregators lag real markets by minutes during a fast depeg,
+        // so the exchange peg feeds above must stay in the list — don't let aggregators
+        // become the only disjoint hosts.
+        PriceFeedConfig(
+            name: "CoinPaprika USDT/USD",
+            urlFormat: "https://api.coinpaprika.com/v1/tickers/usdt-tether",
+            jsonPath: ["quotes", "USD", "price"]
+        ),
+        PriceFeedConfig(
+            name: "Coinlore USDT/USD",
+            urlFormat: "https://api.coinlore.net/api/ticker/?id=518",
+            jsonPath: ["0", "price_usd"]
         )
     ]
 

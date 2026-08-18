@@ -80,7 +80,9 @@ class PriceOracleTest {
         fun host(url: String) = url.substringAfter("//").substringBefore("/")
         val usdHosts = PriceOracle.DIRECT_USD_FEEDS.map { host(it.urlFormat) }.toSet()
         val disjoint = PriceOracle.USDT_USD_FEEDS.count { host(it.urlFormat) !in usdHosts }
-        assertTrue(disjoint >= PriceOracle.MINIMUM_AGREEING_PEG_FEEDS)
+        // Quorum + 2 margin: a single rate-limited or flaky disjoint host must not be
+        // able to drop the gate below quorum in the outage the fallback exists for.
+        assertTrue(disjoint >= PriceOracle.MINIMUM_AGREEING_PEG_FEEDS + 2)
     }
 
     @Test

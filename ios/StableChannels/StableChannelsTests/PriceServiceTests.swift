@@ -161,6 +161,8 @@ final class PriceOracleTests: XCTestCase {
         }
         let usdHosts = Set(PriceOracle.directUSDFeeds.map { host($0.urlFormat) })
         let disjoint = PriceOracle.usdtUSDFeeds.filter { !usdHosts.contains(host($0.urlFormat)) }
-        XCTAssertGreaterThanOrEqual(disjoint.count, PriceOracle.minimumAgreeingPegFeeds)
+        // Quorum + 2 margin: a single rate-limited or flaky disjoint host must not be
+        // able to drop the gate below quorum in the outage the fallback exists for.
+        XCTAssertGreaterThanOrEqual(disjoint.count, PriceOracle.minimumAgreeingPegFeeds + 2)
     }
 }

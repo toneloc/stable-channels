@@ -71,7 +71,14 @@ object PriceOracle {
         // direct-USD tier, so without these the fallback's peg gate would fail exactly when
         // the primary tier is unreachable — the outage the fallback exists to survive.
         PriceFeedConfig("Crypto.com USDT/USD", "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD", listOf("result", "data", "0", "a")),
-        PriceFeedConfig("OKX USDT/USD", "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD", listOf("data", "0", "last"))
+        PriceFeedConfig("OKX USDT/USD", "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD", listOf("data", "0", "last")),
+        // Aggregator margin feeds: keep the disjoint-host count above the quorum so one
+        // rate-limited host (CoinGecko 429s aggressively on carrier NAT) can't kill the
+        // fallback. Caveat: aggregators lag real markets by minutes during a fast depeg,
+        // so the exchange peg feeds above must stay in the list — don't let aggregators
+        // become the only disjoint hosts.
+        PriceFeedConfig("CoinPaprika USDT/USD", "https://api.coinpaprika.com/v1/tickers/usdt-tether", listOf("quotes", "USD", "price")),
+        PriceFeedConfig("Coinlore USDT/USD", "https://api.coinlore.net/api/ticker/?id=518", listOf("0", "price_usd"))
     )
 
     fun resolve(

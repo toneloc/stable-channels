@@ -317,6 +317,21 @@ pub fn get_usdt_usd_price_feeds() -> Vec<PriceFeedConfig> {
             "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD",
             vec!["data", "0", "last"],
         ),
+        // Aggregator margin feeds: keep the disjoint-host count above the quorum so one
+        // rate-limited host (CoinGecko 429s aggressively on carrier NAT) can't kill the
+        // fallback. Caveat: aggregators lag real markets by minutes during a fast depeg,
+        // so the exchange peg feeds above must stay in the list — don't let aggregators
+        // become the only disjoint hosts.
+        PriceFeedConfig::new(
+            "CoinPaprika USDT/USD",
+            "https://api.coinpaprika.com/v1/tickers/usdt-tether",
+            vec!["quotes", "USD", "price"],
+        ),
+        PriceFeedConfig::new(
+            "Coinlore USDT/USD",
+            "https://api.coinlore.net/api/ticker/?id=518",
+            vec!["0", "price_usd"],
+        ),
     ]
 }
 
@@ -371,7 +386,7 @@ mod tests {
         assert_eq!(feeds.len(), 6);
         assert!(feeds.iter().all(|feed| !feed.url_format.contains("USDT")));
         assert_eq!(get_fallback_usdt_price_feeds().len(), 10);
-        assert_eq!(get_usdt_usd_price_feeds().len(), 7);
+        assert_eq!(get_usdt_usd_price_feeds().len(), 9);
     }
 
     #[test]
@@ -390,10 +405,11 @@ mod tests {
             .iter()
             .filter(|feed| !usd_hosts.contains(&host(&feed.url_format)))
             .count();
-        // 3 = MIN_AGREEING_PEG_FEEDS in price_feeds.rs
+        // 3 = MIN_AGREEING_PEG_FEEDS in price_feeds.rs, +2 margin so a single
+        // rate-limited or flaky disjoint host can't drop the gate below quorum.
         assert!(
-            disjoint >= 3,
-            "peg gate needs >=3 feeds on hosts disjoint from the direct-USD tier; got {disjoint}"
+            disjoint >= 3 + 2,
+            "peg gate needs quorum+2 feeds on hosts disjoint from the direct-USD tier; got {disjoint}"
         );
     }
 
