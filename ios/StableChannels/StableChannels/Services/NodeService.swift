@@ -261,9 +261,24 @@ class NodeService: NodeServiceProtocol {
                 self.savedMnemonic = words
                 nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
 
-                // Clean up legacy plaintext file ONLY if the write succeeded
-                if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
-                    try FileManager.default.removeItem(at: seedPhrasePath)
+                // Keep the plaintext seed file in sync as ROLLBACK INSURANCE: older builds
+                // treat "no seed files" as a brand-new wallet and wipe the channel database
+                // before generating a new identity — the historic force-close class, but
+                // worse, because the monitors are destroyed first. Plaintext deletion ships
+                // in a later release, once no earlier build remains installable (staged
+                // rollout, step 1 of 2). Failure to write the insurance copy is logged
+                // loudly but does not block the wallet — the Keychain copy is authoritative.
+                let canonicalWords = MnemonicMigrator.canonicalizeMnemonic(words)
+                let existingPlaintext = (try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8))
+                    .map(MnemonicMigrator.canonicalizeMnemonic)
+                if existingPlaintext != canonicalWords {
+                    do {
+                        try canonicalWords.write(to: seedPhrasePath, atomically: true, encoding: .utf8)
+                    } catch {
+                        AuditService.log("SEED_ROLLBACK_COPY_WRITE_FAILED", data: [
+                            "error": error.localizedDescription
+                        ])
+                    }
                 }
             } catch {
                 AuditService.log("KEYCHAIN_STORE_FAILED", data: ["error": error.localizedDescription])
