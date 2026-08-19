@@ -15,7 +15,7 @@ StableChannels/                          # Main app target
 │   └── Trade.swift                      # Trade & database record types
 ├── Services/
 │   ├── NodeService.swift                # LDK Node wrapper (start/stop, payments, channels)
-│   ├── PriceService.swift               # Multi-feed BTC price fetching (median of 5 sources)
+│   ├── PriceService.swift               # USD-first price oracle with peg-checked USDT fallback
 │   ├── StabilityService.swift           # Stability calculations (threshold check, balance updates)
 │   ├── DatabaseService.swift            # SQLite (channels, trades, payments, price history)
 │   ├── TradeService.swift               # Buy/sell trade execution with signed TLV messages
@@ -57,7 +57,7 @@ When the app is in the background or killed, the LSP sends APNs push notificatio
 5. Otherwise, NSE builds a lightweight LDK node (no RGS gossip, relaxed sync intervals) from the shared app group container
 6. NSE connects to LSP peer
 7. **`lsp_to_user`** (price dropped, LSP sends us sats): polls `node.nextEvent()` for up to 22 seconds waiting for `PaymentReceived`
-8. **`user_to_lsp`** (price rose, user owes LSP): reads channel state from SQLite (C API), fetches median BTC price from 5 sources concurrently, calculates stability payment, sends keysend with TLV marker
+8. **`user_to_lsp`** (price rose, user owes LSP): reads channel state from SQLite (C API), fetches a quorum-backed BTC/USD price with a three-second per-feed deadline, calculates the stability payment, and sends a keysend with a TLV marker
 9. Updates notification content with result ("Stability Payment Received" / "Stability Payment Sent") or falls back to "Payment Pending"
 10. If `serviceExtensionTimeWillExpire()` fires, flags `pending_push_payment` for main app to retry on next launch
 

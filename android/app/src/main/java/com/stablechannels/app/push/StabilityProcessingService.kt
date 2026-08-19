@@ -12,10 +12,16 @@ import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.TradeService
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.NamedPrice
+import com.stablechannels.app.util.PriceFeedConfig
+import com.stablechannels.app.util.PriceOracle
+import com.stablechannels.app.util.PriceOracleAnchorStore
+import com.stablechannels.app.util.PriceOracleException
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import org.lightningdevkit.ldknode.*
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -45,8 +51,9 @@ class StabilityProcessingService : Service() {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .readTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .callTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
     private fun isStabilityMarker(records: List<CustomTlvRecord>): Boolean =
@@ -74,8 +81,7 @@ class StabilityProcessingService : Service() {
         val (type, expectedUsd, parsedUserChannelId) = parsed
         if (type != Constants.SYNC_MESSAGE_TYPE) return false
 
-        var price = fetchMedianPrice()
-        if (price <= 0.0) price = loadChannelStateFromDB()?.latestPrice ?: 0.0
+        val price = fetchMedianPrice()
         if (price <= 0.0) throw BackingUpdateFailed("Cannot apply SYNC_V1 without a BTC price")
 
         val userChannelId = parsedUserChannelId.takeIf { it.isNotEmpty() }
@@ -829,50 +835,78 @@ class StabilityProcessingService : Service() {
         loadChannelStateFromDB()?.userChannelId?.takeIf { it.isNotEmpty() }
 
     private fun fetchMedianPrice(): Double {
-        val feeds = listOf(
-            "https://www.bitstamp.net/api/v2/ticker/btcusd/" to listOf("last"),
-            "https://api.coinbase.com/v2/prices/BTC-USD/spot" to listOf("data", "amount"),
-            "https://blockchain.info/ticker" to listOf("USD", "last"),
-            "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD" to listOf("result", "XXBTZUSD", "c"),
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd" to listOf("bitcoin", "usd")
-        )
+        // Anchor to the app's last accepted price so the large-move circuit breaker also
+        // protects the unattended path (mirrors the iOS notification extension).
+        val lastTrustedPrice = PriceOracleAnchorStore.freshPrice(this)
+        val usdPrices = fetchOracleFeeds(PriceOracle.DIRECT_USD_FEEDS)
+        val price = try {
+            PriceOracle.resolve(usdPrices, emptyList(), emptyList(), lastTrustedPrice).price
+        } catch (error: PriceOracleException) {
+            if (error.quarantinesPrice) {
+                Log.w(TAG, "Rejected direct USD price: ${error.message}")
+                return 0.0
+            }
+            Log.w(TAG, "Direct USD unavailable: ${error.message}; trying USDT fallback")
+            val fallback = fetchOracleFeeds(PriceOracle.BITCOIN_USDT_FEEDS + PriceOracle.USDT_USD_FEEDS)
+            val usdtNames = PriceOracle.BITCOIN_USDT_FEEDS.map { it.name }.toSet()
+            val pegNames = PriceOracle.USDT_USD_FEEDS.map { it.name }.toSet()
+            try {
+                PriceOracle.resolve(
+                    emptyList(),
+                    fallback.filter { it.feedName in usdtNames },
+                    fallback.filter { it.feedName in pegNames },
+                    lastTrustedPrice
+                ).price
+            } catch (fallbackError: Exception) {
+                Log.w(TAG, "Rejected USDT fallback: ${fallbackError.message}")
+                return 0.0
+            }
+        }
+        if (price > 0.0) {
+            PriceOracleAnchorStore.save(this, price)
+        }
+        return price
+    }
 
-        val prices = java.util.Collections.synchronizedList(mutableListOf<Double>())
+    private fun fetchOracleFeeds(feeds: List<PriceFeedConfig>): List<NamedPrice> {
+        val prices = java.util.Collections.synchronizedList(mutableListOf<NamedPrice>())
         val latch = java.util.concurrent.CountDownLatch(feeds.size)
 
-        for ((url, path) in feeds) {
-            val request = Request.Builder().url(url).build()
+        for (feed in feeds) {
+            val request = Request.Builder().url(feed.urlFormat).build()
             httpClient.newCall(request).enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    Log.w(TAG, "${feed.name} failed: ${e.message}")
                     latch.countDown()
                 }
                 override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                     try {
+                        if (!response.isSuccessful) {
+                            Log.w(TAG, "${feed.name} failed: HTTP ${response.code}")
+                            return
+                        }
                         val body = response.body?.string() ?: return
-                        val json = JSONObject(body)
-                        val price = extractPrice(json, path)
-                        if (price != null && price > 0) prices.add(price)
-                    } catch (_: Exception) {
+                        val json = JSONTokener(body).nextValue()
+                        val price = extractPrice(json, feed.jsonPath)
+                        if (price != null) {
+                            prices.add(NamedPrice(feed.name, price))
+                            Log.d(TAG, "${feed.name} succeeded")
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "${feed.name} failed: ${error.message}")
                     } finally {
+                        response.close()
                         latch.countDown()
                     }
                 }
             })
         }
 
-        latch.await(8, TimeUnit.SECONDS)
-
-        if (prices.size < 3) return 0.0  // need at least 3 of 5 feeds
-        val sorted = prices.sorted()
-        val mid = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[mid]
-        }
+        latch.await(Constants.PRICE_FETCH_TIMEOUT_SECS + 1, TimeUnit.SECONDS)
+        return synchronized(prices) { prices.toList() }
     }
 
-    private fun extractPrice(json: JSONObject, path: List<String>): Double? {
+    private fun extractPrice(json: Any, path: List<String>): Double? {
         var current: Any = json
         for (key in path) {
             current = when (current) {
@@ -886,7 +920,13 @@ class StabilityProcessingService : Service() {
             is Int -> current.toDouble()
             is Long -> current.toDouble()
             is String -> current.toDoubleOrNull()
-            is JSONArray -> (current.opt(0) as? String)?.toDoubleOrNull()
+            is JSONArray -> when (val first = current.opt(0)) {
+                is String -> first.toDoubleOrNull()
+                is Double -> first
+                is Int -> first.toDouble()
+                is Long -> first.toDouble()
+                else -> null
+            }
             else -> null
         }
     }

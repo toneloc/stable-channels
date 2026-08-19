@@ -37,7 +37,8 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
     val scope = rememberCoroutineScope()
 
     val sc by appState.stableChannel.collectAsState()
-    val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // Trading fails closed while the displayed cache is stale or quarantined.
+    val btcPrice by appState.priceService.accountingPrice.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val stableSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
     val nativeSatsDisplay = if (lightningSats > stableSats) lightningSats - stableSats else 0L
@@ -169,6 +170,15 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
 
+                if (btcPrice <= 0.0) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "A fresh BTC/USD consensus is required before trading",
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = {
@@ -179,6 +189,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                             step = TradeStep.CONFIRM
                         }
                     },
+                    enabled = btcPrice > 0.0,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Continue") }
             }
@@ -213,18 +224,22 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                         scope.launch(Dispatchers.IO) {
                             try {
                                 appState.ensureLSPConnected()
-                                val totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, btcPrice).amount
-                                val result = appState.tradeService?.executeSell(sc, amountUSD, feeUSD, btcPrice, totalUSD)
+                                val tradePrice = appState.priceService.currentAccountingPrice()
+                                if (tradePrice <= 0.0) {
+                                    throw Exception("A fresh BTC/USD consensus is required before trading")
+                                }
+                                val totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, tradePrice).amount
+                                val result = appState.tradeService?.executeSell(sc, amountUSD, feeUSD, tradePrice, totalUSD)
                                     ?: throw Exception("Trade service unavailable")
                                 val tradeDbId = appState.databaseService?.recordTrade(
                                     channelId = sc.channelId, action = "sell",
                                     amountUSD = amountUSD, amountBTC = result.btcAmount,
-                                    btcPrice = btcPrice, feeUSD = feeUSD,
+                                    btcPrice = tradePrice, feeUSD = feeUSD,
                                     paymentId = result.paymentId, status = "pending"
                                 ) ?: 0
                                 appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
-                                    price = btcPrice,
+                                    price = tradePrice,
                                     tradeDbId = tradeDbId,
                                     action = "sell"
                                 ))
@@ -237,7 +252,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                             isExecuting = false
                         }
                     },
-                    enabled = !isExecuting,
+                    enabled = !isExecuting && btcPrice > 0.0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isExecuting) CircularProgressIndicator(Modifier.size(20.dp))

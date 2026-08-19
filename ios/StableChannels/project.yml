@@ -69,6 +69,7 @@ targets:
     platform: iOS
     sources:
       - path: NotificationService
+      - path: StableChannels/Services/PriceOracle.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.NotificationService

@@ -37,6 +37,8 @@ enum class Phase {
     LOADING, ONBOARDING, SYNCING, WALLET, ERROR
 }
 
+private class RetryableSyncException(message: String) : Exception(message)
+
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
@@ -55,7 +57,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     val nodeService = NodeService(context)
-    val priceService = PriceService()
+    val priceService = PriceService(context)
     var databaseService: DatabaseService? = null
         private set
     var tradeService: TradeService? = null
@@ -1001,7 +1003,13 @@ class AppState(private val context: Context) : ViewModel() {
         val (type, expectedUsd, _) = parsed
         if (type != Constants.SYNC_MESSAGE_TYPE) return false
 
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) {
+            AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
+            // Propagate to the event collector so it completes the ack with false and LDK
+            // re-delivers this authenticated sync after the price oracle recovers.
+            throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
+        }
         val sc = StabilityService.applyTrade(_stableChannel.value, expectedUsd, price)
         _stableChannel.value = sc
         saveChannelToDB()
@@ -1590,10 +1598,10 @@ class AppState(private val context: Context) : ViewModel() {
         refreshBalances()
         updateStableBalances()
         val sc = _stableChannel.value
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
 
-        if (priceService.isPriceStale()) {
-            AuditService.log("STABILITY_SKIP", mapOf("reason" to "stale_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
+        if (price <= 0.0) {
+            AuditService.log("STABILITY_SKIP", mapOf("reason" to "untrusted_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
             return
         }
 

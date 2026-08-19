@@ -39,9 +39,11 @@ enum Constants {
 
     // MARK: - Timing
 
-    static let priceCacheRefreshSecs: UInt64 = 5
-    static let priceFetchRetryDelayMs: UInt64 = 300
-    static let priceFetchMaxRetries = 3
+    static let priceCacheRefreshSecs: UInt64 = 15
+    static let priceFetchTimeoutSecs: TimeInterval = 3
+    /// Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
+    /// than a single-price ticker and must not share the short per-feed ticker timeout.
+    static let chartFetchTimeoutSecs: TimeInterval = 30
 
     static let onchainWalletSyncIntervalSecs: UInt64 = 120
     static let lightningWalletSyncIntervalSecs: UInt64 = 60
@@ -79,36 +81,6 @@ enum Constants {
     static let minChannelLifetime: UInt32 = 100
     static let maxProportionalLSPFeeLimitPPMMsat: UInt64 = 10_000_000
 
-    // MARK: - Price Feeds
-
-    static let defaultPriceFeeds: [PriceFeedConfig] = [
-        PriceFeedConfig(
-            name: "Bitstamp",
-            urlFormat: "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-            jsonPath: ["last"]
-        ),
-        PriceFeedConfig(
-            name: "CoinGecko",
-            urlFormat: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            jsonPath: ["bitcoin", "usd"]
-        ),
-        PriceFeedConfig(
-            name: "Kraken",
-            urlFormat: "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD",
-            jsonPath: ["result", "XXBTZUSD", "c"]
-        ),
-        PriceFeedConfig(
-            name: "Coinbase",
-            urlFormat: "https://api.coinbase.com/v2/prices/spot?currency=USD",
-            jsonPath: ["data", "amount"]
-        ),
-        PriceFeedConfig(
-            name: "Blockchain.com",
-            urlFormat: "https://blockchain.info/ticker",
-            jsonPath: ["USD", "last"]
-        )
-    ]
-
     // MARK: - RGS (Rapid Gossip Sync) Servers
 
     enum RGSServer {
@@ -134,12 +106,6 @@ enum Constants {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("StableChannels").appendingPathComponent(defaultUserAlias)
     }
-}
-
-struct PriceFeedConfig: Codable {
-    let name: String
-    let urlFormat: String
-    let jsonPath: [String]
 }
 
 // MARK: - Seed Constants

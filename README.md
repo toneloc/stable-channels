@@ -29,7 +29,7 @@ Stable Channels ships as an iOS app, an Android app, and a desktop wallet (macOS
 
 The LSP/Server keeps the user stable by overcollateralizing the Stable Channel by 100% at the time of channel creation. Each user (the stability receiver and the LSP/stability provider) puts in the same amount of bitcoin, and the stability mechanism is activated. 
 
-The stability mechanism works like this: each node queries five exchange price feeds every minute. Based on the updated price, they adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
+The stability mechanism works like this: each node refreshes a multi-exchange BTC/USD price consensus every 15 seconds. Six direct USD markets are preferred; a geographically diverse BTC/USDT fallback is used only when at least three independent USDT/USD sources confirm that USDT remains within 0.5% of its dollar peg. At least three agreeing prices are required, outliers are excluded, and stale or suspicious prices can remain visible but cannot move money. Based on an accepted price, the nodes adjust the channel balance with their counterparty to keep the stability receiver's balance at a fixed dollar value (e.g., $100,000 of bitcoin).
 
 <p align="center">
   <img src="./photos/sc.gif" alt="Stable Channels Architecture" width="700"/>
@@ -93,7 +93,7 @@ This points git at `.githooks/` so the pre-commit checks (secret scanning, `carg
 
 ### Stable Channels Process
 
-Every 60 seconds, the price of bitcoin:
+When the accepted price of bitcoin changes:
 
 - **(a) Goes up:**
   - **User/Stable Receiver loses bitcoin.**

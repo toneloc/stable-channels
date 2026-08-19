@@ -321,6 +321,16 @@
         }
       }
     },
+    "%lld/%lld" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld/%2$lld"
+          }
+        }
+      }
+    },
     "%lld%% USD  %lld%% BTC" : {
       "localizations" : {
         "ar" : {
@@ -391,6 +401,9 @@
         }
       }
     },
+    "A fresh BTC/USD consensus is required before trading" : {
+
+    },
     "Active" : {
       "localizations" : {
         "ar" : {
@@ -451,6 +464,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "活跃"
+          }
+        }
+      }
+    },
+    "alert_cancel" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Cancel"
           }
         }
       }
@@ -739,6 +763,39 @@
         }
       }
     },
+    "alert_connect" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Connect"
+          }
+        }
+      }
+    },
+    "alert_connect_lsp_message" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This will restart your node to connect to the new LSP. No funds will be lost."
+          }
+        }
+      }
+    },
+    "alert_connect_lsp_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Connect to LSP"
+          }
+        }
+      }
+    },
     "alert_no_qr" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -877,6 +934,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "读取二维码时出错"
+          }
+        }
+      }
+    },
+    "alert_reset" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Reset"
+          }
+        }
+      }
+    },
+    "alert_reset_lsp_message" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This will reconnect to the default Stable Channels LSP and restart your node."
+          }
+        }
+      }
+    },
+    "alert_reset_lsp_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Reset LSP"
           }
         }
       }
@@ -1868,6 +1958,50 @@
         }
       }
     },
+    "backup_warning_body" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This backup contains your seed phrase. Lightning channel state is NOT included. Please email support@stablechannels.com for questions or assistance."
+          }
+        }
+      }
+    },
+    "backup_warning_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Important"
+          }
+        }
+      }
+    },
+    "badge_custom" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Custom"
+          }
+        }
+      }
+    },
+    "badge_default" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Default"
+          }
+        }
+      }
+    },
     "Bitcoin address QR code" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2290,6 +2424,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关闭通道"
+          }
+        }
+      }
+    },
+    "button_confirm_order" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirm Order"
+          }
+        }
+      }
+    },
+    "button_connect_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Connect"
           }
         }
       }
@@ -3583,6 +3739,17 @@
         }
       }
     },
+    "button_reset_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Reset LSP"
+          }
+        }
+      }
+    },
     "button_restore" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4794,6 +4961,17 @@
         }
       }
     },
+    "confirmations_complete" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirmed"
+          }
+        }
+      }
+    },
     "custody_self" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5205,6 +5383,9 @@
           }
         }
       }
+    },
+    "Download logs" : {
+
     },
     "empty_payments_desc" : {
       "extractionState" : "manual",
@@ -5770,6 +5951,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "输入密码"
+          }
+        }
+      }
+    },
+    "error_address_invalid" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Address must be in host:port format (e.g. example.com:9735)."
+          }
+        }
+      }
+    },
+    "error_alias_empty" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Display name is required."
           }
         }
       }
@@ -6768,6 +6971,28 @@
         }
       }
     },
+    "error_lsp_reset_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Failed to reset. Please try again."
+          }
+        }
+      }
+    },
+    "error_lsp_restart_failed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Failed to connect. The node has been restored to the previous LSP."
+          }
+        }
+      }
+    },
     "error_no_file" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -7332,6 +7557,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "密码验证失败"
+          }
+        }
+      }
+    },
+    "error_price_unavailable" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The BTC price is unavailable or stale. Refresh and try again."
+          }
+        }
+      }
+    },
+    "error_pubkey_invalid" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Pubkey must be a 66-character hex string starting with 02 or 03."
           }
         }
       }
@@ -8535,6 +8782,12 @@
           }
         }
       }
+    },
+    "Face ID access is turned off for Stable Channels. Please enable it in Settings > Stable Channels > Face ID." : {
+
+    },
+    "Face ID Access Required" : {
+
     },
     "file_ready" : {
       "extractionState" : "extracted_with_value",
@@ -10219,6 +10472,17 @@
         }
       }
     },
+    "info_custom_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
+          }
+        }
+      }
+    },
     "info_fee_approx" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -10286,6 +10550,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "预估费用：~"
+          }
+        }
+      }
+    },
+    "info_fee_estimating" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Estimating network fee..."
           }
         }
       }
@@ -10428,6 +10703,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "资金将在 1 个链上确认后到达"
+          }
+        }
+      }
+    },
+    "info_lightning_lsp_fee_estimate" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "~%@ BTC"
+          }
+        }
+      }
+    },
+    "info_lightning_lsp_fee_estimate_with_usd" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "~%1$@ (%2$@ BTC)"
+          }
+        }
+      }
+    },
+    "info_lightning_lsp_fee_none" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No fee expected"
           }
         }
       }
@@ -10641,6 +10949,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用通知以接收付款提醒"
+          }
+        }
+      }
+    },
+    "info_onchain_fee_estimate_sentence" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Expected network fee: ~%1$@ BTC (%2$llu sat/vB)"
+          }
+        }
+      }
+    },
+    "info_onchain_fee_estimate_value" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "~%1$@ BTC (%2$llu sat/vB)"
           }
         }
       }
@@ -13982,6 +14312,17 @@
         }
       }
     },
+    "label_display_name" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Display Name"
+          }
+        }
+      }
+    },
     "label_distance_from_par" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14621,6 +14962,17 @@
         }
       }
     },
+    "label_host_port" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Host:Port"
+          }
+        }
+      }
+    },
     "label_inbound" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -14688,6 +15040,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "入站 (Inbound)"
+          }
+        }
+      }
+    },
+    "label_lsps2_token" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "LSPS2 Token (optional)"
           }
         }
       }
@@ -15114,6 +15477,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "节点标识"
+          }
+        }
+      }
+    },
+    "label_node_pubkey" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node Pubkey"
           }
         }
       }
@@ -15682,6 +16056,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "付款 ID"
+          }
+        }
+      }
+    },
+    "label_pubkey" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Pubkey"
           }
         }
       }
@@ -17035,6 +17420,17 @@
         }
       }
     },
+    "link_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lightning Service Provider"
+          }
+        }
+      }
+    },
     "link_node" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -17528,6 +17924,53 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在加载余额..."
+          }
+        }
+      }
+    },
+    "Logs & Diagnostics" : {
+
+    },
+    "lsp_locked_body" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Close your active channel to switch LSP."
+          }
+        }
+      }
+    },
+    "lsp_locked_footer" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The Lightning Service Provider cannot be changed while a channel is open. The counterparty node is part of the channel's funding transaction."
+          }
+        }
+      }
+    },
+    "lsp_locked_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "LSP configuration locked"
+          }
+        }
+      }
+    },
+    "lsp_switch_success" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Node restarted with new LSP"
           }
         }
       }
@@ -18044,6 +18487,9 @@
         }
       }
     },
+    "Open Settings" : {
+
+    },
     "Partial Recovery Warning" : {
       "localizations" : {
         "ar" : {
@@ -18317,6 +18763,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "密码不匹配"
+          }
+        }
+      }
+    },
+    "payment_detail_error_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Could not load payment details."
+          }
+        }
+      }
+    },
+    "payment_detail_error_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Error"
           }
         }
       }
@@ -19244,6 +19712,17 @@
         }
       }
     },
+    "placeholder_alias" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "My LSP"
+          }
+        }
+      }
+    },
     "placeholder_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -19528,6 +20007,17 @@
         }
       }
     },
+    "placeholder_pubkey" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "02... or 03..."
+          }
+        }
+      }
+    },
     "placeholder_seed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -19599,7 +20089,19 @@
         }
       }
     },
+    "placeholder_token" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Leave empty if not required"
+          }
+        }
+      }
+    },
     "Please email" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -20494,6 +20996,9 @@
         }
       }
     },
+    "Save app logs to a file for debugging and support." : {
+
+    },
     "section_about" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -20561,6 +21066,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关于"
+          }
+        }
+      }
+    },
+    "section_active_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Active LSP"
           }
         }
       }
@@ -20987,6 +21503,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "托管模式"
+          }
+        }
+      }
+    },
+    "section_custom_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Connect to a Custom LSP"
           }
         }
       }
@@ -22333,6 +22860,9 @@
         }
       }
     },
+    "Share the logs" : {
+
+    },
     "status_channel_closed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -22684,6 +23214,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在收集价格数据..."
+          }
+        }
+      }
+    },
+    "status_confirmed" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Confirmed"
+          }
+        }
+      }
+    },
+    "status_connected" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Connected"
+          }
+        }
+      }
+    },
+    "status_offline" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Offline"
           }
         }
       }
@@ -24179,6 +24742,9 @@
         }
       }
     },
+    "Support" : {
+
+    },
     "support@stablechannels.com" : {
       "localizations" : {
         "ar" : {
@@ -24883,6 +25449,7 @@
       }
     },
     "This backup contains your seed phrase. Lightning channel state is NOT included." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -25940,6 +26507,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "历史记录"
+          }
+        }
+      }
+    },
+    "title_lsp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lightning Service Provider"
           }
         }
       }

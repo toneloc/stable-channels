@@ -40,7 +40,12 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // Amount derivation and send enablement track the trusted accounting price, so an untrusted
+    // oracle state is visible (blank sats, disabled button) before tapping — iOS parity.
+    val accountingBtcPrice by appState.priceService.accountingPrice.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
+    val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
+    val satsFromUSD = accountingSatsFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
     val feeVbytes = if (sendAll) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
@@ -237,8 +242,6 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     )
                 }
 
-                val usd = amountUSDStr.toDoubleOrNull() ?: 0.0
-                val satsFromUSD = if (btcPrice > 0 && usd > 0) (usd / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
                 if (satsFromUSD > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text("~ ${satsFromUSD.satsFormatted()} sats", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -301,7 +304,12 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 successTxid = txid
                             } else {
                                 val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
-                                val sats = if (price > 0) (usd / price * Constants.SATS_IN_BTC).toLong() else throw Exception("No price available")
+                                // Money movement converts USD at the trusted accounting price,
+                                // never the raw display price (iOS parity). The same captured
+                                // price is recorded so history reflects the rate actually used.
+                                val accountingPrice = appState.priceService.currentAccountingPrice()
+                                val sats = accountingSatsFromUSD(usd, accountingPrice)
+                                    ?: throw Exception("A trusted BTC/USD price is required")
                                 if (hasChannel) {
                                     if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value
@@ -319,8 +327,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     appState.databaseService?.recordPayment(
                                         paymentId = txid, paymentType = "onchain", direction = "sent",
                                         amountMsat = sats * 1000,
-                                        amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
-                                        btcPrice = if (price > 0) price else null,
+                                        amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                        btcPrice = accountingPrice,
                                         txid = txid, address = addr
                                     )
                                     appState.refreshBalances()
@@ -334,7 +342,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                         isSending = false
                     }
                 },
-                enabled = !isSending && address.isNotBlank(),
+                enabled = !isSending && address.isNotBlank() && (sendAll || satsFromUSD > 0),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (isSending) CircularProgressIndicator(Modifier.size(20.dp))

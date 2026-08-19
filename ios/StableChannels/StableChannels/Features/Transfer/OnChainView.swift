@@ -13,8 +13,14 @@ struct OnChainSendView: View {
     @State private var feeRateSatVb: UInt64?
 
     private var amountSats: UInt64? {
-        guard let usd = Double(amountUSDStr), usd > 0, appState.btcPrice > 0 else { return nil }
-        return UInt64(usd / appState.btcPrice * Double(Constants.satsInBTC))
+        convertedSats(price: appState.accountingBTCPrice)
+    }
+
+    private func convertedSats(price: Double) -> UInt64? {
+        guard let usd = Double(amountUSDStr), usd > 0, price > 0 else { return nil }
+        let sats = usd / price * Double(Constants.satsInBTC)
+        guard sats.isFinite, sats >= 1, sats < Double(UInt64.max) else { return nil }
+        return UInt64(sats)
     }
 
     private var hasReadyChannel: Bool {
@@ -313,8 +319,19 @@ struct OnChainSendView: View {
         errorMessage = nil
         defer { isSending = false }
 
-        let sats = sendAll ? UInt64(0) : (amountSats ?? 0)
-        guard sendAll || sats > 0 else { return }
+        let conversionPrice = sendAll ? nil : appState.accountingBTCPrice
+        let sats: UInt64
+        if sendAll {
+            sats = 0
+        } else if let price = conversionPrice, let converted = convertedSats(price: price) {
+            sats = converted
+        } else {
+            errorMessage = String(
+                localized: "error_price_unavailable",
+                defaultValue: "The BTC price is unavailable or stale. Refresh and try again."
+            )
+            return
+        }
 
         do {
             // If channel exists, route through splice-out
@@ -362,7 +379,7 @@ struct OnChainSendView: View {
             } else {
                 let result = try appState.nodeService.sendOnchain(address: address, amountSats: sats)
                 txid = result
-                let price = appState.btcPrice
+                let price = conversionPrice ?? 0
                 _ = try? appState.databaseService?.paymentRepo.recordPayment(
                     paymentId: result,
                     paymentType: "onchain",
