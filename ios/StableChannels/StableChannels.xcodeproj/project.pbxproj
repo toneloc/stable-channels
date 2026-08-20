@@ -473,6 +473,7 @@
 				498244A83022712F0086BDB6 /* BiometricProtocols.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */,
+				49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */,
 				49B100D4302A493400D72430 /* WalletKeychainService.swift */,
 			);
 			path = Biometric;
@@ -926,6 +927,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
 				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
@@ -1000,6 +1002,7 @@
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
+				49D0FF57302CF5FD00D38B06 /* MnemonicMigrator.swift in Sources */,
 				E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */,
 				4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */,
 				494445793053DB2400B5A146 /* PriceChartFetching.swift in Sources */,
