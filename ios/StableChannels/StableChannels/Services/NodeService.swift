@@ -594,6 +594,7 @@ extension Notification.Name {
     static let ldkEventReceived = Notification.Name("ldkEventReceived")
 }
 
+// Keep in sync with NotificationService/Services/NodeStarter.swift.
 extension Error {
     /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
     /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)

@@ -163,6 +163,7 @@ final class DefaultNodeStarter: NodeStarter {
     }
 }
 
+// Keep in sync with StableChannels/Services/NodeService.swift.
 extension Error {
     /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
     /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
