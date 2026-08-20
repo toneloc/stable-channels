@@ -84,6 +84,10 @@
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49B100D5302A493400D72430 /* WalletKeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B100D4302A493400D72430 /* WalletKeychainService.swift */; };
 		49B100D6302A493400D72430 /* WalletKeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B100D4302A493400D72430 /* WalletKeychainService.swift */; };
+		49BB390A0000000000000002 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
+		49BB390A0000000000000004 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
+		49BB390A0000000000000005 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
+		49BB390A0000000000000006 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
 		49D0FF57302CF5FD00D38B06 /* MnemonicMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */; };
 		49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */; };
 		49D0FF61302CF70000D38B06 /* WalletLifecycleManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF60302CF70000D38B06 /* WalletLifecycleManagerTests.swift */; };
@@ -126,10 +130,6 @@
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
 		6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */; };
-		49BB390A0000000000000002 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
-		49BB390A0000000000000004 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
-		49BB390A0000000000000005 /* BIP39.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000001 /* BIP39.swift */; };
-		49BB390A0000000000000006 /* BIP39WordList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390A0000000000000003 /* BIP39WordList.swift */; };
 		64791A21EBEE43769493F7F3 /* WalletKeychainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64791A21EBEE43769493F7F4 /* WalletKeychainServiceTests.swift */; };
 		6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6EF4DE5A43647E46CAAD52B /* TradeService.swift */; };
 		6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */; };
@@ -266,6 +266,8 @@
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49B100D4302A493400D72430 /* WalletKeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletKeychainService.swift; sourceTree = "<group>"; };
+		49BB390A0000000000000001 /* BIP39.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BIP39.swift; sourceTree = "<group>"; };
+		49BB390A0000000000000003 /* BIP39WordList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BIP39WordList.swift; sourceTree = "<group>"; };
 		49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicMigrator.swift; sourceTree = "<group>"; };
 		49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicMigratorTests.swift; sourceTree = "<group>"; };
 		49D0FF60302CF70000D38B06 /* WalletLifecycleManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletLifecycleManagerTests.swift; sourceTree = "<group>"; };
@@ -321,8 +323,6 @@
 		7DB261201C1C656BAAED5283 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		7E0FAABBD08BCBF20220C850 /* SendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendView.swift; sourceTree = "<group>"; };
 		82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicUtils.swift; sourceTree = "<group>"; };
-		49BB390A0000000000000001 /* BIP39.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BIP39.swift; sourceTree = "<group>"; };
-		49BB390A0000000000000003 /* BIP39WordList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BIP39WordList.swift; sourceTree = "<group>"; };
 		840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FundWalletView.swift; sourceTree = "<group>"; };
 		8811E90D4B2B5C5C51093A95 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedWordGridView.swift; sourceTree = "<group>"; };
@@ -538,6 +538,7 @@
 			isa = PBXGroup;
 			children = (
 				49DDB0022FF0000200000001 /* ChannelRepository.swift */,
+				49DDB0092FF0000200000001 /* HeaderRepository.swift */,
 				49DDB0012FF0000200000001 /* Models.swift */,
 				49DDB0042FF0000200000001 /* OnchainReceiveRepository.swift */,
 				49DDB0032FF0000200000001 /* PaymentRepository.swift */,
@@ -545,7 +546,6 @@
 				49DDB0052FF0000200000001 /* PriceRepository.swift */,
 				49DDB0062FF0000200000001 /* SpliceRepository.swift */,
 				49DDB0072FF0000200000001 /* StabilitySendRepository.swift */,
-				49DDB0092FF0000200000001 /* HeaderRepository.swift */,
 			);
 			path = Repositories;
 			sourceTree = "<group>";
