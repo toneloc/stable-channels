@@ -133,44 +133,7 @@ class NodeService: NodeServiceProtocol {
     weak var databaseService: DatabaseService?
 
     init() {
-        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
-
-        // Encrypted-first: an existing Keychain seed is authoritative.
-        if let keychainMnemonic = try? WalletKeychainService.shared.loadMnemonic() {
-            savedMnemonic = keychainMnemonic
-
-            // If a plaintext file lingers, reconcile rather than blindly overwrite.
-            if let plaintext = try? String(contentsOfFile: path.path, encoding: .utf8) {
-                let trimmed = plaintext.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty, trimmed != keychainMnemonic {
-                    // Two different seeds present — do NOT overwrite. Surface it.
-                    AuditService.log("KEYCHAIN_PLAINTEXT_MISMATCH", data: [:])
-                    return
-                }
-                // Same value (or empty): safe to remove the plaintext, and report if it fails.
-                do { try FileManager.default.removeItem(at: path) }
-                catch {
-                    AuditService.log("KEYCHAIN_PLAINTEXT_DELETE_FAILED", data: ["error": error.localizedDescription])
-                }
-            }
-            return
-        }
-
-        // Keychain empty — migrate plaintext if present.
-        guard let words = try? String(contentsOfFile: path.path, encoding: .utf8) else { return }
-        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        savedMnemonic = trimmed
-        do {
-            try WalletKeychainService.shared.storeMnemonic(trimmed) // verified write
-            do { try FileManager.default.removeItem(at: path) }
-            catch {
-                AuditService.log("KEYCHAIN_PLAINTEXT_DELETE_FAILED", data: ["error": error.localizedDescription])
-            }
-        } catch {
-            // Migration failed — keep the plaintext so nothing is lost, and log it.
-            AuditService.log("KEYCHAIN_MIGRATION_FAILED", data: ["error": error.localizedDescription])
-        }
+        savedMnemonic = MnemonicMigrator.loadOrMigrateMnemonic()
     }
 
     // MARK: - Lifecycle

@@ -83,6 +83,8 @@
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49B100D5302A493400D72430 /* WalletKeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B100D4302A493400D72430 /* WalletKeychainService.swift */; };
 		49B100D6302A493400D72430 /* WalletKeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B100D4302A493400D72430 /* WalletKeychainService.swift */; };
+		49D0FF57302CF5FD00D38B06 /* MnemonicMigrator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */; };
+		49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -257,6 +259,8 @@
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49B100D4302A493400D72430 /* WalletKeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletKeychainService.swift; sourceTree = "<group>"; };
+		49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicMigrator.swift; sourceTree = "<group>"; };
+		49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicMigratorTests.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -426,6 +430,7 @@
 				498244A83022712F0086BDB6 /* BiometricProtocols.swift */,
 				49D9C2E12FB6E52E00133509 /* BiometricService.swift */,
 				498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */,
+				49D0FF56302CF5FD00D38B06 /* MnemonicMigrator.swift */,
 				49B100D4302A493400D72430 /* WalletKeychainService.swift */,
 			);
 			path = Biometric;
@@ -726,6 +731,7 @@
 				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
 				49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */,
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
+				49D0FF58302CF61600D38B06 /* MnemonicMigratorTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
@@ -864,6 +870,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49D0FF59302CF61600D38B06 /* MnemonicMigratorTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
@@ -926,6 +933,7 @@
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
+				49D0FF57302CF5FD00D38B06 /* MnemonicMigrator.swift in Sources */,
 				E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */,
 				4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */,
 				88769D82377C43BCF549A52C /* HistoryView.swift in Sources */,
