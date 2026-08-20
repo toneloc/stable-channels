@@ -37,7 +37,6 @@ enum NodeStarterError: Error {
     /// data dir — the silent wrong-identity class. Fail closed instead.
     case missingSeedFile
 }
-}
 
 /// Concrete implementation of NodeStarter
 final class DefaultNodeStarter: NodeStarter {
