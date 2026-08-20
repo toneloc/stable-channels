@@ -2542,7 +2542,7 @@ class AppState {
 
     /// Starts the node with the current chainURL, and automatically falls back to the
     /// secondary Esplora source (e.g. mempool.space) if primary startup encounters an
-    /// Esplora fee-rate estimation failure or network timeout.
+    /// Esplora fee-rate estimation failure or timeout.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
         let initialURL = chainURL
         do {
@@ -2553,9 +2553,16 @@ class AppState {
                 lspConfig: activeLSP
             )
         } catch {
+            guard error.isRetryableEsploraStartupError else {
+                // Non-Esplora errors (database, storage, lock, entropy, already running)
+                // must propagate immediately without retrying.
+                throw error
+            }
+
+            let initialError = error
             AuditService.log("NODE_START_INITIAL_FAILED", data: [
                 "esploraURL": initialURL,
-                "error": error.localizedDescription
+                "error": initialError.localizedDescription
             ])
 
             let fallbackURL = (initialURL == Constants.primaryChainURL)
@@ -2581,9 +2588,11 @@ class AppState {
                 AuditService.log("NODE_START_FAILOVER_FAILED", data: [
                     "primary": initialURL,
                     "fallback": fallbackURL,
-                    "error": fallbackError.localizedDescription
+                    "primary_error": initialError.localizedDescription,
+                    "fallback_error": fallbackError.localizedDescription
                 ])
-                throw fallbackError
+                // Preserve the original primary error when fallback also fails
+                throw initialError
             }
         }
     }

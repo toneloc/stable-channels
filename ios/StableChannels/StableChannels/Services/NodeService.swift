@@ -23,7 +23,12 @@ final class NodeDirLock: @unchecked Sendable {
     static let lockFilename = "ldk-node.lock"
 
     private var fd: Int32 = -1
+    private var holdCount: Int = 0
     private let queue = DispatchQueue(label: "com.stablechannels.nodedirlock")
+
+    var isHeld: Bool {
+        queue.sync { fd >= 0 }
+    }
 
     /// Take the lock without blocking. Returns true if acquired or already
     /// held by this process.
@@ -46,18 +51,35 @@ final class NodeDirLock: @unchecked Sendable {
         }
     }
 
-    /// Release if held. Safe to call when not holding (no-op).
+    /// Release if held. Decrements the process hold count and releases the flock
+    /// when the hold count reaches zero. Safe to call when not holding (no-op).
     func release() {
+        queue.sync {
+            guard fd >= 0 else { return }
+            holdCount -= 1
+            if holdCount <= 0 {
+                flock(fd, LOCK_UN)
+                close(fd)
+                fd = -1
+                holdCount = 0
+            }
+        }
+    }
+
+    /// Unconditionally release the lock regardless of hold count (e.g. fatal shutdown/cleanup).
+    func forceRelease() {
         queue.sync {
             guard fd >= 0 else { return }
             flock(fd, LOCK_UN)
             close(fd)
             fd = -1
+            holdCount = 0
         }
     }
 
     private func tryAcquireLocked(dataDir: URL) -> Bool {
         if fd >= 0 {
+            holdCount += 1
             return true
         } // already held by this process
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
@@ -69,6 +91,7 @@ final class NodeDirLock: @unchecked Sendable {
             return false
         }
         fd = f
+        holdCount = 1
         return true
     }
 }
@@ -569,4 +592,22 @@ enum NodeServiceError: LocalizedError {
 
 extension Notification.Name {
     static let ldkEventReceived = Notification.Name("ldkEventReceived")
+}
+
+extension Error {
+    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
+    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
+    /// return false and should not be retried.
+    var isRetryableEsploraStartupError: Bool {
+        if let nodeError = self as? NodeError {
+            switch nodeError {
+            case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+                return true
+            default:
+                return false
+            }
+        }
+        let desc = localizedDescription
+        return desc.contains("FeerateEstimationUpdateFailed") || desc.contains("FeerateEstimationUpdateTimeout")
+    }
 }

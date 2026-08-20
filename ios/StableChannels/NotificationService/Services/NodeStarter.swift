@@ -65,7 +65,7 @@ final class DefaultNodeStarter: NodeStarter {
             nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
         }
 
-        // Sync config
+        // Fast sync config for background execution under strict 30s deadline
         let syncConfig = EsploraSyncConfig(
             backgroundSyncConfig: BackgroundSyncConfig(
                 onchainWalletSyncIntervalSecs: 600,
@@ -73,11 +73,11 @@ final class DefaultNodeStarter: NodeStarter {
                 feeRateCacheUpdateIntervalSecs: 3600
             ),
             timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 60,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
+                onchainWalletSyncTimeoutSecs: 6,
+                lightningWalletSyncTimeoutSecs: 6,
+                feeRateCacheUpdateTimeoutSecs: 6,
+                txBroadcastTimeoutSecs: 10,
+                perRequestTimeoutSecs: 4
             )
         )
 
@@ -97,21 +97,35 @@ final class DefaultNodeStarter: NodeStarter {
             logger.log("Mem after start: \(memAfterStart / 1024 / 1024) MB")
             return node
         } catch {
+            guard error.isRetryableEsploraStartupError else {
+                logger.log("Non-retryable startup error in NSE: \(error). Propagating immediately.")
+                throw error
+            }
+
+            let initialError = error
             logger
                 .log(
-                    "Primary Esplora failed during start: \(error.localizedDescription). Retrying with fallback: \(fallbackURL)"
+                    "Primary Esplora failed during start: \(initialError.localizedDescription). Retrying with fallback: \(fallbackURL)"
                 )
-            let fallbackBuilder = LDKNode.Builder.fromConfig(config: config)
-            fallbackBuilder.setChainSourceEsplora(
-                serverUrl: fallbackURL,
-                config: syncConfig
-            )
-            let fallbackNode = try fallbackBuilder.build(nodeEntropy: nodeEntropy)
-            try fallbackNode.start()
+            do {
+                let fallbackBuilder = LDKNode.Builder.fromConfig(config: config)
+                fallbackBuilder.setChainSourceEsplora(
+                    serverUrl: fallbackURL,
+                    config: syncConfig
+                )
+                let fallbackNode = try fallbackBuilder.build(nodeEntropy: nodeEntropy)
+                try fallbackNode.start()
 
-            let memAfterStart = Diagnostics.residentMemoryBytes()
-            logger.log("Mem after fallback start: \(memAfterStart / 1024 / 1024) MB")
-            return fallbackNode
+                let memAfterStart = Diagnostics.residentMemoryBytes()
+                logger.log("Mem after fallback start: \(memAfterStart / 1024 / 1024) MB")
+                return fallbackNode
+            } catch let fallbackError {
+                logger
+                    .log(
+                        "Fallback Esplora also failed in NSE: \(fallbackError.localizedDescription). Preserving primary error."
+                    )
+                throw initialError
+            }
         }
     }
 
@@ -146,5 +160,23 @@ final class DefaultNodeStarter: NodeStarter {
             sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
             sqlite3_exec(db, "VACUUM", nil, nil, nil)
         }
+    }
+}
+
+extension Error {
+    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
+    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
+    /// return false and should not be retried.
+    var isRetryableEsploraStartupError: Bool {
+        if let nodeError = self as? NodeError {
+            switch nodeError {
+            case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+                return true
+            default:
+                return false
+            }
+        }
+        let desc = localizedDescription
+        return desc.contains("FeerateEstimationUpdateFailed") || desc.contains("FeerateEstimationUpdateTimeout")
     }
 }
