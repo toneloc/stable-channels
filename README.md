@@ -53,10 +53,12 @@ You can check out the latest builds for macOS, Windows, or Linux here - https://
 
 #### Quick Setup
 ```bash
-cargo run --bin stable-channels user
+cargo run --locked --bin stable-channels user
 ```
 
 This will start the app on mainnet. Pay the invoice and you are good to go.
+
+Always build with `--locked` so cargo uses the exact dependency versions pinned in the committed `Cargo.lock` instead of re-resolving them. Treat any `Cargo.lock` change as a reviewed change — never update dependencies to versions published the same day (see the 2026-08-20 arrayref supply-chain attack, RUSTSEC-2026-0260).
 
 #### Backups and logs
 
@@ -75,7 +77,7 @@ The application works out of the box with sensible defaults defined in `src/cons
 
 ```bash
 # User interface
-cargo run --bin stable-channels user
+cargo run --locked --bin stable-channels user
 
 ```
 
