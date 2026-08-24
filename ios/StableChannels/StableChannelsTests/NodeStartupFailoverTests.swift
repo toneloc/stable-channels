@@ -3,7 +3,7 @@ import LDKNode
 import XCTest
 
 final class NodeStartupFailoverTests: XCTestCase {
-    // MARK: - Error Classification Tests
+    // MARK: - Error Classification
 
     func testNonEsploraErrorsDoNotTriggerRetry() {
         let nonRetryableErrors: [Error] = [
@@ -27,7 +27,21 @@ final class NodeStartupFailoverTests: XCTestCase {
     func testFeerateEstimationErrorsAreRetryable() {
         let retryableErrors: [Error] = [
             NodeError.FeerateEstimationUpdateFailed(message: "HTTP 429 Too Many Requests"),
-            NodeError.FeerateEstimationUpdateTimeout(message: "Connection timed out"),
+            NodeError.FeerateEstimationUpdateTimeout(message: "Connection timed out")
+        ]
+
+        for error in retryableErrors {
+            XCTAssertTrue(
+                error.isRetryableEsploraStartupError,
+                "Feerate error '\(error)' must be classified as retryable"
+            )
+        }
+    }
+
+    func testBridgedErrorsCarryingCaseNameTextAreNotRetryable() {
+        // Only typed NodeError cases qualify. A foreign error whose description happens to
+        // contain the case name must not trigger a provider retry.
+        let impostors: [Error] = [
             NSError(
                 domain: "LDKNode",
                 code: 100,
@@ -40,179 +54,114 @@ final class NodeStartupFailoverTests: XCTestCase {
             )
         ]
 
-        for error in retryableErrors {
-            XCTAssertTrue(
+        for error in impostors {
+            XCTAssertFalse(
                 error.isRetryableEsploraStartupError,
-                "Feerate error '\(error)' must be classified as retryable"
+                "Non-NodeError '\(error)' must not be classified as retryable"
             )
         }
     }
 
-    // MARK: - NodeDirLock Lease Retention Tests
+    // MARK: - NodeDirLock (binary lease with ownership reporting)
 
-    func testNodeDirLockContinuousHoldAcrossFailoverAttempts() async {
-        let tempDir = FileManager.default.temporaryDirectory
+    private func makeTempDir() -> URL {
+        let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("NodeStartupLockTest-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Regression test for the wallet-lock leak: the normal app lifecycle is
+    /// outer AppState acquire → inner NodeService.start acquire (retained on
+    /// success) → ONE release when backgrounding. That single release must free
+    /// the flock, or the NSE is locked out for the life of the suspended app.
+    func testSuccessLifecycleSingleReleaseFreesLock() {
+        let tempDir = makeTempDir()
         defer {
-            NodeDirLock.shared.forceRelease()
+            NodeDirLock.shared.release()
             try? FileManager.default.removeItem(at: tempDir)
         }
 
-        // 1. Outer caller (AppState.startWallet) acquires lock
-        let acquiredByApp = await NodeDirLock.shared.acquire(dataDir: tempDir, timeout: 5)
-        XCTAssertTrue(acquiredByApp, "AppState must acquire the directory lock")
-        XCTAssertTrue(NodeDirLock.shared.isHeld, "Lock must be held after initial acquisition")
+        // Outer AppState lease
+        let outer = NodeDirLock.shared.tryAcquireReportingNew(dataDir: tempDir)
+        XCTAssertTrue(outer.held)
+        XCTAssertTrue(outer.newlyAcquired, "First acquire must own the flock")
 
-        // 2. Inner attempt 1 (primary NodeService.start) takes an inner lease
-        let acquiredByPrimary = NodeDirLock.shared.tryAcquire(dataDir: tempDir)
-        XCTAssertTrue(acquiredByPrimary, "Inner attempt must succeed under existing lock lease")
-        XCTAssertTrue(NodeDirLock.shared.isHeld, "Lock must remain held")
+        // Inner NodeService.start lease — start succeeds, so it never releases
+        let inner = NodeDirLock.shared.tryAcquireReportingNew(dataDir: tempDir)
+        XCTAssertTrue(inner.held)
+        XCTAssertFalse(inner.newlyAcquired, "Nested acquire must not claim ownership")
 
-        // 3. Primary attempt fails and runs defer { release() }
+        // performBackgroundStop: exactly one release hands the dir to the NSE
         NodeDirLock.shared.release()
+        XCTAssertFalse(
+            NodeDirLock.shared.isHeld,
+            "One release must free the lock — anything else starves the NSE while the app is suspended"
+        )
+    }
 
-        // 4. VERIFY: Lock remains held exclusively by AppState during backoff!
+    /// The Esplora failover window: a failed primary NodeService.start must not
+    /// release the flock when AppState holds the outer lease, so no other
+    /// process can take the wallet dir between the two attempts.
+    func testFailedInnerAttemptKeepsOuterLeaseAcrossFailover() {
+        let tempDir = makeTempDir()
+        defer {
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        // Outer AppState lease
+        XCTAssertTrue(NodeDirLock.shared.tryAcquireReportingNew(dataDir: tempDir).held)
+
+        // Primary attempt acquires without ownership, fails, and — per the
+        // ownership rule — performs no release.
+        let primary = NodeDirLock.shared.tryAcquireReportingNew(dataDir: tempDir)
+        XCTAssertTrue(primary.held)
+        XCTAssertFalse(primary.newlyAcquired)
         XCTAssertTrue(
             NodeDirLock.shared.isHeld,
-            "Lock must NOT be dropped between primary failure and fallback attempt"
+            "Lock must survive a failed primary attempt while the outer lease exists"
         )
 
-        // 5. Inner attempt 2 (fallback NodeService.start) takes lease and succeeds
-        let acquiredByFallback = NodeDirLock.shared.tryAcquire(dataDir: tempDir)
-        XCTAssertTrue(acquiredByFallback, "Fallback attempt must succeed under existing lock lease")
-        XCTAssertTrue(NodeDirLock.shared.isHeld, "Lock must remain held during fallback execution")
+        // Fallback attempt runs under the same lease and succeeds.
+        let fallback = NodeDirLock.shared.tryAcquireReportingNew(dataDir: tempDir)
+        XCTAssertTrue(fallback.held)
+        XCTAssertFalse(fallback.newlyAcquired)
 
-        // 6. When outer lifecycle finishes / cleans up
+        // Background stop: one release frees everything.
         NodeDirLock.shared.release()
-        NodeDirLock.shared.release()
-        XCTAssertFalse(NodeDirLock.shared.isHeld, "Lock must release when all leases are returned")
+        XCTAssertFalse(NodeDirLock.shared.isHeld)
     }
 
-    func testNodeDirLockForceRelease() async {
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("NodeStartupForceReleaseTest-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    /// A standalone start (no outer lease) owns the flock and must release it
+    /// on failure so the NSE isn't blocked by a dead startup.
+    func testStandaloneFailedStartReleasesOwnLease() {
+        let tempDir = makeTempDir()
         defer {
-            NodeDirLock.shared.forceRelease()
+            NodeDirLock.shared.release()
             try? FileManager.default.removeItem(at: tempDir)
         }
 
-        _ = await NodeDirLock.shared.acquire(dataDir: tempDir, timeout: 5)
-        _ = NodeDirLock.shared.tryAcquire(dataDir: tempDir)
-        _ = NodeDirLock.shared.tryAcquire(dataDir: tempDir)
-        XCTAssertTrue(NodeDirLock.shared.isHeld)
+        let lease = NodeDirLock.shared.tryAcquireReportingNew(dataDir: tempDir)
+        XCTAssertTrue(lease.held)
+        XCTAssertTrue(lease.newlyAcquired, "Standalone start must own its lease")
 
-        NodeDirLock.shared.forceRelease()
-        XCTAssertFalse(NodeDirLock.shared.isHeld, "forceRelease must immediately clear the lock")
+        // Failure path: owner releases.
+        NodeDirLock.shared.release()
+        XCTAssertFalse(NodeDirLock.shared.isHeld)
     }
 
-    // MARK: - Failover Simulation Runner Tests
+    func testReleaseWithoutHoldIsSafeNoOp() {
+        let tempDir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
 
-    private struct SimulatedStartupCoordinator {
-        var startHandler: (String) async throws -> Void
+        NodeDirLock.shared.release()
+        NodeDirLock.shared.release()
+        XCTAssertFalse(NodeDirLock.shared.isHeld)
 
-        func startWithFailover(initialURL: String, fallbackURL: String) async throws -> String {
-            do {
-                try await startHandler(initialURL)
-                return initialURL
-            } catch {
-                guard error.isRetryableEsploraStartupError else {
-                    // Immediate propagation of non-Esplora errors
-                    throw error
-                }
-
-                let primaryError = error
-                do {
-                    try await startHandler(fallbackURL)
-                    return fallbackURL
-                } catch {
-                    // Preserves original primary error on fallback failure
-                    throw primaryError
-                }
-            }
-        }
-    }
-
-    func testNonEsploraErrorPropagatesImmediatelyWithoutCallingFallback() async {
-        var attempts: [String] = []
-        let coordinator = SimulatedStartupCoordinator { url in
-            attempts.append(url)
-            throw NodeServiceError.alreadyRunning
-        }
-
-        do {
-            _ = try await coordinator.startWithFailover(
-                initialURL: "https://blockstream.info/api",
-                fallbackURL: "https://mempool.space/api"
-            )
-            XCTFail("Should have thrown error")
-        } catch {
-            guard let serviceError = error as? NodeServiceError, serviceError == .alreadyRunning else {
-                XCTFail("Expected NodeServiceError.alreadyRunning, got \(error)")
-                return
-            }
-            XCTAssertEqual(
-                attempts,
-                ["https://blockstream.info/api"],
-                "Must only attempt primary and not call fallback for non-Esplora errors"
-            )
-        }
-    }
-
-    func testFeerateErrorTriggersFallbackAndSucceeds() async throws {
-        var attempts: [String] = []
-        let coordinator = SimulatedStartupCoordinator { url in
-            attempts.append(url)
-            if url == "https://blockstream.info/api" {
-                throw NodeError.FeerateEstimationUpdateFailed(message: "HTTP 429")
-            }
-        }
-
-        let resolvedURL = try await coordinator.startWithFailover(
-            initialURL: "https://blockstream.info/api",
-            fallbackURL: "https://mempool.space/api"
-        )
-
-        XCTAssertEqual(resolvedURL, "https://mempool.space/api")
-        XCTAssertEqual(
-            attempts,
-            ["https://blockstream.info/api", "https://mempool.space/api"],
-            "Must attempt primary first, failover on feerate error, and succeed on secondary"
-        )
-    }
-
-    func testFallbackFailurePreservesOriginalPrimaryError() async {
-        var attempts: [String] = []
-        let coordinator = SimulatedStartupCoordinator { url in
-            attempts.append(url)
-            if url == "https://blockstream.info/api" {
-                throw NodeError.FeerateEstimationUpdateFailed(message: "Blockstream 429 Rate Limited")
-            } else {
-                throw NodeError.FeerateEstimationUpdateTimeout(message: "Mempool Connection Timeout")
-            }
-        }
-
-        do {
-            _ = try await coordinator.startWithFailover(
-                initialURL: "https://blockstream.info/api",
-                fallbackURL: "https://mempool.space/api"
-            )
-            XCTFail("Should have thrown error")
-        } catch {
-            if case let NodeError.FeerateEstimationUpdateFailed(msg) = error {
-                XCTAssertEqual(
-                    msg,
-                    "Blockstream 429 Rate Limited",
-                    "Must preserve the primary error when fallback also fails"
-                )
-            } else {
-                XCTFail("Expected original FeerateEstimationUpdateFailed error, got \(error)")
-            }
-            XCTAssertEqual(
-                attempts,
-                ["https://blockstream.info/api", "https://mempool.space/api"]
-            )
-        }
+        XCTAssertTrue(NodeDirLock.shared.tryAcquire(dataDir: tempDir))
+        NodeDirLock.shared.release()
+        NodeDirLock.shared.release()
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "Extra releases must stay harmless no-ops")
     }
 }

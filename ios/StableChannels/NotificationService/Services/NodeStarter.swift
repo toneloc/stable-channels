@@ -10,11 +10,19 @@ protocol NodeStarter {
 
 extension NodeStarter {
     func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node {
-        try buildNode(
+        // Prefer the URL the main app last started a node against (written on every
+        // successful start, including failover) so the NSE doesn't pay a degraded
+        // primary's failure before falling over itself.
+        let stored = UserDefaults(suiteName: Constants.appGroup)?.string(forKey: "esplora_chain_url")
+        let primary = stored ?? Constants.primaryChainURL
+        let fallback = (primary == Constants.primaryChainURL)
+            ? Constants.fallbackChainURL
+            : Constants.primaryChainURL
+        return try buildNode(
             dataDir: dataDir,
             logger: logger,
-            primaryURL: Constants.primaryChainURL,
-            fallbackURL: Constants.fallbackChainURL
+            primaryURL: primary,
+            fallbackURL: fallback
         )
     }
 }
@@ -71,7 +79,13 @@ final class DefaultNodeStarter: NodeStarter {
             nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
         }
 
-        // Fast sync config for background execution under strict 30s deadline
+        // Sync config. Only fee estimation blocks node.start() — the wallet syncs run in
+        // background tasks afterward — so only feeRateCacheUpdateTimeoutSecs is shortened,
+        // to bound how long a degraded provider can hold up startup before failover. The
+        // wallet-sync timeouts stay generous: a timed-out sync never updates
+        // latest_lightning_wallet_sync_timestamp, and the NSE gets essentially one sync
+        // attempt per run (600s interval), which the chain-freshness gate depends on for
+        // long-offline wallets.
         let syncConfig = EsploraSyncConfig(
             backgroundSyncConfig: BackgroundSyncConfig(
                 onchainWalletSyncIntervalSecs: 600,
@@ -79,11 +93,11 @@ final class DefaultNodeStarter: NodeStarter {
                 feeRateCacheUpdateIntervalSecs: 3600
             ),
             timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 6,
-                lightningWalletSyncTimeoutSecs: 6,
+                onchainWalletSyncTimeoutSecs: 60,
+                lightningWalletSyncTimeoutSecs: 60,
                 feeRateCacheUpdateTimeoutSecs: 6,
-                txBroadcastTimeoutSecs: 10,
-                perRequestTimeoutSecs: 4
+                txBroadcastTimeoutSecs: 30,
+                perRequestTimeoutSecs: 15
             )
         )
 
@@ -178,15 +192,15 @@ extension Error {
     /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
     /// return false and should not be retried.
     var isRetryableEsploraStartupError: Bool {
-        if let nodeError = self as? NodeError {
-            switch nodeError {
-            case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
-                return true
-            default:
-                return false
-            }
+        // Typed match only: NodeError's description is a human sentence ("Failed to
+        // update fee rate estimates."), so string-matching case names never fires for
+        // real errors and could false-positive on a bridged error carrying the text.
+        guard let nodeError = self as? NodeError else { return false }
+        switch nodeError {
+        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+            return true
+        default:
+            return false
         }
-        let desc = localizedDescription
-        return desc.contains("FeerateEstimationUpdateFailed") || desc.contains("FeerateEstimationUpdateTimeout")
     }
 }
