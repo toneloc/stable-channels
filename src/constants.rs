@@ -77,6 +77,11 @@ pub const ONCHAIN_WALLET_SYNC_INTERVAL_SECS: u64 = 120;
 pub const LIGHTNING_WALLET_SYNC_INTERVAL_SECS: u64 = 60;
 pub const FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 1200;
 
+/// A stability payment may only be sent when the Lightning wallet completed a chain sync
+/// within this window. Paying on a stale chain tip understates outbound HTLC expiry, which
+/// LDK later force-closes on. Two background sync intervals, so one missed tick is tolerated.
+pub const STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS: u64 = 120;
+
 /// Invoice expiration time (in seconds)
 pub const INVOICE_EXPIRY_SECS: u32 = 3600;
 

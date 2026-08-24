@@ -1,8 +1,9 @@
 use crate::audit::audit_event;
 use crate::constants::{
-    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_AUTH_TTL_SECS,
-    STABILITY_PAYMENT_CLOCK_SKEW_SECS, STABILITY_PAYMENT_COOLDOWN_SECS,
-    STABILITY_PAYMENT_MESSAGE_TYPE, STABILITY_THRESHOLD_PERCENT, STABILITY_THRESHOLD_USD,
+    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
+    STABILITY_PAYMENT_AUTH_TTL_SECS, STABILITY_PAYMENT_CLOCK_SKEW_SECS,
+    STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_PAYMENT_MESSAGE_TYPE,
+    STABILITY_THRESHOLD_PERCENT, STABILITY_THRESHOLD_USD,
 };
 use crate::price_feeds::get_fresh_cached_price_no_fetch;
 use crate::types::{Bitcoin, StableChannel, USD};
@@ -785,6 +786,22 @@ pub fn backing_after_lsp_to_user_stability(
         .map(|backing| backing.min(equilibrium))
 }
 
+/// Whether the Lightning wallet's last successful chain sync is recent enough to send a
+/// stability payment. A missing timestamp (never synced), a timestamp in the future (clock
+/// skew), or one older than `max_age_secs` all block the send: paying on a stale chain tip
+/// understates outbound HTLC expiry, which LDK later force-closes on. Exactly `max_age_secs`
+/// old is accepted.
+pub fn lightning_sync_is_fresh(
+    latest_sync_timestamp: Option<u64>,
+    now_secs: u64,
+    max_age_secs: u64,
+) -> bool {
+    match latest_sync_timestamp {
+        Some(ts) => ts <= now_secs && now_secs - ts <= max_age_secs,
+        None => false,
+    }
+}
+
 /// Check and enforce stability for a channel.
 ///
 /// The stability logic keeps the user's expected_usd amount stable:
@@ -982,6 +999,26 @@ pub fn check_stability(
     if amt == 0 {
         return None;
     }
+
+    // Send-boundary chain-freshness gate (see #243): never pay on a stale chain tip.
+    // Skipping here leaves no durable state — the cooldown is only set after a real send —
+    // so the next stability tick retries once LDK's background sync catches up.
+    let latest_sync = node.status().latest_lightning_wallet_sync_timestamp;
+    if !lightning_sync_is_fresh(latest_sync, now.max(0) as u64, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS)
+    {
+        audit_event(
+            "STABILITY_SKIP",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "reason": "stale_lightning_sync",
+                "latest_lightning_wallet_sync_timestamp": latest_sync,
+                "sync_age_secs": latest_sync.map(|ts| (now.max(0) as u64).saturating_sub(ts)),
+                "max_age_secs": STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
+            }),
+        );
+        return None;
+    }
+
     let settlement_id = new_stability_settlement_id();
     let created_at = now.max(0) as u64;
     let expires_at = created_at.saturating_add(STABILITY_PAYMENT_AUTH_TTL_SECS);
@@ -1080,6 +1117,34 @@ pub fn check_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_future_or_old_lightning_sync_blocks_stability_send() {
+        let max_age = STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS;
+        // Never synced.
+        assert!(!lightning_sync_is_fresh(None, 1_000_000, max_age));
+        // Timestamp in the future (clock skew).
+        assert!(!lightning_sync_is_fresh(Some(1_000_001), 1_000_000, max_age));
+        // One second past the freshness window.
+        assert!(!lightning_sync_is_fresh(
+            Some(1_000_000 - max_age - 1),
+            1_000_000,
+            max_age
+        ));
+    }
+
+    #[test]
+    fn fresh_lightning_sync_allows_stability_send() {
+        let max_age = STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS;
+        // Exactly max_age old is accepted.
+        assert!(lightning_sync_is_fresh(
+            Some(1_000_000 - max_age),
+            1_000_000,
+            max_age
+        ));
+        // Just synced.
+        assert!(lightning_sync_is_fresh(Some(1_000_000), 1_000_000, max_age));
+    }
 
     #[test]
     fn signed_stability_payload_round_trips_and_enforces_expiry() {

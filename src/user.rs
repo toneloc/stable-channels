@@ -475,21 +475,6 @@ pub struct UserApp {
     trade_success: Option<TradeAction>,
 }
 
-fn require_initial_wallet_sync(
-    sync_wallets: impl FnOnce() -> Result<(), String>,
-    stop_node: impl FnOnce(),
-) -> Result<(), String> {
-    match sync_wallets() {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            stop_node();
-            Err(format!(
-                "Initial wallet synchronization failed; payments remain disabled: {error}"
-            ))
-        }
-    }
-}
-
 /// Renders a single-line amount text field with iOS-style rounded, light-gray styling.
 /// Returns the inner `Response` so callers can check `has_focus()` etc.
 fn amount_field(ui: &mut egui::Ui, text: &mut String, hint: &str, width: f32) -> egui::Response {
@@ -644,17 +629,7 @@ impl UserApp {
         let node = Arc::new(builder.build(entropy).expect("Failed to build node"));
         node.start().expect("Failed to start node");
 
-        println!("Synchronizing wallet with the chain before enabling payments...");
-        require_initial_wallet_sync(
-            || node.sync_wallets().map_err(|e| e.to_string()),
-            || {
-                if let Err(e) = node.stop() {
-                    eprintln!("Failed to stop node after wallet synchronization error: {e}");
-                }
-            },
-        )?;
-
-        println!("User node started and synchronized: {}", node.node_id());
+        println!("User node started: {}", node.node_id());
 
         // And the LSP
         if let Ok(socket_addr) = SocketAddress::from_str(DEFAULT_LSP_ADDRESS) {
@@ -11657,38 +11632,11 @@ mod tests {
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
         local_sync_backing_sats, local_trade_backing_sats, max_sell_trade_usd_cents,
         parse_incoming_sync, parse_trade_rejection, parse_trade_usd_cents,
-        require_initial_wallet_sync, restrict_secret_file_permissions, sats_for_usd_cents,
+        restrict_secret_file_permissions, sats_for_usd_cents,
         splice_in_overlap_sats, splice_reconcile_action, write_secret_file, IncomingSync,
         LocalTradeAllocationError, PendingSplice, SpliceReconcileAction, UserApp,
     };
     use stable_channels::db::PendingTradeRow;
-
-    #[test]
-    fn initial_wallet_sync_success_allows_startup() {
-        let stop_called = std::cell::Cell::new(false);
-
-        let result = require_initial_wallet_sync(|| Ok(()), || stop_called.set(true));
-
-        assert_eq!(result, Ok(()));
-        assert!(!stop_called.get());
-    }
-
-    #[test]
-    fn initial_wallet_sync_failure_stops_node_and_blocks_startup() {
-        let stop_called = std::cell::Cell::new(false);
-
-        let result = require_initial_wallet_sync(
-            || Err("chain source unavailable".to_string()),
-            || stop_called.set(true),
-        );
-
-        assert_eq!(
-            result,
-            Err("Initial wallet synchronization failed; payments remain disabled: chain source unavailable"
-                .to_string())
-        );
-        assert!(stop_called.get());
-    }
 
     #[test]
     fn trade_usd_input_is_exactly_cent_denominated() {

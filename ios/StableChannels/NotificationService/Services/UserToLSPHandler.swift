@@ -93,6 +93,23 @@ final class UserToLSPHandler: PaymentHandler {
         let amountMsat = UInt64(btcAmount * Constants.satsInBTC * 1000)
         let amountSats = amountMsat / 1000
 
+        // Final chain-freshness gate at the send boundary (see #243). NotificationService
+        // already waited for a fresh sync before dispatching here; this backstop catches the
+        // sync going stale in between. Checked BEFORE the claim so a deferral never leaves a
+        // claimed-but-unsent marker that would block the foreground retry.
+        let nowSecs = UInt64(Date().timeIntervalSince1970)
+        guard StabilityFreshness.isFresh(node.status().latestLightningWalletSyncTimestamp, now: nowSecs) else {
+            completion(
+                mutator.buildPending(
+                    base: baseContent,
+                    title: "Payment Pending",
+                    body: "Open app to process stability payment"
+                ),
+                true
+            )
+            return
+        }
+
         // Claim slot
         guard db.claimPendingSend(amountMsat: amountMsat, price: price) else {
             completion(

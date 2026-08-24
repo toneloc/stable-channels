@@ -306,4 +306,34 @@ final class StabilityServiceTests: XCTestCase {
         let result = StabilityService.checkStabilityAction(sc, price: 200_000.0)
         XCTAssertEqual(result.action, .pay)
     }
+
+    // MARK: - StabilityFreshness (chain-freshness gate for stability sends, see #243)
+
+    private let freshnessNow: UInt64 = 1_000_000
+
+    func testMissingSyncTimestampBlocksSend() {
+        XCTAssertFalse(StabilityFreshness.isFresh(nil, now: freshnessNow))
+        XCTAssertNil(StabilityFreshness.syncAgeSecs(nil, now: freshnessNow))
+    }
+
+    func testFutureSyncTimestampBlocksSend() {
+        XCTAssertFalse(StabilityFreshness.isFresh(freshnessNow + 1, now: freshnessNow))
+        XCTAssertNil(StabilityFreshness.syncAgeSecs(freshnessNow + 1, now: freshnessNow))
+    }
+
+    func testSyncTimestampOlderThanWindowBlocksSend() {
+        let maxAge = Constants.stabilityMaxLightningSyncAgeSecs
+        XCTAssertFalse(StabilityFreshness.isFresh(freshnessNow - maxAge - 1, now: freshnessNow))
+    }
+
+    func testSyncTimestampExactlyAtWindowBoundaryIsAccepted() {
+        let maxAge = Constants.stabilityMaxLightningSyncAgeSecs
+        XCTAssertTrue(StabilityFreshness.isFresh(freshnessNow - maxAge, now: freshnessNow))
+    }
+
+    func testFreshSyncTimestampIsAccepted() {
+        XCTAssertTrue(StabilityFreshness.isFresh(freshnessNow, now: freshnessNow))
+        XCTAssertTrue(StabilityFreshness.isFresh(freshnessNow - 1, now: freshnessNow))
+        XCTAssertEqual(StabilityFreshness.syncAgeSecs(freshnessNow - 90, now: freshnessNow), 90)
+    }
 }

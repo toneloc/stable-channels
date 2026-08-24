@@ -470,6 +470,40 @@ class NodeService: NodeServiceProtocol {
         )
     }
 
+    /// Age in seconds of LDK's last successful Lightning-wallet chain sync, or nil when the
+    /// node isn't running, the wallet has never synced, or the timestamp is in the future.
+    func lightningSyncAgeSecs() -> UInt64? {
+        guard let node else { return nil }
+        return StabilityFreshness.syncAgeSecs(
+            node.status().latestLightningWalletSyncTimestamp,
+            now: UInt64(Date().timeIntervalSince1970)
+        )
+    }
+
+    /// Send-boundary gate for stability payments (see #243): all foreground stability sends
+    /// must go through this wrapper, which refuses to pay on a stale chain tip. Throws
+    /// `NodeServiceError.staleLightningSync` so the caller can release its send claim and
+    /// retry on the next stability tick once LDK's background sync catches up.
+    func sendStabilityPayment(
+        amountMsat: UInt64,
+        to nodeId: PublicKey,
+        tlvs: [CustomTlvRecord]
+    ) throws -> PaymentId {
+        guard let node else { throw NodeServiceError.notRunning }
+        let now = UInt64(Date().timeIntervalSince1970)
+        guard StabilityFreshness.isFresh(
+            node.status().latestLightningWalletSyncTimestamp, now: now
+        ) else {
+            throw NodeServiceError.staleLightningSync
+        }
+        return try node.spontaneousPayment().sendWithCustomTlvs(
+            amountMsat: amountMsat,
+            nodeId: nodeId,
+            routeParameters: nil,
+            customTlvs: tlvs
+        )
+    }
+
     func receivePayment(amountMsat: UInt64, description: String) throws -> Bolt11Invoice {
         guard let node else { throw NodeServiceError.notRunning }
         return try node.bolt11Payment().receive(
@@ -557,13 +591,41 @@ enum NodeServiceError: LocalizedError {
     case notRunning
     case alreadyRunning
     case dataDirLocked
+    case staleLightningSync
 
     var errorDescription: String? {
         switch self {
         case .notRunning: return "Node is not running"
         case .alreadyRunning: return "Node is already running"
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
+        case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
         }
+    }
+}
+
+/// Chain-freshness rule for stability payments (see #243): a stability payment may only be
+/// sent when LDK completed a Lightning-wallet chain sync within
+/// `Constants.stabilityMaxLightningSyncAgeSecs`. Paying on a stale chain tip understates
+/// outbound HTLC expiry, which LDK later force-closes on.
+///
+/// Keep in sync with `lightning_sync_is_fresh` in `src/stable.rs` and the NSE copy in
+/// NotificationService/NotificationService.swift.
+enum StabilityFreshness {
+    /// True when the timestamp exists, is not in the future, and is at most `maxAgeSecs`
+    /// old (exactly `maxAgeSecs` old is accepted).
+    static func isFresh(
+        _ latestSyncTimestampSecs: UInt64?,
+        now nowSecs: UInt64,
+        maxAgeSecs: UInt64 = Constants.stabilityMaxLightningSyncAgeSecs
+    ) -> Bool {
+        guard let ts = latestSyncTimestampSecs, ts <= nowSecs else { return false }
+        return nowSecs - ts <= maxAgeSecs
+    }
+
+    /// Age of the last sync in seconds, or nil when missing or in the future.
+    static func syncAgeSecs(_ latestSyncTimestampSecs: UInt64?, now nowSecs: UInt64) -> UInt64? {
+        guard let ts = latestSyncTimestampSecs, ts <= nowSecs else { return nil }
+        return nowSecs - ts
     }
 }
 
