@@ -3,6 +3,12 @@ import SwiftUI
 import LDKNode
 import SQLite3
 
+private enum SyncMessageHandlingResult {
+    case notSync
+    case applied
+    case retry
+}
+
 @MainActor
 @Observable
 class AppState {
@@ -20,9 +26,13 @@ class AppState {
 
     // MARK: - Authentication
 
+    /// Injected biometric authenticator — defaults to `BiometricService.shared`.
+    /// Depend on the `BiometricAuthenticating` protocol, not the concrete type (DI).
+    let biometricAuth: BiometricAuthenticating = BiometricService.shared
+
     /// Whether user has passed biometric/passcode auth this session.
     /// Reset to false on app termination (no persistence = no bypass on restart).
-    var isUnlocked: Bool = false
+    private(set) var isUnlocked: Bool = false
 
     /// Prevents double-trigger of auth (onAppear + onChange both firing).
     var isAuthenticating: Bool = false
@@ -40,6 +50,11 @@ class AppState {
         }
     }
 
+    func lock() {
+        isUnlocked = false
+        authError = nil
+    }
+
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
         // E2E harness bypass — debug builds with test_config.json only
         // (simulators have no biometrics; the prompt would fail instantly).
@@ -51,26 +66,24 @@ class AppState {
         defer { isAuthenticating = false }
         authError = nil
 
+        let success: Bool
         do {
-            return try await BiometricService.authenticate(reason: reason)
+            success = try await biometricAuth.authenticate(reason: reason, allowPasscodeFallback: true)
         } catch let error as BiometricError {
-            // Fallback to passcode unless user explicitly cancelled
-            if error == .cancelled {
-                authError = nil
-                return false
-            }
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
-            if !passcodeOk {
+            if error != .cancelled {
                 authError = error.errorDescription
             }
-            return passcodeOk
+            success = false
         } catch {
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: reason)) ?? false
-            if !passcodeOk {
-                authError = "Authentication failed. Please try again."
-            }
-            return passcodeOk
+            authError = "Authentication failed. Please try again."
+            success = false
         }
+
+        if success {
+            isUnlocked = true
+        }
+
+        return success
     }
 
     // MARK: - Services
@@ -98,6 +111,7 @@ class AppState {
 
     var stableChannel: StableChannel = .default
     var btcPrice: Double { priceService.currentPrice }
+    var accountingBTCPrice: Double { priceService.accountingPrice }
     var statusMessage: String = ""
     var paymentFlash: Bool = false
     var isChannelClosing: Bool = false
@@ -343,7 +357,6 @@ class AppState {
         }
 
         cancelBackgroundStop()
-        await waitForNSE()
 
         // Own the wallet dir before stopping/wiping: restore can be reached
         // while the lock is not held (e.g. after a startup failure released
@@ -525,25 +538,42 @@ class AppState {
         nodeFlowInProgress = true
         defer { nodeFlowInProgress = false }
 
-        // Migrate data from old Application Support dir to shared App Group container
-        migrateDataDirIfNeeded()
+        // Logging must be live before the startup prologue: chain resolution and
+        // the wallet-dir lock both emit audit events, and both run before
+        // initializeDatabaseServices() sets the path.
+        AuditService.setLogPath(
+            Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        )
 
-        // Wait for NSE to finish if it was recently active
-        await waitForNSE()
+        // The launch screen (phase == .loading) is shown for this entire prologue,
+        // so every step below is measured — several of them previously logged only
+        // on failure, which left the whole window invisible.
+        let prologueStart = Date()
+        func elapsedMs(_ since: Date) -> String { "\(Int(Date().timeIntervalSince(since) * 1000))" }
+
+        // Migrate data from old Application Support dir to shared App Group container
+        let migrateStart = Date()
+        migrateDataDirIfNeeded()
+        let migrateMs = elapsedMs(migrateStart)
 
         // Pick best esplora endpoint BEFORE taking the lock — pure network,
         // no DB access, and it can stall; no reason to hold the dir for it.
+        let chainStart = Date()
         chainURL = await resolveChainURL()
+        let chainMs = elapsedMs(chainStart)
 
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
+        let lockStart = Date()
         if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
         }
+        let lockMs = elapsedMs(lockStart)
 
         // Initialize database
+        let dbStart = Date()
         do {
             try initializeDatabaseServices()
         } catch {
@@ -554,7 +584,10 @@ class AppState {
             return
         }
 
+        let dbMs = elapsedMs(dbStart)
+
         // Load saved channel state from DB
+        let dbReadStart = Date()
         loadChannelFromDB()
 
         // Refresh payment status from DB (NSE may have recorded payments while app was closed)
@@ -562,13 +595,23 @@ class AppState {
 
         // Seed historical price data for charts
         seedHistoricalPrices()
+        let dbReadMs = elapsedMs(dbReadStart)
+
+        AuditService.log("STARTUP_PROLOGUE", data: [
+            "total_ms": elapsedMs(prologueStart),
+            "migrate_ms": migrateMs,
+            "chain_resolve_ms": chainMs,
+            "dir_lock_ms": lockMs,
+            "db_init_ms": dbMs,
+            "db_read_ms": dbReadMs
+        ])
 
         // Backfill hourly prices from Kraken for smooth 1D/1W/1M charts
         Task { await backfillHourlyPrices() }
 
         // Seed price from cache so UI can compute native USD immediately
         if stableChannel.latestPrice > 0 {
-            priceService.currentPrice = stableChannel.latestPrice
+            priceService.seedDisplayPrice(stableChannel.latestPrice)
         }
 
         // Start price fetching
@@ -704,22 +747,12 @@ class AppState {
 
     // MARK: - NSE Coordination
 
-    /// Wait for the Notification Service Extension to finish if it's currently processing.
-    /// Prevents two processes from running LDK on the same data directory simultaneously.
-    private func waitForNSE() async {
-        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        var waited = 0
-        while shared?.bool(forKey: "nse_processing") == true {
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-            waited += 1
-            if waited >= 30 {
-                break
-            } // NSE has an approximately 30-second execution window
-        }
-        if waited > 0 {
-            AuditService.log("NSE_WAIT", data: ["seconds": "\(waited)"])
-        }
-    }
+    //
+    // Coordination with the Notification Service Extension is handled entirely by
+    // NodeDirLock (flock on ldk-node.lock). The kernel releases that lock when the
+    // holding process dies, so it self-heals; the previous `nse_processing`
+    // UserDefaults flag did not, and a jetsammed NSE left it set permanently —
+    // every launch then burned the full 30s ceiling waiting on a dead process.
 
     func stop() {
         stabilityTimer?.cancel()
@@ -823,7 +856,6 @@ class AppState {
         nodeFlowInProgress = true
         defer { nodeFlowInProgress = false }
         cancelBackgroundStop()
-        await waitForNSE()
         loadChannelFromDB()
         // Payments received while backgrounded are recorded by the NSE, not the foreground
         // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
@@ -1354,11 +1386,18 @@ class AppState {
         let paymentHashStr = "\(paymentHash)"
         let paymentIdStr = paymentId.map { "\($0)" } ?? paymentHashStr
 
-        // Check for SYNC_V1 message from LSP
-        if handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
+        // Check for SYNC_V1 message from LSP. A valid sync that cannot yet be applied must
+        // remain in LDK's event queue; treating it like malformed control traffic loses it.
+        switch handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
+        case .applied:
             refreshBalances()
             updateStableBalances()
             return
+        case .retry:
+            ackToken?.shouldAck = false
+            return
+        case .notSync:
+            break
         }
 
         let hasStableControlTLV = customRecords.contains {
@@ -1465,8 +1504,11 @@ class AppState {
         }
     }
 
-    /// Parse and handle a SYNC_V1 TLV message. Returns true if handled.
-    private func handleSyncMessage(customRecords: [CustomTlvRecord], paymentHash: String) -> Bool {
+    /// Parse a SYNC_V1 TLV and distinguish invalid control traffic from retryable processing.
+    private func handleSyncMessage(
+        customRecords: [CustomTlvRecord],
+        paymentHash: String
+    ) -> SyncMessageHandlingResult {
         for tlv in customRecords {
             guard tlv.typeNum == Constants.stableChannelTLVType else { continue }
 
@@ -1481,7 +1523,14 @@ class AppState {
             guard parsed.type == Constants.syncMessageType else { continue }
 
             let oldExpected = stableChannel.expectedUSD.amount
-            let price = stableChannel.latestPrice
+            let price = accountingBTCPrice
+            guard price > 0 else {
+                AuditService.log("SYNC_V1_DEFERRED", data: [
+                    "reason": "untrusted_price",
+                    "payment_hash": paymentHash
+                ])
+                return .retry
+            }
             StabilityService.applyTrade(&stableChannel, newExpectedUSD: parsed.expectedUSD, price: price)
             saveChannelToDB()
 
@@ -1491,9 +1540,9 @@ class AppState {
                 "btc_price": "\(price)",
                 "payment_hash": paymentHash
             ])
-            return true
+            return .applied
         }
-        return false
+        return .notSync
     }
 
     // MARK: - Payment Successful
@@ -1846,10 +1895,22 @@ class AppState {
     private func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
         if let db = databaseService,
            let row = db.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
-            if db.paymentRepo.paymentExists(txid: txid, excludePaymentId: row.paymentId) {
-                // WebSocket beat us to it, this fallback placeholder is a duplicate.
-                db.paymentRepo.deletePayment(paymentId: row.paymentId)
+            if let wsPayment = db.paymentRepo.payment(txid: txid) {
+                if wsPayment.amountMsat == UInt64(row.amountMsat) {
+                    // WebSocket beat us to it, this fallback placeholder is a duplicate.
+                    db.paymentRepo.deletePayment(paymentId: row.paymentId)
+                } else {
+                    // Mismatched amount! This placeholder belongs to a different deposit.
+                    // Leave it intact to prevent erasing it from history.
+                    AuditService.log("ONCHAIN_RECEIVE_RES_MISMATCHED_AMOUNT", data: [
+                        "resolution_id": "\(resolutionId)",
+                        "txid": txid,
+                        "placeholder_msat": "\(row.amountMsat)",
+                        "websocket_msat": "\(wsPayment.amountMsat)"
+                    ])
+                }
             } else {
+                // No websocket row exists. Attach the txid to this placeholder.
                 db.paymentRepo.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
             }
         }
@@ -2089,8 +2150,13 @@ class AppState {
     private func runStabilityCheck() {
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
-        let price = btcPrice
-        guard price > 0 else { return }
+        let price = accountingBTCPrice
+        guard price > 0 else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": priceService.isQuarantined ? "quarantined_price" : "stale_price"
+            ])
+            return
+        }
 
         refreshBalances()
         updateStableBalances()
@@ -2114,6 +2180,18 @@ class AppState {
 
         guard let databaseService else { return }
 
+        // Chain-freshness gate (see #243): never pay on a stale chain tip, and check BEFORE
+        // claiming so a deferral leaves no claimed-but-unsent marker. The next stability
+        // tick retries once LDK's background sync catches up.
+        let syncAge = nodeService.lightningSyncAgeSecs()
+        guard let syncAge, syncAge <= Constants.stabilityMaxLightningSyncAgeSecs else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "stale_lightning_sync",
+                "sync_age_secs": syncAge.map { "\($0)" } ?? "never"
+            ])
+            return
+        }
+
         // Claim the durable send slot (cross-process atomic via BEGIN IMMEDIATE).
         // If the NSE — or a previous run — already holds it, abort this run.
         guard databaseService.stabilityRepo.claimPendingSend(amountMsat: amountMsat, price: price) else {
@@ -2129,11 +2207,19 @@ class AppState {
             // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
             // this as a settlement (operator GUI) and runs reconcile_incoming_stability
             // immediately, matching every other sender. See issue #161.
-            paymentId = try nodeService.sendKeysendWithTLV(
+            paymentId = try nodeService.sendStabilityPayment(
                 amountMsat: amountMsat,
                 to: stableChannel.counterparty,
                 tlvs: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))]
             )
+        } catch NodeServiceError.staleLightningSync {
+            // The wrapper's send-boundary gate fired (sync went stale after the precheck
+            // above). Send never happened — release the claim and retry next tick.
+            databaseService.stabilityRepo.clearPendingSend()
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "stale_lightning_sync"
+            ])
+            return
         } catch {
             databaseService.stabilityRepo.clearPendingSend()
             AuditService.log("STABILITY_PAYMENT_FAILED", data: [
@@ -2545,15 +2631,28 @@ class AppState {
         guard let url = URL(string: "\(Constants.primaryChainURL)/blocks/tip/height") else {
             return Constants.fallbackChainURL
         }
+        // This sits on the critical path before first paint, so it gets a short
+        // budget of its own: URLSession.shared defaults to a 60s request timeout,
+        // which would hold the launch screen for a minute on a slow primary.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 2
+        config.timeoutIntervalForResource = 3
+        let session = URLSession(configuration: config)
+        let startedAt = Date()
         do {
-            let (_, response) = try await URLSession.shared.data(from: url)
+            let (_, response) = try await session.data(from: url)
             if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                AuditService.log("CHAIN_SOURCE_RESOLVED", data: [
+                    "using": Constants.primaryChainURL,
+                    "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+                ])
                 return Constants.primaryChainURL
             }
         } catch {}
         AuditService.log("CHAIN_SOURCE_FALLBACK", data: [
             "primary": Constants.primaryChainURL,
-            "using": Constants.fallbackChainURL
+            "using": Constants.fallbackChainURL,
+            "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
         ])
         return Constants.fallbackChainURL
     }

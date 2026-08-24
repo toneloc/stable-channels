@@ -1,0 +1,42 @@
+name: iOS Tests
+
+on:
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-tests.yml"
+
+concurrency:
+  group: ios-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Run iOS unit tests
+        run: |
+          set -o pipefail
+          # Signing stays ENABLED: simulator builds get an automatic ad-hoc
+          # signature that embeds the app-group/keychain entitlements. With
+          # CODE_SIGNING_ALLOWED=NO the test host has no entitlements and every
+          # real keychain test dies with errSecMissingEntitlement (-34018).
+          xcodebuild test \
+            -project ios/StableChannels/StableChannels.xcodeproj \
+            -scheme StableChannels \
+            -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 17' \
+            -parallel-testing-enabled NO

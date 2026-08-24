@@ -12,6 +12,7 @@ mod stability_tick;
 mod stable_manager;
 mod state;
 mod tls;
+mod trade_response_retry;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -179,6 +180,7 @@ async fn main() -> Result<()> {
     event_loop::spawn(state.clone());
     stability_tick::spawn(state.clone());
     observability::spawn(state.clone());
+    trade_response_retry::spawn(state.clone());
 
     let router = Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))
@@ -267,6 +269,9 @@ async fn main() -> Result<()> {
             "/api/channel-exists",
             post(handlers::channel_exists::channel_exists),
         )
+        // Defense-in-depth body cap covering every route, including the two unsigned endpoints
+        // that never reach the auth middleware's own capped read.
+        .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

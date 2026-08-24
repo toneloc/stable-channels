@@ -39,7 +39,8 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     val scope = rememberCoroutineScope()
 
     val sc by appState.stableChannel.collectAsState()
-    val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // Trading fails closed while the displayed cache is stale or quarantined.
+    val btcPrice by appState.priceService.accountingPrice.collectAsState()
     val maxBuyUSD = sc.expectedUSD.amount
     val amountUSD = amountText.toDoubleOrNull() ?: 0.0
     val feeUSD = amountUSD * Constants.STABLE_CHANNEL_TRADE_FEE_RATE
@@ -168,6 +169,15 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
 
+                if (btcPrice <= 0.0) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "A fresh BTC/USD consensus is required before trading",
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = {
@@ -178,6 +188,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                             step = TradeStep.CONFIRM
                         }
                     },
+                    enabled = btcPrice > 0.0,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Continue") }
             }
@@ -212,17 +223,21 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         scope.launch(Dispatchers.IO) {
                             try {
                                 appState.ensureLSPConnected()
-                                val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, btcPrice)
+                                val tradePrice = appState.priceService.currentAccountingPrice()
+                                if (tradePrice <= 0.0) {
+                                    throw Exception("A fresh BTC/USD consensus is required before trading")
+                                }
+                                val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, tradePrice)
                                     ?: throw Exception("Trade service unavailable")
                                 val tradeDbId = appState.databaseService?.recordTrade(
                                     channelId = sc.channelId, action = "buy",
                                     amountUSD = amountUSD, amountBTC = result.btcAmount,
-                                    btcPrice = btcPrice, feeUSD = feeUSD,
+                                    btcPrice = tradePrice, feeUSD = feeUSD,
                                     paymentId = result.paymentId, status = "pending"
                                 ) ?: 0
                                 appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
-                                    price = btcPrice,
+                                    price = tradePrice,
                                     tradeDbId = tradeDbId,
                                     action = "buy"
                                 ))
@@ -235,7 +250,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                             isExecuting = false
                         }
                     },
-                    enabled = !isExecuting,
+                    enabled = !isExecuting && btcPrice > 0.0,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     if (isExecuting) CircularProgressIndicator(Modifier.size(20.dp))

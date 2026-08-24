@@ -57,7 +57,6 @@ send_push.sh
 # Rust
 target/
 /data/
-Cargo.lock
 umbrel/test/store-server/store-repo/
 **/*.rs.bk
 src/bin/recover.rs

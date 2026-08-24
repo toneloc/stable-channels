@@ -7,6 +7,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +27,22 @@ pub struct PaymentPersistence {
     pub new_backing: Option<i64>,
     /// True if `current + delta` went below zero and was clamped to 0.
     pub clamped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundStabilityRegistration {
+    New,
+    Pending,
+    Applied,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInboundStabilitySettlement {
+    pub settlement_id: String,
+    pub payment_id: String,
+    pub amount_msat: u64,
+    pub envelope: String,
 }
 
 /// Result of consuming a failed outbound stability settlement.
@@ -59,8 +76,123 @@ pub fn is_missing_channel_row(err: &rusqlite::Error) -> bool {
     matches!(err, rusqlite::Error::QueryReturnedNoRows)
 }
 
+const STALE_INBOUND_STABILITY_ALLOCATION: &str = "stale inbound stability allocation";
+
+/// Returns true when an authenticated settlement raced with a newer durable backing allocation.
+/// Callers may reload that allocation and retry the same inbox transition once.
+pub fn is_stale_inbound_stability_allocation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::InvalidParameterName(message)
+            if message == STALE_INBOUND_STABILITY_ALLOCATION
+    )
+}
+
 /// Database file name
 pub const DB_FILENAME: &str = "stablechannels.db";
+
+const CREATE_TRADE_DECISIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS trade_decisions (
+        inbound_payment_id TEXT PRIMARY KEY,
+        trade_id TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_channel_id TEXT NOT NULL,
+        counterparty TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        reason_code TEXT,
+        expected_usd REAL,
+        backing_sats INTEGER,
+        sync_version INTEGER,
+        decided_at INTEGER NOT NULL,
+        response_envelope TEXT,
+        response_payment_id TEXT,
+        response_status TEXT NOT NULL DEFAULT 'pending',
+        response_attempts INTEGER NOT NULL DEFAULT 0,
+        next_response_attempt_at INTEGER NOT NULL,
+        delivery_deadline INTEGER NOT NULL,
+        delivered_at INTEGER,
+        details_pruned_at INTEGER
+    )";
+
+const CREATE_TRADE_DECISIONS_DUE_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS idx_trade_decisions_response_due
+     ON trade_decisions(response_status, next_response_attempt_at)";
+
+fn trade_decision_columns(conn: &Connection) -> SqliteResult<HashSet<String>> {
+    let mut stmt = conn.prepare("PRAGMA table_info(trade_decisions)")?;
+    let columns = stmt.query_map([], |row| row.get(1))?.collect();
+    columns
+}
+
+fn init_trade_decisions_schema(conn: &mut Connection) -> SqliteResult<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trade_decisions'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute(CREATE_TRADE_DECISIONS_TABLE, [])?;
+        conn.execute(CREATE_TRADE_DECISIONS_DUE_INDEX, [])?;
+        return Ok(());
+    }
+
+    let columns = trade_decision_columns(conn)?;
+    let current_columns = [
+        "inbound_payment_id", "trade_id", "request_hash", "channel_id",
+        "user_channel_id", "counterparty", "outcome", "reason_code",
+        "expected_usd", "backing_sats", "sync_version", "decided_at",
+        "response_envelope", "response_payment_id", "response_status",
+        "response_attempts", "next_response_attempt_at", "delivery_deadline",
+        "delivered_at", "details_pruned_at",
+    ];
+    if current_columns.iter().all(|column| columns.contains(*column)) {
+        conn.execute(CREATE_TRADE_DECISIONS_DUE_INDEX, [])?;
+        return Ok(());
+    }
+
+    // An earlier correlated-trade prototype used this table name with an incompatible shape.
+    // Rebuild it transactionally: its already-sent responses remain terminal dedup tombstones,
+    // while new decisions use the request hash and retry lifecycle required by the protocol.
+    let legacy_columns = [
+        "inbound_payment_id", "trade_id", "channel_id", "user_channel_id",
+        "counterparty", "outcome", "reason_code", "expected_usd", "backing_sats",
+        "sync_version", "response_envelope", "response_payment_id", "response_status",
+        "response_attempts", "next_response_attempt_at", "created_at", "resolved_at",
+    ];
+    if let Some(missing) = legacy_columns.iter().find(|column| !columns.contains(**column)) {
+        return Err(rusqlite::Error::InvalidColumnName(format!(
+            "unsupported trade_decisions schema: missing {missing}"
+        )));
+    }
+
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute("ALTER TABLE trade_decisions RENAME TO trade_decisions_legacy_v1", [])?;
+    tx.execute(CREATE_TRADE_DECISIONS_TABLE, [])?;
+    tx.execute(
+        "INSERT INTO trade_decisions (
+            inbound_payment_id, trade_id, request_hash, channel_id, user_channel_id,
+            counterparty, outcome, reason_code, expected_usd, backing_sats, sync_version,
+            decided_at, response_envelope, response_payment_id, response_status,
+            response_attempts, next_response_attempt_at, delivery_deadline, delivered_at
+         )
+         SELECT inbound_payment_id, COALESCE(NULLIF(trade_id, ''), inbound_payment_id),
+            inbound_payment_id, channel_id, user_channel_id, counterparty, outcome,
+            reason_code, expected_usd, backing_sats, sync_version, created_at,
+            response_envelope, response_payment_id,
+            CASE WHEN response_status IN ('succeeded', 'delivered')
+                 THEN 'delivered' ELSE 'abandoned' END,
+            response_attempts, next_response_attempt_at, created_at,
+            CASE WHEN response_status IN ('succeeded', 'delivered')
+                 THEN COALESCE(resolved_at, created_at) ELSE NULL END
+         FROM trade_decisions_legacy_v1",
+        [],
+    )?;
+    tx.execute("DROP TABLE trade_decisions_legacy_v1", [])?;
+    tx.execute(CREATE_TRADE_DECISIONS_DUE_INDEX, [])?;
+    tx.commit()
+}
 
 /// Thread-safe database handle
 #[derive(Clone)]
@@ -84,13 +216,57 @@ pub fn forward_fingerprint(
     )
 }
 
-/// A still-pending trade recoverable after a restart (the in-memory pending-trade map is empty on launch).
+/// An unresolved or historically resolved trade addressable by protocol correlation fields.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PendingTradeRow {
     pub id: i64,
+    pub channel_id: String,
+    pub trade_id: Option<String>,
+    pub payment_id: Option<String>,
+    pub request_hash: Option<String>,
+    pub fee_msat: u64,
     pub new_expected_usd: f64,
     pub btc_price: f64,
     pub new_backing_sats: Option<u64>,
     pub action: String,
+    pub status: String,
+}
+
+fn pending_trade_from_row(row: &rusqlite::Row<'_>) -> SqliteResult<PendingTradeRow> {
+    Ok(PendingTradeRow {
+        id: row.get(0)?,
+        channel_id: row.get(1)?,
+        trade_id: row.get(2)?,
+        payment_id: row.get(3)?,
+        request_hash: row.get(4)?,
+        fee_msat: row.get::<_, i64>(5)?.max(0) as u64,
+        new_expected_usd: row.get(6)?,
+        btc_price: row.get(7)?,
+        new_backing_sats: row.get::<_, Option<i64>>(8)?.map(|value| value.max(0) as u64),
+        action: row.get(9)?,
+        status: row.get(10)?,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradeDecisionIdentity {
+    pub inbound_payment_id: String,
+    pub trade_id: String,
+    pub request_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTradeResponse {
+    pub inbound_payment_id: String,
+    pub counterparty: String,
+    pub response_envelope: String,
+    pub attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrelatedTradeAcceptance {
+    pub trade_resolved: bool,
+    pub allocation_applied: bool,
 }
 
 fn finish_transaction<T>(conn: &Connection, result: SqliteResult<T>) -> SqliteResult<T> {
@@ -142,7 +318,7 @@ impl Database {
 
     /// Initialize database schema
     fn init_schema(&self) -> SqliteResult<()> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
 
         // Channels table - stores channel settings
         conn.execute(
@@ -191,6 +367,31 @@ impl Database {
         // Exact allocation signed in TRADE_V1. NULL identifies trades written by older wallets,
         // which still need the legacy price-derived recovery path.
         let _ = conn.execute("ALTER TABLE trades ADD COLUMN new_backing_sats INTEGER", []);
+
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN trade_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN request_hash TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN request_payload TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE trades ADD COLUMN fee_msat INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE trades ADD COLUMN fee_status TEXT NOT NULL DEFAULT 'legacy'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN failure_code TEXT", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN expires_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE trades ADD COLUMN resolved_at INTEGER", []);
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_trade_id
+             ON trades(trade_id) WHERE trade_id IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_unresolved_channel
+             ON trades(channel_id, status)",
+            [],
+        )?;
 
         // Migration: Add stable_sats column to channels table if missing
         // stable_sats tracks the BTC backing the stable portion (excludes native BTC)
@@ -392,6 +593,32 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
             [],
         );
+
+        // Authenticated stability-payment inbox. The settlement id prevents the same signed
+        // authorization being reused with another keysend, while payment_id makes LDK event
+        // replay idempotent. The raw envelope is retained for audit and conflict detection.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS inbound_stability_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                payment_id TEXT NOT NULL UNIQUE,
+                channel_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL,
+                direction TEXT NOT NULL,
+                envelope TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_inbound_stability_settlements_state
+             ON inbound_stability_settlements(state, updated_at)",
+            [],
+        )?;
+
+        init_trade_decisions_schema(&mut conn)?;
 
         // Forwarded-payment dedup: tracks fingerprints of forwards already audited (live or backfilled)
         conn.execute(
@@ -779,6 +1006,246 @@ impl Database {
         Ok(version as u64)
     }
 
+    pub fn candidate_sync_version(&self, user_channel_id: &str) -> SqliteResult<u64> {
+        let conn = self.conn.lock().unwrap();
+        let current: i64 = conn.query_row(
+            "SELECT sync_version FROM channels WHERE user_channel_id = ?1",
+            params![user_channel_id],
+            |row| row.get(0),
+        )?;
+        current
+            .checked_add(1)
+            .filter(|version| *version > 0)
+            .map(|version| version as u64)
+            .ok_or(rusqlite::Error::IntegralValueOutOfRange(0, current))
+    }
+
+    pub fn trade_decision_by_payment(
+        &self,
+        inbound_payment_id: &str,
+    ) -> SqliteResult<Option<TradeDecisionIdentity>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT inbound_payment_id, trade_id, request_hash
+             FROM trade_decisions WHERE inbound_payment_id = ?1",
+            params![inbound_payment_id],
+            |row| Ok(TradeDecisionIdentity {
+                inbound_payment_id: row.get(0)?,
+                trade_id: row.get(1)?,
+                request_hash: row.get(2)?,
+            }),
+        ).optional()
+    }
+
+    pub fn trade_decision_by_trade_id(
+        &self,
+        trade_id: &str,
+    ) -> SqliteResult<Option<TradeDecisionIdentity>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT inbound_payment_id, trade_id, request_hash
+             FROM trade_decisions WHERE trade_id = ?1",
+            params![trade_id],
+            |row| Ok(TradeDecisionIdentity {
+                inbound_payment_id: row.get(0)?,
+                trade_id: row.get(1)?,
+                request_hash: row.get(2)?,
+            }),
+        ).optional()
+    }
+
+    pub fn requeue_exact_trade_response(
+        &self,
+        inbound_payment_id: &str,
+        trade_id: &str,
+        request_hash: &str,
+        now: i64,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE trade_decisions
+             SET response_status = 'pending', response_payment_id = NULL,
+                 next_response_attempt_at = ?4
+             WHERE inbound_payment_id = ?1 AND trade_id = ?2 AND request_hash = ?3
+               AND response_envelope IS NOT NULL AND delivery_deadline > ?4",
+            params![inbound_payment_id, trade_id, request_hash, now],
+        )?;
+        Ok(updated == 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_trade_rejection(
+        &self,
+        inbound_payment_id: &str,
+        trade_id: &str,
+        request_hash: &str,
+        channel_id: &str,
+        user_channel_id: &str,
+        counterparty: &str,
+        reason_code: &str,
+        decided_at: i64,
+        response_envelope: &str,
+    ) -> SqliteResult<bool> {
+        let deadline = decided_at.saturating_add(
+            crate::constants::TRADE_RESPONSE_RETRY_WINDOW_SECS.min(i64::MAX as u64) as i64,
+        );
+        let conn = self.conn.lock().unwrap();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO trade_decisions (
+                inbound_payment_id, trade_id, request_hash, channel_id, user_channel_id,
+                counterparty, outcome, reason_code, decided_at, response_envelope,
+                next_response_attempt_at, delivery_deadline
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'rejected', ?7, ?8, ?9, ?8, ?10)",
+            params![inbound_payment_id, trade_id, request_hash, channel_id, user_channel_id,
+                counterparty, reason_code, decided_at, response_envelope, deadline],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_trade_acceptance(
+        &self,
+        inbound_payment_id: &str,
+        trade_id: &str,
+        request_hash: &str,
+        channel_id: &str,
+        user_channel_id: &str,
+        counterparty: &str,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        sync_version: u64,
+        decided_at: i64,
+        response_envelope: &str,
+    ) -> SqliteResult<bool> {
+        if !expected_usd.is_finite() || expected_usd < 0.0
+            || backing_sats > i64::MAX as u64 || native_sats > i64::MAX as u64
+            || sync_version == 0 || sync_version > i64::MAX as u64 {
+            return Ok(false);
+        }
+        let deadline = decided_at.saturating_add(
+            crate::constants::TRADE_RESPONSE_RETRY_WINDOW_SECS.min(i64::MAX as u64) as i64,
+        );
+        let previous_version = sync_version as i64 - 1;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let duplicate: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM trade_decisions
+             WHERE inbound_payment_id = ?1 OR trade_id = ?2)",
+            params![inbound_payment_id, trade_id], |row| row.get(0),
+        )?;
+        if duplicate { tx.commit()?; return Ok(false); }
+        let updated = tx.execute(
+            "UPDATE channels SET channel_id = ?1, expected_usd = ?2, stable_sats = ?3,
+             native_sats = ?4, sync_version = ?5, updated_at = strftime('%s', 'now'),
+             closed_at = NULL WHERE user_channel_id = ?6 AND sync_version = ?7",
+            params![channel_id, expected_usd, backing_sats as i64, native_sats as i64,
+                sync_version as i64, user_channel_id, previous_version],
+        )?;
+        if updated != 1 { tx.rollback()?; return Ok(false); }
+        tx.execute(
+            "INSERT INTO trade_decisions (inbound_payment_id, trade_id, request_hash,
+             channel_id, user_channel_id, counterparty, outcome, expected_usd, backing_sats,
+             sync_version, decided_at, response_envelope, next_response_attempt_at,
+             delivery_deadline) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'accepted', ?7, ?8,
+             ?9, ?10, ?11, ?10, ?12)",
+            params![inbound_payment_id, trade_id, request_hash, channel_id, user_channel_id,
+                counterparty, expected_usd, backing_sats as i64, sync_version as i64,
+                decided_at, response_envelope, deadline],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn due_trade_responses(&self, now: i64, limit: usize) -> SqliteResult<Vec<PendingTradeResponse>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT inbound_payment_id, counterparty, response_envelope, response_attempts
+             FROM trade_decisions WHERE response_status = 'pending'
+             AND next_response_attempt_at <= ?1 AND delivery_deadline > ?1
+             AND response_envelope IS NOT NULL ORDER BY next_response_attempt_at, decided_at LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![now, limit as i64], |row| Ok(PendingTradeResponse {
+            inbound_payment_id: row.get(0)?, counterparty: row.get(1)?,
+            response_envelope: row.get(2)?, attempts: row.get::<_, i64>(3)?.max(0) as u32,
+        }))?;
+        rows.collect()
+    }
+
+    fn trade_response_delay_secs(attempt: u32) -> i64 {
+        let exponent = attempt.saturating_sub(1).min(10);
+        5_i64.saturating_mul(1_i64 << exponent).min(60 * 60)
+    }
+
+    pub fn reserve_trade_response_attempt(&self, inbound_payment_id: &str,
+        expected_attempts: u32, now: i64) -> SqliteResult<bool> {
+        let next_attempt = expected_attempts.saturating_add(1);
+        let next_at = now.saturating_add(Self::trade_response_delay_secs(next_attempt));
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE trade_decisions SET response_attempts = ?2, next_response_attempt_at = ?3
+             WHERE inbound_payment_id = ?1 AND response_status = 'pending'
+             AND response_attempts = ?4 AND next_response_attempt_at <= ?5
+             AND delivery_deadline > ?5 AND response_envelope IS NOT NULL",
+            params![inbound_payment_id, next_attempt, next_at, expected_attempts, now],
+        )?;
+        Ok(updated == 1)
+    }
+
+    pub fn mark_trade_response_in_flight(&self, inbound_payment_id: &str,
+        response_payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE trade_decisions SET response_status = 'in_flight', response_payment_id = ?2
+             WHERE inbound_payment_id = ?1 AND response_status = 'pending'",
+            params![inbound_payment_id, response_payment_id],
+        )? == 1)
+    }
+
+    pub fn in_flight_trade_response_payment_ids(&self) -> SqliteResult<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT response_payment_id FROM trade_decisions
+             WHERE response_status = 'in_flight' AND response_payment_id IS NOT NULL")?;
+        let payment_ids = stmt.query_map([], |row| row.get(0))?.collect();
+        payment_ids
+    }
+
+    pub fn mark_trade_response_delivered(&self, response_payment_id: &str, now: i64) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE trade_decisions SET response_status = 'delivered',
+             delivered_at = COALESCE(delivered_at, ?2)
+             WHERE response_payment_id = ?1 AND response_status <> 'delivered'",
+            params![response_payment_id, now],
+        )? > 0)
+    }
+
+    pub fn mark_trade_response_failed(&self, response_payment_id: &str, now: i64) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE trade_decisions SET response_status = 'pending', response_payment_id = NULL,
+             next_response_attempt_at = MAX(next_response_attempt_at, ?2)
+             WHERE response_payment_id = ?1 AND response_status = 'in_flight'",
+            params![response_payment_id, now],
+        )? > 0)
+    }
+
+    pub fn abandon_expired_trade_responses(&self, now: i64) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE trade_decisions SET response_status = 'abandoned'
+             WHERE response_status IN ('pending', 'in_flight') AND delivery_deadline <= ?1", params![now])
+    }
+
+    pub fn prune_trade_response_details(&self, now: i64) -> SqliteResult<usize> {
+        let cutoff = now.saturating_sub(
+            crate::constants::TRADE_RESPONSE_DETAIL_RETENTION_SECS.min(i64::MAX as u64) as i64,
+        );
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE trade_decisions SET response_envelope = NULL, details_pruned_at = ?1
+             WHERE response_status IN ('delivered', 'abandoned') AND decided_at <= ?2
+             AND response_envelope IS NOT NULL", params![now, cutoff])
+    }
+
     /// Apply a signed inbound SYNC_V1 allocation only when its version is newer.
     /// The version and allocation share one SQLite statement, so a crash cannot
     /// persist one without the other. Returns false for stale/replayed versions.
@@ -1019,6 +1486,23 @@ impl Database {
         }
     }
 
+    /// Resolve user_channel_id only when the channel is currently tracked as active.
+    pub fn get_active_user_channel_id_by_channel_id(
+        &self,
+        channel_id: &str,
+    ) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let user_channel_id: Option<Option<String>> = conn
+            .query_row(
+                "SELECT user_channel_id FROM channels
+                 WHERE channel_id = ?1 AND closed_at IS NULL",
+                params![channel_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(user_channel_id.flatten())
+    }
+
     /// Load channel settings by user_channel_id (stable across splices)
     pub fn load_channel(&self, user_channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
         let conn = self.conn.lock().unwrap();
@@ -1135,6 +1619,52 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_prepared_trade(&self, channel_id: &str, trade_id: &str,
+        request_hash: &str, request_payload: &str, action: &str, amount_usd: f64,
+        amount_btc: f64, btc_price: f64, fee_usd: f64, fee_msat: u64,
+        new_expected_usd: f64, new_backing_sats: u64, expires_at: i64) -> SqliteResult<i64> {
+        if !crate::trade::is_channel_id(channel_id) || !crate::trade::is_trade_id(trade_id)
+            || !crate::trade::is_request_hash(request_hash)
+            || crate::trade::request_hash(request_payload.as_bytes()) != request_hash
+            || fee_msat > i64::MAX as u64 || new_backing_sats > i64::MAX as u64
+            || !new_expected_usd.is_finite() || new_expected_usd < 0.0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO trades (channel_id, trade_id, request_hash, request_payload, action,
+             amount_usd, amount_btc, btc_price, fee_usd, fee_msat, fee_status, new_expected_usd,
+             new_backing_sats, status, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+             ?9, ?10, 'sending', ?11, ?12, 'sending', ?13)",
+            params![channel_id, trade_id, request_hash, request_payload, action, amount_usd,
+                amount_btc, btc_price, fee_usd, fee_msat as i64, new_expected_usd,
+                new_backing_sats as i64, expires_at],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn attach_trade_payment_id(&self, trade_db_id: i64, payment_id: &str) -> SqliteResult<bool> {
+        if !crate::trade::is_payment_id(payment_id) { return Ok(false); }
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("UPDATE trades SET payment_id = ?2, fee_status = 'pending',
+             status = 'awaiting_result' WHERE id = ?1 AND payment_id IS NULL AND status = 'sending'",
+            params![trade_db_id, payment_id])? == 1)
+    }
+
+    pub fn mark_trade_send_failed(&self, trade_db_id: i64) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("UPDATE trades SET status = 'payment_failed', fee_status = 'failed',
+             failure_code = 'payment_failed', resolved_at = strftime('%s', 'now')
+             WHERE id = ?1 AND status = 'sending'", params![trade_db_id])? == 1)
+    }
+
+    pub fn mark_trade_fee_paid(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("UPDATE trades SET fee_status = 'paid' WHERE payment_id = ?1
+             AND status IN ('sending', 'awaiting_result', 'outcome_unknown')", params![payment_id])? == 1)
+    }
+
     /// Look up a still-pending trade by its payment_id, for restart recovery. Only returns rows
     /// that have either an exact allocation or a non-zero legacy target.
     pub fn get_pending_trade_by_payment_id(
@@ -1143,51 +1673,181 @@ impl Database {
     ) -> SqliteResult<Option<PendingTradeRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, new_expected_usd, btc_price, new_backing_sats, action FROM trades
-             WHERE payment_id = ?1 AND status = 'pending'
+            "SELECT id, channel_id, trade_id, payment_id, request_hash, fee_msat,
+                    new_expected_usd, btc_price, new_backing_sats, action, status FROM trades
+             WHERE payment_id = ?1 AND status IN ('pending', 'sending', 'awaiting_result', 'outcome_unknown')
                AND (new_backing_sats IS NOT NULL OR new_expected_usd > 0.0)
              ORDER BY id DESC LIMIT 1",
             params![payment_id],
-            |row| {
-                Ok(PendingTradeRow {
-                    id: row.get(0)?,
-                    new_expected_usd: row.get(1)?,
-                    btc_price: row.get(2)?,
-                    new_backing_sats: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
-                    action: row.get(4)?,
-                })
-            },
+            pending_trade_from_row,
         )
         .optional()
     }
 
-    /// Match a signed allocation acknowledgment to a trade authored by this wallet. The LSP can
-    /// deliver SYNC_V1 before or after LDK reports the trade-fee payment as successful, so the
-    /// allocation itself is the stable correlation key.
-    pub fn get_pending_trade_by_allocation(
+    /// Match an acknowledgment to a trade authored by this wallet. Backing is deliberately not a
+    /// correlation key because each peer derives it independently from its own price.
+    pub fn get_pending_trade_by_expected_usd(
         &self,
         new_expected_usd: f64,
-        new_backing_sats: u64,
     ) -> SqliteResult<Option<PendingTradeRow>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, new_expected_usd, btc_price, new_backing_sats, action FROM trades
-             WHERE status = 'pending'
-               AND new_backing_sats = ?1
-               AND ABS(new_expected_usd - ?2) <= 0.000000001
+            "SELECT id, channel_id, trade_id, payment_id, request_hash, fee_msat,
+                    new_expected_usd, btc_price, new_backing_sats, action, status FROM trades
+             WHERE status = 'pending' AND trade_id IS NULL
+               AND ABS(new_expected_usd - ?1) <= 0.000000001
              ORDER BY id DESC LIMIT 1",
-            params![new_backing_sats, new_expected_usd],
-            |row| {
-                Ok(PendingTradeRow {
-                    id: row.get(0)?,
-                    new_expected_usd: row.get(1)?,
-                    btc_price: row.get(2)?,
-                    new_backing_sats: row.get::<_, Option<i64>>(3)?.map(|v| v.max(0) as u64),
-                    action: row.get(4)?,
-                })
-            },
+            params![new_expected_usd],
+            pending_trade_from_row,
         )
         .optional()
+    }
+
+    pub fn get_trade_by_correlation(&self, trade_id: &str, trade_payment_id: &str,
+        request_hash: &str) -> SqliteResult<Option<PendingTradeRow>> {
+        if !crate::trade::is_trade_id(trade_id) || !crate::trade::is_payment_id(trade_payment_id)
+            || !crate::trade::is_request_hash(request_hash) { return Ok(None); }
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT id, channel_id, trade_id, payment_id, request_hash, fee_msat,
+             new_expected_usd, btc_price, new_backing_sats, action, status FROM trades
+             WHERE trade_id = ?1 AND request_hash = ?2 AND (payment_id IS NULL OR payment_id = ?3)
+             LIMIT 1", params![trade_id, request_hash, trade_payment_id], pending_trade_from_row).optional()
+    }
+
+    pub fn mark_trade_rejected(&self, trade_db_id: i64, trade_payment_id: &str,
+        reason_code: &str, decided_at: i64) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("UPDATE trades SET status = 'rejected', fee_status = 'paid',
+             failure_code = ?3, payment_id = COALESCE(payment_id, ?2), resolved_at = ?4
+             WHERE id = ?1 AND status IN ('sending', 'awaiting_result', 'outcome_unknown')
+             AND (payment_id IS NULL OR payment_id = ?2)",
+            params![trade_db_id, trade_payment_id, reason_code, decided_at])? == 1)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_correlated_trade_acceptance(&self, user_channel_id: &str, sync_version: u64,
+        expected_usd: f64, backing_sats: u64, native_sats: u64, trade_db_id: i64,
+        trade_payment_id: &str) -> SqliteResult<CorrelatedTradeAcceptance> {
+        let none = CorrelatedTradeAcceptance { trade_resolved: false, allocation_applied: false };
+        if sync_version == 0 || sync_version > i64::MAX as u64 || !expected_usd.is_finite()
+            || expected_usd < 0.0 || backing_sats > i64::MAX as u64
+            || native_sats > i64::MAX as u64 { return Ok(none); }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let trade: Option<(f64, Option<String>, String, Option<String>)> = tx.query_row(
+            "SELECT new_expected_usd, payment_id, status, trade_id FROM trades WHERE id = ?1",
+            params![trade_db_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+        let Some((requested_usd, stored_payment_id, status, correlated_trade_id)) = trade else {
+            tx.commit()?;
+            return Ok(none);
+        };
+        if !crate::trade::target_matches(requested_usd, expected_usd)
+            || stored_payment_id.as_deref().is_some_and(|stored| stored != trade_payment_id) {
+            tx.commit()?; return Ok(none);
+        }
+        let unresolved = matches!(status.as_str(), "sending" | "awaiting_result" | "outcome_unknown");
+        let (current_version, before_expected, before_backing, before_native):
+            (i64, f64, i64, i64) = tx.query_row(
+                "SELECT sync_version, expected_usd, stable_sats, native_sats FROM channels
+                 WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let allocation_applied = unresolved && current_version < sync_version as i64 && tx.execute(
+            "UPDATE channels SET expected_usd = ?1, stable_sats = ?2, native_sats = ?3,
+             sync_version = ?4, updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?5 AND sync_version < ?4",
+            params![expected_usd, backing_sats as i64, native_sats as i64,
+                sync_version as i64, user_channel_id])? == 1;
+        let trade_resolved = unresolved && tx.execute(
+            "UPDATE trades SET status = 'accepted', fee_status = 'paid',
+             payment_id = COALESCE(payment_id, ?2), resolved_at = strftime('%s', 'now')
+             WHERE id = ?1 AND status IN ('sending', 'awaiting_result', 'outcome_unknown')",
+            params![trade_db_id, trade_payment_id])? == 1;
+        let ledger_mirror = if allocation_applied {
+            let draft = LedgerEventDraft {
+                event_type: "SYNC_V1_APPLIED".to_owned(),
+                category: "stability".to_owned(),
+                severity: "info".to_owned(),
+                status: "completed".to_owned(),
+                source: "signed_sync".to_owned(),
+                completeness: LedgerCompleteness::Observed,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+                dedup_key: Some(format!(
+                    "signed-sync:sync-v1:{user_channel_id}:{sync_version}"
+                )),
+                before: Some(AccountingSnapshot {
+                    expected_usd: Some(before_expected),
+                    backing_sats: u64::try_from(before_backing).ok(),
+                    native_sats: u64::try_from(before_native).ok(),
+                    live_receiver_sats: u64::try_from(
+                        before_backing.saturating_add(before_native),
+                    ).ok(),
+                    ..Default::default()
+                }),
+                after: Some(AccountingSnapshot {
+                    expected_usd: Some(expected_usd),
+                    backing_sats: Some(backing_sats),
+                    native_sats: Some(native_sats),
+                    live_receiver_sats: Some(backing_sats.saturating_add(native_sats)),
+                    ..Default::default()
+                }),
+                detail: serde_json::json!({
+                    "user_channel_id": user_channel_id,
+                    "sync_version": sync_version,
+                    "trade_id": correlated_trade_id,
+                    "trade_db_id": trade_db_id,
+                    "new_expected_usd": expected_usd,
+                    "new_backing_sats": backing_sats,
+                    "new_native_sats": native_sats,
+                    "live_receiver_sats": backing_sats.saturating_add(native_sats),
+                }),
+                refs: vec![LedgerRef::new("user_channel_id", user_channel_id)],
+            };
+            let outcome = ledger::append_on_connection(&tx, &draft)?;
+            Some((draft, outcome))
+        } else {
+            None
+        };
+        tx.commit()?;
+        if let Some((draft, outcome)) = ledger_mirror {
+            if outcome.inserted {
+                crate::audit::mirror_committed_ledger_event(&draft, outcome.event_id);
+            }
+        }
+        Ok(CorrelatedTradeAcceptance { trade_resolved, allocation_applied })
+    }
+
+    pub fn mark_trade_payment_failed(&self, payment_id: &str) -> SqliteResult<Option<PendingTradeRow>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let trade = tx.query_row("SELECT id, channel_id, trade_id, payment_id, request_hash,
+             fee_msat, new_expected_usd, btc_price, new_backing_sats, action, status FROM trades
+             WHERE payment_id = ?1 AND status IN ('pending', 'sending', 'awaiting_result', 'outcome_unknown')
+             ORDER BY id DESC LIMIT 1", params![payment_id], pending_trade_from_row).optional()?;
+        if let Some(trade) = trade.as_ref() {
+            tx.execute("UPDATE trades SET status = 'payment_failed', fee_status = 'failed',
+                 failure_code = 'payment_failed', resolved_at = strftime('%s', 'now') WHERE id = ?1",
+                params![trade.id])?;
+        }
+        tx.commit()?;
+        Ok(trade)
+    }
+
+    pub fn mark_unresolved_trades_unknown(&self, now: i64) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE trades SET status = 'outcome_unknown'
+             WHERE status IN ('sending', 'awaiting_result') AND expires_at IS NOT NULL
+             AND expires_at <= ?1", params![now])
+    }
+
+    pub fn has_unresolved_trade_for_channel(&self, channel_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM trades WHERE channel_id = ?1
+             AND status IN ('sending', 'awaiting_result', 'outcome_unknown'))",
+            params![channel_id], |row| row.get(0))
     }
 
     /// Whether this payment id belongs to any trade, including one already completed by an
@@ -1217,7 +1877,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd,
-                    payment_id, status, created_at
+                    payment_id, status, created_at, failure_code
              FROM trades
              ORDER BY id DESC
              LIMIT ?1",
@@ -1235,6 +1895,7 @@ impl Database {
                 payment_id: row.get(7)?,
                 status: row.get(8)?,
                 created_at: row.get(9)?,
+                failure_code: row.get(10)?,
             })
         })?;
 
@@ -2077,10 +2738,116 @@ impl Database {
         user_channel_id: Option<&str>,
         backing_delta_sats: Option<i64>,
     ) -> SqliteResult<PaymentPersistence> {
+        self.record_payment_and_update_allocation_inner(
+            payment_id,
+            payment_type,
+            direction,
+            amount_msat,
+            amount_usd,
+            btc_price,
+            status,
+            user_channel_id,
+            backing_delta_sats,
+            None,
+            None,
+        )
+    }
+
+    /// Atomically record an authenticated inbound stability payment, apply its complete local
+    /// allocation transition, classify the payment, and consume its settlement id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_signed_stability_payment_and_update_allocation(
+        &self,
+        payment_id: &str,
+        settlement_id: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
+        user_channel_id: &str,
+        backing_sats_before: u64,
+        backing_sats_after: u64,
+        native_sats_after: u64,
+    ) -> SqliteResult<PaymentPersistence> {
+        if amount_msat > i64::MAX as u64
+            || backing_sats_before > i64::MAX as u64
+            || backing_sats_after > i64::MAX as u64
+            || native_sats_after > i64::MAX as u64
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "stability allocation exceeds sqlite range".to_string(),
+            ));
+        }
+        self.record_payment_and_update_allocation_inner(
+            Some(payment_id),
+            "stability",
+            "received",
+            amount_msat,
+            amount_usd,
+            btc_price,
+            "completed",
+            Some(user_channel_id),
+            None,
+            Some((
+                backing_sats_before,
+                backing_sats_after,
+                native_sats_after,
+            )),
+            Some(settlement_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_payment_and_update_allocation_inner(
+        &self,
+        payment_id: Option<&str>,
+        payment_type: &str,
+        direction: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
+        status: &str,
+        user_channel_id: Option<&str>,
+        backing_delta_sats: Option<i64>,
+        absolute_allocation: Option<(u64, u64, u64)>,
+        inbound_settlement_id: Option<&str>,
+    ) -> SqliteResult<PaymentPersistence> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let mut mirror = None;
         let result: SqliteResult<PaymentPersistence> = (|| {
+            if let Some(settlement_id) = inbound_settlement_id {
+                let pid = payment_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "payment_id required for stability settlement".to_string(),
+                    )
+                })?;
+                let registered: (String, i64, String) = conn.query_row(
+                    "SELECT payment_id, amount_msat, state
+                     FROM inbound_stability_settlements WHERE settlement_id = ?1",
+                    params![settlement_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                if registered.0 != pid || registered.1 != amount_msat as i64 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "stability settlement does not match its inbox record".to_string(),
+                    ));
+                }
+                match registered.2.as_str() {
+                    "pending" => {}
+                    "applied" => {
+                        return Ok(PaymentPersistence {
+                            is_new: false,
+                            new_backing: None,
+                            clamped: false,
+                        });
+                    }
+                    _ => {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "stability settlement is not pending".to_string(),
+                        ));
+                    }
+                }
+            }
             // Dedup check inside the transaction to prevent cross-process TOCTOU
             if let Some(pid) = payment_id {
                 let exists: Option<i64> = conn
@@ -2091,6 +2858,11 @@ impl Database {
                     )
                     .optional()?;
                 if exists.is_some() {
+                    if inbound_settlement_id.is_some() {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "stability payment id was already classified elsewhere".to_string(),
+                        ));
+                    }
                     return Ok(PaymentPersistence {
                         is_new: false,
                         new_backing: None,
@@ -2108,9 +2880,41 @@ impl Database {
             )?;
             let payment_row_id = conn.last_insert_rowid();
             let mut new_backing = None;
+            let mut new_native = None;
             let mut clamped = false;
             let mut channel_before: Option<(f64, i64, i64)> = None;
-            if let Some(delta) = backing_delta_sats {
+            if let Some((backing_before, backing_after, native_after)) = absolute_allocation {
+                let ucid = user_channel_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "user_channel_id required for allocation update".to_string(),
+                    )
+                })?;
+                channel_before = conn
+                    .query_row(
+                        "SELECT expected_usd, stable_sats, native_sats
+                         FROM channels WHERE user_channel_id = ?1",
+                        params![ucid],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                let current = channel_before
+                    .as_ref()
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                if current.1 != backing_before as i64 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        STALE_INBOUND_STABILITY_ALLOCATION.to_string(),
+                    ));
+                }
+                conn.execute(
+                    "UPDATE channels
+                     SET stable_sats = ?1, native_sats = ?2,
+                         updated_at = strftime('%s', 'now')
+                     WHERE user_channel_id = ?3",
+                    params![backing_after as i64, native_after as i64, ucid],
+                )?;
+                new_backing = Some(backing_after as i64);
+                new_native = Some(native_after as i64);
+            } else if let Some(delta) = backing_delta_sats {
                 // user_channel_id must be set when a backing update is requested.
                 let ucid = user_channel_id.ok_or_else(|| {
                     rusqlite::Error::InvalidParameterName(
@@ -2139,6 +2943,36 @@ impl Database {
                 )?;
                 new_backing = Some(updated);
             }
+            if let Some(settlement_id) = inbound_settlement_id {
+                let pid = payment_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "payment_id required for stability settlement".to_string(),
+                    )
+                })?;
+                let ucid = user_channel_id.ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "user_channel_id required for stability settlement".to_string(),
+                    )
+                })?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO settlement_payments
+                        (payment_id, kind, user_channel_id, outcome)
+                     VALUES (?1, 'stability', ?2, 'succeeded')",
+                    params![pid, ucid],
+                )?;
+                let consumed = conn.execute(
+                    "UPDATE inbound_stability_settlements
+                     SET state = 'applied', reason = NULL,
+                         updated_at = strftime('%s', 'now')
+                     WHERE settlement_id = ?1 AND payment_id = ?2 AND state = 'pending'",
+                    params![settlement_id, pid],
+                )?;
+                if consumed != 1 {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "stability settlement inbox transition failed".to_string(),
+                    ));
+                }
+            }
             let after_backing = new_backing.and_then(|value| u64::try_from(value).ok());
             let before_snapshot = channel_before.map(|(expected, backing, native)| AccountingSnapshot {
                 expected_usd: Some(expected),
@@ -2153,10 +2987,16 @@ impl Database {
             let after_snapshot = before_snapshot.as_ref().map(|before| AccountingSnapshot {
                 expected_usd: before.expected_usd,
                 backing_sats: after_backing.or(before.backing_sats),
-                native_sats: before.native_sats,
+                native_sats: new_native
+                    .and_then(|value| u64::try_from(value).ok())
+                    .or(before.native_sats),
                 live_receiver_sats: after_backing
                     .or(before.backing_sats)
-                    .zip(before.native_sats)
+                    .zip(
+                        new_native
+                            .and_then(|value| u64::try_from(value).ok())
+                            .or(before.native_sats),
+                    )
                     .map(|(backing, native)| backing.saturating_add(native)),
                 btc_price,
                 amount_msat: Some(amount_msat),
@@ -2200,7 +3040,9 @@ impl Database {
                     "user_channel_id": user_channel_id,
                     "backing_delta_sats": backing_delta_sats,
                     "new_backing_sats": new_backing,
+                    "new_native_sats": new_native,
                     "clamped": clamped,
+                    "settlement_id": inbound_settlement_id,
                 }),
                 refs,
             };
@@ -2600,6 +3442,178 @@ impl Database {
             params![payment_id, kind, user_channel_id],
         )?;
         Ok(())
+    }
+
+    /// Durably register signed stability metadata before changing channel accounting.
+    /// Replays must match the original payment and complete signed envelope exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_inbound_stability_settlement(
+        &self,
+        settlement_id: &str,
+        payment_id: &str,
+        channel_id: &str,
+        amount_msat: u64,
+        direction: &str,
+        envelope: &str,
+    ) -> SqliteResult<InboundStabilityRegistration> {
+        if settlement_id.is_empty()
+            || payment_id.is_empty()
+            || channel_id.is_empty()
+            || direction.is_empty()
+            || envelope.is_empty()
+            || amount_msat == 0
+            || amount_msat > i64::MAX as u64
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid inbound stability settlement".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        // Terminal rows are replay tombstones only until their signed authorization is guaranteed
+        // to be expired. Prune them opportunistically so paid one-sat garbage cannot grow the
+        // inbox forever, while pending work remains durable.
+        let terminal_retention_secs = crate::constants::STABILITY_PAYMENT_AUTH_TTL_SECS
+            .saturating_add(crate::constants::STABILITY_PAYMENT_CLOCK_SKEW_SECS);
+        conn.execute(
+            "DELETE FROM inbound_stability_settlements
+             WHERE state IN ('applied', 'invalid')
+               AND updated_at < strftime('%s', 'now') - ?1",
+            params![i64::try_from(terminal_retention_secs).unwrap_or(i64::MAX)],
+        )?;
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO inbound_stability_settlements
+                (settlement_id, payment_id, channel_id, amount_msat, direction, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                settlement_id,
+                payment_id,
+                channel_id,
+                amount_msat as i64,
+                direction,
+                envelope,
+            ],
+        )?;
+        let existing: (String, String, i64, String, String, String) = conn.query_row(
+            "SELECT payment_id, channel_id, amount_msat, direction, envelope, state
+             FROM inbound_stability_settlements WHERE settlement_id = ?1",
+            params![settlement_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+        if existing.0 != payment_id
+            || existing.1 != channel_id
+            || existing.2 != amount_msat as i64
+            || existing.3 != direction
+            || existing.4 != envelope
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "conflicting inbound stability settlement replay".to_string(),
+            ));
+        }
+        if inserted == 1 {
+            return Ok(InboundStabilityRegistration::New);
+        }
+        match existing.5.as_str() {
+            "pending" => Ok(InboundStabilityRegistration::Pending),
+            "applied" => Ok(InboundStabilityRegistration::Applied),
+            "invalid" => Ok(InboundStabilityRegistration::Invalid),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+
+    pub fn finish_inbound_stability_settlement(
+        &self,
+        settlement_id: &str,
+        state: &str,
+        reason: Option<&str>,
+    ) -> SqliteResult<()> {
+        if !matches!(state, "applied" | "invalid") {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid inbound stability settlement state".to_string(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE inbound_stability_settlements
+             SET state = ?2, reason = ?3, updated_at = strftime('%s', 'now')
+             WHERE settlement_id = ?1 AND state = 'pending'",
+            params![settlement_id, state, reason],
+        )?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn inbound_stability_settlement_state(
+        &self,
+        settlement_id: &str,
+    ) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT state FROM inbound_stability_settlements WHERE settlement_id = ?1",
+            params![settlement_id],
+            |row| row.get(0),
+        )
+        .optional()
+    }
+
+    pub fn inbound_stability_settlement_received_at(
+        &self,
+        settlement_id: &str,
+    ) -> SqliteResult<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        let created_at: Option<i64> = conn
+            .query_row(
+                "SELECT created_at FROM inbound_stability_settlements
+                 WHERE settlement_id = ?1",
+                params![settlement_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        created_at
+            .map(|value| {
+                u64::try_from(value).map_err(|_| {
+                    rusqlite::Error::IntegralValueOutOfRange(0, value)
+                })
+            })
+            .transpose()
+    }
+
+    pub fn pending_inbound_stability_settlements(
+        &self,
+        limit: usize,
+    ) -> SqliteResult<Vec<PendingInboundStabilitySettlement>> {
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let conn = self.conn.lock().unwrap();
+        let mut statement = conn.prepare(
+            "SELECT settlement_id, payment_id, amount_msat, envelope
+             FROM inbound_stability_settlements
+             WHERE state = 'pending'
+             ORDER BY created_at ASC, settlement_id ASC
+             LIMIT ?1",
+        )?;
+        let settlements = statement
+            .query_map(params![limit], |row| {
+                let amount_msat: i64 = row.get(2)?;
+                let amount_msat = u64::try_from(amount_msat).map_err(|_| {
+                    rusqlite::Error::IntegralValueOutOfRange(2, amount_msat)
+                })?;
+                Ok(PendingInboundStabilitySettlement {
+                    settlement_id: row.get(0)?,
+                    payment_id: row.get(1)?,
+                    amount_msat,
+                    envelope: row.get(3)?,
+                })
+            })?
+            .collect();
+        settlements
     }
 
     /// Record the reversible allocation transition, optimistic channel state, and ledger event in
@@ -3104,6 +4118,7 @@ pub struct TradeRecord {
     pub payment_id: Option<String>,
     pub status: String,
     pub created_at: i64,
+    pub failure_code: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3162,6 +4177,177 @@ pub struct DailyPriceRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_stability_registration_detects_replays_and_conflicts() {
+        let db = Database::open_in_memory().unwrap();
+        let settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        assert_eq!(
+            db.register_inbound_stability_settlement(
+                &settlement_id,
+                "payment-1",
+                &channel_id,
+                909_000,
+                "user_to_lsp",
+                "signed-envelope",
+            )
+            .unwrap(),
+            InboundStabilityRegistration::New
+        );
+        assert_eq!(
+            db.register_inbound_stability_settlement(
+                &settlement_id,
+                "payment-1",
+                &channel_id,
+                909_000,
+                "user_to_lsp",
+                "signed-envelope",
+            )
+            .unwrap(),
+            InboundStabilityRegistration::Pending
+        );
+        assert_eq!(
+            db.pending_inbound_stability_settlements(10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(db
+            .register_inbound_stability_settlement(
+                &settlement_id,
+                "payment-2",
+                &channel_id,
+                909_000,
+                "user_to_lsp",
+                "signed-envelope",
+            )
+            .is_err());
+
+        db.finish_inbound_stability_settlement(&settlement_id, "invalid", Some("signature"))
+            .unwrap();
+        assert_eq!(
+            db.inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("invalid")
+        );
+        assert!(db
+            .pending_inbound_stability_settlements(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn inbound_stability_registration_prunes_only_expired_terminal_tombstones() {
+        let db = Database::open_in_memory().unwrap();
+        let old_settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        db.register_inbound_stability_settlement(
+            &old_settlement_id,
+            "payment-old",
+            &channel_id,
+            1_000,
+            "user_to_lsp",
+            "old-envelope",
+        )
+        .unwrap();
+        db.finish_inbound_stability_settlement(&old_settlement_id, "invalid", Some("test"))
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE inbound_stability_settlements SET updated_at = 0
+                 WHERE settlement_id = ?1",
+                params![old_settlement_id],
+            )
+            .unwrap();
+
+        let new_settlement_id = "33".repeat(32);
+        db.register_inbound_stability_settlement(
+            &new_settlement_id,
+            "payment-new",
+            &channel_id,
+            1_000,
+            "user_to_lsp",
+            "new-envelope",
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.inbound_stability_settlement_state(&old_settlement_id)
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            db.inbound_stability_settlement_state(&new_settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("pending"),
+        );
+    }
+
+    #[test]
+    fn signed_stability_payment_updates_allocation_once_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        let settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        db.save_channel(&channel_id, "42", 10.0, 10_000, 40_000, None)
+            .unwrap();
+        db.register_inbound_stability_settlement(
+            &settlement_id,
+            "payment-1",
+            &channel_id,
+            909_000,
+            "user_to_lsp",
+            "signed-envelope",
+        )
+        .unwrap();
+
+        let first = db
+            .record_signed_stability_payment_and_update_allocation(
+                "payment-1",
+                &settlement_id,
+                909_000,
+                Some(0.9999),
+                Some(110_000.0),
+                "42",
+                10_000,
+                9_091,
+                40_000,
+            )
+            .unwrap();
+        assert!(first.is_new);
+        let channel = db.load_channel("42").unwrap().unwrap();
+        assert_eq!(channel.backing_sats, 9_091);
+        assert_eq!(channel.native_sats, 40_000);
+        assert_eq!(
+            db.inbound_stability_settlement_state(&settlement_id)
+                .unwrap()
+                .as_deref(),
+            Some("applied")
+        );
+
+        let replay = db
+            .record_signed_stability_payment_and_update_allocation(
+                "payment-1",
+                &settlement_id,
+                909_000,
+                Some(0.9999),
+                Some(110_000.0),
+                "42",
+                10_000,
+                9_091,
+                40_000,
+            )
+            .unwrap();
+        assert!(!replay.is_new);
+        assert_eq!(
+            db.load_channel("42").unwrap().unwrap().backing_sats,
+            9_091
+        );
+    }
 
     #[test]
     fn test_open_in_memory() {
@@ -3470,6 +4656,472 @@ mod tests {
         assert_eq!(db.next_sync_version("user-channel-1").unwrap(), 2);
         assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
         assert!(db.next_sync_version("missing").is_err());
+    }
+
+    #[test]
+    fn legacy_trade_decisions_are_migrated_to_terminal_dedup_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(DB_FILENAME);
+        let payment_id = "11".repeat(32);
+        let trade_id = "22".repeat(32);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE trade_decisions (
+                inbound_payment_id TEXT PRIMARY KEY,
+                trade_id TEXT,
+                channel_id TEXT NOT NULL,
+                user_channel_id TEXT NOT NULL,
+                counterparty TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                reason_code TEXT,
+                explanation TEXT,
+                expected_usd REAL,
+                backing_sats INTEGER,
+                sync_version INTEGER,
+                response_envelope TEXT NOT NULL,
+                response_amount_msat INTEGER NOT NULL,
+                response_payment_id TEXT,
+                response_status TEXT NOT NULL DEFAULT 'pending',
+                response_attempts INTEGER NOT NULL DEFAULT 0,
+                next_response_attempt_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                resolved_at INTEGER,
+                remote_user_channel_id TEXT
+             );
+             CREATE INDEX idx_trade_decisions_response_due
+                ON trade_decisions(response_status, next_response_attempt_at);",
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO trade_decisions (
+                inbound_payment_id, trade_id, channel_id, user_channel_id, counterparty,
+                outcome, expected_usd, backing_sats, sync_version, response_envelope,
+                response_amount_msat, response_payment_id, response_status,
+                response_attempts, next_response_attempt_at, created_at, resolved_at
+             ) VALUES (?1, ?2, ?3, 'user-channel', 'counterparty', 'accepted', 20.0,
+                20000, 7, 'old-signed-sync', 1, ?4, 'succeeded', 1, 101, 100, 102)",
+            params![payment_id, trade_id, "33".repeat(32), "44".repeat(32)],
+        ).unwrap();
+        drop(conn);
+
+        let db = Database::open(directory.path()).unwrap();
+        assert_eq!(db.trade_decision_by_payment(&payment_id).unwrap(), Some(TradeDecisionIdentity {
+            inbound_payment_id: payment_id.clone(),
+            trade_id: trade_id.clone(),
+            request_hash: payment_id.clone(),
+        }));
+        let conn = db.conn.lock().unwrap();
+        let (status, delivered_at): (String, Option<i64>) = conn.query_row(
+            "SELECT response_status, delivered_at FROM trade_decisions
+             WHERE inbound_payment_id = ?1",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(status, "delivered");
+        assert_eq!(delivered_at, Some(102));
+        let columns = trade_decision_columns(&conn).unwrap();
+        assert!(columns.contains("request_hash"));
+        assert!(columns.contains("delivery_deadline"));
+        assert!(!columns.contains("response_amount_msat"));
+        drop(conn);
+
+        assert!(db.persist_trade_rejection(
+            &"55".repeat(32), &"66".repeat(32), &"77".repeat(32), &"88".repeat(32),
+            "user-channel", "counterparty", "internal_failure", 200,
+            "new-signed-rejection",
+        ).unwrap());
+        drop(db);
+
+        let reopened = Database::open(directory.path()).unwrap();
+        assert_eq!(reopened.due_trade_responses(200, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lsp_trade_acceptance_and_decision_commit_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        let channel_id = "11".repeat(32);
+        let trade_id = "22".repeat(32);
+        let request_hash = "33".repeat(32);
+        let payment_id = "44".repeat(32);
+        db.save_channel(&channel_id, "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_trade_decision BEFORE INSERT ON trade_decisions
+                 BEGIN SELECT RAISE(ABORT, 'injected decision failure'); END;",
+            )
+            .unwrap();
+        assert!(db
+            .persist_trade_acceptance(
+                &payment_id,
+                &trade_id,
+                &request_hash,
+                &channel_id,
+                "user-channel-1",
+                "counterparty",
+                20.0,
+                20_000,
+                4_000,
+                1,
+                100,
+                "signed-sync",
+            )
+            .is_err());
+        let unchanged = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(unchanged.expected_usd, 10.0);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(0));
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_none());
+
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_trade_decision")
+            .unwrap();
+        assert!(db
+            .persist_trade_acceptance(
+                &payment_id,
+                &trade_id,
+                &request_hash,
+                &channel_id,
+                "user-channel-1",
+                "counterparty",
+                20.0,
+                20_000,
+                4_000,
+                1,
+                100,
+                "signed-sync",
+            )
+            .unwrap());
+        let accepted = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(accepted.expected_usd, 20.0);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(1));
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_some());
+        assert!(!db
+            .persist_trade_acceptance(
+                &payment_id,
+                &trade_id,
+                &request_hash,
+                &channel_id,
+                "user-channel-1",
+                "counterparty",
+                30.0,
+                30_000,
+                1_000,
+                2,
+                101,
+                "different-sync",
+            )
+            .unwrap());
+        assert_eq!(
+            db.load_channel("user-channel-1")
+                .unwrap()
+                .unwrap()
+                .expected_usd,
+            20.0
+        );
+    }
+
+    #[test]
+    fn durable_trade_response_reserves_backoff_and_stops_after_delivery() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(Database::trade_response_delay_secs(1), 5);
+        assert_eq!(Database::trade_response_delay_secs(2), 10);
+        assert_eq!(Database::trade_response_delay_secs(100), 60 * 60);
+        let payment_id = "55".repeat(32);
+        assert!(db
+            .persist_trade_rejection(
+                &payment_id,
+                &"66".repeat(32),
+                &"77".repeat(32),
+                &"88".repeat(32),
+                "user-channel-1",
+                "counterparty",
+                "insufficient_capacity",
+                100,
+                "signed-rejection",
+            )
+            .unwrap());
+        let due = db.due_trade_responses(100, 10).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempts, 0);
+        assert!(db.reserve_trade_response_attempt(&payment_id, 0, 100).unwrap());
+        assert!(db.due_trade_responses(104, 10).unwrap().is_empty());
+        assert_eq!(db.due_trade_responses(105, 10).unwrap()[0].attempts, 1);
+
+        assert!(db.reserve_trade_response_attempt(&payment_id, 1, 105).unwrap());
+        let response_payment_id = "99".repeat(32);
+        assert!(db
+            .mark_trade_response_in_flight(&payment_id, &response_payment_id)
+            .unwrap());
+        assert_eq!(
+            db.in_flight_trade_response_payment_ids().unwrap(),
+            vec![response_payment_id.clone()]
+        );
+        assert!(db
+            .mark_trade_response_failed(&response_payment_id, 106)
+            .unwrap());
+        assert!(db.due_trade_responses(114, 10).unwrap().is_empty());
+        assert_eq!(db.due_trade_responses(115, 10).unwrap().len(), 1);
+
+        assert!(db.reserve_trade_response_attempt(&payment_id, 2, 115).unwrap());
+        assert!(db
+            .mark_trade_response_in_flight(&payment_id, &response_payment_id)
+            .unwrap());
+        assert!(db
+            .mark_trade_response_delivered(&response_payment_id, 116)
+            .unwrap());
+        assert!(db.due_trade_responses(i64::MAX / 2, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn trade_response_retry_survives_restart_then_abandons_and_prunes_details() {
+        let directory = tempfile::tempdir().unwrap();
+        let payment_id = "0a".repeat(32);
+        {
+            let db = Database::open(directory.path()).unwrap();
+            assert!(db
+                .persist_trade_rejection(
+                    &payment_id,
+                    &"0b".repeat(32),
+                    &"0c".repeat(32),
+                    &"0d".repeat(32),
+                    "user-channel-1",
+                    "counterparty",
+                    "internal_failure",
+                    100,
+                    "signed-rejection",
+                )
+                .unwrap());
+        }
+
+        let db = Database::open(directory.path()).unwrap();
+        assert_eq!(db.due_trade_responses(100, 10).unwrap().len(), 1);
+        let deadline = 100 + crate::constants::TRADE_RESPONSE_RETRY_WINDOW_SECS as i64;
+        assert_eq!(db.abandon_expired_trade_responses(deadline).unwrap(), 1);
+        assert!(db.due_trade_responses(deadline, 10).unwrap().is_empty());
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_some());
+
+        let prune_at = 100 + crate::constants::TRADE_RESPONSE_DETAIL_RETENTION_SECS as i64;
+        assert_eq!(db.prune_trade_response_details(prune_at).unwrap(), 1);
+        let envelope: Option<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT response_envelope FROM trade_decisions WHERE inbound_payment_id = ?1",
+                params![payment_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(envelope, None);
+        assert!(db.trade_decision_by_payment(&payment_id).unwrap().is_some());
+    }
+
+    fn prepare_correlated_trade(
+        db: &Database,
+        channel_id: &str,
+        user_channel_id: &str,
+        trade_id: &str,
+        payment_id: &str,
+        request_hash: &str,
+    ) -> i64 {
+        let payload = "exact signed payload";
+        db.save_channel(channel_id, user_channel_id, 10.0, 10_000, 5_000, None)
+            .unwrap();
+        let row_id = db
+            .record_prepared_trade(
+                channel_id,
+                trade_id,
+                request_hash,
+                payload,
+                "sell",
+                10.0,
+                0.0001,
+                100_000.0,
+                0.1,
+                100_000,
+                20.0,
+                20_000,
+                100,
+            )
+            .unwrap();
+        assert!(db.attach_trade_payment_id(row_id, payment_id).unwrap());
+        row_id
+    }
+
+    #[test]
+    fn correlated_trade_acceptance_appends_accounting_ledger_atomically() {
+        let db = Database::open_in_memory().unwrap();
+        let channel_id = "a1".repeat(32);
+        let trade_id = "b1".repeat(32);
+        let payment_id = "c1".repeat(32);
+        let request_hash = crate::trade::request_hash(b"exact signed payload");
+        let row_id = prepare_correlated_trade(
+            &db, &channel_id, "user-channel-1", &trade_id, &payment_id, &request_hash,
+        );
+
+        let result = db
+            .apply_correlated_trade_acceptance(
+                "user-channel-1", 1, 20.0, 20_000, 5_000, row_id, &payment_id,
+            )
+            .unwrap();
+        assert_eq!(result, CorrelatedTradeAcceptance {
+            trade_resolved: true,
+            allocation_applied: true,
+        });
+        let events = db
+            .list_ledger_events(&LedgerQuery {
+                identifier: Some("user-channel-1".to_owned()),
+                limit: 20,
+                ..Default::default()
+            })
+            .unwrap()
+            .events;
+        let sync = events
+            .iter()
+            .find(|event| event.event_type == "SYNC_V1_APPLIED")
+            .unwrap();
+        assert_eq!(sync.before.as_ref().unwrap().backing_sats, Some(10_000));
+        assert_eq!(sync.after.as_ref().unwrap().backing_sats, Some(20_000));
+        assert_eq!(sync.after.as_ref().unwrap().native_sats, Some(5_000));
+        assert_eq!(sync.detail["trade_id"], trade_id);
+    }
+
+    #[test]
+    fn correlated_acceptance_ledger_failure_rolls_back_trade_and_allocation() {
+        let db = Database::open_in_memory().unwrap();
+        let channel_id = "a2".repeat(32);
+        let trade_id = "b2".repeat(32);
+        let payment_id = "c2".repeat(32);
+        let request_hash = crate::trade::request_hash(b"exact signed payload");
+        let row_id = prepare_correlated_trade(
+            &db, &channel_id, "user-channel-1", &trade_id, &payment_id, &request_hash,
+        );
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER inject_correlated_sync_ledger_failure
+             BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'SYNC_V1_APPLIED'
+             BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;",
+        ).unwrap();
+
+        assert!(db
+            .apply_correlated_trade_acceptance(
+                "user-channel-1", 1, 20.0, 20_000, 5_000, row_id, &payment_id,
+            )
+            .is_err());
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 10.0);
+        assert_eq!(channel.backing_sats, 10_000);
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(0));
+        assert_eq!(
+            db.get_trade_by_correlation(&trade_id, &payment_id, &request_hash)
+                .unwrap()
+                .unwrap()
+                .status,
+            "awaiting_result"
+        );
+    }
+
+    #[test]
+    fn desktop_unknown_trade_accepts_late_older_correlated_sync_without_rollback() {
+        let db = Database::open_in_memory().unwrap();
+        let channel_id = "aa".repeat(32);
+        let trade_id = "bb".repeat(32);
+        let payment_id = "cc".repeat(32);
+        let request_hash = crate::trade::request_hash(b"exact signed payload");
+        let row_id = prepare_correlated_trade(
+            &db, &channel_id, "user-channel-1", &trade_id, &payment_id, &request_hash,
+        );
+        assert!(db
+            .apply_sync_if_newer("user-channel-1", 2, 30.0, 30_000, 7_000)
+            .unwrap());
+        assert_eq!(db.mark_unresolved_trades_unknown(100).unwrap(), 1);
+
+        let result = db
+            .apply_correlated_trade_acceptance(
+                "user-channel-1",
+                1,
+                20.0,
+                20_000,
+                4_000,
+                row_id,
+                &payment_id,
+            )
+            .unwrap();
+        assert!(result.trade_resolved);
+        assert!(!result.allocation_applied);
+        let current = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(db.get_sync_version("user-channel-1").unwrap(), Some(2));
+        assert_eq!(current.expected_usd, 30.0);
+        assert_eq!(
+            db.get_trade_by_correlation(&trade_id, &payment_id, &request_hash)
+                .unwrap()
+                .unwrap()
+                .status,
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn rejected_trade_cannot_later_apply_a_conflicting_acceptance() {
+        let db = Database::open_in_memory().unwrap();
+        let channel_id = "da".repeat(32);
+        let trade_id = "db".repeat(32);
+        let payment_id = "dc".repeat(32);
+        let payload = "signed request";
+        let request_hash = crate::trade::request_hash(payload.as_bytes());
+        db.save_channel(&channel_id, "user-channel-1", 10.0, 10_000, 5_000, None)
+            .unwrap();
+        let row_id = db
+            .record_prepared_trade(
+                &channel_id,
+                &trade_id,
+                &request_hash,
+                payload,
+                "sell",
+                10.0,
+                0.0001,
+                100_000.0,
+                0.1,
+                100_000,
+                20.0,
+                20_000,
+                1_000,
+            )
+            .unwrap();
+        assert!(db.attach_trade_payment_id(row_id, &payment_id).unwrap());
+        assert!(db
+            .mark_trade_rejected(
+                row_id,
+                &payment_id,
+                "insufficient_capacity",
+                100,
+            )
+            .unwrap());
+        let result = db
+            .apply_correlated_trade_acceptance(
+                "user-channel-1",
+                1,
+                20.0,
+                20_000,
+                4_000,
+                row_id,
+                &payment_id,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            CorrelatedTradeAcceptance {
+                trade_resolved: false,
+                allocation_applied: false,
+            }
+        );
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.expected_usd, 10.0);
+        assert_eq!(channel.backing_sats, 10_000);
     }
 
     #[test]
@@ -4020,7 +5672,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_trade_matches_signed_allocation_and_payment_id_remains_classified() {
+    fn pending_trade_matches_expected_target_and_payment_id_remains_classified() {
         let db = Database::open_in_memory().unwrap();
         let trade_id = db
             .record_trade(
@@ -4038,12 +5690,12 @@ mod tests {
             .unwrap();
 
         let matched = db
-            .get_pending_trade_by_allocation(60.0, 60_000)
+            .get_pending_trade_by_expected_usd(60.0)
             .unwrap()
-            .expect("exact wallet-authored allocation must match");
+            .expect("wallet-authored target must match even when peer backing differs");
         assert_eq!(matched.id, trade_id);
         assert!(db
-            .get_pending_trade_by_allocation(60.01, 60_000)
+            .get_pending_trade_by_expected_usd(60.01)
             .unwrap()
             .is_none());
         assert!(db.is_trade_payment("trade-payment").unwrap());
@@ -4051,7 +5703,7 @@ mod tests {
         db.update_trade_status(trade_id, "completed").unwrap();
         assert!(db.is_trade_payment("trade-payment").unwrap());
         assert!(db
-            .get_pending_trade_by_allocation(60.0, 60_000)
+            .get_pending_trade_by_expected_usd(60.0)
             .unwrap()
             .is_none());
     }
@@ -4119,7 +5771,19 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.save_channel("chan_x", "42", 0.0, 0, 0, None).unwrap();
         assert_eq!(db.get_user_channel_id_by_channel_id("chan_x").unwrap(), Some("42".to_string()));
+        assert_eq!(
+            db.get_active_user_channel_id_by_channel_id("chan_x").unwrap(),
+            Some("42".to_string())
+        );
         assert_eq!(db.get_user_channel_id_by_channel_id("missing").unwrap(), None);
+        assert_eq!(db.get_active_user_channel_id_by_channel_id("missing").unwrap(), None);
+
+        db.mark_channel_closed("42").unwrap();
+        assert_eq!(
+            db.get_user_channel_id_by_channel_id("chan_x").unwrap(),
+            Some("42".to_string())
+        );
+        assert_eq!(db.get_active_user_channel_id_by_channel_id("chan_x").unwrap(), None);
     }
 
     #[test]

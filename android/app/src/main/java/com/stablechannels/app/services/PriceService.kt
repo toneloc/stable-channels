@@ -1,7 +1,14 @@
 package com.stablechannels.app.services
 
+import android.content.Context
+import android.util.Log
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.NamedPrice
 import com.stablechannels.app.util.PriceFeedConfig
+import com.stablechannels.app.util.PriceOracle
+import com.stablechannels.app.util.PriceOracleAnchorStore
+import com.stablechannels.app.util.PriceOracleException
+import com.stablechannels.app.util.PriceOracleSource
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -9,14 +16,24 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.util.Date
 import java.util.concurrent.TimeUnit
 
-class PriceService {
+class PriceService(private val appContext: Context? = null) {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .readTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .callTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .build()
+
+    /** Longer-lived client for historical-chart backfill: the ~30-day hourly OHLC payload is far
+     *  larger than a ticker response, so the short per-feed timeout would silently truncate it to
+     *  an empty chart on a slow connection (iOS chartSession parity). */
+    private val chartClient = client.newBuilder()
+        .readTimeout(Constants.CHART_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .callTimeout(Constants.CHART_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
     private val _currentPrice = MutableStateFlow(0.0)
@@ -25,11 +42,24 @@ class PriceService {
     private val _lastUpdate = MutableStateFlow(Date(0))
     val lastUpdate: StateFlow<Date> = _lastUpdate
 
+    private val _accountingPrice = MutableStateFlow(0.0)
+    val accountingPrice: StateFlow<Double> = _accountingPrice
+
+    private val _activeSource = MutableStateFlow<PriceOracleSource?>(null)
+    val activeSource: StateFlow<PriceOracleSource?> = _activeSource
+
+    @Volatile
+    private var isQuarantined = false
+
     /** Returns true if the price was last updated more than [maxAgeSecs] seconds ago. */
-    fun isPriceStale(maxAgeSecs: Long = 60): Boolean {
+    fun isPriceStale(maxAgeSecs: Long = PriceOracle.MAXIMUM_TRUSTED_PRICE_AGE_SECS): Boolean {
         val ageMs = System.currentTimeMillis() - _lastUpdate.value.time
         return ageMs > maxAgeSecs * 1000
     }
+
+    /** Re-check freshness at the point of use so money movement never relies on a stale flow value. */
+    fun currentAccountingPrice(): Double =
+        _currentPrice.value.takeIf { it > 0.0 && !isQuarantined && !isPriceStale() } ?: 0.0
 
     private var refreshJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -62,20 +92,65 @@ class PriceService {
         if (isUpdating) return
         isUpdating = true
         try {
-            val prices = coroutineScope {
-                Constants.DEFAULT_PRICE_FEEDS.map { feed ->
-                    async { fetchSingleFeed(feed) }
-                }.mapNotNull { it.await() }
+            val lastTrustedPrice = _currentPrice.value.takeIf {
+                it > 0 && !isPriceStale()
             }
-            if (prices.size < 3) return  // need at least 3 of 5 feeds
-            val med = median(prices)
-            if (med > 0) {
-                _currentPrice.value = med
-                _lastUpdate.value = Date()
+            // Constants.DEFAULT_PRICE_FEEDS is PriceOracle.DIRECT_USD_FEEDS in production and the
+            // local E2E feed set when TestOverrides supplies one.
+            val usdPrices = fetchFeeds(Constants.DEFAULT_PRICE_FEEDS)
+            val result = try {
+                PriceOracle.resolve(usdPrices, emptyList(), emptyList(), lastTrustedPrice)
+            } catch (error: PriceOracleException) {
+                if (error.quarantinesPrice) throw error
+                Log.w(TAG, "Direct USD unavailable: ${error.message}; trying USDT fallback")
+                coroutineScope {
+                    val usdtPrices = async { fetchFeeds(PriceOracle.BITCOIN_USDT_FEEDS) }
+                    val pegPrices = async { fetchFeeds(PriceOracle.USDT_USD_FEEDS) }
+                    PriceOracle.resolve(
+                        emptyList(),
+                        usdtPrices.await(),
+                        pegPrices.await(),
+                        lastTrustedPrice
+                    )
+                }
             }
+
+            _currentPrice.value = result.price
+            _lastUpdate.value = Date()
+            _accountingPrice.value = result.price
+            _activeSource.value = result.source
+            isQuarantined = false
+            // Persist the accepted price so the background stability service inherits the
+            // large-move circuit breaker (mirrors the iOS app-group anchor).
+            appContext?.let {
+                PriceOracleAnchorStore.save(it, result.price, _lastUpdate.value.time)
+            }
+            Log.d(
+                TAG,
+                "Accepted ${result.source} price from ${result.agreeingFeedNames.size} feeds" +
+                    (result.usdtUsd?.let { ", USDT/USD=$it" } ?: "")
+            )
+        } catch (error: Exception) {
+            if ((error as? PriceOracleException)?.quarantinesPrice == true) {
+                isQuarantined = true
+            }
+            _accountingPrice.value = if (!isQuarantined && !isPriceStale()) {
+                _currentPrice.value
+            } else {
+                0.0
+            }
+            Log.w(TAG, "Rejected price refresh: ${error.message}")
         } finally {
             isUpdating = false
         }
+    }
+
+    private suspend fun fetchFeeds(feeds: List<PriceFeedConfig>): List<NamedPrice> = coroutineScope {
+        feeds.map { feed ->
+            async {
+                fetchSingleFeed(feed)?.let { NamedPrice(feed.name, it) }
+            }
+        }.mapNotNull { it.await() }
     }
 
     private suspend fun fetchSingleFeed(feed: PriceFeedConfig): Double? {
@@ -83,23 +158,31 @@ class PriceService {
             .replace("{currency_lc}", "usd")
             .replace("{currency}", "USD")
 
-        repeat(Constants.PRICE_FETCH_MAX_RETRIES) {
-            try {
-                val request = Request.Builder().url(url).build()
-                val response = withContext(Dispatchers.IO) {
-                    client.newCall(request).execute()
+        return try {
+            val request = Request.Builder().url(url).build()
+            val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
+            response.use {
+                if (!it.isSuccessful) {
+                    Log.w(TAG, "${feed.name} failed: HTTP ${it.code}")
+                    return null
                 }
-                val body = response.body?.string() ?: return null
-                val json = JSONObject(body)
-                return extractPrice(json, feed.jsonPath)
-            } catch (_: Exception) {
-                delay(Constants.PRICE_FETCH_RETRY_DELAY_MS)
+                val body = it.body?.string() ?: return null
+                val json = JSONTokener(body).nextValue()
+                val price = extractPrice(json, feed.jsonPath)
+                if (price == null) {
+                    Log.w(TAG, "${feed.name} failed: invalid response path")
+                } else {
+                    Log.d(TAG, "${feed.name} succeeded")
+                }
+                price
             }
+        } catch (error: Exception) {
+            Log.w(TAG, "${feed.name} failed: ${error.message}")
+            null
         }
-        return null
     }
 
-    private fun extractPrice(json: JSONObject, path: List<String>): Double? {
+    private fun extractPrice(json: Any, path: List<String>): Double? {
         var current: Any = json
         for (key in path) {
             current = when (current) {
@@ -131,7 +214,7 @@ class PriceService {
         val url = "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=$sinceTs"
         return try {
             val request = Request.Builder().url(url).build()
-            val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
+            val response = withContext(Dispatchers.IO) { chartClient.newCall(request).execute() }
             val body = response.body?.string() ?: return emptyList()
             val json = JSONObject(body)
             val result = json.optJSONObject("result") ?: return emptyList()
@@ -150,15 +233,10 @@ class PriceService {
     }
 
     companion object {
+        private const val TAG = "PriceOracle"
+
         fun median(values: List<Double>): Double {
-            if (values.isEmpty()) return 0.0
-            val sorted = values.sorted()
-            val mid = sorted.size / 2
-            return if (sorted.size % 2 == 0) {
-                (sorted[mid - 1] + sorted[mid]) / 2.0
-            } else {
-                sorted[mid]
-            }
+            return PriceOracle.median(values) ?: 0.0
         }
     }
 }

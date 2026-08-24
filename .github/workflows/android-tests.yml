@@ -1,0 +1,53 @@
+name: Mobile Tests – Android
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-tests.yml'
+
+concurrency:
+  group: test-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-android:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # JVM unit tests (includes PriceOracleTest.kt — the cross-platform oracle parity suite).
+      - name: Run unit tests
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-test-report
+          path: android/app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore

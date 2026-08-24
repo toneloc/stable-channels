@@ -18,8 +18,8 @@ android {
         applicationId = "com.stablechannels.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.9.3"
+        versionCode = 5
+        versionName = "0.9.4"
     }
 
     // Play upload signing. Reads STABLECHANNELS_UPLOAD_* Gradle properties
@@ -131,4 +131,5 @@ dependencies {
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }

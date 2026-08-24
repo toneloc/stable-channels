@@ -12,10 +12,17 @@ import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.TradeService
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.NamedPrice
+import com.stablechannels.app.util.PriceFeedConfig
+import com.stablechannels.app.util.PriceOracle
+import com.stablechannels.app.util.PriceOracleAnchorStore
+import com.stablechannels.app.util.PriceOracleException
+import com.stablechannels.app.util.StabilityFreshness
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import org.lightningdevkit.ldknode.*
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -38,15 +45,21 @@ class StabilityProcessingService : Service() {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
         private const val DB_RETRY_BACKOFF_MS = 500L
+        private const val SYNC_FRESHNESS_POLL_MS = 500L
 
         @Volatile
         var isRunning = false
             private set
     }
 
+    /** Whether this run's gossip strip deleted node_metrics — resetting LDK's persisted
+     *  Lightning-sync timestamp, so the freshness gate can't inherit the app's last sync. */
+    private var nodeMetricsReset = false
+
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .readTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
+        .callTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
     private fun isStabilityMarker(records: List<CustomTlvRecord>): Boolean =
@@ -74,8 +87,7 @@ class StabilityProcessingService : Service() {
         val (type, expectedUsd, parsedUserChannelId) = parsed
         if (type != Constants.SYNC_MESSAGE_TYPE) return false
 
-        var price = fetchMedianPrice()
-        if (price <= 0.0) price = loadChannelStateFromDB()?.latestPrice ?: 0.0
+        val price = fetchMedianPrice()
         if (price <= 0.0) throw BackingUpdateFailed("Cannot apply SYNC_V1 without a BTC price")
 
         val userChannelId = parsedUserChannelId.takeIf { it.isNotEmpty() }
@@ -176,7 +188,7 @@ class StabilityProcessingService : Service() {
         try {
             // Strip gossip from SQLite to avoid OOM in the foreground service.
             // The service doesn't need gossip (it only routes to the LSP, a direct peer).
-            stripGossipFromDB(dataDir)
+            nodeMetricsReset = stripGossipFromDB(dataDir)
 
             val lspPubkey = LspPreferencesManager.getLspPubkey(this)
             val lspAddress = LspPreferencesManager.getLspAddress(this)
@@ -568,11 +580,50 @@ class StabilityProcessingService : Service() {
 
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
 
+        // Chain-freshness gate (see #243): never keysend on a stale chain tip — an outbound
+        // HTLC built on an old best block understates its expiry, and LDK later force-closes
+        // on it. If stale, wait for LDK's background sync within this service's existing
+        // work budget. Checked BEFORE the claim so a deferral never leaves a
+        // claimed-but-unsent marker that would block the foreground retry.
+        val initialSyncAge = lightningSyncAgeSecs(node)
+        logStabilityGateEvent("stability_background_attempted", initialSyncAge, waitedMs = 0)
+        var waitedMs = 0L
+        if (!lightningSyncIsFresh(node)) {
+            val waitStart = System.currentTimeMillis()
+            val waitDeadline = waitStart + POLL_TIMEOUT_SECS * 1000L
+            while (System.currentTimeMillis() < waitDeadline && !lightningSyncIsFresh(node)) {
+                Thread.sleep(SYNC_FRESHNESS_POLL_MS)
+            }
+            waitedMs = System.currentTimeMillis() - waitStart
+            if (!lightningSyncIsFresh(node)) {
+                logStabilityGateEvent(
+                    "stability_background_deferred_stale_sync", initialSyncAge, waitedMs
+                )
+                Log.w(TAG, "Lightning sync still stale after ${waitedMs}ms — deferring to foreground")
+                FCMService.flagPendingPayment(this)
+                return
+            }
+            logStabilityGateEvent("stability_background_fresh_after_wait", initialSyncAge, waitedMs)
+        } else {
+            logStabilityGateEvent("stability_background_fresh_ready", initialSyncAge, waitedMs)
+        }
+
         // Atomically claim the send before starting it. If another process (foreground timer)
         // already holds the marker, the claim is denied and we skip this tick — this is the
         // check-and-set that prevents a double send.
         if (!claimPendingSendInDB(dbPath, amountMsat, price)) {
             Log.d(TAG, "Pending send already claimed by another sender — skipping this tick")
+            return
+        }
+
+        // Re-check after the claim: the SQLite claim can take up to ~2s under cross-process
+        // contention and could carry the timestamp past the 120s boundary. No send happened,
+        // so clear the claim rather than blocking the foreground retry.
+        if (!lightningSyncIsFresh(node)) {
+            try { clearPendingSendInDB(dbPath) } catch (_: Exception) {}
+            logStabilityGateEvent("stability_background_deferred_stale_sync", initialSyncAge, waitedMs)
+            Log.w(TAG, "Lightning sync went stale during claim — deferring to foreground")
+            FCMService.flagPendingPayment(this)
             return
         }
 
@@ -592,6 +643,13 @@ class StabilityProcessingService : Service() {
             Log.e(TAG, "Stability keysend failed", e)
             throw e
         }
+        // Only an accepted send counts as sent_* — denied-claim and send-failure runs must
+        // not inflate the pilot's send numbers.
+        logStabilityGateEvent(
+            if (waitedMs > 0) "stability_background_sent_after_sync" else "stability_background_sent_fresh",
+            initialSyncAge,
+            waitedMs
+        )
         Log.d(TAG, "Stability keysend sent successfully")
 
         try {
@@ -617,6 +675,30 @@ class StabilityProcessingService : Service() {
         }
         clearPendingSendInDB(dbPath)
         Log.d(TAG, "Recorded outgoing payment and updated backingSats -= $amountSats atomically")
+    }
+
+    private fun lightningSyncAgeSecs(node: Node): Long? =
+        StabilityFreshness.syncAgeSecs(
+            node.status().latestLightningWalletSyncTimestamp?.toLong(),
+            System.currentTimeMillis() / 1000
+        )
+
+    private fun lightningSyncIsFresh(node: Node): Boolean =
+        StabilityFreshness.isFresh(
+            node.status().latestLightningWalletSyncTimestamp?.toLong(),
+            System.currentTimeMillis() / 1000
+        )
+
+    /** Structured pilot metric for the background user_to_lsp freshness gate. No wallet
+     *  secrets or payment identifiers — platform, sync age, wait time, and strip state only. */
+    private fun logStabilityGateEvent(event: String, prevSyncAgeSecs: Long?, waitedMs: Long) {
+        val json = JSONObject()
+            .put("event", event)
+            .put("platform", "android")
+            .put("prev_sync_age_secs", prevSyncAgeSecs ?: JSONObject.NULL)
+            .put("waited_ms", waitedMs)
+            .put("node_metrics_reset", nodeMetricsReset)
+        Log.i(TAG, "STABILITY_GATE $json")
     }
 
     /** Resolve any leftover pending-send marker. Returns true when no unresolved marker
@@ -829,50 +911,78 @@ class StabilityProcessingService : Service() {
         loadChannelStateFromDB()?.userChannelId?.takeIf { it.isNotEmpty() }
 
     private fun fetchMedianPrice(): Double {
-        val feeds = listOf(
-            "https://www.bitstamp.net/api/v2/ticker/btcusd/" to listOf("last"),
-            "https://api.coinbase.com/v2/prices/BTC-USD/spot" to listOf("data", "amount"),
-            "https://blockchain.info/ticker" to listOf("USD", "last"),
-            "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD" to listOf("result", "XXBTZUSD", "c"),
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd" to listOf("bitcoin", "usd")
-        )
+        // Anchor to the app's last accepted price so the large-move circuit breaker also
+        // protects the unattended path (mirrors the iOS notification extension).
+        val lastTrustedPrice = PriceOracleAnchorStore.freshPrice(this)
+        val usdPrices = fetchOracleFeeds(Constants.DEFAULT_PRICE_FEEDS)
+        val price = try {
+            PriceOracle.resolve(usdPrices, emptyList(), emptyList(), lastTrustedPrice).price
+        } catch (error: PriceOracleException) {
+            if (error.quarantinesPrice) {
+                Log.w(TAG, "Rejected direct USD price: ${error.message}")
+                return 0.0
+            }
+            Log.w(TAG, "Direct USD unavailable: ${error.message}; trying USDT fallback")
+            val fallback = fetchOracleFeeds(PriceOracle.BITCOIN_USDT_FEEDS + PriceOracle.USDT_USD_FEEDS)
+            val usdtNames = PriceOracle.BITCOIN_USDT_FEEDS.map { it.name }.toSet()
+            val pegNames = PriceOracle.USDT_USD_FEEDS.map { it.name }.toSet()
+            try {
+                PriceOracle.resolve(
+                    emptyList(),
+                    fallback.filter { it.feedName in usdtNames },
+                    fallback.filter { it.feedName in pegNames },
+                    lastTrustedPrice
+                ).price
+            } catch (fallbackError: Exception) {
+                Log.w(TAG, "Rejected USDT fallback: ${fallbackError.message}")
+                return 0.0
+            }
+        }
+        if (price > 0.0) {
+            PriceOracleAnchorStore.save(this, price)
+        }
+        return price
+    }
 
-        val prices = java.util.Collections.synchronizedList(mutableListOf<Double>())
+    private fun fetchOracleFeeds(feeds: List<PriceFeedConfig>): List<NamedPrice> {
+        val prices = java.util.Collections.synchronizedList(mutableListOf<NamedPrice>())
         val latch = java.util.concurrent.CountDownLatch(feeds.size)
 
-        for ((url, path) in feeds) {
-            val request = Request.Builder().url(url).build()
+        for (feed in feeds) {
+            val request = Request.Builder().url(feed.urlFormat).build()
             httpClient.newCall(request).enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    Log.w(TAG, "${feed.name} failed: ${e.message}")
                     latch.countDown()
                 }
                 override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                     try {
+                        if (!response.isSuccessful) {
+                            Log.w(TAG, "${feed.name} failed: HTTP ${response.code}")
+                            return
+                        }
                         val body = response.body?.string() ?: return
-                        val json = JSONObject(body)
-                        val price = extractPrice(json, path)
-                        if (price != null && price > 0) prices.add(price)
-                    } catch (_: Exception) {
+                        val json = JSONTokener(body).nextValue()
+                        val price = extractPrice(json, feed.jsonPath)
+                        if (price != null) {
+                            prices.add(NamedPrice(feed.name, price))
+                            Log.d(TAG, "${feed.name} succeeded")
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "${feed.name} failed: ${error.message}")
                     } finally {
+                        response.close()
                         latch.countDown()
                     }
                 }
             })
         }
 
-        latch.await(8, TimeUnit.SECONDS)
-
-        if (prices.size < 3) return 0.0  // need at least 3 of 5 feeds
-        val sorted = prices.sorted()
-        val mid = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            (sorted[mid - 1] + sorted[mid]) / 2.0
-        } else {
-            sorted[mid]
-        }
+        latch.await(Constants.PRICE_FETCH_TIMEOUT_SECS + 1, TimeUnit.SECONDS)
+        return synchronized(prices) { prices.toList() }
     }
 
-    private fun extractPrice(json: JSONObject, path: List<String>): Double? {
+    private fun extractPrice(json: Any, path: List<String>): Double? {
         var current: Any = json
         for (key in path) {
             current = when (current) {
@@ -886,7 +996,13 @@ class StabilityProcessingService : Service() {
             is Int -> current.toDouble()
             is Long -> current.toDouble()
             is String -> current.toDoubleOrNull()
-            is JSONArray -> (current.opt(0) as? String)?.toDoubleOrNull()
+            is JSONArray -> when (val first = current.opt(0)) {
+                is String -> first.toDoubleOrNull()
+                is Double -> first
+                is Int -> first.toDouble()
+                is Long -> first.toDouble()
+                else -> null
+            }
             else -> null
         }
     }
@@ -895,10 +1011,14 @@ class StabilityProcessingService : Service() {
      * Delete network_graph, scorer, and node_metrics from the LDK SQLite DB.
      * The background service doesn't need gossip (it only routes to the LSP, a direct peer).
      * This reduces the DB from ~10MB to ~30KB, preventing OOM on low-memory devices.
+     *
+     * Returns true when node_metrics was deleted: that resets LDK's persisted
+     * latest_lightning_wallet_sync_timestamp, so the freshness gate must wait for a new
+     * sync on this run instead of inheriting the foreground app's recent one.
      */
-    private fun stripGossipFromDB(dataDir: File) {
+    private fun stripGossipFromDB(dataDir: File): Boolean {
         val ldkDbPath = File(dataDir, "ldk_node_data.sqlite")
-        if (!ldkDbPath.exists()) return
+        if (!ldkDbPath.exists()) return false
 
         try {
             val db = SQLiteDatabase.openDatabase(ldkDbPath.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
@@ -907,7 +1027,8 @@ class StabilityProcessingService : Service() {
             val cursor = db.rawQuery("SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'", null)
             val graphSize = cursor.use { if (it.moveToFirst()) it.getInt(0) else 0 }
 
-            if (graphSize > 100_000) {
+            val stripped = graphSize > 100_000
+            if (stripped) {
                 db.execSQL("DELETE FROM ldk_node_data WHERE key = 'network_graph'")
                 db.execSQL("DELETE FROM ldk_node_data WHERE key = 'scorer'")
                 db.execSQL("DELETE FROM ldk_node_data WHERE key = 'node_metrics'")
@@ -916,8 +1037,10 @@ class StabilityProcessingService : Service() {
                 Log.d(TAG, "Gossip data small ($graphSize bytes), skipping strip")
             }
             db.close()
+            return stripped
         } catch (e: Exception) {
             Log.w(TAG, "Failed to strip gossip from LDK DB: ${e.message}")
+            return false
         }
     }
 }

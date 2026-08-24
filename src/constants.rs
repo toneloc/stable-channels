@@ -8,11 +8,23 @@ pub const SATS_IN_BTC: u64 = 100_000_000;
 /// Custom TLV type for stable channel messages
 pub const STABLE_CHANNEL_TLV_TYPE: u64 = 13377331;
 
+/// Authenticated metadata for a stability-payment keysend.
+pub const SIGNED_STABILITY_TLV_TYPE: u64 = 13377333;
+
+/// Maximum signed stability metadata accepted before parsing.
+pub const MAX_SIGNED_STABILITY_TLV_VALUE_BYTES: usize = 8 * 1024;
+
 /// Trade message type identifier
 pub const TRADE_MESSAGE_TYPE: &str = "TRADE_V1";
 
 /// Sync message type identifier (LSP → user expected_usd sync after stable deductions)
 pub const SYNC_MESSAGE_TYPE: &str = "SYNC_V1";
+
+/// Signed rejection message returned for correlated desktop trades.
+pub const TRADE_REJECTED_MESSAGE_TYPE: &str = "TRADE_REJECTED_V1";
+
+/// Signed stability-payment message type identifier.
+pub const STABILITY_PAYMENT_MESSAGE_TYPE: &str = "STABILITY_PAYMENT_V1";
 
 // ============================================================================
 // DEFAULT CONFIGURATION VALUES
@@ -49,18 +61,26 @@ pub const DEFAULT_LSP_ADDRESS: &str = "stablechannels.com:9735";
 // ============================================================================
 
 /// Price cache refresh interval (in seconds)
-pub const PRICE_CACHE_REFRESH_SECS: u64 = 5;
+pub const PRICE_CACHE_REFRESH_SECS: u64 = 15;
 
-/// Price fetch retry delay (in milliseconds)
-pub const PRICE_FETCH_RETRY_DELAY_MS: u64 = 300;
+/// Per-feed connect timeout — fail fast on an unreachable or geo-blocked host so feed
+/// diversity provides the retry rather than serially waiting on one dead host.
+pub const PRICE_FETCH_TIMEOUT_SECS: u64 = 3;
 
-/// Price fetch maximum retry attempts
-pub const PRICE_FETCH_MAX_RETRIES: usize = 3;
+/// Per-feed overall request budget (connect + TLS + response body). Must exceed the connect
+/// timeout: on a congested or filtered link a feed can consume most of the connect budget and
+/// still need time to deliver its body, which the now-required 3-feed quorum depends on.
+pub const PRICE_FETCH_TOTAL_TIMEOUT_SECS: u64 = 8;
 
 /// Background sync intervals (in seconds)
 pub const ONCHAIN_WALLET_SYNC_INTERVAL_SECS: u64 = 120;
 pub const LIGHTNING_WALLET_SYNC_INTERVAL_SECS: u64 = 60;
 pub const FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 1200;
+
+/// A stability payment may only be sent when the Lightning wallet completed a chain sync
+/// within this window. Paying on a stale chain tip understates outbound HTLC expiry, which
+/// LDK later force-closes on. Two background sync intervals, so one missed tick is tolerated.
+pub const STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS: u64 = 120;
 
 /// Invoice expiration time (in seconds)
 pub const INVOICE_EXPIRY_SECS: u32 = 3600;
@@ -74,6 +94,15 @@ pub const BALANCE_UPDATE_INTERVAL_SECS: u64 = 30;
 pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 60;
 #[cfg(feature = "e2e")]
 pub const STABILITY_CHECK_INTERVAL_SECS: u64 = 5;
+
+/// A correlated trade becomes locally uncertain after this long, but remains late-resolvable.
+pub const TRADE_RESULT_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// The LSP retries durable result delivery throughout this window.
+pub const TRADE_RESPONSE_RETRY_WINDOW_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Detailed signed response bytes may be pruned after this retention period.
+pub const TRADE_RESPONSE_DETAIL_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
 // ============================================================================
 // BUSINESS LOGIC CONSTANTS
@@ -89,6 +118,12 @@ pub const STABILITY_THRESHOLD_USD: f64 = 0.25; // minimum $0.25 drift to trigger
 /// Minimum seconds between stability payments on the same channel (cooldown)
 pub const STABILITY_PAYMENT_COOLDOWN_SECS: u64 = 120;
 
+/// Maximum lifetime of a newly-created stability settlement authorization.
+pub const STABILITY_PAYMENT_AUTH_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Small allowance for peers whose system clocks are not perfectly aligned.
+pub const STABILITY_PAYMENT_CLOCK_SKEW_SECS: u64 = 60;
+
 /// Minimum USD amount to display in UI
 pub const MIN_DISPLAY_USD: f64 = 2.0;
 
@@ -99,6 +134,10 @@ pub const AUTO_SWEEP_MIN_SATS: u64 = 10_000;
 ///
 /// Shared by wallet fee construction and the LSP's server-side amount validation.
 pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
+
+/// Maximum difference between the wallet's signed trade quote and the LSP's local price.
+/// Enforced by the LSP; the wallet accepts an explicit rejection if their trusted prices differ.
+pub const MAX_TRADE_QUOTE_DEVIATION_PERCENT: f64 = 0.5;
 
 /// LDK channel-config defaults for outbound forwarding fees.
 pub const LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT: u64 = 1_000;
@@ -202,24 +241,139 @@ pub fn get_default_price_feeds() -> Vec<PriceFeedConfig> {
             vec!["last"],
         ),
         PriceFeedConfig::new(
-            "CoinGecko",
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            vec!["bitcoin", "usd"],
-        ),
-        PriceFeedConfig::new(
             "Kraken",
             "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD",
             vec!["result", "XXBTZUSD", "c"],
         ),
         PriceFeedConfig::new(
             "Coinbase",
-            "https://api.coinbase.com/v2/prices/spot?currency=USD",
+            "https://api.coinbase.com/v2/prices/BTC-USD/spot",
             vec!["data", "amount"],
         ),
         PriceFeedConfig::new(
-            "Blockchain.com",
-            "https://blockchain.info/ticker",
-            vec!["USD", "last"],
+            "Bitfinex",
+            "https://api-pub.bitfinex.com/v2/ticker/tBTCUSD",
+            vec!["6"],
+        ),
+        PriceFeedConfig::new(
+            "Gemini",
+            "https://api.gemini.com/v1/pubticker/btcusd",
+            vec!["last"],
+        ),
+        PriceFeedConfig::new(
+            "Bullish",
+            "https://api.exchange.bullish.com/trading-api/v1/markets/BTCUSD/tick",
+            vec!["last"],
+        ),
+    ]
+}
+
+pub fn get_fallback_usdt_price_feeds() -> Vec<PriceFeedConfig> {
+    vec![
+        PriceFeedConfig::new(
+            "Binance BTC/USDT",
+            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            vec!["price"],
+        ),
+        // Binance.com geo-blocks US IPs (HTTP 451); the separate Binance.US host restores
+        // fallback depth for US users.
+        PriceFeedConfig::new(
+            "Binance.US BTC/USDT",
+            "https://api.binance.us/api/v3/ticker/price?symbol=BTCUSDT",
+            vec!["price"],
+        ),
+        PriceFeedConfig::new(
+            "Bybit BTC/USDT",
+            "https://api.bybit.com/v5/market/tickers?category=spot&symbol=BTCUSDT",
+            vec!["result", "list", "0", "lastPrice"],
+        ),
+        PriceFeedConfig::new(
+            "Huobi BTC/USDT",
+            "https://api.huobi.pro/market/detail/merged?symbol=btcusdt",
+            vec!["tick", "close"],
+        ),
+        PriceFeedConfig::new(
+            "KuCoin BTC/USDT",
+            "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=BTC-USDT",
+            vec!["data", "price"],
+        ),
+        PriceFeedConfig::new(
+            "Gate.io BTC/USDT",
+            "https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT",
+            vec!["0", "last"],
+        ),
+        PriceFeedConfig::new(
+            "MEXC BTC/USDT",
+            "https://api.mexc.com/api/v3/ticker/price?symbol=BTCUSDT",
+            vec!["price"],
+        ),
+        PriceFeedConfig::new(
+            "CoinDCX BTC/USDT",
+            "https://public.coindcx.com/market_data/trade_history?pair=B-BTC_USDT&limit=1",
+            vec!["0", "p"],
+        ),
+        PriceFeedConfig::new(
+            "BTCTurk BTC/USDT",
+            "https://api.btcturk.com/api/v2/ticker?pairSymbol=BTCUSDT",
+            vec!["data", "0", "last"],
+        ),
+    ]
+}
+
+pub fn get_usdt_usd_price_feeds() -> Vec<PriceFeedConfig> {
+    vec![
+        PriceFeedConfig::new(
+            "Coinbase USDT/USD",
+            "https://api.coinbase.com/v2/prices/USDT-USD/spot",
+            vec!["data", "amount"],
+        ),
+        PriceFeedConfig::new(
+            "Kraken USDT/USD",
+            "https://api.kraken.com/0/public/Ticker?pair=USDTUSD",
+            vec!["result", "USDTZUSD", "c"],
+        ),
+        PriceFeedConfig::new(
+            "Bitstamp USDT/USD",
+            "https://www.bitstamp.net/api/v2/ticker/usdtusd/",
+            vec!["last"],
+        ),
+        PriceFeedConfig::new(
+            "Bitfinex USDT/USD",
+            "https://api-pub.bitfinex.com/v2/ticker/tUSTUSD",
+            vec!["6"],
+        ),
+        PriceFeedConfig::new(
+            "CoinGecko USDT/USD",
+            "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd",
+            vec!["tether", "usd"],
+        ),
+        // Disjoint-host peg sources: the four exchange peg feeds above share hosts with the
+        // direct-USD tier, so without these the fallback's peg gate would fail exactly when
+        // the primary tier is unreachable — the outage the fallback exists to survive.
+        PriceFeedConfig::new(
+            "Crypto.com USDT/USD",
+            "https://api.crypto.com/exchange/v1/public/get-tickers?instrument_name=USDT_USD",
+            vec!["result", "data", "0", "a"],
+        ),
+        PriceFeedConfig::new(
+            "OKX USDT/USD",
+            "https://www.okx.com/api/v5/market/ticker?instId=USDT-USD",
+            vec!["data", "0", "last"],
+        ),
+        // Aggregator margin feeds: keep the disjoint-host count above the quorum so one
+        // rate-limited host (CoinGecko 429s aggressively on carrier NAT) can't kill the
+        // fallback. Caveat: aggregators lag real markets by minutes during a fast depeg,
+        // so the exchange peg feeds above must stay in the list — don't let aggregators
+        // become the only disjoint hosts.
+        PriceFeedConfig::new(
+            "CoinPaprika USDT/USD",
+            "https://api.coinpaprika.com/v1/tickers/usdt-tether",
+            vec!["quotes", "USD", "price"],
+        ),
+        PriceFeedConfig::new(
+            "Coinlore USDT/USD",
+            "https://api.coinlore.net/api/ticker/?id=518",
+            vec!["0", "price_usd"],
         ),
     ]
 }
@@ -286,7 +440,51 @@ mod tests {
     #[test]
     fn test_default_price_feeds_not_empty() {
         let feeds = get_default_price_feeds();
-        assert!(!feeds.is_empty());
+        assert_eq!(feeds.len(), 6);
+        assert!(feeds.iter().all(|feed| !feed.url_format.contains("USDT")));
+        let fallback_feeds = get_fallback_usdt_price_feeds();
+        assert_eq!(
+            fallback_feeds
+                .iter()
+                .map(|feed| feed.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Binance BTC/USDT",
+                "Binance.US BTC/USDT",
+                "Bybit BTC/USDT",
+                "Huobi BTC/USDT",
+                "KuCoin BTC/USDT",
+                "Gate.io BTC/USDT",
+                "MEXC BTC/USDT",
+                "CoinDCX BTC/USDT",
+                "BTCTurk BTC/USDT",
+            ]
+        );
+        assert_eq!(get_usdt_usd_price_feeds().len(), 9);
+    }
+
+    #[test]
+    fn usdt_peg_gate_survives_direct_usd_host_outage() {
+        // The USDT fallback's peg gate needs 3 agreeing feeds. If too many peg feeds share
+        // hosts with the direct-USD tier, the fallback fails exactly when the primary tier
+        // is unreachable — the outage it exists to survive.
+        fn host(url: &str) -> String {
+            url.split('/').nth(2).unwrap_or("").to_string()
+        }
+        let usd_hosts: std::collections::HashSet<String> = get_default_price_feeds()
+            .iter()
+            .map(|feed| host(&feed.url_format))
+            .collect();
+        let disjoint = get_usdt_usd_price_feeds()
+            .iter()
+            .filter(|feed| !usd_hosts.contains(&host(&feed.url_format)))
+            .count();
+        // 3 = MIN_AGREEING_PEG_FEEDS in price_feeds.rs, +2 margin so a single
+        // rate-limited or flaky disjoint host can't drop the gate below quorum.
+        assert!(
+            disjoint >= 3 + 2,
+            "peg gate needs quorum+2 feeds on hosts disjoint from the direct-USD tier; got {disjoint}"
+        );
     }
 
     #[test]

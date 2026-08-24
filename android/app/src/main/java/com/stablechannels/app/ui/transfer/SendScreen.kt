@@ -101,6 +101,23 @@ private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): 
     }
 }
 
+/** USD → sats through a trusted accounting price, with finiteness/overflow guards (iOS parity). */
+internal fun accountingSatsFromUSD(usd: Double, accountingPrice: Double): Long? {
+    if (accountingPrice <= 0.0 || usd <= 0.0) return null
+    val sats = usd / accountingPrice * Constants.SATS_IN_BTC
+    if (!sats.isFinite() || sats < 1.0 || sats >= Long.MAX_VALUE.toDouble()) return null
+    return sats.toLong()
+}
+
+internal fun accountingMsatFromUSD(usd: Double, accountingPrice: Double): Long? {
+    if (accountingPrice <= 0.0 || usd <= 0.0) return null
+    val msat = usd / accountingPrice * Constants.SATS_IN_BTC * 1_000
+    if (!msat.isFinite() || msat < 1.0 || msat >= Long.MAX_VALUE.toDouble()) return null
+    return msat.toLong()
+}
+
+private const val UNTRUSTED_PRICE_MESSAGE = "A trusted BTC/USD price is required"
+
 @Composable
 fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var input by remember { mutableStateOf("") }
@@ -116,6 +133,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val activity = context.findActivity()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    // Amount derivation and send enablement track the trusted accounting price, so an untrusted
+    // oracle state is visible (blank sats, disabled button) before tapping — iOS parity.
+    val accountingBtcPrice by appState.priceService.accountingPrice.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val lastPaymentResult by appState.lastPaymentResult.collectAsState()
@@ -157,10 +177,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val isAmountlessBolt11 = inputType == InputType.BOLT11 && parsedBolt11Msat == null && input.isNotBlank()
 
     val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
-    val manualAmountMsat: Long = run {
-        if (btcPrice <= 0 || enteredUSD <= 0) return@run 0L
-        (enteredUSD / btcPrice * Constants.SATS_IN_BTC * 1000).toLong()
-    }
+    val manualAmountMsat: Long = accountingMsatFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
     val manualAmountSats = manualAmountMsat / 1000
 
     val needsAmount = when {
@@ -652,37 +669,51 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         val invoiceMsat = invoice.amountMilliSatoshis()?.toLong() ?: 0L
                                         val paymentId: String
                                         val actualMsat: Long
+                                        val recordPrice: Double
                                         if (invoiceMsat > 0) {
                                             paymentId = appState.nodeService.sendPayment(invoice)
                                             actualMsat = invoiceMsat
+                                            recordPrice = price
                                         } else {
-                                            actualMsat = manualAmountMsat
+                                            // Money movement converts USD at the trusted accounting
+                                            // price, never the raw display price (iOS parity). The
+                                            // same captured price is recorded so payment history
+                                            // reflects the rate actually used.
+                                            if (enteredUSD <= 0) throw Exception("Enter amount")
+                                            val accountingPrice = appState.priceService.currentAccountingPrice()
+                                            actualMsat = accountingMsatFromUSD(enteredUSD, accountingPrice)
+                                                ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
+                                            recordPrice = accountingPrice
                                             paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
                                         }
                                         appState.databaseService?.recordPayment(
                                             paymentId = paymentId, paymentType = "lightning",
                                             direction = "sent", amountMsat = actualMsat,
-                                            amountUSD = if (price > 0) (actualMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price else null,
-                                            btcPrice = if (price > 0) price else null
+                                            amountUSD = if (recordPrice > 0) (actualMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * recordPrice else null,
+                                            btcPrice = if (recordPrice > 0) recordPrice else null
                                         )
                                         result = "Sending payment..."
                                     }
                                     InputType.BOLT12 -> {
-                                        val sats = manualAmountSats
-                                        if (sats <= 0) throw Exception("Enter amount")
+                                        if (enteredUSD <= 0) throw Exception("Enter amount")
+                                        val accountingPrice = appState.priceService.currentAccountingPrice()
+                                        val sats = accountingSatsFromUSD(enteredUSD, accountingPrice)
+                                            ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
                                         val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
                                         appState.databaseService?.recordPayment(
                                             paymentId = paymentId, paymentType = "bolt12",
                                             direction = "sent", amountMsat = sats * 1000,
-                                            amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
-                                            btcPrice = if (price > 0) price else null
+                                            amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                            btcPrice = accountingPrice
                                         )
                                         result = "Bolt12 payment sent"
                                     }
                                     InputType.ONCHAIN -> {
-                                        val sats = manualAmountSats
-                                        if (sats <= 0) throw Exception("Enter amount")
+                                        if (enteredUSD <= 0) throw Exception("Enter amount")
+                                        val accountingPrice = appState.priceService.currentAccountingPrice()
+                                        val sats = accountingSatsFromUSD(enteredUSD, accountingPrice)
+                                            ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
                                         if (hasChannel) {
                                             if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
@@ -704,8 +735,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             appState.databaseService?.recordPayment(
                                                 paymentId = null, paymentType = "onchain",
                                                 direction = "sent", amountMsat = sats * 1000,
-                                                amountUSD = if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
-                                                btcPrice = if (price > 0) price else null,
+                                                amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                                btcPrice = accountingPrice,
                                                 txid = txid, address = trimmed
                                             )
                                             result = "Onchain tx sent: $txid"

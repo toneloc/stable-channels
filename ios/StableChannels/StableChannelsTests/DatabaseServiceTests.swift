@@ -569,6 +569,32 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertNotNil(second)
     }
 
+    func testPaymentByTxid() throws {
+        let txid = String(repeating: "c", count: 64)
+        let paymentId = "onchain_receive_\(txid)"
+        let address = "tb1qtestaddress"
+
+        let ok = try service.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 60.0,
+            btcPrice: 60_000.0,
+            counterparty: nil,
+            status: "pending",
+            txid: txid,
+            address: address
+        )
+        XCTAssertTrue(ok)
+
+        let payment = service.paymentRepo.payment(txid: txid)
+        XCTAssertNotNil(payment)
+        XCTAssertEqual(payment?.paymentId, paymentId)
+        XCTAssertEqual(payment?.amountMsat, 100_000_000)
+        XCTAssertEqual(payment?.address, address)
+    }
+
     // MARK: - Price History Pruning Tests
 
     func testPruneHistoricalDataPurgesStalePriceHistory() throws {
