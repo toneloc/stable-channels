@@ -41,6 +41,11 @@ object Constants {
     const val STABILITY_THRESHOLD_PERCENT: Double = 0.1
     const val STABILITY_THRESHOLD_USD: Double = 0.25
     const val STABILITY_PAYMENT_COOLDOWN_SECS: Long = 120
+
+    // A stability payment may only be sent when the Lightning wallet synced to chain within
+    // this window (two 60s background sync intervals, so one missed tick is tolerated).
+    // Keep in sync with STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS in src/constants.rs.
+    const val STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS: Long = 120
     const val MIN_DISPLAY_USD: Double = 2.0
     const val MAX_CHANNEL_USD: Double = 100.0
     /** Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount. */

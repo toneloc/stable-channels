@@ -2163,6 +2163,18 @@ class AppState {
 
         guard let databaseService else { return }
 
+        // Chain-freshness gate (see #243): never pay on a stale chain tip, and check BEFORE
+        // claiming so a deferral leaves no claimed-but-unsent marker. The next stability
+        // tick retries once LDK's background sync catches up.
+        let syncAge = nodeService.lightningSyncAgeSecs()
+        guard let syncAge, syncAge <= Constants.stabilityMaxLightningSyncAgeSecs else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "stale_lightning_sync",
+                "sync_age_secs": syncAge.map { "\($0)" } ?? "never"
+            ])
+            return
+        }
+
         // Claim the durable send slot (cross-process atomic via BEGIN IMMEDIATE).
         // If the NSE — or a previous run — already holds it, abort this run.
         guard databaseService.stabilityRepo.claimPendingSend(amountMsat: amountMsat, price: price) else {
@@ -2178,11 +2190,19 @@ class AppState {
             // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
             // this as a settlement (operator GUI) and runs reconcile_incoming_stability
             // immediately, matching every other sender. See issue #161.
-            paymentId = try nodeService.sendKeysendWithTLV(
+            paymentId = try nodeService.sendStabilityPayment(
                 amountMsat: amountMsat,
                 to: stableChannel.counterparty,
                 tlvs: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))]
             )
+        } catch NodeServiceError.staleLightningSync {
+            // The wrapper's send-boundary gate fired (sync went stale after the precheck
+            // above). Send never happened — release the claim and retry next tick.
+            databaseService.stabilityRepo.clearPendingSend()
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "stale_lightning_sync"
+            ])
+            return
         } catch {
             databaseService.stabilityRepo.clearPendingSend()
             AuditService.log("STABILITY_PAYMENT_FAILED", data: [
