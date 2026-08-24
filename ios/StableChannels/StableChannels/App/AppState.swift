@@ -379,12 +379,7 @@ class AppState {
 
         do {
             try initializeDatabaseServices()
-            try await nodeService.start(
-                network: Self.ldkNetwork(),
-                esploraURL: chainURL,
-                mnemonic: words,
-                lspConfig: activeLSP
-            )
+            try await startNodeWithFailover(mnemonic: words)
 
             let nodeId = nodeService.nodeId
             if !nodeId.isEmpty {
@@ -407,8 +402,9 @@ class AppState {
         } catch {
             // If we failed before the node came up (e.g. DB init threw), no
             // node owns the wallet dir — release so the NSE isn't blocked.
-            // On node-start failure NodeService already released; if the node
-            // somehow IS running, the lock must stay held.
+            // (startNodeWithFailover releases on its own failures; a second
+            // release here is a safe no-op. If the node somehow IS running,
+            // the lock must stay held.)
             if !nodeService.isRunning {
                 NodeDirLock.shared.release()
             }
@@ -641,12 +637,7 @@ class AppState {
             purgeEmptyNetworkGraph()
 
             do {
-                try await nodeService.start(
-                    network: Self.ldkNetwork(),
-                    esploraURL: chainURL,
-                    mnemonic: "", // Uses existing seed from data dir
-                    lspConfig: activeLSP
-                )
+                try await startNodeWithFailover(mnemonic: "")
                 // Store node_id in shared UserDefaults for NSE and push registration
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
@@ -686,12 +677,7 @@ class AppState {
             // New wallet — auto-create
             await MainActor.run { phase = .syncing }
             do {
-                try await nodeService.start(
-                    network: Self.ldkNetwork(),
-                    esploraURL: chainURL,
-                    mnemonic: "",
-                    lspConfig: activeLSP
-                )
+                try await startNodeWithFailover(mnemonic: "")
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -880,12 +866,7 @@ class AppState {
         }
         restoreGossipToDB()
         do {
-            try await nodeService.start(
-                network: Self.ldkNetwork(),
-                esploraURL: chainURL,
-                mnemonic: "",
-                lspConfig: activeLSP
-            )
+            try await startNodeWithFailover(mnemonic: "")
             refreshBalances()
             blockHeightService.start()
             mempoolWebSocketService.connect()
@@ -2624,6 +2605,88 @@ class AppState {
                 isSweeping = false
             }
         }
+    }
+
+    /// Starts the node with the current chainURL, and automatically falls back to the
+    /// secondary Esplora source (e.g. mempool.space) if primary startup encounters an
+    /// Esplora fee-rate estimation failure or timeout.
+    ///
+    /// Two failover layers exist by design: `resolveChainURL()` probes connectivity once
+    /// at launch and picks the starting provider; this helper covers failures that only
+    /// surface inside `node.start()` itself (fee-rate estimation against the chosen host).
+    /// Both record the working URL in the app group so the NSE starts from it too.
+    ///
+    /// On total failure the wallet-dir lock is released (a no-op when NodeService.start
+    /// already released its own lease) so a broken app process never starves the NSE.
+    private func startNodeWithFailover(mnemonic: String = "") async throws {
+        do {
+            try await startNodeOrFailover(mnemonic: mnemonic)
+        } catch {
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
+            throw error
+        }
+    }
+
+    private func startNodeOrFailover(mnemonic: String) async throws {
+        let initialURL = chainURL
+        do {
+            try await nodeService.start(
+                network: Self.ldkNetwork(),
+                esploraURL: initialURL,
+                mnemonic: mnemonic,
+                lspConfig: activeLSP
+            )
+            publishWorkingChainURL(initialURL)
+        } catch {
+            guard error.isRetryableEsploraStartupError else {
+                // Non-Esplora errors (database, storage, lock, entropy, already running)
+                // must propagate immediately without retrying.
+                throw error
+            }
+
+            let initialError = error
+            AuditService.log("NODE_START_INITIAL_FAILED", data: [
+                "esploraURL": initialURL,
+                "error": initialError.localizedDescription
+            ])
+
+            let fallbackURL = (initialURL == Constants.primaryChainURL)
+                ? Constants.fallbackChainURL
+                : Constants.primaryChainURL
+
+            do {
+                try await nodeService.start(
+                    network: Self.ldkNetwork(),
+                    esploraURL: fallbackURL,
+                    mnemonic: mnemonic,
+                    lspConfig: activeLSP
+                )
+                self.chainURL = fallbackURL
+                publishWorkingChainURL(fallbackURL)
+                AuditService.log("NODE_START_FAILOVER_SUCCESS", data: [
+                    "primary": initialURL,
+                    "using": fallbackURL
+                ])
+            } catch let fallbackError {
+                AuditService.log("NODE_START_FAILOVER_FAILED", data: [
+                    "primary": initialURL,
+                    "fallback": fallbackURL,
+                    "primary_error": initialError.localizedDescription,
+                    "fallback_error": fallbackError.localizedDescription
+                ])
+                // Preserve the original primary error when fallback also fails
+                throw initialError
+            }
+        }
+    }
+
+    /// Record the Esplora URL a node actually started against, so the NSE begins with a
+    /// known-working provider instead of paying a degraded primary's failure first.
+    private func publishWorkingChainURL(_ url: String) {
+        UserDefaults(suiteName: Constants.appGroupIdentifier)?
+            .set(url, forKey: "esplora_chain_url")
     }
 
     /// Test Blockstream connectivity; fall back to mempool.space if unreachable.
