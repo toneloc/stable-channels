@@ -80,12 +80,13 @@ enum StabilityFreshness {
 class NotificationService: UNNotificationServiceExtension {
     // MARK: - Constants
 
-    /// user_to_lsp only: how long after `extensionStart` the freshness wait may run. iOS
-    /// grants the extension ~30s total; stopping the wait at +20s reserves ~10s for the
-    /// send, persistence, notification mutation, and cleanup. This is an outer limit, not a
-    /// promise — node build, LSP connect, and price work all consume part of it.
+    /// user_to_lsp only: how long after `extensionStart` the handler's chain-freshness wait
+    /// may run (see StabilitySyncGate). iOS grants the extension ~30s total; the +20s
+    /// deadline reserves ~10s for the send, persistence, notification mutation, and
+    /// cleanup. This is an outer limit, not a promise — node build, LSP connect, and price
+    /// work all consume part of it, and the deadline is authoritative even over a sync that
+    /// becomes fresh late.
     private static let userToLspFreshnessDeadlineSecs: TimeInterval = 20
-    private static let freshnessPollIntervalSecs: TimeInterval = 0.5
 
     // MARK: - Dependencies (injected for testability)
 
@@ -297,34 +298,6 @@ class NotificationService: UNNotificationServiceExtension {
             Thread.sleep(forTimeInterval: 3)
 
             startHeartbeat()
-
-            // Chain-freshness gate (see #243) — user_to_lsp only: never keysend on a stale
-            // chain tip. An outbound HTLC built on an old best block understates its expiry,
-            // and LDK later force-closes on it. Waits here on the background processing
-            // queue (never the main thread), before any send claim is taken.
-            if direction == .userToLsp {
-                switch waitForFreshLightningSync(node: node) {
-                case .fresh:
-                    break
-                case .deadlineReached:
-                    stopHeartbeat()
-                    UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
-                    cleanup()
-                    finish(contentMutator.buildPending(
-                        base: content,
-                        title: "Payment Pending",
-                        body: "Open app to process stability payment"
-                    ))
-                    return
-                case .cancelled:
-                    // Expiry got there first: the expire handler already set the pending
-                    // flag and delivered the notification. Just hand back the wallet dir.
-                    stopHeartbeat()
-                    cleanup()
-                    return
-                }
-            }
-
             processPayment(
                 node: node,
                 content: content,
@@ -354,7 +327,24 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        let handler = PaymentHandlerFactory.handler(for: direction)
+        // The user_to_lsp handler waits for a fresh Lightning-wallet sync at its send
+        // boundary (see #243); this gate lets that wait observe the extension lifecycle
+        // (checked under the lock each iteration) and the extension-wide deadline.
+        let syncGate: StabilitySyncGate? = direction == .userToLsp
+            ? StabilitySyncGate(
+                deadline: extensionStart.addingTimeInterval(Self.userToLspFreshnessDeadlineSecs),
+                isCancelled: { [weak self] in
+                    guard let self else { return true }
+                    self.lifecycleLock.lock()
+                    let cancelled = self.timeExpired || self.didFinish
+                    self.lifecycleLock.unlock()
+                    return cancelled
+                },
+                log: { [logger] message in logger.log(message) }
+            )
+            : nil
+
+        let handler = PaymentHandlerFactory.handler(for: direction, syncGate: syncGate)
         handler
             .handle(node: node, db: db, priceFetcher: priceFetcher, baseContent: content,
                     mutator: contentMutator) { [weak self] resultContent, newPendingState in
@@ -371,68 +361,6 @@ class NotificationService: UNNotificationServiceExtension {
                 self.cleanup()
                 self.finish(resultContent)
             }
-    }
-
-    private enum FreshnessWaitOutcome {
-        case fresh
-        case deadlineReached
-        case cancelled
-    }
-
-    /// Poll `node.status()` every 500ms until the Lightning-wallet sync timestamp is fresh,
-    /// the extension-wide deadline (`extensionStart` + 20s) passes, or the run is cancelled
-    /// by expiry. The timestamp is persisted by LDK, so a run that kept node_metrics can be
-    /// fresh immediately off the main app's last sync; otherwise this rides the initial
-    /// background sync ldk-node kicks off at start(). Each iteration re-checks lifecycle
-    /// state under the lock so expiry cancels the wait promptly.
-    private func waitForFreshLightningSync(node: Node) -> FreshnessWaitOutcome {
-        let deadline = extensionStart.addingTimeInterval(Self.userToLspFreshnessDeadlineSecs)
-        let initialAge = StabilityFreshness.syncAgeSecs(
-            node.status().latestLightningWalletSyncTimestamp,
-            now: UInt64(Date().timeIntervalSince1970)
-        )
-        let waitStart = Date()
-        logGateEvent("stability_background_attempted", initialAge: initialAge, waitStart: waitStart)
-
-        var waited = false
-        while true {
-            lifecycleLock.lock()
-            let aborted = timeExpired || didFinish
-            lifecycleLock.unlock()
-            if aborted {
-                logGateEvent("stability_background_deferred_stale_sync",
-                             initialAge: initialAge, waitStart: waitStart, outcome: "cancelled")
-                return .cancelled
-            }
-            let now = UInt64(Date().timeIntervalSince1970)
-            if StabilityFreshness.isFresh(node.status().latestLightningWalletSyncTimestamp, now: now) {
-                logGateEvent(waited ? "stability_background_sent_after_sync" : "stability_background_sent_fresh",
-                             initialAge: initialAge, waitStart: waitStart, outcome: "fresh")
-                return .fresh
-            }
-            if Date() >= deadline {
-                logGateEvent("stability_background_deferred_stale_sync",
-                             initialAge: initialAge, waitStart: waitStart, outcome: "deadline_reached")
-                return .deadlineReached
-            }
-            waited = true
-            Thread.sleep(forTimeInterval: Self.freshnessPollIntervalSecs)
-        }
-    }
-
-    /// Structured pilot metric for the background user_to_lsp freshness gate. No wallet
-    /// secrets or payment identifiers — platform, sync age, wait time, and outcome only.
-    private func logGateEvent(
-        _ event: String, initialAge: UInt64?, waitStart: Date, outcome: String? = nil
-    ) {
-        let waitedMs = Int(Date().timeIntervalSince(waitStart) * 1000)
-        let age = initialAge.map { "\($0)" } ?? "null"
-        let outcomeJson = outcome.map { "\"\($0)\"" } ?? "null"
-        logger.log(
-            "stability_gate {\"event\":\"\(event)\",\"platform\":\"ios\"," +
-                "\"prev_sync_age_secs\":\(age),\"waited_ms\":\(waitedMs)," +
-                "\"deadline_outcome\":\(outcomeJson)}"
-        )
     }
 
     private func finishWithError(

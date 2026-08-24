@@ -603,9 +603,9 @@ class StabilityProcessingService : Service() {
                 FCMService.flagPendingPayment(this)
                 return
             }
-            logStabilityGateEvent("stability_background_sent_after_sync", initialSyncAge, waitedMs)
+            logStabilityGateEvent("stability_background_fresh_after_wait", initialSyncAge, waitedMs)
         } else {
-            logStabilityGateEvent("stability_background_sent_fresh", initialSyncAge, waitedMs)
+            logStabilityGateEvent("stability_background_fresh_ready", initialSyncAge, waitedMs)
         }
 
         // Atomically claim the send before starting it. If another process (foreground timer)
@@ -613,6 +613,17 @@ class StabilityProcessingService : Service() {
         // check-and-set that prevents a double send.
         if (!claimPendingSendInDB(dbPath, amountMsat, price)) {
             Log.d(TAG, "Pending send already claimed by another sender — skipping this tick")
+            return
+        }
+
+        // Re-check after the claim: the SQLite claim can take up to ~2s under cross-process
+        // contention and could carry the timestamp past the 120s boundary. No send happened,
+        // so clear the claim rather than blocking the foreground retry.
+        if (!lightningSyncIsFresh(node)) {
+            try { clearPendingSendInDB(dbPath) } catch (_: Exception) {}
+            logStabilityGateEvent("stability_background_deferred_stale_sync", initialSyncAge, waitedMs)
+            Log.w(TAG, "Lightning sync went stale during claim — deferring to foreground")
+            FCMService.flagPendingPayment(this)
             return
         }
 
@@ -632,6 +643,13 @@ class StabilityProcessingService : Service() {
             Log.e(TAG, "Stability keysend failed", e)
             throw e
         }
+        // Only an accepted send counts as sent_* — denied-claim and send-failure runs must
+        // not inflate the pilot's send numbers.
+        logStabilityGateEvent(
+            if (waitedMs > 0) "stability_background_sent_after_sync" else "stability_background_sent_fresh",
+            initialSyncAge,
+            waitedMs
+        )
         Log.d(TAG, "Stability keysend sent successfully")
 
         try {
