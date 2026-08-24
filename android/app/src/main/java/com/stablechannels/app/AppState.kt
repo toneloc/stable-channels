@@ -37,6 +37,8 @@ enum class Phase {
     LOADING, ONBOARDING, SYNCING, WALLET, ERROR
 }
 
+private class RetryableSyncException(message: String) : Exception(message)
+
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
@@ -55,7 +57,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     val nodeService = NodeService(context)
-    val priceService = PriceService()
+    val priceService = PriceService(context)
     var databaseService: DatabaseService? = null
         private set
     var tradeService: TradeService? = null
@@ -1001,7 +1003,13 @@ class AppState(private val context: Context) : ViewModel() {
         val (type, expectedUsd, _) = parsed
         if (type != Constants.SYNC_MESSAGE_TYPE) return false
 
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) {
+            AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
+            // Propagate to the event collector so it completes the ack with false and LDK
+            // re-delivers this authenticated sync after the price oracle recovers.
+            throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
+        }
         val sc = StabilityService.applyTrade(_stableChannel.value, expectedUsd, price)
         _stableChannel.value = sc
         saveChannelToDB()
@@ -1590,10 +1598,10 @@ class AppState(private val context: Context) : ViewModel() {
         refreshBalances()
         updateStableBalances()
         val sc = _stableChannel.value
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
 
-        if (priceService.isPriceStale()) {
-            AuditService.log("STABILITY_SKIP", mapOf("reason" to "stale_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
+        if (price <= 0.0) {
+            AuditService.log("STABILITY_SKIP", mapOf("reason" to "untrusted_price", "price_age_ms" to (System.currentTimeMillis() - priceService.lastUpdate.value.time)))
             return
         }
 
@@ -1608,6 +1616,18 @@ class AppState(private val context: Context) : ViewModel() {
 
             val amountMsat = USD(abs(result.dollarsFromPar)).toMsats(price)
             if (amountMsat == 0L) return
+
+            // Chain-freshness gate (see #243): never pay on a stale chain tip, and check
+            // BEFORE claiming so a deferral leaves no claimed-but-unsent marker. The next
+            // stability tick retries once LDK's background sync catches up.
+            val syncAge = nodeService.lightningSyncAgeSecs()
+            if (syncAge == null || syncAge > Constants.STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS) {
+                AuditService.log(
+                    "STABILITY_SKIP",
+                    mapOf("reason" to "stale_lightning_sync", "sync_age_secs" to syncAge)
+                )
+                return
+            }
 
             // Atomically claim the send. A denied claim means another sender (e.g. the
             // background push service) already owns an in-flight send — skip this tick.
@@ -1626,11 +1646,20 @@ class AppState(private val context: Context) : ViewModel() {
                 // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
                 // this as a settlement (operator GUI) and runs reconcile_incoming_stability
                 // immediately, matching every other sender. See issue #161.
-                nodeService.sendKeysendWithTLV(
+                nodeService.sendStabilityPayment(
                     amountMsat,
                     sc.counterparty,
                     listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1)))
                 )
+            } catch (e: NodeService.StaleLightningSyncException) {
+                // The wrapper's send-boundary gate fired (sync went stale after the precheck
+                // above). Send never happened — release the claim and retry next tick.
+                try { databaseService?.clearPendingSend() } catch (_: Exception) {}
+                AuditService.log(
+                    "STABILITY_SKIP",
+                    mapOf("reason" to "stale_lightning_sync", "sync_age_secs" to e.syncAgeSecs)
+                )
+                return
             } catch (e: Exception) {
                 // Send never happened — release the claim.
                 try { databaseService?.clearPendingSend() } catch (_: Exception) {}

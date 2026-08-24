@@ -23,12 +23,14 @@ struct SellView: View {
         case done
     }
 
+    private var tradePrice: Double { appState.accountingBTCPrice }
+
     private var maxSellUSD: Double {
-        guard appState.btcPrice > 0 else { return 0 }
-        let stableSats = UInt64(appState.stableUSD / appState.btcPrice * Double(Constants.satsInBTC))
+        guard tradePrice > 0 else { return 0 }
+        let stableSats = UInt64(appState.stableUSD / tradePrice * Double(Constants.satsInBTC))
         let nativeSats = appState.lightningBalanceSats > stableSats
             ? appState.lightningBalanceSats - stableSats : 0
-        return Double(nativeSats) / Double(Constants.satsInBTC) * appState.btcPrice
+        return Double(nativeSats) / Double(Constants.satsInBTC) * tradePrice
     }
 
     private var amountUSD: Double {
@@ -48,13 +50,13 @@ struct SellView: View {
     }
 
     private var btcAmount: Double {
-        guard appState.btcPrice > 0 else { return 0 }
-        return amountUSD / appState.btcPrice
+        guard tradePrice > 0 else { return 0 }
+        return amountUSD / tradePrice
     }
 
     private var btcAmountFinal: Double {
-        guard appState.btcPrice > 0 else { return 0 }
-        return netAmountUSD / appState.btcPrice
+        guard tradePrice > 0 else { return 0 }
+        return netAmountUSD / tradePrice
     }
 
     var body: some View {
@@ -119,12 +121,18 @@ struct SellView: View {
                     .foregroundStyle(.red)
             }
 
+            if tradePrice <= 0 {
+                Text("A fresh BTC/USD consensus is required before trading")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             Spacer()
 
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(amountUSD <= 0 || amountUSD > maxSellUSD)
+                .disabled(amountUSD <= 0 || amountUSD > maxSellUSD || tradePrice <= 0)
         }
     }
 
@@ -147,7 +155,7 @@ struct SellView: View {
                 )
                 confirmRow(
                     String(localized: "label_btc_price", defaultValue: "BTC Price"),
-                    appState.btcPrice.usdFormatted
+                    tradePrice.usdFormatted
                 )
                 Divider()
                 confirmRow(
@@ -181,7 +189,7 @@ struct SellView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(isExecuting)
+            .disabled(isExecuting || tradePrice <= 0)
         }
     }
 
@@ -249,8 +257,13 @@ struct SellView: View {
         errorMessage = nil
         appState.ensureLSPConnected()
         let sc = appState.stableChannel
-        let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: appState.btcPrice).amount
-        let price = appState.btcPrice
+        let price = tradePrice
+        guard price > 0 else {
+            errorMessage = "A fresh BTC/USD consensus is required before trading"
+            isExecuting = false
+            return
+        }
+        let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: price).amount
         do {
             guard let result = try appState.tradeService?.executeSell(
                 sc: sc,

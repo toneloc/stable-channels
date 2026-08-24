@@ -49,10 +49,44 @@ final class NodeDirLock: @unchecked Sendable {
     }
 }
 
+/// Chain-freshness rule for stability payments (see #243): a user_to_lsp stability payment
+/// may only be sent when LDK completed a Lightning-wallet chain sync within
+/// `maxAgeSecs`. Paying on a stale chain tip understates outbound HTLC expiry, which LDK
+/// later force-closes on. The timestamp is persisted by LDK (node_metrics), so a run whose
+/// gossip strip kept node_metrics can inherit the main app's recent sync and send at once.
+///
+/// Keep in sync with `lightning_sync_is_fresh` in `src/stable.rs` and the copy in
+/// StableChannels/Services/NodeService.swift.
+enum StabilityFreshness {
+    /// Keep in sync with STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS in src/constants.rs.
+    static let maxAgeSecs: UInt64 = 120
+
+    /// True when the timestamp exists, is not in the future, and is at most `maxAgeSecs`
+    /// old (exactly `maxAgeSecs` old is accepted).
+    static func isFresh(_ latestSyncTimestampSecs: UInt64?, now nowSecs: UInt64) -> Bool {
+        guard let ts = latestSyncTimestampSecs, ts <= nowSecs else { return false }
+        return nowSecs - ts <= maxAgeSecs
+    }
+
+    /// Age of the last sync in seconds, or nil when missing or in the future.
+    static func syncAgeSecs(_ latestSyncTimestampSecs: UInt64?, now nowSecs: UInt64) -> UInt64? {
+        guard let ts = latestSyncTimestampSecs, ts <= nowSecs else { return nil }
+        return nowSecs - ts
+    }
+}
+
 /// Notification Service Extension — handles stability payments while main app is killed.
 /// Uses dependency injection for testability and SOLID compliance.
 class NotificationService: UNNotificationServiceExtension {
     // MARK: - Constants
+
+    /// user_to_lsp only: how long after `extensionStart` the handler's chain-freshness wait
+    /// may run (see StabilitySyncGate). iOS grants the extension ~30s total; the +20s
+    /// deadline reserves ~10s for the send, persistence, notification mutation, and
+    /// cleanup. This is an outer limit, not a promise — node build, LSP connect, and price
+    /// work all consume part of it, and the deadline is authoritative even over a sync that
+    /// becomes fresh late.
+    private static let userToLspFreshnessDeadlineSecs: TimeInterval = 20
 
     // MARK: - Dependencies (injected for testability)
 
@@ -67,6 +101,11 @@ class NotificationService: UNNotificationServiceExtension {
     private var contentHandler: ((UNNotificationContent) -> Void)?
     private var bestAttemptContent: UNMutableNotificationContent?
     private var node: Node?
+
+    /// When this run's notification arrived — anchor for the user_to_lsp freshness
+    /// deadline. Recorded before node build or price work so those costs count against
+    /// the wait budget, not on top of it.
+    private var extensionStart = Date()
 
     /// Coordinates serviceExtensionTimeWillExpire with an in-flight node
     /// build: while `buildInFlight`, the expire handler must NOT release the
@@ -97,6 +136,7 @@ class NotificationService: UNNotificationServiceExtension {
         _ request: UNNotificationRequest,
         withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
+        extensionStart = Date()
         self.contentHandler = contentHandler
         self.bestAttemptContent = (request.content.mutableCopy() as? UNMutableNotificationContent)
 
@@ -287,7 +327,24 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        let handler = PaymentHandlerFactory.handler(for: direction)
+        // The user_to_lsp handler waits for a fresh Lightning-wallet sync at its send
+        // boundary (see #243); this gate lets that wait observe the extension lifecycle
+        // (checked under the lock each iteration) and the extension-wide deadline.
+        let syncGate: StabilitySyncGate? = direction == .userToLsp
+            ? StabilitySyncGate(
+                deadline: extensionStart.addingTimeInterval(Self.userToLspFreshnessDeadlineSecs),
+                isCancelled: { [weak self] in
+                    guard let self else { return true }
+                    self.lifecycleLock.lock()
+                    let cancelled = self.timeExpired || self.didFinish
+                    self.lifecycleLock.unlock()
+                    return cancelled
+                },
+                log: { [logger] message in logger.log(message) }
+            )
+            : nil
+
+        let handler = PaymentHandlerFactory.handler(for: direction, syncGate: syncGate)
         handler
             .handle(node: node, db: db, priceFetcher: priceFetcher, baseContent: content,
                     mutator: contentMutator) { [weak self] resultContent, newPendingState in

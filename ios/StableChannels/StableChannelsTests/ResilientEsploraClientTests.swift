@@ -389,9 +389,13 @@ final class ResilientEsploraClientTests: XCTestCase {
             elapsed, 0.75,
             "Jittered backoff of base 1s must elapse at least 0.75s (jitter lower bound 0.75x)"
         )
+        // Generous upper slack: loaded CI runners add hundreds of ms of scheduler
+        // latency on top of the 1.25x jitter ceiling (observed 1.57s in CI). The
+        // lower bound is the meaningful assertion; the upper bound only guards
+        // against backoff being wildly longer than configured.
         XCTAssertLessThanOrEqual(
-            elapsed, 1.5,
-            "Jittered backoff of base 1s must elapse at most 1.5s (jitter upper bound 1.25x + slack)"
+            elapsed, 3.0,
+            "Jittered backoff of base 1s must elapse well under 3s (1.25x jitter + runner slack)"
         )
     }
 

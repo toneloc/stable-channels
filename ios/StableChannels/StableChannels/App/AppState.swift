@@ -3,6 +3,12 @@ import SwiftUI
 import LDKNode
 import SQLite3
 
+private enum SyncMessageHandlingResult {
+    case notSync
+    case applied
+    case retry
+}
+
 @MainActor
 @Observable
 class AppState {
@@ -90,6 +96,7 @@ class AppState {
 
     var stableChannel: StableChannel = .default
     var btcPrice: Double { priceService.currentPrice }
+    var accountingBTCPrice: Double { priceService.accountingPrice }
     var statusMessage: String = ""
     var paymentFlash: Bool = false
     var isChannelClosing: Bool = false
@@ -584,7 +591,7 @@ class AppState {
 
         // Seed price from cache so UI can compute native USD immediately
         if stableChannel.latestPrice > 0 {
-            priceService.currentPrice = stableChannel.latestPrice
+            priceService.seedDisplayPrice(stableChannel.latestPrice)
         }
 
         // Start price fetching
@@ -1344,11 +1351,18 @@ class AppState {
         let paymentHashStr = "\(paymentHash)"
         let paymentIdStr = paymentId.map { "\($0)" } ?? paymentHashStr
 
-        // Check for SYNC_V1 message from LSP
-        if handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
+        // Check for SYNC_V1 message from LSP. A valid sync that cannot yet be applied must
+        // remain in LDK's event queue; treating it like malformed control traffic loses it.
+        switch handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
+        case .applied:
             refreshBalances()
             updateStableBalances()
             return
+        case .retry:
+            ackToken?.shouldAck = false
+            return
+        case .notSync:
+            break
         }
 
         let hasStableControlTLV = customRecords.contains {
@@ -1455,8 +1469,11 @@ class AppState {
         }
     }
 
-    /// Parse and handle a SYNC_V1 TLV message. Returns true if handled.
-    private func handleSyncMessage(customRecords: [CustomTlvRecord], paymentHash: String) -> Bool {
+    /// Parse a SYNC_V1 TLV and distinguish invalid control traffic from retryable processing.
+    private func handleSyncMessage(
+        customRecords: [CustomTlvRecord],
+        paymentHash: String
+    ) -> SyncMessageHandlingResult {
         for tlv in customRecords {
             guard tlv.typeNum == Constants.stableChannelTLVType else { continue }
 
@@ -1471,7 +1488,14 @@ class AppState {
             guard parsed.type == Constants.syncMessageType else { continue }
 
             let oldExpected = stableChannel.expectedUSD.amount
-            let price = stableChannel.latestPrice
+            let price = accountingBTCPrice
+            guard price > 0 else {
+                AuditService.log("SYNC_V1_DEFERRED", data: [
+                    "reason": "untrusted_price",
+                    "payment_hash": paymentHash
+                ])
+                return .retry
+            }
             StabilityService.applyTrade(&stableChannel, newExpectedUSD: parsed.expectedUSD, price: price)
             saveChannelToDB()
 
@@ -1481,9 +1505,9 @@ class AppState {
                 "btc_price": "\(price)",
                 "payment_hash": paymentHash
             ])
-            return true
+            return .applied
         }
-        return false
+        return .notSync
     }
 
     // MARK: - Payment Successful
@@ -2089,8 +2113,13 @@ class AppState {
     private func runStabilityCheck() {
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
-        let price = btcPrice
-        guard price > 0 else { return }
+        let price = accountingBTCPrice
+        guard price > 0 else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": priceService.isQuarantined ? "quarantined_price" : "stale_price"
+            ])
+            return
+        }
 
         refreshBalances()
         updateStableBalances()
@@ -2114,6 +2143,18 @@ class AppState {
 
         guard let databaseService else { return }
 
+        // Chain-freshness gate (see #243): never pay on a stale chain tip, and check BEFORE
+        // claiming so a deferral leaves no claimed-but-unsent marker. The next stability
+        // tick retries once LDK's background sync catches up.
+        let syncAge = nodeService.lightningSyncAgeSecs()
+        guard let syncAge, syncAge <= Constants.stabilityMaxLightningSyncAgeSecs else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "stale_lightning_sync",
+                "sync_age_secs": syncAge.map { "\($0)" } ?? "never"
+            ])
+            return
+        }
+
         // Claim the durable send slot (cross-process atomic via BEGIN IMMEDIATE).
         // If the NSE — or a previous run — already holds it, abort this run.
         guard databaseService.stabilityRepo.claimPendingSend(amountMsat: amountMsat, price: price) else {
@@ -2129,11 +2170,19 @@ class AppState {
             // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
             // this as a settlement (operator GUI) and runs reconcile_incoming_stability
             // immediately, matching every other sender. See issue #161.
-            paymentId = try nodeService.sendKeysendWithTLV(
+            paymentId = try nodeService.sendStabilityPayment(
                 amountMsat: amountMsat,
                 to: stableChannel.counterparty,
                 tlvs: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))]
             )
+        } catch NodeServiceError.staleLightningSync {
+            // The wrapper's send-boundary gate fired (sync went stale after the precheck
+            // above). Send never happened — release the claim and retry next tick.
+            databaseService.stabilityRepo.clearPendingSend()
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "stale_lightning_sync"
+            ])
+            return
         } catch {
             databaseService.stabilityRepo.clearPendingSend()
             AuditService.log("STABILITY_PAYMENT_FAILED", data: [

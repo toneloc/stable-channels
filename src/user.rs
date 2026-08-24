@@ -9527,10 +9527,10 @@ impl UserApp {
                         Self::format_price(available_usd)
                     );
                 } else {
-                    // Calculate trade details (use non-blocking cached price)
-                    let btc_price = get_cached_price_no_fetch();
+                    // Money movement requires a fresh, non-quarantined consensus.
+                    let btc_price = get_fresh_cached_price_no_fetch();
                     if btc_price < 1.0 || !btc_price.is_finite() {
-                        self.trade_error = "Invalid price".to_string();
+                        self.trade_error = "A fresh BTC/USD consensus is required".to_string();
                         return;
                     }
                     let fee_usd = Self::stable_trade_fee(amount);
@@ -9788,7 +9788,7 @@ impl UserApp {
 
         // Show the native allocation valued in USD. A price quote changes its value, not which
         // sats belong to it.
-        let btc_price = get_cached_price_no_fetch();
+        let btc_price = get_fresh_cached_price_no_fetch();
         let (live_receiver_sats, native_sats, current_backing_sats, current_expected_usd) = {
             let sc = self.stable_channel.lock().unwrap();
             let (_, native_sats, _) = channel_balance_split(
@@ -9905,7 +9905,7 @@ impl UserApp {
                 let amount = amount_cents as f64 / 100.0;
                 // Validate user has enough BTC to sell
                 if btc_price < 1.0 || !btc_price.is_finite() {
-                    self.trade_error = "Invalid price".to_string();
+                    self.trade_error = "A fresh BTC/USD consensus is required".to_string();
                 } else if amount_cents > available_btc_usd_cents {
                     self.trade_error = format!(
                         "Amount exceeds tradable channel capacity. Maximum is {}.",
@@ -10389,10 +10389,29 @@ impl UserApp {
         });
     }
 
-    fn execute_buy(&mut self, amount_usd: f64, btc_price: f64) {
+    /// If the live quote drifted beyond the trade band from the price shown on the review
+    /// screen, ask the user to review again rather than silently repricing the order (which
+    /// would move a different number of sats than they consented to).
+    fn quote_moved_error(displayed_btc_price: f64, live_btc_price: f64) -> Option<String> {
+        if !displayed_btc_price.is_finite() || displayed_btc_price < 1.0 {
+            return None; // no meaningful reviewed price to compare against
+        }
+        let deviation = (live_btc_price - displayed_btc_price).abs() / displayed_btc_price;
+        if deviation > MAX_TRADE_QUOTE_DEVIATION_PERCENT / 100.0 {
+            Some(format!(
+                "Price moved (${:.2} → ${:.2}) — please review the order again.",
+                displayed_btc_price, live_btc_price
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn execute_buy(&mut self, amount_usd: f64, displayed_btc_price: f64) {
         self.trade_error.clear();
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
+        let btc_price = get_fresh_cached_price_no_fetch();
 
         let current_expected_usd = {
             let sc = self.stable_channel.lock().unwrap();
@@ -10400,7 +10419,12 @@ impl UserApp {
         };
 
         if btc_price < 1.0 || !btc_price.is_finite() {
-            self.trade_error = "Invalid price".to_string();
+            self.trade_error = "A fresh BTC/USD consensus is required".to_string();
+            return;
+        }
+
+        if let Some(err) = Self::quote_moved_error(displayed_btc_price, btc_price) {
+            self.trade_error = err;
             return;
         }
 
@@ -10448,10 +10472,31 @@ impl UserApp {
         }
     }
 
-    fn execute_sell(&mut self, amount_usd: f64, btc_price: f64, btc_sats: u64) {
+    fn execute_sell(
+        &mut self,
+        amount_usd: f64,
+        displayed_btc_price: f64,
+        _displayed_btc_sats: u64,
+    ) {
         self.trade_error.clear();
         let fee_usd = Self::stable_trade_fee(amount_usd);
         let net_amount = amount_usd - fee_usd;
+        let btc_price = get_fresh_cached_price_no_fetch();
+
+        if btc_price < 1.0 || !btc_price.is_finite() {
+            self.trade_error = "A fresh BTC/USD consensus is required".to_string();
+            return;
+        }
+
+        if let Some(err) = Self::quote_moved_error(displayed_btc_price, btc_price) {
+            self.trade_error = err;
+            return;
+        }
+
+        let Some(btc_sats) = sats_for_usd_cents(floor_usd_cents(amount_usd), btc_price) else {
+            self.trade_error = "The current BTC/USD quote cannot represent this amount".to_string();
+            return;
+        };
 
         let (current_expected_usd, native_sats) = {
             let sc = self.stable_channel.lock().unwrap();
@@ -10464,13 +10509,8 @@ impl UserApp {
             (sc.expected_usd.0, native_sats)
         };
 
-        if btc_price < 1.0 || !btc_price.is_finite() {
-            self.trade_error = "Invalid price".to_string();
-            return;
-        }
-
-        // Revalidate the accepted sat amount, not its moving USD value. Price movement between
-        // the amount and confirmation screens does not change how many native sats are owned.
+        // Re-price at submission so a confirmation screen left open cannot move money using an
+        // expired quote. The order remains denominated in the whole-cent USD amount the user chose.
         if btc_sats == 0 || btc_sats > native_sats {
             self.trade_error = format!("BTC balance changed ({} sats available)", native_sats);
             return;

@@ -24,9 +24,11 @@ object Constants {
     const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     const val DEFAULT_LSP_ADDRESS = "stablechannels.com:9735"
 
-    const val PRICE_CACHE_REFRESH_SECS: Long = 5
-    const val PRICE_FETCH_RETRY_DELAY_MS: Long = 300
-    const val PRICE_FETCH_MAX_RETRIES = 3
+    const val PRICE_CACHE_REFRESH_SECS: Long = 15
+    const val PRICE_FETCH_TIMEOUT_SECS: Long = 3
+    /** Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
+     *  than a single-price ticker and must not share the short per-feed ticker timeout. */
+    const val CHART_FETCH_TIMEOUT_SECS: Long = 30
 
     const val ONCHAIN_WALLET_SYNC_INTERVAL_SECS: Long = 120
     const val LIGHTNING_WALLET_SYNC_INTERVAL_SECS: Long = 60
@@ -39,6 +41,11 @@ object Constants {
     const val STABILITY_THRESHOLD_PERCENT: Double = 0.1
     const val STABILITY_THRESHOLD_USD: Double = 0.25
     const val STABILITY_PAYMENT_COOLDOWN_SECS: Long = 120
+
+    // A stability payment may only be sent when the Lightning wallet synced to chain within
+    // this window (two 60s background sync intervals, so one missed tick is tolerated).
+    // Keep in sync with STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS in src/constants.rs.
+    const val STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS: Long = 120
     const val MIN_DISPLAY_USD: Double = 2.0
     const val MAX_CHANNEL_USD: Double = 100.0
     /** Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount. */
@@ -52,13 +59,9 @@ object Constants {
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000
 
-    val DEFAULT_PRICE_FEEDS = listOf(
-        PriceFeedConfig("Bitstamp", "https://www.bitstamp.net/api/v2/ticker/btc{currency_lc}/", listOf("last")),
-        PriceFeedConfig("CoinGecko", "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies={currency_lc}", listOf("bitcoin", "usd")),
-        PriceFeedConfig("Kraken", "https://api.kraken.com/0/public/Ticker?pair=XBT{currency}", listOf("result", "XXBTZUSD", "c")),
-        PriceFeedConfig("Coinbase", "https://api.coinbase.com/v2/prices/BTC-{currency}/spot", listOf("data", "amount")),
-        PriceFeedConfig("Blockchain.com", "https://blockchain.info/ticker", listOf("{currency}", "last"))
-    )
+    val DEFAULT_PRICE_FEEDS = PriceOracle.DIRECT_USD_FEEDS
+    val FALLBACK_USDT_PRICE_FEEDS = PriceOracle.BITCOIN_USDT_FEEDS
+    val USDT_USD_PRICE_FEEDS = PriceOracle.USDT_USD_FEEDS
 
     object RGSServer {
         const val BITCOIN = "https://rapidsync.lightningdevkit.org/snapshot/"

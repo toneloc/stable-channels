@@ -14,7 +14,7 @@ app/src/main/java/com/stablechannels/app/
 ├── models/                      # Data models (StableChannel, Bitcoin, USD, Trade, etc.)
 ├── services/
 │   ├── NodeService.kt           # LDK Node wrapper (start/stop, payments, channels)
-│   ├── PriceService.kt          # BTC price fetching (median of 5 feeds)
+│   ├── PriceService.kt          # USD-first price oracle with peg-checked USDT fallback
 │   ├── StabilityService.kt      # Stability calculations (threshold check, balance updates)
 │   ├── DatabaseService.kt       # SQLite (channels, trades, payments, price history)
 │   ├── TradeService.kt          # Buy/sell trade execution with signed TLV messages
