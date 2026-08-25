@@ -1015,10 +1015,9 @@ impl UserApp {
 
                     // Completion is keyed to LDK's confirmation view, never to mempool or
                     // balance sight: sweep every inbound on-chain payment LDK reports
-                    // Succeeded (confirmed) and complete its pending row. Idempotent —
-                    // the UPDATE only touches pending rows — and it covers every deposit,
-                    // not just the latest, so several deposits inside one sync interval
-                    // each complete. Rows still pending stay eligible for RBF failure.
+                    // Succeeded (confirmed) and complete its row. Confirmation is authoritative
+                    // even if a prior mempool eviction marked the row failed. The sweep covers
+                    // every deposit, not just the latest.
                     let mut new_deposits: Vec<(String, u64, PaymentStatus)> = Vec::new();
                     for p in node_arc.list_payments() {
                         if p.direction != PaymentDirection::Inbound {
@@ -1029,7 +1028,12 @@ impl UserApp {
                         };
                         let txid = txid.to_string();
                         if p.status == PaymentStatus::Succeeded {
-                            let _ = db.complete_payment_by_txid(&txid);
+                            if let Err(e) = db.complete_payment_by_txid(&txid) {
+                                audit_event(
+                                    "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+                                    json!({ "txid": txid, "error": e.to_string() }),
+                                );
+                            }
                         }
                         if p.latest_update_timestamp >= thread_started_unix {
                             new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
@@ -1044,10 +1048,22 @@ impl UserApp {
                         // an unconfirmed deposit is pending until the sweep above
                         // completes it.
                         let mut covered = false;
+                        let mut persistence_failed = false;
                         for (txid, ldk_amount_msat, status) in &new_deposits {
-                            if db.payment_txid_exists(txid).unwrap_or(true) {
-                                covered = true;
-                                continue;
+                            match db.payment_txid_exists(txid) {
+                                Ok(true) => {
+                                    covered = true;
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    persistence_failed = true;
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+                                        json!({ "txid": txid, "error": e.to_string() }),
+                                    );
+                                    continue;
+                                }
                             }
                             let amount_msat = if *ldk_amount_msat > 0 {
                                 *ldk_amount_msat
@@ -1062,7 +1078,7 @@ impl UserApp {
                             } else {
                                 "pending"
                             };
-                            let _ = db.record_payment(
+                            match db.record_payment(
                                 Some(&format!("onchain_receive_{txid}")),
                                 "onchain",
                                 "received",
@@ -1073,10 +1089,27 @@ impl UserApp {
                                 row_status,
                                 Some(txid),
                                 None,
-                            );
-                            covered = true;
+                            ) {
+                                Ok(_) => covered = true,
+                                Err(e) => {
+                                    persistence_failed = true;
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+                                        json!({ "txid": txid, "error": e.to_string() }),
+                                    );
+                                }
+                            }
                         }
-                        if covered {
+                        if persistence_failed {
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DEFERRED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "ticks_waited": unaccounted_delta_ticks,
+                                    "reason": "database_error",
+                                }),
+                            );
+                        } else if covered {
                             unaccounted_delta_ticks = 0;
                             audit_event(
                                 "ONCHAIN_DEPOSIT_DETECTED",
@@ -1108,7 +1141,7 @@ impl UserApp {
                             // an identity.
                             let amount_usd =
                                 price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
-                            let _ = db.record_payment(
+                            match db.record_payment(
                                 None,
                                 "onchain",
                                 "received",
@@ -1119,19 +1152,26 @@ impl UserApp {
                                 "completed",
                                 None,
                                 None,
-                            );
-                            unaccounted_delta_ticks = 0;
-                            audit_event(
-                                "ONCHAIN_DEPOSIT_DETECTED",
-                                json!({
-                                    "amount_sats": deposit_sats,
-                                    "prev_onchain": prev_onchain_sats,
-                                    "new_onchain": current_onchain,
-                                    "ldk_reported_deposits": new_deposits.len(),
-                                    "anonymous_fallback": true,
-                                }),
-                            );
-                            prev_onchain_sats = current_onchain;
+                            ) {
+                                Ok(_) => {
+                                    unaccounted_delta_ticks = 0;
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_DETECTED",
+                                        json!({
+                                            "amount_sats": deposit_sats,
+                                            "prev_onchain": prev_onchain_sats,
+                                            "new_onchain": current_onchain,
+                                            "ldk_reported_deposits": new_deposits.len(),
+                                            "anonymous_fallback": true,
+                                        }),
+                                    );
+                                    prev_onchain_sats = current_onchain;
+                                }
+                                Err(e) => audit_event(
+                                    "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+                                    json!({ "txid": null, "error": e.to_string() }),
+                                ),
+                            }
                         }
                     } else {
                         unaccounted_delta_ticks = 0;

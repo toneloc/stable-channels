@@ -27,6 +27,7 @@ const ENDPOINT: &str = "wss://mempool.space/api/v1/ws";
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_BACKOFF_SECS: u64 = 60;
+const STABLE_CONNECTION_RESET: Duration = Duration::from_secs(30);
 /// Ignore receives below this — fee-estimation noise, parity with the mobile ports.
 const MIN_RECEIVE_SATS: u64 = 1000;
 
@@ -309,10 +310,12 @@ fn handle_message(
 
 type WsSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
-fn send_tracking(socket: &mut WsSocket, tracked: &HashSet<String>) -> Result<(), tungstenite::Error> {
+fn send_tracking(socket: &mut WsSocket, tracked: &HashSet<String>) -> Result<(), String> {
     // Always send, even empty — an empty list clears server-side subscriptions after untrack.
     let list: Vec<&String> = tracked.iter().collect();
-    socket.send(Message::Text(json!({ "track-addresses": list }).to_string()))
+    socket
+        .send(Message::Text(json!({ "track-addresses": list }).to_string()))
+        .map_err(|error| error.to_string())
 }
 
 /// Apply a command to the tracked set. Returns false when the thread should exit.
@@ -322,6 +325,14 @@ fn apply_cmd(cmd: Cmd, tracked: &mut HashSet<String>) -> (bool, bool) {
         Cmd::Untrack(addr) => (tracked.remove(&addr), true),
         Cmd::Shutdown => (false, false),
     }
+}
+
+fn reconnect_delay(failed_attempts: u32) -> Duration {
+    if failed_attempts == 0 {
+        return Duration::ZERO;
+    }
+    let seconds = (1u64 << (failed_attempts - 1).min(6)).min(MAX_BACKOFF_SECS);
+    Duration::from_secs(seconds)
 }
 
 fn run(cmd_rx: Receiver<Cmd>, event_tx: Sender<WsEvent>) {
@@ -346,8 +357,7 @@ fn run(cmd_rx: Receiver<Cmd>, event_tx: Sender<WsEvent>) {
         // Exponential backoff before retry attempts, drained in small steps so shutdown
         // and tracking changes stay responsive.
         if failed_attempts > 0 {
-            let delay = (1u64 << (failed_attempts - 1).min(6)).min(MAX_BACKOFF_SECS);
-            let deadline = Instant::now() + Duration::from_secs(delay);
+            let deadline = Instant::now() + reconnect_delay(failed_attempts);
             while Instant::now() < deadline {
                 match cmd_rx.recv_timeout(Duration::from_millis(250)) {
                     Ok(cmd) => {
@@ -385,10 +395,13 @@ fn run(cmd_rx: Receiver<Cmd>, event_tx: Sender<WsEvent>) {
             }
             _ => {}
         }
-        failed_attempts = 0;
 
-        if send_tracking(&mut socket, &tracked).is_err() {
-            failed_attempts = 1;
+        if let Err(e) = send_tracking(&mut socket, &tracked) {
+            failed_attempts = failed_attempts.saturating_add(1);
+            audit_event(
+                "WEBSOCKET_TRACKING_FAILED",
+                json!({ "error": format!("{e}"), "attempts": failed_attempts }),
+            );
             continue 'reconnect;
         }
         audit_event(
@@ -397,7 +410,17 @@ fn run(cmd_rx: Receiver<Cmd>, event_tx: Sender<WsEvent>) {
         );
 
         let mut last_ping = Instant::now();
+        let connected_at = Instant::now();
+        let mut stable_connection = false;
         loop {
+            // A successful TLS handshake is not enough to reset the retry counter: endpoints and
+            // captive portals can accept and immediately close. Only a connection that survives
+            // this window earns a reset, preventing a reconnect/audit-log storm.
+            if !stable_connection && connected_at.elapsed() >= STABLE_CONNECTION_RESET {
+                failed_attempts = 0;
+                stable_connection = true;
+            }
+
             // Drain pending commands; re-sync tracking on any change.
             loop {
                 match cmd_rx.try_recv() {
@@ -407,8 +430,18 @@ fn run(cmd_rx: Receiver<Cmd>, event_tx: Sender<WsEvent>) {
                             let _ = socket.close(None);
                             return;
                         }
-                        if changed && send_tracking(&mut socket, &tracked).is_err() {
-                            continue 'reconnect;
+                        if changed {
+                            if let Err(e) = send_tracking(&mut socket, &tracked) {
+                                failed_attempts = failed_attempts.saturating_add(1);
+                                audit_event(
+                                    "WEBSOCKET_TRACKING_FAILED",
+                                    json!({
+                                        "error": format!("{e}"),
+                                        "attempts": failed_attempts,
+                                    }),
+                                );
+                                continue 'reconnect;
+                            }
                         }
                     }
                     Err(TryRecvError::Empty) => break,
@@ -444,8 +477,7 @@ fn run(cmd_rx: Receiver<Cmd>, event_tx: Sender<WsEvent>) {
                 }
             }
         }
-        // Connection dropped after a successful open: reconnect immediately once;
-        // subsequent failures back off.
+        failed_attempts = failed_attempts.saturating_add(1);
     }
 }
 
@@ -462,6 +494,15 @@ mod tests {
 
     fn tracked(addrs: &[&str]) -> HashSet<String> {
         addrs.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn reconnect_delay_grows_and_caps() {
+        assert_eq!(reconnect_delay(0), Duration::ZERO);
+        assert_eq!(reconnect_delay(1), Duration::from_secs(1));
+        assert_eq!(reconnect_delay(2), Duration::from_secs(2));
+        assert_eq!(reconnect_delay(7), Duration::from_secs(60));
+        assert_eq!(reconnect_delay(u32::MAX), Duration::from_secs(60));
     }
 
     #[test]
