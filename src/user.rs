@@ -6629,7 +6629,7 @@ impl UserApp {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new(
-                                        "Get your first payment to activate your account",
+                                        "Get your first payment over Lightning to activate your account",
                                     )
                                     .size(11.0)
                                     .color(theme::MUTED),
@@ -6639,7 +6639,7 @@ impl UserApp {
                             // State 4: confirmed funds but no channel — need a
                             // Lightning receive to open one.
                             ui.label(
-                                RichText::new("Get your first payment to activate your account")
+                                RichText::new("Get your first payment over Lightning to activate your account")
                                     .size(11.0)
                                     .color(theme::MUTED),
                             );
@@ -7224,7 +7224,7 @@ impl UserApp {
             if !has_active_channel {
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("Get your first payment to activate your account")
+                        RichText::new("Get your first payment over Lightning to activate your account")
                             .size(12.0)
                             .color(theme::MUTED),
                     );
@@ -9083,7 +9083,7 @@ impl UserApp {
                 ui.vertical_centered(|ui| {
                     if !has_ready_channel {
                         ui.label(
-                            RichText::new("Get your first payment to activate your account")
+                            RichText::new("Get your first payment over Lightning to activate your account")
                                 .size(11.0)
                                 .color(theme::MUTED)
                                 .italics(),
