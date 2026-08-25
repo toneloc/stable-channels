@@ -4,8 +4,27 @@ import SQLite3
 
 /// Protocol for starting an LDK node
 protocol NodeStarter {
-    func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node
+    func buildNode(dataDir: URL, logger: Logger, primaryURL: String, fallbackURL: String) throws -> LDKNode.Node
     func connectToLSP(node: LDKNode.Node) throws
+}
+
+extension NodeStarter {
+    func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node {
+        // Prefer the URL the main app last started a node against (written on every
+        // successful start, including failover) so the NSE doesn't pay a degraded
+        // primary's failure before falling over itself.
+        let stored = UserDefaults(suiteName: Constants.appGroup)?.string(forKey: "esplora_chain_url")
+        let primary = stored ?? Constants.primaryChainURL
+        let fallback = (primary == Constants.primaryChainURL)
+            ? Constants.fallbackChainURL
+            : Constants.primaryChainURL
+        return try buildNode(
+            dataDir: dataDir,
+            logger: logger,
+            primaryURL: primary,
+            fallbackURL: fallback
+        )
+    }
 }
 
 /// Concrete implementation of NodeStarter
@@ -13,7 +32,12 @@ final class DefaultNodeStarter: NodeStarter {
     private static let lspPubkey = Constants.lspPubkey
     private static let lspAddress = Constants.lspAddress
 
-    func buildNode(dataDir: URL, logger: Logger) throws -> LDKNode.Node {
+    func buildNode(
+        dataDir: URL,
+        logger: Logger,
+        primaryURL: String = Constants.primaryChainURL,
+        fallbackURL: String = Constants.fallbackChainURL
+    ) throws -> LDKNode.Node {
         let memBefore = Diagnostics.residentMemoryBytes()
         logger.log("Mem before build: \(memBefore / 1024 / 1024) MB")
 
@@ -24,7 +48,13 @@ final class DefaultNodeStarter: NodeStarter {
         let dbSize = (attrs?[.size] as? UInt64) ?? 0
         logger.log("ldk_node_data size: \(dbSize / 1024 / 1024) MB")
 
-        Self.stripGossipFromDB(path: ldkDbPath.path)
+        // A strip deletes node_metrics along with the graph, resetting LDK's persisted
+        // latest_lightning_wallet_sync_timestamp — so on strip runs the freshness gate must
+        // wait for a new sync instead of inheriting the main app's recent one. Logged so the
+        // pilot metrics can split immediate-send runs from forced-resync runs.
+        let nodeMetricsReset = Self.stripGossipFromDB(path: ldkDbPath.path)
+        logger
+            .log("stability_gate {\"event\":\"node_metrics_reset\",\"platform\":\"ios\",\"reset\":\(nodeMetricsReset)}")
 
         // Node config
         var config = LDKNode.defaultConfig()
@@ -49,7 +79,13 @@ final class DefaultNodeStarter: NodeStarter {
             nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
         }
 
-        // Sync config
+        // Sync config. Only fee estimation blocks node.start() — the wallet syncs run in
+        // background tasks afterward — so only feeRateCacheUpdateTimeoutSecs is shortened,
+        // to bound how long a degraded provider can hold up startup before failover. The
+        // wallet-sync timeouts stay generous: a timed-out sync never updates
+        // latest_lightning_wallet_sync_timestamp, and the NSE gets essentially one sync
+        // attempt per run (600s interval), which the chain-freshness gate depends on for
+        // long-offline wallets.
         let syncConfig = EsploraSyncConfig(
             backgroundSyncConfig: BackgroundSyncConfig(
                 onchainWalletSyncIntervalSecs: 600,
@@ -59,29 +95,58 @@ final class DefaultNodeStarter: NodeStarter {
             timeoutsConfig: SyncTimeoutsConfig(
                 onchainWalletSyncTimeoutSecs: 60,
                 lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 60,
+                feeRateCacheUpdateTimeoutSecs: 6,
                 txBroadcastTimeoutSecs: 30,
                 perRequestTimeoutSecs: 15
             )
         )
 
-        let builder = LDKNode.Builder.fromConfig(config: config)
-        builder.setChainSourceEsplora(
-            serverUrl: "https://blockstream.info/api",
-            config: syncConfig
-        )
+        do {
+            let builder = LDKNode.Builder.fromConfig(config: config)
+            builder.setChainSourceEsplora(
+                serverUrl: primaryURL,
+                config: syncConfig
+            )
+            let node = try builder.build(nodeEntropy: nodeEntropy)
+            let memAfterBuild = Diagnostics.residentMemoryBytes()
+            logger.log("Mem after build: \(memAfterBuild / 1024 / 1024) MB")
 
-        let node = try builder.build(nodeEntropy: nodeEntropy)
+            try node.start()
 
-        let memAfterBuild = Diagnostics.residentMemoryBytes()
-        logger.log("Mem after build: \(memAfterBuild / 1024 / 1024) MB")
+            let memAfterStart = Diagnostics.residentMemoryBytes()
+            logger.log("Mem after start: \(memAfterStart / 1024 / 1024) MB")
+            return node
+        } catch {
+            guard error.isRetryableEsploraStartupError else {
+                logger.log("Non-retryable startup error in NSE: \(error). Propagating immediately.")
+                throw error
+            }
 
-        try node.start()
+            let initialError = error
+            logger
+                .log(
+                    "Primary Esplora failed during start: \(initialError.localizedDescription). Retrying with fallback: \(fallbackURL)"
+                )
+            do {
+                let fallbackBuilder = LDKNode.Builder.fromConfig(config: config)
+                fallbackBuilder.setChainSourceEsplora(
+                    serverUrl: fallbackURL,
+                    config: syncConfig
+                )
+                let fallbackNode = try fallbackBuilder.build(nodeEntropy: nodeEntropy)
+                try fallbackNode.start()
 
-        let memAfterStart = Diagnostics.residentMemoryBytes()
-        logger.log("Mem after start: \(memAfterStart / 1024 / 1024) MB")
-
-        return node
+                let memAfterStart = Diagnostics.residentMemoryBytes()
+                logger.log("Mem after fallback start: \(memAfterStart / 1024 / 1024) MB")
+                return fallbackNode
+            } catch let fallbackError {
+                logger
+                    .log(
+                        "Fallback Esplora also failed in NSE: \(fallbackError.localizedDescription). Preserving primary error."
+                    )
+                throw initialError
+            }
+        }
     }
 
     func connectToLSP(node: LDKNode.Node) throws {
@@ -92,14 +157,16 @@ final class DefaultNodeStarter: NodeStarter {
         )
     }
 
-    private static func stripGossipFromDB(path: String) {
+    /// Returns true when the strip ran and deleted node_metrics (resetting LDK's persisted
+    /// Lightning-sync timestamp along with the graph and scorer).
+    private static func stripGossipFromDB(path: String) -> Bool {
         var db: OpaquePointer?
-        guard sqlite3_open(path, &db) == SQLITE_OK else { return }
+        guard sqlite3_open(path, &db) == SQLITE_OK else { return false }
         defer { sqlite3_close(db) }
 
         var stmt: OpaquePointer?
         let sql = "SELECT LENGTH(value) FROM ldk_node_data WHERE key = 'network_graph'"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
         let hasGraph: Bool
         if sqlite3_step(stmt) == SQLITE_ROW {
             let size = sqlite3_column_int64(stmt, 0)
@@ -114,6 +181,26 @@ final class DefaultNodeStarter: NodeStarter {
             sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'scorer'", nil, nil, nil)
             sqlite3_exec(db, "DELETE FROM ldk_node_data WHERE key = 'node_metrics'", nil, nil, nil)
             sqlite3_exec(db, "VACUUM", nil, nil, nil)
+        }
+        return hasGraph
+    }
+}
+
+// Keep in sync with StableChannels/Services/NodeService.swift.
+extension Error {
+    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
+    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
+    /// return false and should not be retried.
+    var isRetryableEsploraStartupError: Bool {
+        // Typed match only: NodeError's description is a human sentence ("Failed to
+        // update fee rate estimates."), so string-matching case names never fires for
+        // real errors and could false-positive on a bridged error carrying the text.
+        guard let nodeError = self as? NodeError else { return false }
+        switch nodeError {
+        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+            return true
+        default:
+            return false
         }
     }
 }

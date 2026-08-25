@@ -8,4 +8,5 @@ pub mod ledger;
 pub mod mempool_ws;
 pub mod price_feeds;
 pub mod stable;
+pub mod trade;
 pub mod types;

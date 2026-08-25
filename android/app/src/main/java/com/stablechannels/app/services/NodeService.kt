@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.StabilityFreshness
 import org.lightningdevkit.ldknode.*
 import java.io.File
 
@@ -255,6 +256,28 @@ class NodeService(private val context: Context) {
         return n.spontaneousPayment().sendWithCustomTlvs(amountMsat.toULong(), toNodeId, null, tlvs)
     }
 
+    /** Age in seconds of LDK's last successful Lightning-wallet chain sync, or null when the
+     *  node isn't running, the wallet has never synced, or the timestamp is in the future. */
+    fun lightningSyncAgeSecs(): Long? {
+        val n = node ?: return null
+        val ts = n.status().latestLightningWalletSyncTimestamp?.toLong()
+        return StabilityFreshness.syncAgeSecs(ts, System.currentTimeMillis() / 1000)
+    }
+
+    /** Send-boundary gate for stability payments (see #243): all foreground stability sends
+     *  must go through this wrapper, which refuses to pay on a stale chain tip. Throws
+     *  [StaleLightningSyncException] so the caller can release its send claim and retry on
+     *  the next stability tick once LDK's background sync catches up. */
+    fun sendStabilityPayment(amountMsat: Long, toNodeId: String, tlvs: List<CustomTlvRecord>): String {
+        val n = node ?: throw NodeServiceError()
+        val ts = n.status().latestLightningWalletSyncTimestamp?.toLong()
+        val now = System.currentTimeMillis() / 1000
+        if (!StabilityFreshness.isFresh(ts, now)) {
+            throw StaleLightningSyncException(StabilityFreshness.syncAgeSecs(ts, now))
+        }
+        return n.spontaneousPayment().sendWithCustomTlvs(amountMsat.toULong(), toNodeId, null, tlvs)
+    }
+
     fun receivePayment(amountMsat: Long, description: String): Bolt11Invoice {
         val n = node ?: throw NodeServiceError()
         return n.bolt11Payment().receive(
@@ -378,4 +401,9 @@ class NodeService(private val context: Context) {
     }
 
     class NodeServiceError : Exception("Node not running")
+
+    /** Thrown by [sendStabilityPayment] when the Lightning wallet's chain sync is too old
+     *  to safely pay. [syncAgeSecs] is null when the wallet has never synced. */
+    class StaleLightningSyncException(val syncAgeSecs: Long?) :
+        Exception("Lightning wallet sync is stale (age=${syncAgeSecs ?: "never"}s)")
 }

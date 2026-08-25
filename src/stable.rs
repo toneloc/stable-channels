@@ -1,11 +1,15 @@
 use crate::audit::audit_event;
 use crate::constants::{
-    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_THRESHOLD_PERCENT,
-    STABILITY_THRESHOLD_USD,
+    MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
+    STABILITY_PAYMENT_AUTH_TTL_SECS, STABILITY_PAYMENT_CLOCK_SKEW_SECS,
+    STABILITY_PAYMENT_COOLDOWN_SECS, STABILITY_PAYMENT_MESSAGE_TYPE,
+    STABILITY_THRESHOLD_PERCENT, STABILITY_THRESHOLD_USD,
 };
-use crate::price_feeds::{get_cached_price, get_fresh_cached_price_no_fetch};
+use crate::price_feeds::get_fresh_cached_price_no_fetch;
 use crate::types::{Bitcoin, StableChannel, USD};
 use ldk_node::Node;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use ureq::Agent;
@@ -357,6 +361,100 @@ pub fn trade_backing_sats(
     )
 }
 
+/// Treat sub-cent stable targets as a full exit throughout trade processing.
+///
+/// The UI cannot action less than one cent, so retaining a fractional-cent target would only
+/// bypass the full-exit drift guard and leave an unusable residual allocation.
+pub fn normalize_trade_expected_usd(expected_usd: f64) -> f64 {
+    if expected_usd.is_finite() && expected_usd >= 0.0 && expected_usd < 0.01 {
+        0.0
+    } else {
+        expected_usd
+    }
+}
+
+/// Apply only the change in the stable target at this peer's local price.
+///
+/// Repricing the complete target would erase stability drift accumulated before the trade. A full
+/// exit is allowed only while that drift is inside the normal stability deadband; an actionable
+/// adjustment must settle first because a zero target cannot retain the old drift.
+pub fn trade_backing_after_delta(
+    receiver_sats: u64,
+    current_backing_sats: u64,
+    current_expected_usd: f64,
+    new_expected_usd: f64,
+    price: f64,
+) -> Option<u64> {
+    let new_expected_usd = normalize_trade_expected_usd(new_expected_usd);
+    if !current_expected_usd.is_finite()
+        || current_expected_usd < 0.0
+        || !new_expected_usd.is_finite()
+        || new_expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+    {
+        return None;
+    }
+
+    let receiver_usd = receiver_sats as f64 / SATS_IN_BTC as f64 * price;
+    if new_expected_usd > receiver_usd {
+        return None;
+    }
+
+    if new_expected_usd == 0.0 {
+        return (!allocation_drift_is_actionable(
+            current_backing_sats,
+            current_expected_usd,
+            price,
+        ))
+        .then_some(0);
+    }
+
+    // Floor cumulative targets and subtract them instead of flooring each standalone delta. At a
+    // fixed price the differences telescope, so repeated sub-sat trades eventually apply exactly
+    // the same backing as one cumulative trade while preserving all pre-trade drift.
+    let current_target_sats_f = current_expected_usd / price * SATS_IN_BTC as f64;
+    let new_target_sats_f = new_expected_usd / price * SATS_IN_BTC as f64;
+    if !current_target_sats_f.is_finite()
+        || !new_target_sats_f.is_finite()
+        || current_target_sats_f >= u64::MAX as f64
+        || new_target_sats_f >= u64::MAX as f64
+    {
+        return None;
+    }
+    let current_target_sats = current_target_sats_f.floor() as u64;
+    let new_target_sats = new_target_sats_f.floor() as u64;
+    let mut backing_sats = if new_expected_usd >= current_expected_usd {
+        current_backing_sats.checked_add(new_target_sats.checked_sub(current_target_sats)?)?
+    } else {
+        current_backing_sats.checked_sub(current_target_sats.checked_sub(new_target_sats)?)?
+    };
+
+    // Native dust is absorbed only for a fresh allocation. normalize_backing_sats deliberately
+    // leaves an already-over-capacity value unchanged, and the final check rejects it.
+    if current_expected_usd < 0.01 && current_backing_sats == 0 {
+        backing_sats = normalize_backing_sats(receiver_sats, backing_sats, new_expected_usd, price);
+    }
+    // Zero is also used by stability checks to mean "legacy/uninitialized backing". Persisting
+    // that sentinel for a live target would make the next check rebuild the full target at the
+    // latest price and erase the drift this delta calculation is designed to preserve.
+    (backing_sats > 0 && backing_sats <= receiver_sats).then_some(backing_sats)
+}
+
+fn allocation_drift_is_actionable(
+    backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+) -> bool {
+    let current_value = backing_sats as f64 / SATS_IN_BTC as f64 * price;
+    let drift_usd = (current_value - expected_usd).abs();
+    if expected_usd < 0.01 {
+        return drift_usd >= STABILITY_THRESHOLD_USD;
+    }
+    let drift_percent = drift_usd / expected_usd * 100.0;
+    drift_usd >= STABILITY_THRESHOLD_USD && drift_percent >= STABILITY_THRESHOLD_PERCENT
+}
+
 /// Apply an allocation already derived by this peer.
 ///
 /// Callers must not pass a counterparty-supplied `backing_sats` value here. The shared contract is
@@ -368,31 +466,30 @@ pub fn apply_trade_allocation(sc: &mut StableChannel, new_expected_usd: f64, bac
     recompute_native(sc);
 }
 
-/// Apply a trade — set new expected_usd and recalculate backing_sats + native_sats.
+/// Apply a trade without repricing its existing backing.
 ///
-/// Used after buy/sell trades and when the LSP processes a trade message.
-/// Sets `expected_usd` to the new value and recalculates `backing_sats`
-/// at the current price. Updates `native_sats` (the invariant that stays
-/// fixed between stability payments).
-pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) {
-    sc.expected_usd = USD::from_f64(new_expected_usd);
-    if price > 0.0 {
-        let receiver_sats = sc.stable_receiver_btc.sats;
-        sc.backing_sats = if receiver_sats > 0 {
-            trade_backing_sats(receiver_sats, new_expected_usd, price)
-        } else {
-            (new_expected_usd / price * SATS_IN_BTC as f64) as u64
-        };
-    }
-    // native_sats is everything NOT backing the stable position
-    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
-    recompute_native(sc);
+/// Only the target delta is converted at the current price. Returns `false` and leaves the
+/// allocation untouched if the delta cannot be represented safely or fit the live balance.
+#[must_use]
+pub fn apply_trade(sc: &mut StableChannel, new_expected_usd: f64, price: f64) -> bool {
+    let new_expected_usd = normalize_trade_expected_usd(new_expected_usd);
+    let Some(backing_sats) = trade_backing_after_delta(
+        sc.stable_receiver_btc.sats,
+        sc.backing_sats,
+        sc.expected_usd.0,
+        new_expected_usd,
+        price,
+    ) else {
+        return false;
+    };
+    apply_trade_allocation(sc, new_expected_usd, backing_sats);
+    true
 }
 
 /// Get the current BTC/USD price, preferring cached value when available
 pub fn get_current_price(agent: &Agent) -> f64 {
-    // First try the cached price
-    let cached_price = get_cached_price();
+    // Accounting callers may only consume a fresh, non-quarantined cache value.
+    let cached_price = get_fresh_cached_price_no_fetch();
 
     // Use the cached price if valid
     if cached_price > 0.0 {
@@ -515,12 +612,194 @@ pub fn update_balances<'update_balance_lifetime>(
 /// Information about a stability payment that was sent
 #[derive(Debug, Clone)]
 pub struct StabilityPaymentInfo {
+    pub settlement_id: String,
     pub payment_id: String,
     pub amount_msat: u64,
     pub counterparty: String,
     pub btc_price: f64,
     pub backing_sats_before: u64,
     pub backing_sats_after: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StabilityPaymentDirection {
+    UserToLsp,
+    LspToUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StabilityPaymentPayload {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub settlement_id: String,
+    pub channel_id: String,
+    pub amount_msat: u64,
+    pub direction: StabilityPaymentDirection,
+    pub expected_usd: f64,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StabilitySignedEnvelope {
+    pub payload: String,
+    pub signature: String,
+}
+
+pub fn new_stability_settlement_id() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn is_lower_hex_32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_stability_payment_payload(
+    settlement_id: &str,
+    channel_id: &str,
+    amount_msat: u64,
+    direction: StabilityPaymentDirection,
+    expected_usd: f64,
+    created_at: u64,
+    expires_at: u64,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&StabilityPaymentPayload {
+        kind: STABILITY_PAYMENT_MESSAGE_TYPE.to_owned(),
+        settlement_id: settlement_id.to_owned(),
+        channel_id: channel_id.to_owned(),
+        amount_msat,
+        direction,
+        expected_usd,
+        created_at,
+        expires_at,
+    })
+}
+
+pub fn build_stability_signed_envelope(
+    payload: String,
+    signature: String,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&StabilitySignedEnvelope { payload, signature })
+}
+
+pub fn parse_stability_signed_envelope(raw: &str) -> Option<StabilitySignedEnvelope> {
+    serde_json::from_str(raw).ok()
+}
+
+pub fn parse_stability_payment_payload(payload: &str) -> Option<StabilityPaymentPayload> {
+    let payment: StabilityPaymentPayload = serde_json::from_str(payload).ok()?;
+    if payment.kind != STABILITY_PAYMENT_MESSAGE_TYPE
+        || !is_lower_hex_32(&payment.settlement_id)
+        || !is_lower_hex_32(&payment.channel_id)
+        || payment.amount_msat == 0
+        || !payment.amount_msat.is_multiple_of(1000)
+        || !payment.expected_usd.is_finite()
+        || payment.expected_usd < 0.0
+        || payment.created_at > payment.expires_at
+        || payment.expires_at.saturating_sub(payment.created_at)
+            > STABILITY_PAYMENT_AUTH_TTL_SECS
+    {
+        return None;
+    }
+    Some(payment)
+}
+
+pub fn stability_payment_is_fresh(payment: &StabilityPaymentPayload, now: u64) -> bool {
+    payment.created_at <= now.saturating_add(STABILITY_PAYMENT_CLOCK_SKEW_SECS)
+        && now <= payment.expires_at.saturating_add(STABILITY_PAYMENT_CLOCK_SKEW_SECS)
+}
+
+/// Apply a wallet-to-LSP stability payment to the LSP's local allocation.
+///
+/// The paid sats are authoritative, but PR #231's local-equilibrium floor remains in force: a
+/// payment may settle an above-par surplus, never manufacture a below-par claim at the LSP's
+/// price. The final live-balance clamp preserves the allocation invariant.
+pub fn backing_after_user_to_lsp_stability(
+    current_backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+    amount_sats: u64,
+    live_receiver_sats: u64,
+) -> Option<u64> {
+    if !expected_usd.is_finite()
+        || expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+        || amount_sats == 0
+    {
+        return None;
+    }
+    let equilibrium_f = expected_usd / price * SATS_IN_BTC as f64;
+    if !equilibrium_f.is_finite() || equilibrium_f >= u64::MAX as f64 {
+        return None;
+    }
+    let equilibrium = equilibrium_f.floor() as u64;
+    let settled = if current_backing_sats > equilibrium {
+        current_backing_sats
+            .saturating_sub(amount_sats)
+            .max(equilibrium)
+    } else {
+        current_backing_sats
+    };
+    Some(settled.min(live_receiver_sats))
+}
+
+/// Apply an LSP-to-wallet stability payment to the wallet's local allocation.
+///
+/// The received sats move backing only toward the wallet's equilibrium at its own price. Any
+/// overpayment remains native, and an already above-par allocation is never reduced by an incoming
+/// payment. This lets peers safely retain independent price feeds without comparing `f64` state
+/// bit-for-bit.
+pub fn backing_after_lsp_to_user_stability(
+    current_backing_sats: u64,
+    expected_usd: f64,
+    price: f64,
+    amount_sats: u64,
+    live_receiver_sats: u64,
+) -> Option<u64> {
+    if !expected_usd.is_finite()
+        || expected_usd < 0.0
+        || !price.is_finite()
+        || price <= 0.0
+        || amount_sats == 0
+        || current_backing_sats > live_receiver_sats
+    {
+        return None;
+    }
+    let equilibrium_f = expected_usd / price * SATS_IN_BTC as f64;
+    if !equilibrium_f.is_finite() || equilibrium_f >= u64::MAX as f64 {
+        return None;
+    }
+    let equilibrium = (equilibrium_f.floor() as u64).min(live_receiver_sats);
+    if current_backing_sats >= equilibrium {
+        return Some(current_backing_sats);
+    }
+    current_backing_sats
+        .checked_add(amount_sats)
+        .map(|backing| backing.min(equilibrium))
+}
+
+/// Whether the Lightning wallet's last successful chain sync is recent enough to send a
+/// stability payment. A missing timestamp (never synced), a timestamp in the future (clock
+/// skew), or one older than `max_age_secs` all block the send: paying on a stale chain tip
+/// understates outbound HTLC expiry, which LDK later force-closes on. Exactly `max_age_secs`
+/// old is accepted.
+pub fn lightning_sync_is_fresh(
+    latest_sync_timestamp: Option<u64>,
+    now_secs: u64,
+    max_age_secs: u64,
+) -> bool {
+    match latest_sync_timestamp {
+        Some(ts) => ts <= now_secs && now_secs - ts <= max_age_secs,
+        None => false,
+    }
 }
 
 /// Check and enforce stability for a channel.
@@ -714,12 +993,89 @@ pub fn check_stability(
         return None;
     }
 
-    let amt = USD::to_msats(dollars_from_par, sc.latest_price);
+    // Stable allocations are sat-denominated. Send and sign the same exact whole-sat value that
+    // both peers can apply to backing without fractional-sat ambiguity.
+    let amt = (USD::to_msats(dollars_from_par, sc.latest_price) / 1000) * 1000;
+    if amt == 0 {
+        return None;
+    }
+
+    // Send-boundary chain-freshness gate (see #243): never pay on a stale chain tip.
+    // Skipping here leaves no durable state — the cooldown is only set after a real send —
+    // so the next stability tick retries once LDK's background sync catches up.
+    let latest_sync = node.status().latest_lightning_wallet_sync_timestamp;
+    if !lightning_sync_is_fresh(latest_sync, now.max(0) as u64, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS)
+    {
+        audit_event(
+            "STABILITY_SKIP",
+            json!({
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "reason": "stale_lightning_sync",
+                "latest_lightning_wallet_sync_timestamp": latest_sync,
+                "sync_age_secs": latest_sync.map(|ts| (now.max(0) as u64).saturating_sub(ts)),
+                "max_age_secs": STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
+            }),
+        );
+        return None;
+    }
+
+    let settlement_id = new_stability_settlement_id();
+    let created_at = now.max(0) as u64;
+    let expires_at = created_at.saturating_add(STABILITY_PAYMENT_AUTH_TTL_SECS);
+    let payload = match build_stability_payment_payload(
+        &settlement_id,
+        &sc.channel_id.to_string(),
+        amt,
+        StabilityPaymentDirection::UserToLsp,
+        sc.expected_usd.0,
+        created_at,
+        expires_at,
+    ) {
+        Ok(payload) => payload,
+        Err(error) => {
+            audit_event(
+                "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                json!({
+                    "user_channel_id": format!("{}", sc.user_channel_id),
+                    "settlement_id": settlement_id,
+                    "amount_msat": amt,
+                    "error": error.to_string(),
+                }),
+            );
+            return None;
+        }
+    };
+    let signature = node.sign_message(payload.as_bytes());
+    let signed_envelope = match build_stability_signed_envelope(payload, signature) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            audit_event(
+                "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                json!({
+                    "user_channel_id": format!("{}", sc.user_channel_id),
+                    "settlement_id": settlement_id,
+                    "amount_msat": amt,
+                    "stage": "envelope",
+                    "error": error.to_string(),
+                }),
+            );
+            return None;
+        }
+    };
     let marker = ldk_node::CustomTlvRecord {
         type_num: crate::constants::STABLE_CHANNEL_TLV_TYPE,
         value: vec![1u8],
     };
-    match node.spontaneous_payment().send_with_custom_tlvs(amt, sc.counterparty, None, vec![marker]) {
+    let signed_record = ldk_node::CustomTlvRecord {
+        type_num: crate::constants::SIGNED_STABILITY_TLV_TYPE,
+        value: signed_envelope.into_bytes(),
+    };
+    match node.spontaneous_payment().send_with_custom_tlvs(
+        amt,
+        sc.counterparty,
+        None,
+        vec![marker, signed_record],
+    ) {
         Ok(payment_id) => {
             sc.payment_made = true;
             sc.last_stability_payment = now;
@@ -735,6 +1091,7 @@ pub fn check_stability(
             let payment_id_str = payment_id.to_string();
             let counterparty_str = sc.counterparty.to_string();
             Some(StabilityPaymentInfo {
+                settlement_id,
                 payment_id: payment_id_str,
                 amount_msat: amt,
                 counterparty: counterparty_str,
@@ -760,6 +1117,152 @@ pub fn check_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_future_or_old_lightning_sync_blocks_stability_send() {
+        let max_age = STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS;
+        // Never synced.
+        assert!(!lightning_sync_is_fresh(None, 1_000_000, max_age));
+        // Timestamp in the future (clock skew).
+        assert!(!lightning_sync_is_fresh(Some(1_000_001), 1_000_000, max_age));
+        // One second past the freshness window.
+        assert!(!lightning_sync_is_fresh(
+            Some(1_000_000 - max_age - 1),
+            1_000_000,
+            max_age
+        ));
+    }
+
+    #[test]
+    fn fresh_lightning_sync_allows_stability_send() {
+        let max_age = STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS;
+        // Exactly max_age old is accepted.
+        assert!(lightning_sync_is_fresh(
+            Some(1_000_000 - max_age),
+            1_000_000,
+            max_age
+        ));
+        // Just synced.
+        assert!(lightning_sync_is_fresh(Some(1_000_000), 1_000_000, max_age));
+    }
+
+    #[test]
+    fn signed_stability_payload_round_trips_and_enforces_expiry() {
+        let settlement_id = "11".repeat(32);
+        let channel_id = "22".repeat(32);
+        let payload = build_stability_payment_payload(
+            &settlement_id,
+            &channel_id,
+            909_000,
+            StabilityPaymentDirection::UserToLsp,
+            10.0,
+            1_000,
+            1_000 + STABILITY_PAYMENT_AUTH_TTL_SECS,
+        )
+        .unwrap();
+        let parsed = parse_stability_payment_payload(&payload).unwrap();
+        assert_eq!(parsed.settlement_id, settlement_id);
+        assert_eq!(parsed.channel_id, channel_id);
+        assert_eq!(parsed.amount_msat, 909_000);
+        assert_eq!(parsed.direction, StabilityPaymentDirection::UserToLsp);
+        assert!(stability_payment_is_fresh(&parsed, 1_300));
+        assert!(!stability_payment_is_fresh(
+            &parsed,
+            parsed.expires_at + STABILITY_PAYMENT_CLOCK_SKEW_SECS + 1
+        ));
+
+        let envelope = build_stability_signed_envelope(payload.clone(), "signature".to_owned())
+            .unwrap();
+        let parsed_envelope = parse_stability_signed_envelope(&envelope).unwrap();
+        assert_eq!(parsed_envelope.payload, payload);
+        assert_eq!(parsed_envelope.signature, "signature");
+    }
+
+    #[test]
+    fn signed_stability_payload_rejects_non_sat_and_invalid_identifiers() {
+        let valid_id = "aa".repeat(32);
+        let valid_channel = "22".repeat(32);
+        let non_sat = build_stability_payment_payload(
+            &valid_id,
+            &valid_channel,
+            1_001,
+            StabilityPaymentDirection::LspToUser,
+            10.0,
+            1_000,
+            1_100,
+        )
+        .unwrap();
+        assert!(parse_stability_payment_payload(&non_sat).is_none());
+
+        let uppercase_id = build_stability_payment_payload(
+            &valid_id.to_uppercase(),
+            &valid_channel,
+            1_000,
+            StabilityPaymentDirection::LspToUser,
+            10.0,
+            1_000,
+            1_100,
+        )
+        .unwrap();
+        assert!(parse_stability_payment_payload(&uppercase_id).is_none());
+
+        let excessive_lifetime = build_stability_payment_payload(
+            &valid_id,
+            &valid_channel,
+            1_000,
+            StabilityPaymentDirection::LspToUser,
+            10.0,
+            1_000,
+            1_001 + STABILITY_PAYMENT_AUTH_TTL_SECS,
+        )
+        .unwrap();
+        assert!(parse_stability_payment_payload(&excessive_lifetime).is_none());
+    }
+
+    #[test]
+    fn user_to_lsp_settlement_is_amount_bound_and_keeps_pr231_floor() {
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 1, 49_999),
+            Some(9_999)
+        );
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 909, 49_091),
+            Some(9_091)
+        );
+        // An oversized marker/payment cannot push backing below the LSP's local equilibrium.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 5_000, 45_000),
+            Some(9_090)
+        );
+        // If already below the local equilibrium, receiving money does not erase that drift.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(9_000, 10.0, 110_000.0, 909, 49_091),
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn lsp_to_user_settlement_uses_local_equilibrium_and_keeps_excess_native() {
+        assert_eq!(
+            backing_after_lsp_to_user_stability(9_000, 10.0, 100_000.0, 1_000, 50_000),
+            Some(10_000),
+        );
+        assert_eq!(
+            backing_after_lsp_to_user_stability(9_000, 10.0, 100_000.0, 5_000, 50_000),
+            Some(10_000),
+            "an overpayment cannot create backing above the local target",
+        );
+        assert_eq!(
+            backing_after_lsp_to_user_stability(10_000, 10.0, 110_000.0, 1_000, 50_000),
+            Some(10_000),
+            "an incoming payment cannot reduce an existing above-par allocation",
+        );
+        assert_eq!(
+            backing_after_lsp_to_user_stability(10_001, 10.0, 100_000.0, 1_000, 10_000),
+            None,
+            "a stale over-capacity allocation must be reconciled before settlement",
+        );
+    }
 
     #[test]
     fn only_pending_outbound_lightning_blocks_capacity_repair() {
@@ -1164,7 +1667,7 @@ mod tests {
     fn trade_buy_reduces_stable() {
         // Buy $200 BTC: expected_usd $500 → $300
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 300.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 300.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 300.0);
         let expected_backing = (300.0 / 100_000.0 * 100_000_000.0) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
@@ -1174,7 +1677,7 @@ mod tests {
     fn trade_sell_increases_stable() {
         // Sell $200 BTC: expected_usd $500 → $700
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 700.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 700.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 700.0);
         let expected_backing = (700.0 / 100_000.0 * 100_000_000.0) as u64;
         assert_eq!(sc.backing_sats, expected_backing);
@@ -1183,7 +1686,7 @@ mod tests {
     #[test]
     fn trade_to_zero() {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 0.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 0.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 0.0);
         assert_eq!(sc.backing_sats, 0);
     }
@@ -1192,27 +1695,26 @@ mod tests {
     fn trade_zero_price_skips_backing_update() {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
         let backing_before = sc.backing_sats;
-        apply_trade(&mut sc, 700.0, 0.0);
-        assert_eq!(sc.expected_usd.0, 700.0); // usd updated
-        assert_eq!(sc.backing_sats, backing_before); // backing unchanged
+        assert!(!apply_trade(&mut sc, 700.0, 0.0));
+        assert_eq!(sc.expected_usd.0, 500.0);
+        assert_eq!(sc.backing_sats, backing_before);
     }
 
     #[test]
-    fn trade_at_different_price() {
-        // Same $500 stable, but price doubled to $200k
-        // backing should be half the sats
+    fn no_op_trades_preserve_above_and_below_par_drift() {
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 500.0, 200_000.0);
-        let expected_backing = (500.0 / 200_000.0 * 100_000_000.0) as u64; // 250k
-        assert_eq!(sc.backing_sats, expected_backing);
-        assert_eq!(expected_backing, 250_000);
+        assert!(apply_trade(&mut sc, 500.0, 200_000.0));
+        assert_eq!(sc.backing_sats, 500_000);
+
+        assert!(apply_trade(&mut sc, 500.0, 80_000.0));
+        assert_eq!(sc.backing_sats, 500_000);
     }
 
     #[test]
     fn trade_full_balance_to_stable() {
         // Convert all $1000 to stable
         let mut sc = test_sc(0.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 1000.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 1000.0, 100_000.0));
         assert_eq!(sc.expected_usd.0, 1000.0);
         assert_eq!(sc.backing_sats, 1_000_000);
     }
@@ -1220,7 +1722,7 @@ mod tests {
     #[test]
     fn trade_full_balance_absorbs_sub_cent_native_dust() {
         let mut sc = test_sc(0.0, 66_250.21, 57_444);
-        apply_trade(&mut sc, 38.055025828575, 66_250.21);
+        assert!(apply_trade(&mut sc, 38.055025828575, 66_250.21));
 
         assert_eq!(sc.backing_sats, 57_444);
         assert_eq!(sc.native_sats, 0);
@@ -1230,7 +1732,7 @@ mod tests {
     #[test]
     fn trade_keeps_meaningful_native_allocation() {
         let mut sc = test_sc(0.0, 100_000.0, 100_000);
-        apply_trade(&mut sc, 99.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 99.0, 100_000.0));
 
         assert_eq!(sc.backing_sats, 99_000);
         assert_eq!(sc.native_sats, 1_000);
@@ -1238,12 +1740,152 @@ mod tests {
     }
 
     #[test]
-    fn trade_backing_never_exceeds_live_balance() {
+    fn trade_over_live_balance_is_not_partially_applied() {
         let mut sc = test_sc(0.0, 100_000.0, 95_000);
-        apply_trade(&mut sc, 100.0, 100_000.0);
+        assert!(!apply_trade(&mut sc, 100.0, 100_000.0));
 
-        assert_eq!(sc.backing_sats, 95_000);
-        assert_eq!(sc.native_sats, 0);
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+        assert_eq!(sc.native_sats, 95_000);
+    }
+
+    #[test]
+    fn normal_trades_apply_only_the_locally_priced_delta() {
+        let mut increase = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut increase, 110.0, 110_000.0));
+        assert_eq!(increase.backing_sats, 109_091);
+
+        let mut decrease = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut decrease, 90.0, 110_000.0));
+        assert_eq!(decrease.backing_sats, 90_909);
+    }
+
+    #[test]
+    fn tiny_trade_preserves_preexisting_stability_drift() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+
+        assert!(apply_trade(&mut sc, 100.01, 110_000.0));
+
+        assert_eq!(sc.backing_sats, 100_009);
+        let value = sc.backing_sats as f64 / SATS_IN_BTC as f64 * 110_000.0;
+        assert!(value - sc.expected_usd.0 > 9.99);
+    }
+
+    #[test]
+    fn repeated_sub_sat_target_changes_apply_the_cumulative_backing() {
+        let price = 63_734.35;
+        let mut current_expected = 0.0;
+        let mut backing = 0;
+
+        for step in 1..=10_000 {
+            let new_expected =
+                normalize_trade_expected_usd(step as f64 / 10_000.0);
+            backing = trade_backing_after_delta(
+                1_000_000,
+                backing,
+                current_expected,
+                new_expected,
+                price,
+            )
+            .unwrap();
+            current_expected = new_expected;
+        }
+
+        assert_eq!(
+            backing,
+            (current_expected / price * SATS_IN_BTC as f64).floor() as u64,
+        );
+    }
+
+    #[test]
+    fn arithmetic_underflow_leaves_trade_state_unchanged() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+        sc.backing_sats = 10;
+        sc.native_sats = 199_990;
+
+        assert!(!apply_trade(&mut sc, 99.0, 100_000.0));
+        assert_eq!(sc.expected_usd.0, 100.0);
+        assert_eq!(sc.backing_sats, 10);
+        assert_eq!(sc.native_sats, 199_990);
+    }
+
+    #[test]
+    fn nonzero_trade_target_cannot_use_the_uninitialized_zero_backing_sentinel() {
+        // At the local price this reduction consumes the final 500 backing sats while leaving a
+        // live $0.50 target. Accepting it would let check_stability rebuild 500 sats and erase the
+        // existing below-par drift.
+        assert_eq!(
+            trade_backing_after_delta(10_000, 500, 1.0, 0.5, 100_000.0),
+            None,
+        );
+
+        let mut sc = test_sc(1.0, 100_000.0, 10_000);
+        sc.backing_sats = 500;
+        sc.native_sats = 9_500;
+        assert!(!apply_trade(&mut sc, 0.5, 100_000.0));
+        assert_eq!(sc.expected_usd.0, 1.0);
+        assert_eq!(sc.backing_sats, 500);
+    }
+
+    #[test]
+    fn full_exit_waits_for_actionable_drift_to_settle() {
+        for price in [90_000.0, 110_000.0] {
+            let mut sc = test_sc(100.0, 100_000.0, 200_000);
+            assert!(!apply_trade(&mut sc, 0.0, price));
+            assert_eq!(sc.expected_usd.0, 100.0);
+            assert_eq!(sc.backing_sats, 100_000);
+        }
+    }
+
+    #[test]
+    fn full_exit_allows_non_actionable_drift() {
+        let mut sc = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut sc, 0.0, 100_001.0));
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 0);
+    }
+
+    #[test]
+    fn sub_cent_target_is_normalized_through_the_full_exit_guard() {
+        let mut safe = test_sc(100.0, 100_000.0, 200_000);
+        assert!(apply_trade(&mut safe, 0.009, 100_001.0));
+        assert_eq!(safe.expected_usd.0, 0.0);
+        assert_eq!(safe.backing_sats, 0);
+
+        let mut actionable = test_sc(100.0, 100_000.0, 200_000);
+        assert!(!apply_trade(&mut actionable, 0.009, 90_000.0));
+        assert_eq!(actionable.expected_usd.0, 100.0);
+        assert_eq!(actionable.backing_sats, 100_000);
+    }
+
+    #[test]
+    fn full_exit_does_not_hide_large_absolute_drift_on_sub_cent_target() {
+        let mut sc = test_sc(0.005, 100_000.0, 200_000);
+        sc.backing_sats = 100_000;
+        sc.native_sats = 100_000;
+
+        assert!(!apply_trade(&mut sc, 0.0, 100_000.0));
+        assert_eq!(sc.expected_usd.0, 0.005);
+        assert_eq!(sc.backing_sats, 100_000);
+    }
+
+    #[test]
+    fn capacity_overflow_is_rejected_instead_of_clamped() {
+        assert_eq!(
+            trade_backing_after_delta(100_000, 0, 0.0, 100.001, 100_000.0),
+            None,
+        );
+        assert_eq!(
+            trade_backing_after_delta(100_000, 0, 0.0, 100.10, 100_000.0),
+            None,
+        );
+
+        // Existing backing is $0.30 above a $10 target. Clamping this increase would silently
+        // erase that actionable pre-trade obligation.
+        assert_eq!(
+            trade_backing_after_delta(20_000, 10_300, 10.0, 20.001, 100_000.0),
+            None,
+        );
     }
 
     #[test]
@@ -1315,7 +1957,7 @@ mod tests {
     fn native_updated_after_apply_trade() {
         // Sell BTC: increase stable from $500 to $800
         let mut sc = test_sc(500.0, 100_000.0, 1_000_000);
-        apply_trade(&mut sc, 800.0, 100_000.0);
+        assert!(apply_trade(&mut sc, 800.0, 100_000.0));
         let expected_backing = (800.0 / 100_000.0 * 100_000_000.0) as u64;
         assert_eq!(sc.native_channel_btc.sats, 1_000_000 - expected_backing);
     }

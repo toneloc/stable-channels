@@ -39,9 +39,11 @@ enum Constants {
 
     // MARK: - Timing
 
-    static let priceCacheRefreshSecs: UInt64 = 5
-    static let priceFetchRetryDelayMs: UInt64 = 300
-    static let priceFetchMaxRetries = 3
+    static let priceCacheRefreshSecs: UInt64 = 15
+    static let priceFetchTimeoutSecs: TimeInterval = 3
+    /// Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
+    /// than a single-price ticker and must not share the short per-feed ticker timeout.
+    static let chartFetchTimeoutSecs: TimeInterval = 30
 
     static let onchainWalletSyncIntervalSecs: UInt64 = 120
     static let lightningWalletSyncIntervalSecs: UInt64 = 60
@@ -57,6 +59,11 @@ enum Constants {
     static let stabilityThresholdPercent: Double = 0.1
     static let stabilityThresholdUSD: Double = 0.25
     static let stabilityPaymentCooldownSecs: UInt64 = 120
+    /// A stability payment may only be sent when the Lightning wallet synced to chain within
+    /// this window (two 60s background sync intervals, so one missed tick is tolerated).
+    /// Keep in sync with STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS in src/constants.rs and the
+    /// NSE's copy in NotificationService.swift.
+    static let stabilityMaxLightningSyncAgeSecs: UInt64 = 120
     static let minDisplayUSD: Double = 2.0
     static let maxChannelUSD: Double = 100.0
     /// Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount.
@@ -78,36 +85,6 @@ enum Constants {
     static let minChannelOpeningFeeMsat: UInt64 = 0
     static let minChannelLifetime: UInt32 = 100
     static let maxProportionalLSPFeeLimitPPMMsat: UInt64 = 10_000_000
-
-    // MARK: - Price Feeds
-
-    static let defaultPriceFeeds: [PriceFeedConfig] = [
-        PriceFeedConfig(
-            name: "Bitstamp",
-            urlFormat: "https://www.bitstamp.net/api/v2/ticker/btcusd/",
-            jsonPath: ["last"]
-        ),
-        PriceFeedConfig(
-            name: "CoinGecko",
-            urlFormat: "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            jsonPath: ["bitcoin", "usd"]
-        ),
-        PriceFeedConfig(
-            name: "Kraken",
-            urlFormat: "https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD",
-            jsonPath: ["result", "XXBTZUSD", "c"]
-        ),
-        PriceFeedConfig(
-            name: "Coinbase",
-            urlFormat: "https://api.coinbase.com/v2/prices/spot?currency=USD",
-            jsonPath: ["data", "amount"]
-        ),
-        PriceFeedConfig(
-            name: "Blockchain.com",
-            urlFormat: "https://blockchain.info/ticker",
-            jsonPath: ["USD", "last"]
-        )
-    ]
 
     // MARK: - RGS (Rapid Gossip Sync) Servers
 
@@ -134,12 +111,6 @@ enum Constants {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("StableChannels").appendingPathComponent(defaultUserAlias)
     }
-}
-
-struct PriceFeedConfig: Codable {
-    let name: String
-    let urlFormat: String
-    let jsonPath: [String]
 }
 
 // MARK: - Seed Constants

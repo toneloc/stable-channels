@@ -16,8 +16,13 @@ import LDKNode
 ///   (gossip strip/restore, purge, wipe).
 /// - Hold for the node's entire lifetime, including the background grace
 ///   period; release only after the last post-stop DB write.
+/// - The lock is BINARY: any release() frees it, no matter how many acquires
+///   observed it held. Callers that may run under an outer lease use the
+///   `...ReportingNew` variants to release on failure only when they were the
+///   actual acquirer.
 ///
-/// Keep in sync with the copy in NotificationService/NotificationService.swift.
+/// Keep in sync with the copy in NotificationService/NotificationService.swift
+/// (the NSE copy stays the minimal binary variant without lease reporting).
 final class NodeDirLock: @unchecked Sendable {
     static let shared = NodeDirLock()
     static let lockFilename = "ldk-node.lock"
@@ -25,22 +30,42 @@ final class NodeDirLock: @unchecked Sendable {
     private var fd: Int32 = -1
     private let queue = DispatchQueue(label: "com.stablechannels.nodedirlock")
 
+    var isHeld: Bool {
+        queue.sync { fd >= 0 }
+    }
+
     /// Take the lock without blocking. Returns true if acquired or already
     /// held by this process.
     func tryAcquire(dataDir: URL) -> Bool {
+        queue.sync { tryAcquireLocked(dataDir: dataDir).held }
+    }
+
+    /// Like `tryAcquire`, but also reports whether THIS call newly acquired the
+    /// flock. The lock stays binary — any `release()` frees it — so a caller that
+    /// may run under an outer lease (NodeService.start under AppState's acquire)
+    /// uses `newlyAcquired` to release on failure only when it was the actual
+    /// acquirer, leaving the outer holder's lock intact.
+    func tryAcquireReportingNew(dataDir: URL) -> (held: Bool, newlyAcquired: Bool) {
         queue.sync { tryAcquireLocked(dataDir: dataDir) }
     }
 
     /// Poll for the lock up to `timeout` seconds (the NSE's execution window
     /// is ~30s, so 35s outlasts any live extension). Returns true when held.
     func acquire(dataDir: URL, timeout: TimeInterval) async -> Bool {
+        await acquireReportingNew(dataDir: dataDir, timeout: timeout).held
+    }
+
+    /// Polling variant of `tryAcquireReportingNew` — see that method for the
+    /// ownership semantics.
+    func acquireReportingNew(dataDir: URL, timeout: TimeInterval) async -> (held: Bool, newlyAcquired: Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            if tryAcquire(dataDir: dataDir) {
-                return true
+            let lease = tryAcquireReportingNew(dataDir: dataDir)
+            if lease.held {
+                return lease
             }
             if Date() >= deadline {
-                return false
+                return (held: false, newlyAcquired: false)
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
@@ -56,20 +81,20 @@ final class NodeDirLock: @unchecked Sendable {
         }
     }
 
-    private func tryAcquireLocked(dataDir: URL) -> Bool {
+    private func tryAcquireLocked(dataDir: URL) -> (held: Bool, newlyAcquired: Bool) {
         if fd >= 0 {
-            return true
+            return (held: true, newlyAcquired: false)
         } // already held by this process
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         let path = dataDir.appendingPathComponent(Self.lockFilename).path
         let f = open(path, O_CREAT | O_RDWR, 0o644)
-        guard f >= 0 else { return false }
+        guard f >= 0 else { return (held: false, newlyAcquired: false) }
         guard flock(f, LOCK_EX | LOCK_NB) == 0 else {
             close(f)
-            return false
+            return (held: false, newlyAcquired: false)
         }
         fd = f
-        return true
+        return (held: true, newlyAcquired: true)
     }
 }
 
@@ -128,14 +153,18 @@ class NodeService: NodeServiceProtocol {
 
         // Cross-process exclusivity: never open the wallet dir while another
         // process (the NSE) has a node on it. No-op if already held.
-        guard await NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35) else {
+        let lease = await NodeDirLock.shared.acquireReportingNew(dataDir: Constants.userDataDir, timeout: 35)
+        guard lease.held else {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "NodeService.start"])
             throw NodeServiceError.dataDirLocked
         }
-        // A failed start leaves no node; free the dir for the NSE.
+        // A failed start leaves no node; free the dir for the NSE — but only when this
+        // call was the actual acquirer. Under an outer AppState lease (every node-owning
+        // flow takes one), the flock must survive a failed primary attempt so the Esplora
+        // failover retry never opens a window for the NSE to grab the wallet dir.
         var startSucceeded = false
         defer {
-            if !startSucceeded {
+            if !startSucceeded && lease.newlyAcquired {
                 NodeDirLock.shared.release()
             }
         }
@@ -470,6 +499,40 @@ class NodeService: NodeServiceProtocol {
         )
     }
 
+    /// Age in seconds of LDK's last successful Lightning-wallet chain sync, or nil when the
+    /// node isn't running, the wallet has never synced, or the timestamp is in the future.
+    func lightningSyncAgeSecs() -> UInt64? {
+        guard let node else { return nil }
+        return StabilityFreshness.syncAgeSecs(
+            node.status().latestLightningWalletSyncTimestamp,
+            now: UInt64(Date().timeIntervalSince1970)
+        )
+    }
+
+    /// Send-boundary gate for stability payments (see #243): all foreground stability sends
+    /// must go through this wrapper, which refuses to pay on a stale chain tip. Throws
+    /// `NodeServiceError.staleLightningSync` so the caller can release its send claim and
+    /// retry on the next stability tick once LDK's background sync catches up.
+    func sendStabilityPayment(
+        amountMsat: UInt64,
+        to nodeId: PublicKey,
+        tlvs: [CustomTlvRecord]
+    ) throws -> PaymentId {
+        guard let node else { throw NodeServiceError.notRunning }
+        let now = UInt64(Date().timeIntervalSince1970)
+        guard StabilityFreshness.isFresh(
+            node.status().latestLightningWalletSyncTimestamp, now: now
+        ) else {
+            throw NodeServiceError.staleLightningSync
+        }
+        return try node.spontaneousPayment().sendWithCustomTlvs(
+            amountMsat: amountMsat,
+            nodeId: nodeId,
+            routeParameters: nil,
+            customTlvs: tlvs
+        )
+    }
+
     func receivePayment(amountMsat: UInt64, description: String) throws -> Bolt11Invoice {
         guard let node else { throw NodeServiceError.notRunning }
         return try node.bolt11Payment().receive(
@@ -557,16 +620,63 @@ enum NodeServiceError: LocalizedError {
     case notRunning
     case alreadyRunning
     case dataDirLocked
+    case staleLightningSync
 
     var errorDescription: String? {
         switch self {
         case .notRunning: return "Node is not running"
         case .alreadyRunning: return "Node is already running"
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
+        case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
         }
+    }
+}
+
+/// Chain-freshness rule for stability payments (see #243): a stability payment may only be
+/// sent when LDK completed a Lightning-wallet chain sync within
+/// `Constants.stabilityMaxLightningSyncAgeSecs`. Paying on a stale chain tip understates
+/// outbound HTLC expiry, which LDK later force-closes on.
+///
+/// Keep in sync with `lightning_sync_is_fresh` in `src/stable.rs` and the NSE copy in
+/// NotificationService/NotificationService.swift.
+enum StabilityFreshness {
+    /// True when the timestamp exists, is not in the future, and is at most `maxAgeSecs`
+    /// old (exactly `maxAgeSecs` old is accepted).
+    static func isFresh(
+        _ latestSyncTimestampSecs: UInt64?,
+        now nowSecs: UInt64,
+        maxAgeSecs: UInt64 = Constants.stabilityMaxLightningSyncAgeSecs
+    ) -> Bool {
+        guard let ts = latestSyncTimestampSecs, ts <= nowSecs else { return false }
+        return nowSecs - ts <= maxAgeSecs
+    }
+
+    /// Age of the last sync in seconds, or nil when missing or in the future.
+    static func syncAgeSecs(_ latestSyncTimestampSecs: UInt64?, now nowSecs: UInt64) -> UInt64? {
+        guard let ts = latestSyncTimestampSecs, ts <= nowSecs else { return nil }
+        return nowSecs - ts
     }
 }
 
 extension Notification.Name {
     static let ldkEventReceived = Notification.Name("ldkEventReceived")
+}
+
+// Keep in sync with NotificationService/Services/NodeStarter.swift.
+extension Error {
+    /// Determines whether a startup error is an Esplora feerate estimation failure or timeout
+    /// eligible for provider failover. Non-Esplora errors (database, storage, lock, entropy)
+    /// return false and should not be retried.
+    var isRetryableEsploraStartupError: Bool {
+        // Typed match only: NodeError's description is a human sentence ("Failed to
+        // update fee rate estimates."), so string-matching case names never fires for
+        // real errors and could false-positive on a bridged error carrying the text.
+        guard let nodeError = self as? NodeError else { return false }
+        switch nodeError {
+        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+            return true
+        default:
+            return false
+        }
+    }
 }

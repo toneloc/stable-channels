@@ -109,7 +109,7 @@ struct ReceiveView: View {
             if !hasChannel {
                 Text(String(
                     localized: "info_first_payment",
-                    defaultValue: "Get your first payment to activate your account"
+                    defaultValue: "Get your first payment over Lightning to activate your account"
                 ))
                 .font(.caption)
                 .foregroundStyle(.orange)

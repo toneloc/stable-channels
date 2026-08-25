@@ -1,5 +1,4 @@
 import SwiftUI
-import LocalAuthentication
 
 struct AppAccessSettingsView: View {
     enum AuthTarget: String, Identifiable {
@@ -8,14 +7,21 @@ struct AppAccessSettingsView: View {
 
         var id: String { rawValue }
 
-        var title: String {
+        var enableReason: String {
+            switch self {
+            case .appUnlock: return "Verify to enable App Unlock"
+            case .transaction: return "Verify to enable Payment Confirmation"
+            }
+        }
+
+        var disableTitle: String {
             switch self {
             case .appUnlock: return "Authenticate to disable App Unlock"
             case .transaction: return "Authenticate to disable Payment Confirmation"
             }
         }
 
-        var subtitle: String {
+        var disableSubtitle: String {
             switch self {
             case .appUnlock: return "Verify your identity to turn off App Unlock"
             case .transaction: return "Verify your identity to turn off Payment Confirmation"
@@ -23,7 +29,27 @@ struct AppAccessSettingsView: View {
         }
     }
 
-    @State private var authTarget: AuthTarget?
+    // MARK: - Dependencies (Dependency Inversion)
+
+    /// Capability checker — only exposes hardware detection, not auth methods.
+    private let capability: BiometricCapabilityChecking
+
+    /// Auth orchestration for toggle enable/disable (Single Responsibility).
+    @State private var coordinator: BiometricToggleCoordinator
+
+    // MARK: - State
+
+    @State private var disableTarget: AuthTarget?
+    @State private var appUnlockEnabled = false
+    @State private var transactionEnabled = false
+
+    init(
+        capability: BiometricCapabilityChecking = BiometricService.shared,
+        auth: BiometricAuthenticating = BiometricService.shared
+    ) {
+        self.capability = capability
+        self._coordinator = State(initialValue: BiometricToggleCoordinator(auth: auth))
+    }
 
     private func isEnabled(_ target: AuthTarget) -> Bool {
         UserDefaults.standard.bool(forKey: target.rawValue)
@@ -33,27 +59,39 @@ struct AppAccessSettingsView: View {
         List {
             Section(String(localized: "section_wallet_security", defaultValue: "Wallet Security")) {
                 Toggle(isOn: Binding(
-                    get: { isEnabled(.appUnlock) },
-                    set: {
-                        if $0 {
-                            enable(.appUnlock)
+                    get: { appUnlockEnabled },
+                    set: { newValue in
+                        if newValue {
+                            Task {
+                                let success = await coordinator.enableToggle(
+                                    AuthTarget.appUnlock.rawValue,
+                                    reason: AuthTarget.appUnlock.enableReason
+                                )
+                                appUnlockEnabled = success
+                            }
                         } else {
-                            requestAuth(for: .appUnlock)
+                            disableTarget = .appUnlock
                         }
                     }
                 )) {
                     Label { Text(String(localized: "label_app_unlock", defaultValue: "App Unlock")) }
                         icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
-                .disabled(!BiometricService.canUseBiometrics)
+                .disabled(capability.biometricType == .none || coordinator.isEnabling)
 
                 Toggle(isOn: Binding(
-                    get: { isEnabled(.transaction) },
-                    set: {
-                        if $0 {
-                            enable(.transaction)
+                    get: { transactionEnabled },
+                    set: { newValue in
+                        if newValue {
+                            Task {
+                                let success = await coordinator.enableToggle(
+                                    AuthTarget.transaction.rawValue,
+                                    reason: AuthTarget.transaction.enableReason
+                                )
+                                transactionEnabled = success
+                            }
                         } else {
-                            requestAuth(for: .transaction)
+                            disableTarget = .transaction
                         }
                     }
                 )) {
@@ -62,27 +100,44 @@ struct AppAccessSettingsView: View {
                     }
                     icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
-                .disabled(!BiometricService.canUseBiometrics)
+                .disabled(capability.biometricType == .none || coordinator.isEnabling)
             }
         }
         .navigationTitle(String(localized: "title_app_access", defaultValue: "App Access"))
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $authTarget) { target in
-            ToggleAuthSheet(target: target)
+        .onAppear {
+            appUnlockEnabled = isEnabled(.appUnlock)
+            transactionEnabled = isEnabled(.transaction)
         }
-    }
-
-    private func enable(_ target: AuthTarget) {
-        UserDefaults.standard.set(true, forKey: target.rawValue)
-    }
-
-    private func requestAuth(for target: AuthTarget) {
-        authTarget = target
+        .sheet(item: $disableTarget, onDismiss: {
+            appUnlockEnabled = isEnabled(.appUnlock)
+            transactionEnabled = isEnabled(.transaction)
+        }) { target in
+            ToggleAuthSheet(target: target, coordinator: coordinator)
+        }
+        .alert(
+            "Face ID Access Required",
+            isPresented: $coordinator.requiresSettingsRedirect
+        ) {
+            Button("Open Settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Face ID access is turned off for Stable Channels. Please enable it in Settings > Stable Channels > Face ID."
+            )
+        }
     }
 }
 
+// MARK: - Disable Auth Sheet
+
 struct ToggleAuthSheet: View {
     let target: AppAccessSettingsView.AuthTarget
+    let coordinator: BiometricToggleCoordinator
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -92,16 +147,19 @@ struct ToggleAuthSheet: View {
                     .font(.system(size: 60))
                     .foregroundStyle(.green)
 
-                Text(target.title)
+                Text(target.disableTitle)
                     .font(.headline)
 
-                Text(target.subtitle)
+                Text(target.disableSubtitle)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
                 Button(String(localized: "button_continue", defaultValue: "Continue")) {
-                    Task { await performAuth() }
+                    Task {
+                        await coordinator.disableToggle(target.rawValue, reason: target.disableTitle)
+                        dismiss()
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -121,18 +179,5 @@ struct ToggleAuthSheet: View {
             }
         }
         .presentationDetents([.medium])
-    }
-
-    private func performAuth() async {
-        do {
-            try await BiometricService.authenticate(reason: target.title)
-            UserDefaults.standard.set(false, forKey: target.rawValue)
-        } catch {
-            let passcodeOk = await (try? BiometricService.authenticateWithPasscode(reason: target.title)) ?? false
-            if passcodeOk {
-                UserDefaults.standard.set(false, forKey: target.rawValue)
-            }
-        }
-        dismiss()
     }
 }
