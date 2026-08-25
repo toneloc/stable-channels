@@ -257,7 +257,7 @@ private struct MismatchRecoverySheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppState.self) private var appState
     @State private var restoreMnemonic = ""
-    @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.wordCount12)
+    @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.maxWordCount)
     @State private var isWordFieldsReadOnly = false
     @State private var isImportingSeed = false
     @State private var isRestoring = false
