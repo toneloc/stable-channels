@@ -363,7 +363,6 @@ pub struct UserApp {
     settings_show_sats: bool,
     balance_last_update: std::time::Instant,
     confirm_close_popup: bool,
-    pub stable_message: String,
     show_confirm_trade: bool,
     trade_amount_input: String,
     pending_trade: Option<PendingTrade>,
@@ -746,7 +745,6 @@ impl UserApp {
                 .checked_sub(Duration::from_secs(10))
                 .unwrap_or_else(std::time::Instant::now),
             confirm_close_popup: false,
-            stable_message: String::new(),
             show_confirm_trade: false,
             trade_amount_input: String::new(),
             pending_trade: None,
@@ -3002,31 +3000,6 @@ impl UserApp {
             );
 
             println!("Migrated channel {} from JSON to SQLite", channel_id_str);
-        }
-    }
-
-    fn send_stable_message(&mut self) {
-        let amt = 1;
-        let custom_str = self.stable_message.clone();
-        let custom_tlv = ldk_node::CustomTlvRecord {
-            type_num: STABLE_CHANNEL_TLV_TYPE,
-            value: custom_str.as_bytes().to_vec(),
-        };
-
-        let mut sc = self.stable_channel.lock().unwrap();
-        match self.node.spontaneous_payment().send_with_custom_tlvs(
-            amt,
-            sc.counterparty,
-            None,
-            vec![custom_tlv],
-        ) {
-            Ok(_payment_id) => {
-                sc.payment_made = true;
-                self.status_message = format!("Sent stable message: {}", self.stable_message);
-            }
-            Err(e) => {
-                self.status_message = format!("Failed to send stable message: {}", e);
-            }
         }
     }
 
@@ -7935,31 +7908,6 @@ impl UserApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                // Send Message row
-                let purple = Color32::from_rgb(139, 92, 246);
-                ui.horizontal(|ui| {
-                    icon_badge(ui, "💬", purple);
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Message Devs").size(13.0).color(Color32::BLACK));
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let msg_edit = egui::TextEdit::singleline(&mut self.stable_message)
-                        .hint_text("Say hello…")
-                        .desired_width(200.0);
-                    ui.add(msg_edit);
-                    let send_btn = egui::Button::new(RichText::new("Send").size(12.0).color(Color32::WHITE))
-                        .fill(purple).corner_radius(theme::RADIUS_PILL);
-                    if ui.add(send_btn).clicked() && !self.stable_message.is_empty() {
-                        self.send_stable_message();
-                        self.show_toast("Message sent!", "OK");
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
                 // Debug row
                 let gray = Color32::from_rgb(107, 114, 128);
                 ui.horizontal(|ui| {
@@ -10183,7 +10131,6 @@ impl UserApp {
         let btc_amount = trade.btc_amount;
         let btc_sats = trade.btc_sats;
         let net_amount = trade.net_amount_usd;
-        let is_full_peg = trade.is_full_peg;
 
         // Header
         ui.label(
@@ -10278,20 +10225,6 @@ impl UserApp {
                     });
                 });
             });
-
-        if is_full_peg {
-            ui.add_space(12.0);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(
-                        "This trade may be rejected by the LSP if the price changes, and the trade fee will not be refunded.",
-                    )
-                    .size(12.0)
-                    .color(theme::WARNING),
-                )
-                .wrap(),
-            );
-        }
 
         let confirmation_blocked = !self.trade_error.is_empty();
         if confirmation_blocked {
