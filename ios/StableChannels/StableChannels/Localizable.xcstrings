@@ -9355,67 +9355,67 @@
       "localizations" : {
         "ar" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "استلم عبر Lightning لإنشاء Stable Wallet الخاصة بك"
           }
         },
         "bn" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "আপনার Stable Wallet তৈরি করতে Lightning-এর মাধ্যমে গ্রহণ করুন"
           }
         },
         "de" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Empfangen Sie über Lightning, um Ihre Stable Wallet zu erstellen"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Get your first payment to activate your account"
+            "value" : "Get your first payment over Lightning to activate your account"
           }
         },
         "es" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Recibe a través de Lightning para crear tu Stable Wallet"
           }
         },
         "fr" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Recevez via Lightning pour créer votre Stable Wallet"
           }
         },
         "hi" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "अपना Stable Wallet बनाने के लिए Lightning के माध्यम से प्राप्त करें"
           }
         },
         "ja" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Lightningで受け取ってStable Walletを作成します"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Receba via Lightning para criar sua Stable Wallet"
           }
         },
         "ru" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Получите через Lightning, чтобы создать свой Stable Wallet"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "通过 Lightning 接收以创建您的 Stable Wallet"
           }
         }
@@ -10570,67 +10570,67 @@
       "localizations" : {
         "ar" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "قم بإجراء الدفعة الأولى لتنشيط القناة"
           }
         },
         "bn" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "চ্যানেলটি সক্রিয় করতে আপনার প্রথম পেমেন্ট করুন"
           }
         },
         "de" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Machen Sie Ihre erste Zahlung, um den Kanal zu aktivieren"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Get your first payment to activate your account"
+            "value" : "Get your first payment over Lightning to activate your account"
           }
         },
         "es" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Haz tu primer pago para activar el canal"
           }
         },
         "fr" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Effectuez votre premier paiement pour activer le canal"
           }
         },
         "hi" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "चैनल सक्रिय करने के लिए अपना पहला भुगतान करें"
           }
         },
         "ja" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "最初の支払いを行ってチャネルをアクティブにする"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Faça seu primeiro pagamento para ativar o canal"
           }
         },
         "ru" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "Сделайте свой первый платеж, чтобы активировать канал"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
-            "state" : "translated",
+            "state" : "needs_review",
             "value" : "进行您的首次付款以激活通道"
           }
         }

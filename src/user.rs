@@ -10,10 +10,7 @@ use chrono::{TimeZone, Utc};
 use egui::{Color32, CursorIcon, OpenUrl, RichText, Sense, TextureOptions};
 use image::{GrayImage, Luma};
 use ldk_node::lightning::ln::channelmanager::PaymentId;
-use ldk_node::payment::{PaymentDirection, PaymentKind};
-// `PaymentStatus` is only referenced by the debug-only Mac E2E harness.
-#[cfg(debug_assertions)]
-use ldk_node::payment::PaymentStatus;
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use qrcode::QrCode;
 use serde_json::json;
 use std::collections::HashMap;
@@ -350,6 +347,8 @@ pub struct UserApp {
     fund_tab: FundTab,
     stable_channel: Arc<Mutex<StableChannel>>,
     background_started: bool,
+    mempool_ws: stable_channels::mempool_ws::MempoolWs,
+    ws_events: Option<std::sync::mpsc::Receiver<stable_channels::mempool_ws::WsEvent>>,
     audit_log_path: String,
     show_log_window: bool,
     show_diagnostics_window: bool,
@@ -377,7 +376,6 @@ pub struct UserApp {
     settings_show_sats: bool,
     balance_last_update: std::time::Instant,
     confirm_close_popup: bool,
-    pub stable_message: String,
     show_confirm_trade: bool,
     trade_amount_input: String,
     pending_trade: Option<PendingTrade>,
@@ -726,6 +724,11 @@ impl UserApp {
             .min(i64::MAX as u64) as i64;
         let _ = db.mark_unresolved_trades_unknown(startup_now);
 
+        // Mempool websocket: idle until the first receive address is tracked; events are
+        // consumed by a thread spawned in start_background_if_needed().
+        let (ws_tx, ws_events) = std::sync::mpsc::channel();
+        let mempool_ws = stable_channels::mempool_ws::MempoolWs::start(ws_tx);
+
         let mut app = Self {
             node: Arc::clone(&node),
             runtime_config,
@@ -739,6 +742,8 @@ impl UserApp {
             fund_tab: FundTab::Lightning,
             stable_channel: Arc::clone(&stable_channel),
             background_started: false,
+            mempool_ws,
+            ws_events: Some(ws_events),
             btc_price,
             invoice_amount: "0".to_string(),
             jit_amount_input: String::new(),
@@ -773,7 +778,6 @@ impl UserApp {
                 .checked_sub(Duration::from_secs(10))
                 .unwrap_or_else(std::time::Instant::now),
             confirm_close_popup: false,
-            stable_message: String::new(),
             show_confirm_trade: false,
             trade_amount_input: String::new(),
             pending_trade: None,
@@ -884,6 +888,51 @@ impl UserApp {
             return;
         }
 
+        // Websocket events: record receives at mempool-sighting time (pending, later
+        // completed by the balance-delta path), fail rows on RBF/eviction.
+        if let Some(ws_rx) = self.ws_events.take() {
+            let ws_db = self.db.clone();
+            std::thread::spawn(move || {
+                for event in ws_rx {
+                    match event {
+                        stable_channels::mempool_ws::WsEvent::Receive {
+                            address,
+                            txid,
+                            amount_sats,
+                        } => {
+                            let price = stable_channels::price_feeds::get_cached_price();
+                            let amount_usd = (price > 0.0)
+                                .then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
+                            // Atomic txid-dedup + insert; the balance-delta path can race
+                            // this without producing a second row.
+                            let recorded = ws_db
+                                .record_websocket_receive(
+                                    &txid,
+                                    &address,
+                                    amount_sats * 1000,
+                                    amount_usd,
+                                    (price > 0.0).then_some(price),
+                                )
+                                .unwrap_or(false);
+                            if recorded {
+                                audit_event(
+                                    "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
+                                    json!({ "txid": txid, "amount_sats": amount_sats }),
+                                );
+                            }
+                        }
+                        stable_channels::mempool_ws::WsEvent::Removed { address, txid } => {
+                            let failed = ws_db.fail_payment_by_txid(&txid).unwrap_or(false);
+                            audit_event(
+                                "WEBSOCKET_RBF_FAILED_PAYMENT",
+                                json!({ "txid": txid, "address": address, "row_failed": failed }),
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
         let node_arc = Arc::clone(&self.node);
         let sc_arc = Arc::clone(&self.stable_channel);
         let db = self.db.clone();
@@ -902,6 +951,15 @@ impl UserApp {
             }
 
             let mut prev_onchain_sats: u64 = node_arc.list_balances().total_onchain_balance_sats;
+            // Deposits whose LDK payment entry updated after this moment are "new" for the
+            // insert fallback; older entries are history and must not re-materialize as rows.
+            let thread_started_unix: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Ticks a balance rise has gone unexplained by any txid; bounds the deferral
+            // before the anonymous-aggregate fallback records it.
+            let mut unaccounted_delta_ticks: u8 = 0;
 
             loop {
                 // Refresh the shared price state outside the channel lock. This preserves the
@@ -995,44 +1053,176 @@ impl UserApp {
                 // Housekeeping must continue during a price-feed outage. Only the optional USD
                 // metadata depends on price; balance observations and splice completion do not.
                 {
+                    // Balance FIRST, payments second: the payments snapshot can then only be
+                    // fresher than the balance it must explain, so a sync landing between the
+                    // two reads can no longer produce a delta whose txid is missing from the
+                    // snapshot (which is what used to recreate the anonymous fallback row).
                     let current_onchain = node_arc.list_balances().total_onchain_balance_sats;
+
+                    // Completion is keyed to LDK's confirmation view, never to mempool or
+                    // balance sight: sweep every inbound on-chain payment LDK reports
+                    // Succeeded (confirmed) and complete its row. Confirmation is authoritative
+                    // even if a prior mempool eviction marked the row failed. The sweep covers
+                    // every deposit, not just the latest.
+                    let mut new_deposits: Vec<(String, u64, PaymentStatus)> = Vec::new();
+                    for p in node_arc.list_payments() {
+                        if p.direction != PaymentDirection::Inbound {
+                            continue;
+                        }
+                        let PaymentKind::Onchain { ref txid, .. } = p.kind else {
+                            continue;
+                        };
+                        let txid = txid.to_string();
+                        if p.status == PaymentStatus::Succeeded {
+                            if let Err(e) = db.complete_payment_by_txid(&txid) {
+                                audit_event(
+                                    "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+                                    json!({ "txid": txid, "error": e.to_string() }),
+                                );
+                            }
+                        }
+                        if p.latest_update_timestamp >= thread_started_unix {
+                            new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
+                        }
+                    }
+
                     let is_splicing = splice_flag.load(std::sync::atomic::Ordering::Relaxed);
                     if current_onchain > prev_onchain_sats && !is_splicing {
                         let deposit_sats = current_onchain - prev_onchain_sats;
-                        let amount_usd =
-                            price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
-                        // Try to find the txid from LDK's payment list
-                        let deposit_txid: Option<String> =
-                            node_arc.list_payments().iter().rev().find_map(|p| {
-                                if p.direction == PaymentDirection::Inbound {
-                                    if let PaymentKind::Onchain { ref txid, .. } = p.kind {
-                                        return Some(txid.to_string());
-                                    }
+                        // One row per LDK-reported deposit the websocket did not already
+                        // record, with LDK's own amount and confirmation-derived status —
+                        // an unconfirmed deposit is pending until the sweep above
+                        // completes it.
+                        let mut covered = false;
+                        let mut persistence_failed = false;
+                        for (txid, ldk_amount_msat, status) in &new_deposits {
+                            match db.payment_txid_exists(txid) {
+                                Ok(true) => {
+                                    covered = true;
+                                    continue;
                                 }
-                                None
+                                Ok(false) => {}
+                                Err(e) => {
+                                    persistence_failed = true;
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+                                        json!({ "txid": txid, "error": e.to_string() }),
+                                    );
+                                    continue;
+                                }
+                            }
+                            let amount_msat = if *ldk_amount_msat > 0 {
+                                *ldk_amount_msat
+                            } else {
+                                deposit_sats * 1000
+                            };
+                            let amount_usd = price.map(|value| {
+                                amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * value
                             });
-                        let _ = db.record_payment(
-                            None,
-                            "onchain",
-                            "received",
-                            deposit_sats * 1000,
-                            amount_usd,
-                            price,
-                            None,
-                            "completed",
-                            deposit_txid.as_deref(),
-                            None,
-                        );
-                        audit_event(
-                            "ONCHAIN_DEPOSIT_DETECTED",
-                            json!({
-                                "amount_sats": deposit_sats,
-                                "prev_onchain": prev_onchain_sats,
-                                "new_onchain": current_onchain,
-                            }),
-                        );
+                            let row_status = if *status == PaymentStatus::Succeeded {
+                                "completed"
+                            } else {
+                                "pending"
+                            };
+                            match db.record_payment(
+                                Some(&format!("onchain_receive_{txid}")),
+                                "onchain",
+                                "received",
+                                amount_msat,
+                                amount_usd,
+                                price,
+                                None,
+                                row_status,
+                                Some(txid),
+                                None,
+                            ) {
+                                Ok(_) => covered = true,
+                                Err(e) => {
+                                    persistence_failed = true;
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+                                        json!({ "txid": txid, "error": e.to_string() }),
+                                    );
+                                }
+                            }
+                        }
+                        if persistence_failed {
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DEFERRED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "ticks_waited": unaccounted_delta_ticks,
+                                    "reason": "database_error",
+                                }),
+                            );
+                        } else if covered {
+                            unaccounted_delta_ticks = 0;
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DETECTED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "prev_onchain": prev_onchain_sats,
+                                    "new_onchain": current_onchain,
+                                    "ldk_reported_deposits": new_deposits.len(),
+                                }),
+                            );
+                            prev_onchain_sats = current_onchain;
+                        } else if unaccounted_delta_ticks < 3 {
+                            // Nothing names this delta yet. Hold the watermark and retry:
+                            // LDK's payment list usually surfaces the entry within a tick,
+                            // at which point it records per-txid instead of as an
+                            // anonymous aggregate.
+                            unaccounted_delta_ticks += 1;
+                            audit_event(
+                                "ONCHAIN_DEPOSIT_DEFERRED",
+                                json!({
+                                    "amount_sats": deposit_sats,
+                                    "ticks_waited": unaccounted_delta_ticks,
+                                }),
+                            );
+                        } else {
+                            // Bounded fallback (~3 ticks): a balance rise LDK never names
+                            // as a payment still gets recorded — txid-less and completed
+                            // (pre-websocket behavior). It cannot be RBF-tracked without
+                            // an identity.
+                            let amount_usd =
+                                price.map(|value| deposit_sats as f64 / 100_000_000.0 * value);
+                            match db.record_payment(
+                                None,
+                                "onchain",
+                                "received",
+                                deposit_sats * 1000,
+                                amount_usd,
+                                price,
+                                None,
+                                "completed",
+                                None,
+                                None,
+                            ) {
+                                Ok(_) => {
+                                    unaccounted_delta_ticks = 0;
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_DETECTED",
+                                        json!({
+                                            "amount_sats": deposit_sats,
+                                            "prev_onchain": prev_onchain_sats,
+                                            "new_onchain": current_onchain,
+                                            "ldk_reported_deposits": new_deposits.len(),
+                                            "anonymous_fallback": true,
+                                        }),
+                                    );
+                                    prev_onchain_sats = current_onchain;
+                                }
+                                Err(e) => audit_event(
+                                    "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+                                    json!({ "txid": null, "error": e.to_string() }),
+                                ),
+                            }
+                        }
+                    } else {
+                        unaccounted_delta_ticks = 0;
+                        prev_onchain_sats = current_onchain;
                     }
-                    prev_onchain_sats = current_onchain;
                 }
 
                 // The splice flag stays set until BDK observes the on-chain spend.
@@ -1919,7 +2109,11 @@ impl UserApp {
     pub fn get_address(&mut self) -> bool {
         match self.node.onchain_payment().new_address() {
             Ok(address) => {
-                self.on_chain_address = address.to_string();
+                let previous = std::mem::replace(&mut self.on_chain_address, address.to_string());
+                if !previous.is_empty() && previous != self.on_chain_address {
+                    self.mempool_ws.untrack_address(&previous);
+                }
+                self.mempool_ws.track_address(&self.on_chain_address);
                 self.status_message = "Address generated".to_string();
                 true
             }
@@ -2854,31 +3048,6 @@ impl UserApp {
             );
 
             println!("Migrated channel {} from JSON to SQLite", channel_id_str);
-        }
-    }
-
-    fn send_stable_message(&mut self) {
-        let amt = 1;
-        let custom_str = self.stable_message.clone();
-        let custom_tlv = ldk_node::CustomTlvRecord {
-            type_num: STABLE_CHANNEL_TLV_TYPE,
-            value: custom_str.as_bytes().to_vec(),
-        };
-
-        let mut sc = self.stable_channel.lock().unwrap();
-        match self.node.spontaneous_payment().send_with_custom_tlvs(
-            amt,
-            sc.counterparty,
-            None,
-            vec![custom_tlv],
-        ) {
-            Ok(_payment_id) => {
-                sc.payment_made = true;
-                self.status_message = format!("Sent stable message: {}", self.stable_message);
-            }
-            Err(e) => {
-                self.status_message = format!("Failed to send stable message: {}", e);
-            }
         }
     }
 
@@ -6682,7 +6851,7 @@ impl UserApp {
                                 ui.add_space(4.0);
                                 ui.label(
                                     RichText::new(
-                                        "Get your first payment to activate your account",
+                                        "Get your first payment over Lightning to activate your account",
                                     )
                                     .size(11.0)
                                     .color(theme::MUTED),
@@ -6692,7 +6861,7 @@ impl UserApp {
                             // State 4: confirmed funds but no channel — need a
                             // Lightning receive to open one.
                             ui.label(
-                                RichText::new("Get your first payment to activate your account")
+                                RichText::new("Get your first payment over Lightning to activate your account")
                                     .size(11.0)
                                     .color(theme::MUTED),
                             );
@@ -7277,7 +7446,7 @@ impl UserApp {
             if !has_active_channel {
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("Get your first payment to activate your account")
+                        RichText::new("Get your first payment over Lightning to activate your account")
                             .size(12.0)
                             .color(theme::MUTED),
                     );
@@ -7784,31 +7953,6 @@ impl UserApp {
                         });
                     }
                 }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                // Send Message row
-                let purple = Color32::from_rgb(139, 92, 246);
-                ui.horizontal(|ui| {
-                    icon_badge(ui, "💬", purple);
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Message Devs").size(13.0).color(Color32::BLACK));
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let msg_edit = egui::TextEdit::singleline(&mut self.stable_message)
-                        .hint_text("Say hello…")
-                        .desired_width(200.0);
-                    ui.add(msg_edit);
-                    let send_btn = egui::Button::new(RichText::new("Send").size(12.0).color(Color32::WHITE))
-                        .fill(purple).corner_radius(theme::RADIUS_PILL);
-                    if ui.add(send_btn).clicked() && !self.stable_message.is_empty() {
-                        self.send_stable_message();
-                        self.show_toast("Message sent!", "OK");
-                    }
-                });
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -9136,7 +9280,7 @@ impl UserApp {
                 ui.vertical_centered(|ui| {
                     if !has_ready_channel {
                         ui.label(
-                            RichText::new("Get your first payment to activate your account")
+                            RichText::new("Get your first payment over Lightning to activate your account")
                                 .size(11.0)
                                 .color(theme::MUTED)
                                 .italics(),
@@ -10037,7 +10181,6 @@ impl UserApp {
         let btc_amount = trade.btc_amount;
         let btc_sats = trade.btc_sats;
         let net_amount = trade.net_amount_usd;
-        let is_full_peg = trade.is_full_peg;
 
         // Header
         ui.label(
@@ -10132,20 +10275,6 @@ impl UserApp {
                     });
                 });
             });
-
-        if is_full_peg {
-            ui.add_space(12.0);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(
-                        "This trade may be rejected by the LSP if the price changes, and the trade fee will not be refunded.",
-                    )
-                    .size(12.0)
-                    .color(theme::WARNING),
-                )
-                .wrap(),
-            );
-        }
 
         let confirmation_blocked = !self.trade_error.is_empty();
         if confirmation_blocked {

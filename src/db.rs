@@ -285,6 +285,41 @@ fn finish_transaction<T>(conn: &Connection, result: SqliteResult<T>) -> SqliteRe
     }
 }
 
+/// Make `payments.payment_id` unique without discarding legacy retry rows.
+///
+/// Older databases may contain one row per attempt for the same payment id. Preserve the
+/// reconciled row when one exists; otherwise preserve the newest attempt, matching the lookup
+/// behavior used before this migration. Historical duplicates remain queryable under a reserved
+/// synthetic id. The rewrite and index creation are atomic so startup never continues while the
+/// deduplication invariant is only partially installed.
+fn ensure_unique_payment_ids(conn: &Connection) -> SqliteResult<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        conn.execute(
+            "WITH ranked AS (
+                 SELECT id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY payment_id
+                            ORDER BY stable_reconciled DESC, id DESC
+                        ) AS payment_rank
+                 FROM payments
+                 WHERE payment_id IS NOT NULL
+             )
+             UPDATE payments
+                SET payment_id = '__sc_duplicate_payment_row_' || id || '__' || payment_id
+              WHERE id IN (SELECT id FROM ranked WHERE payment_rank > 1)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_payment_id
+             ON payments(payment_id) WHERE payment_id IS NOT NULL",
+            [],
+        )?;
+        Ok(())
+    })();
+    finish_transaction(conn, result)
+}
+
 impl Database {
     /// Open or create the database at the given directory path.
     pub fn open(data_dir: &Path) -> SqliteResult<Self> {
@@ -505,6 +540,11 @@ impl Database {
              ON payments(created_at DESC)",
             [],
         )?;
+
+        // Uniqueness backstop for deterministic payment ids (e.g. onchain_receive_<txid>).
+        // This migration preserves legacy duplicate history while keeping the authoritative
+        // reconciled/newest row under the real payment id.
+        ensure_unique_payment_ids(&conn)?;
 
         // On-chain transactions table - stores on-chain tx history
         conn.execute(
@@ -2118,6 +2158,76 @@ impl Database {
         Ok(exists)
     }
 
+    /// Whether any payment row already carries this txid — the websocket path's dedup key
+    /// against the balance-delta detection path.
+    pub fn payment_txid_exists(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT 1 FROM payments WHERE txid = ?1 LIMIT 1")?;
+        let exists = stmt.exists(params![txid])?;
+        Ok(exists)
+    }
+
+    /// Complete the payment carrying this txid. LDK's confirmed status is authoritative, so it
+    /// may recover a row that a prior mempool eviction marked failed before the same transaction
+    /// was rebroadcast. Returns true if a row transitioned.
+    pub fn complete_payment_by_txid(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE payments SET status = 'completed'
+             WHERE txid = ?1 AND status IN ('pending', 'failed')",
+            params![txid],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Record a websocket-detected receive unless its txid is already tracked. The check and
+    /// the insert run in one transaction so a racing balance-delta detection cannot slip a
+    /// duplicate in between; the unique payment_id index is the backstop underneath.
+    /// Returns true when a new row was inserted.
+    pub fn record_websocket_receive(
+        &self,
+        txid: &str,
+        address: &str,
+        amount_msat: u64,
+        amount_usd: Option<f64>,
+        btc_price: Option<f64>,
+    ) -> SqliteResult<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let already_tracked = tx
+            .prepare("SELECT 1 FROM payments WHERE txid = ?1 LIMIT 1")?
+            .exists(params![txid])?;
+        let inserted = if already_tracked {
+            false
+        } else {
+            tx.execute(
+                "INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, txid, address)
+                 VALUES (?1, 'onchain', 'received', ?2, ?3, ?4, 'pending', ?5, ?6)",
+                params![
+                    format!("onchain_receive_{txid}"),
+                    amount_msat as i64,
+                    amount_usd,
+                    btc_price,
+                    txid,
+                    address
+                ],
+            )? > 0
+        };
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Fail any pending payment carrying this txid (RBF replacement or mempool eviction).
+    /// Completed rows are never touched.
+    pub fn fail_payment_by_txid(&self, txid: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE payments SET status = 'failed' WHERE txid = ?1 AND status = 'pending'",
+            params![txid],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Whether a payment (by payment_id) is a recorded stability (peg-maintenance) payment.
     pub fn is_stability_payment(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
@@ -2313,12 +2423,43 @@ impl Database {
         address: Option<&str>,
     ) -> SqliteResult<i64> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+        // OR IGNORE + the unique payment_id index turn a duplicate insert into a no-op
+        // instead of a second row for the same payment.
+        let changed = conn.execute(
+            "INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![payment_id, payment_type, direction, amount_msat as i64, amount_usd, btc_price, counterparty, status, txid, address],
         )?;
-        Ok(conn.last_insert_rowid())
+        if changed > 0 {
+            return Ok(conn.last_insert_rowid());
+        }
+        // Duplicate payment_id — a legitimate replay: retrying a failed BOLT11 invoice
+        // reuses its payment hash. Hand back the REAL row id (callers store it and later
+        // update by id), and revive a failed row into the caller's fresh status so the
+        // retry tracks the same row. Completed rows are never downgraded, and non-failed
+        // rows are returned untouched (idempotent replay).
+        let Some(pid) = payment_id else {
+            // Unreachable in practice: only the unique payment_id index can trigger
+            // OR IGNORE, and it exempts NULL ids.
+            return Err(rusqlite::Error::InvalidParameterName(
+                "ignored payment insert had no payment_id".to_string(),
+            ));
+        };
+        let (existing_id, existing_status): (i64, String) = conn.query_row(
+            "SELECT id, status FROM payments WHERE payment_id = ?1",
+            params![pid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if existing_status == "failed" && status != "failed" {
+            conn.execute(
+                "UPDATE payments SET status = ?1, amount_msat = ?2,
+                                     amount_usd = COALESCE(?3, amount_usd),
+                                     btc_price = COALESCE(?4, btc_price)
+                 WHERE id = ?5",
+                params![status, amount_msat as i64, amount_usd, btc_price, existing_id],
+            )?;
+        }
+        Ok(existing_id)
     }
 
     /// Persist a sent stability payment and its optimistic channel allocation in one transaction.
@@ -4353,6 +4494,187 @@ mod tests {
     fn test_open_in_memory() {
         let db = Database::open_in_memory().unwrap();
         assert!(db.conn.lock().is_ok());
+    }
+
+    #[test]
+    fn payment_id_migration_preserves_the_authoritative_legacy_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE payments (
+                 id INTEGER PRIMARY KEY,
+                 payment_id TEXT,
+                 status TEXT NOT NULL,
+                 stable_reconciled INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO payments (id, payment_id, status, stable_reconciled) VALUES
+                 (1, 'reconciled', 'failed', 0),
+                 (2, 'reconciled', 'completed', 1),
+                 (3, 'reconciled', 'pending', 0),
+                 (4, 'latest', 'failed', 0),
+                 (5, 'latest', 'pending', 0),
+                 (6, NULL, 'completed', 0);",
+        )
+        .unwrap();
+
+        ensure_unique_payment_ids(&conn).unwrap();
+
+        let reconciled: (i64, String) = conn
+            .query_row(
+                "SELECT id, status FROM payments WHERE payment_id = 'reconciled'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reconciled, (2, "completed".to_string()));
+
+        let latest: (i64, String) = conn
+            .query_row(
+                "SELECT id, status FROM payments WHERE payment_id = 'latest'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(latest, (5, "pending".to_string()));
+
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM payments", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 6, "the migration must preserve payment history");
+        assert!(conn
+            .execute(
+                "INSERT INTO payments (payment_id, status) VALUES ('latest', 'pending')",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn websocket_receive_reconciliation_helpers() {
+        let db = Database::open_in_memory().unwrap();
+        let record_pending = |payment_id: &str, amount_msat: u64, txid: &str| {
+            db.record_payment(
+                Some(payment_id),
+                "onchain",
+                "received",
+                amount_msat,
+                None,
+                None,
+                None,
+                "pending",
+                Some(txid),
+                Some("bc1qme"),
+            )
+            .unwrap();
+        };
+
+        record_pending("onchain_receive_tx1", 50_000_000, "tx1");
+        assert!(db.payment_txid_exists("tx1").unwrap());
+        assert!(!db.payment_txid_exists("tx2").unwrap());
+
+        assert!(db.complete_payment_by_txid("tx1").unwrap());
+        assert!(
+            !db.complete_payment_by_txid("tx1").unwrap(),
+            "an already-completed row must not transition again"
+        );
+
+        // Websocket recording is txid-deduped atomically; a second sighting is a no-op,
+        // as is a sighting of a txid the delta path already recorded (tx1).
+        assert!(db
+            .record_websocket_receive("tx2", "bc1qme", 70_000_000, None, None)
+            .unwrap());
+        assert!(!db
+            .record_websocket_receive("tx2", "bc1qme", 70_000_000, None, None)
+            .unwrap());
+        assert!(!db
+            .record_websocket_receive("tx1", "bc1qme", 50_000_000, None, None)
+            .unwrap());
+
+        // Duplicate deterministic payment_ids collapse to the EXISTING row (never -1, never
+        // a second row): callers store the returned id and later update by id, so a retry
+        // of the same payment hash must resolve to the row it will be updating.
+        record_pending("onchain_receive_tx3", 30_000_000, "tx3");
+        let first = db
+            .record_payment(
+                Some("onchain_receive_tx3"),
+                "onchain",
+                "received",
+                30_000_000,
+                None,
+                None,
+                None,
+                "pending",
+                Some("tx3"),
+                None,
+            )
+            .unwrap();
+        assert!(first > 0, "a duplicate payment_id must return the real row id");
+
+        // RBF failure touches pending rows only.
+        assert!(db.fail_payment_by_txid("tx3").unwrap());
+        assert!(
+            !db.fail_payment_by_txid("tx1").unwrap(),
+            "completed rows are never marked failed by an RBF event"
+        );
+        assert!(
+            db.complete_payment_by_txid("tx3").unwrap(),
+            "authoritative confirmation must recover a transaction after mempool eviction"
+        );
+        let recovered_status: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status FROM payments WHERE txid = 'tx3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovered_status, "completed");
+    }
+
+    #[test]
+    fn retrying_a_failed_payment_revives_its_row() {
+        let db = Database::open_in_memory().unwrap();
+        let record = |status: &str| {
+            db.record_payment(
+                Some("bolt11_hash"),
+                "lightning",
+                "sent",
+                10_000,
+                None,
+                None,
+                None,
+                status,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let status_of = |id: i64| -> String {
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM payments WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        let first = record("pending");
+        db.update_payment_status(first, "failed", None).unwrap();
+
+        // Retrying the same invoice reuses its payment hash: same row, revived to pending.
+        let retry = record("pending");
+        assert_eq!(retry, first, "the retry must track the original row");
+        assert_eq!(status_of(first), "pending");
+
+        // A replay against a completed row is idempotent — never downgraded.
+        db.update_payment_status(first, "completed", None).unwrap();
+        let replay = record("pending");
+        assert_eq!(replay, first);
+        assert_eq!(status_of(first), "completed");
     }
 
     #[test]

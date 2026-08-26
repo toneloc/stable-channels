@@ -384,7 +384,7 @@ struct HomeView: View {
                 if !hasReadyChannel {
                     Text(String(
                         localized: "hint_create_wallet",
-                        defaultValue: "Get your first payment to activate your account"
+                        defaultValue: "Get your first payment over Lightning to activate your account"
                     ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -393,7 +393,7 @@ struct HomeView: View {
                 // 4. No channel, confirmed deposit — just needs a Lightning receive
                 Text(String(
                     localized: "hint_create_wallet",
-                    defaultValue: "Get your first payment to activate your account"
+                    defaultValue: "Get your first payment over Lightning to activate your account"
                 ))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
