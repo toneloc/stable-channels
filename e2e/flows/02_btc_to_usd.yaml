@@ -28,6 +28,20 @@ tags: [android, ios, trade]
     file: helpers/drag_btc_to_usd_ios.yaml
 
 - assertVisible: "How much BTC to convert to USD\\?"
+
+# The drag's landing pixel prefills a layout-dependent amount (observed $73.34
+# after the price chart shifted the bar; historically $76.07). Overtype the
+# canonical amount so the review numbers — and flow 03's stability math, which
+# depends on the $75.31 net target — stay deterministic.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "\\$?7[0-9]\\.[0-9]{2}"
+      - eraseText
+      - inputText: "76.07"
+      - hideKeyboard
+
 - tapOn: "Continue"
 
 - assertVisible: "Review BTC -> USD"
