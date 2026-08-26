@@ -28,6 +28,7 @@ env:
 
 - tapOn: "0.00"       # amount placeholder (USD)
 - inputText: "85"     # canonical stable target — matches prod history, under the $100 JIT cap
+- hideKeyboard    # Gboard covers the button after amount entry
 - tapOn: "Generate Invoice"
 
 - extendedWaitUntil:

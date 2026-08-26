@@ -15,6 +15,7 @@ env:
 
 - tapOn: "0.00"
 - inputText: "10"
+- hideKeyboard    # Gboard covers the button after amount entry
 - tapOn: "Generate Invoice"
 
 - extendedWaitUntil:
