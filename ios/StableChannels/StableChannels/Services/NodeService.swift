@@ -111,7 +111,13 @@ protocol NodeServiceProtocol {
     var nodeId: String { get }
     var channels: [ChannelDetails] { get }
     var savedMnemonic: String? { get }
-    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws
+    func start(
+        network: Network,
+        esploraURL: String,
+        mnemonic: String,
+        lspConfig: LSPConfig,
+        allowCreate: Bool
+    ) async throws
     func stop()
 }
 
@@ -150,7 +156,17 @@ class NodeService: NodeServiceProtocol {
 
     // MARK: - Lifecycle
 
-    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig = .default) async throws {
+    /// `allowCreate` gates implicit wallet generation: only the lifecycle-confirmed
+    /// `.newWallet` startup branch may pass true. Every other caller (foreground
+    /// restart, LSP switch, Esplora failover retry) must fail on missing seed state
+    /// rather than mint a fresh identity.
+    func start(
+        network: Network,
+        esploraURL: String,
+        mnemonic: String,
+        lspConfig: LSPConfig = .default,
+        allowCreate: Bool = false
+    ) async throws {
         guard !isRunning else { throw NodeServiceError.alreadyRunning }
         isStarting = true
         defer { isStarting = false }
@@ -242,6 +258,19 @@ class NodeService: NodeServiceProtocol {
                 if let migrated = try MnemonicMigrator.loadOrMigrateMnemonic(keychain: keychain) {
                     words = migrated
                 } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
+                    // Wallet generation is double-gated. `allowCreate` limits it to the
+                    // lifecycle-confirmed `.newWallet` branch, and a surviving channel
+                    // database blocks it unconditionally: seedless-with-db is
+                    // `.dbOnlyMismatch`, and wiping the monitors to mint a fresh identity
+                    // here is the historic force-close class. Fail closed instead.
+                    let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite")
+                    guard allowCreate, !FileManager.default.fileExists(atPath: dbPath.path) else {
+                        AuditService.log("IMPLICIT_WALLET_CREATE_BLOCKED", data: [
+                            "allow_create": "\(allowCreate)",
+                            "db_present": "\(FileManager.default.fileExists(atPath: dbPath.path))"
+                        ])
+                        throw NodeServiceError.walletStateMismatch
+                    }
                     try Self.wipeWalletData(keychain: keychain)
                     words = generateEntropyMnemonic(wordCount: nil)
                 } else {
@@ -663,6 +692,7 @@ enum NodeServiceError: LocalizedError {
     case dataDirLocked
     case staleLightningSync
     case invalidStoredMnemonic
+    case walletStateMismatch
 
     var errorDescription: String? {
         switch self {
@@ -671,6 +701,7 @@ enum NodeServiceError: LocalizedError {
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
         case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
         case .invalidStoredMnemonic: return "The stored wallet seed failed validation."
+        case .walletStateMismatch: return "Wallet state is inconsistent. Restore with your recovery phrase."
         }
     }
 }

@@ -127,6 +127,33 @@ final class MnemonicMigratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
+    func testUnreadablePlaintextThrowsInsteadOfReadingAsAbsent() throws {
+        let mockSvc = MockMnemonicStorage()
+        mockSvc.mockLoadError = WalletKeychainError.keyNotFound
+
+        // A seed_phrase that EXISTS but cannot be read must fail closed: returning nil
+        // here is what routes NodeService.start() toward wipe-and-generate.
+        let path = tempDirURL.appendingPathComponent("seed_phrase")
+        try testMnemonic.write(to: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+        }
+
+        var loggedUnreadable = false
+        XCTAssertThrowsError(try MnemonicMigrator.loadOrMigrateMnemonic(
+            keychain: mockSvc,
+            legacyPath: path,
+            logError: { event, _ in
+                if event == "PLAINTEXT_SEED_UNREADABLE" { loggedUnreadable = true }
+            }
+        )) { error in
+            XCTAssertEqual(error as? MnemonicMigrationError, .plaintextUnreadable)
+        }
+        XCTAssertTrue(loggedUnreadable)
+        XCTAssertNil(mockSvc.mockMnemonic, "no migration may occur from an unreadable file")
+    }
+
     func testLoadErrorDataConversionFailedThrowsFailClosed() throws {
         let mockSvc = MockMnemonicStorage()
         mockSvc.mockLoadError = WalletKeychainError.dataConversionFailed
