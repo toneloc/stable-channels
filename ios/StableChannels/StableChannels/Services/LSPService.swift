@@ -32,7 +32,8 @@ final class LSPService {
                 network: .bitcoin,
                 esploraURL: chainURL,
                 mnemonic: "",
-                lspConfig: newConfig
+                lspConfig: newConfig,
+                allowCreate: false
             )
             onSuccess()
             return true
@@ -48,7 +49,8 @@ final class LSPService {
                 network: .bitcoin,
                 esploraURL: chainURL,
                 mnemonic: "",
-                lspConfig: oldConfig
+                lspConfig: oldConfig,
+                allowCreate: false
             )
             return false
         }

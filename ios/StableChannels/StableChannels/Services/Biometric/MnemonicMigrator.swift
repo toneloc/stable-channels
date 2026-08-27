@@ -1,12 +1,15 @@
 import Foundation
 
-enum MnemonicMigrationError: Error, LocalizedError {
+enum MnemonicMigrationError: Error, LocalizedError, Equatable {
     case seedMismatch
+    case plaintextUnreadable
 
     var errorDescription: String? {
         switch self {
         case .seedMismatch:
             return "Mismatched seed storage detected. The secure Keychain seed does not match the legacy plaintext backup."
+        case .plaintextUnreadable:
+            return "The legacy seed backup exists but could not be read."
         }
     }
 }
@@ -67,8 +70,18 @@ enum MnemonicMigrator {
             throw error // Fail closed: operational Keychain error must halt startup!
         }
 
-        // 2. Keychain empty — migrate plaintext if present.
-        guard let words = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) else { return nil }
+        // 2. Keychain empty — migrate plaintext if present. A file that EXISTS but cannot
+        // be read (permissions, I/O error, partial write) must not be treated as absent:
+        // returning nil here is what routes NodeService.start() toward wipe-and-generate,
+        // so this is the one place an unread error would destroy a wallet. Fail closed.
+        let legacyExists = FileManager.default.fileExists(atPath: legacyPath.path)
+        guard let words = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) else {
+            if legacyExists {
+                logError?("PLAINTEXT_SEED_UNREADABLE", [:])
+                throw MnemonicMigrationError.plaintextUnreadable
+            }
+            return nil
+        }
         let canonicalWords = canonicalizeMnemonic(words)
         guard !canonicalWords.isEmpty else { return nil }
 
