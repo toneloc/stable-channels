@@ -728,7 +728,7 @@ class AppState {
             // Safe state: Neither present. Auto-create new wallet.
             await MainActor.run { phase = .syncing }
             do {
-                try await startNodeWithFailover(mnemonic: "")
+                try await startNodeWithFailover(mnemonic: "", allowCreate: true)
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -2705,9 +2705,9 @@ class AppState {
     ///
     /// On total failure the wallet-dir lock is released (a no-op when NodeService.start
     /// already released its own lease) so a broken app process never starves the NSE.
-    private func startNodeWithFailover(mnemonic: String = "") async throws {
+    private func startNodeWithFailover(mnemonic: String = "", allowCreate: Bool = false) async throws {
         do {
-            try await startNodeOrFailover(mnemonic: mnemonic)
+            try await startNodeOrFailover(mnemonic: mnemonic, allowCreate: allowCreate)
         } catch {
             if !nodeService.isRunning {
                 NodeDirLock.shared.release()
@@ -2716,14 +2716,15 @@ class AppState {
         }
     }
 
-    private func startNodeOrFailover(mnemonic: String) async throws {
+    private func startNodeOrFailover(mnemonic: String, allowCreate: Bool) async throws {
         let initialURL = chainURL
         do {
             try await nodeService.start(
                 network: .bitcoin,
                 esploraURL: initialURL,
                 mnemonic: mnemonic,
-                lspConfig: activeLSP
+                lspConfig: activeLSP,
+                allowCreate: allowCreate
             )
             publishWorkingChainURL(initialURL)
         } catch {
@@ -2748,7 +2749,8 @@ class AppState {
                     network: .bitcoin,
                     esploraURL: fallbackURL,
                     mnemonic: mnemonic,
-                    lspConfig: activeLSP
+                    lspConfig: activeLSP,
+                    allowCreate: allowCreate
                 )
                 self.chainURL = fallbackURL
                 publishWorkingChainURL(fallbackURL)
