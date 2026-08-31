@@ -15,7 +15,13 @@ env:
 
 - tapOn: "0.00"
 - inputText: "10"
-- hideKeyboard    # Gboard covers the button after amount entry
+# Android-only: Gboard covers the button after amount entry. iOS neither needs
+# nor supports hideKeyboard here (Maestro can't dismiss the decimal pad).
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
 - tapOn: "Generate Invoice"
 
 - extendedWaitUntil:
