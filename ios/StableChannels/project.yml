@@ -26,6 +26,7 @@ targets:
     platform: iOS
     sources:
       - path: StableChannels
+      - path: NotificationService/Services/TradeProtocol.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app

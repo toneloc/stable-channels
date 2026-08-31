@@ -1,168 +1,138 @@
 import Foundation
 import LDKNode
 
-/// Handles buy/sell BTC trades and custom TLV message protocol.
-class TradeService {
-    private let nodeService: NodeService
+struct TradeExecutionResult {
+    let paymentId: String
+    let newExpectedUSD: Double
+    let btcAmount: Double
+    let tradeDbId: Int64
+}
 
-    init(nodeService: NodeService) {
+/// Builds a durable, correlated TRADE_V1 request and sends its non-refundable fee.
+final class TradeService {
+    private let nodeService: NodeService
+    private let databaseService: DatabaseService
+
+    init(nodeService: NodeService, databaseService: DatabaseService) {
         self.nodeService = nodeService
+        self.databaseService = databaseService
     }
 
-    // MARK: - Trade Execution
-
-    /// Execute a buy BTC trade. Returns the PaymentId on success so the caller
-    /// can store a PendingTradePayment. Trade is NOT applied until payment confirms.
     func executeBuy(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
         price: Double
-    ) throws -> (paymentId: String, newExpectedUSD: Double, btcAmount: Double)? {
+    ) throws -> TradeExecutionResult? {
         guard amountUSD > 0, amountUSD <= sc.expectedUSD.amount, price > 0 else { return nil }
-
         let netAmount = amountUSD - feeUSD
-        let newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0)
-        let btcAmount = netAmount / price
-
-        // Send trade message to counterparty — payment must succeed before we apply the trade
-        let paymentId = try sendTradeMessage(
-            expectedUSD: newExpectedUSD,
+        return try preparePersistAndSend(
+            sc: sc,
+            action: "buy",
+            amountUSD: amountUSD,
+            amountBTC: netAmount / price,
             feeUSD: feeUSD,
-            price: price,
-            channelId: sc.channelId,
-            userChannelId: sc.userChannelId,
-            counterparty: sc.counterparty
+            newExpectedUSD: max(sc.expectedUSD.amount - amountUSD, 0),
+            price: price
         )
-
-        return (paymentId: paymentId, newExpectedUSD: newExpectedUSD, btcAmount: btcAmount)
     }
 
-    /// Execute a sell BTC trade. Returns the PaymentId on success.
     func executeSell(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
         price: Double,
         maxUSD: Double
-    ) throws -> (paymentId: String, newExpectedUSD: Double, btcAmount: Double)? {
+    ) throws -> TradeExecutionResult? {
         guard amountUSD > 0, price > 0 else { return nil }
-
         let netAmount = amountUSD - feeUSD
-        let newExpectedUSD = min(sc.expectedUSD.amount + netAmount, maxUSD)
-        let btcAmount = netAmount / price
-
-        let paymentId = try sendTradeMessage(
-            expectedUSD: newExpectedUSD,
+        return try preparePersistAndSend(
+            sc: sc,
+            action: "sell",
+            amountUSD: amountUSD,
+            amountBTC: netAmount / price,
             feeUSD: feeUSD,
-            price: price,
+            newExpectedUSD: min(sc.expectedUSD.amount + netAmount, maxUSD),
+            price: price
+        )
+    }
+
+    private func preparePersistAndSend(
+        sc: StableChannel,
+        action: String,
+        amountUSD: Double,
+        amountBTC: Double,
+        feeUSD: Double,
+        newExpectedUSD: Double,
+        price: Double
+    ) throws -> TradeExecutionResult? {
+        guard let prepared = TradeProtocol.prepare(
             channelId: sc.channelId,
             userChannelId: sc.userChannelId,
-            counterparty: sc.counterparty
+            currentExpectedUSD: sc.expectedUSD.amount,
+            currentBackingSats: sc.backingSats,
+            receiverSats: sc.stableReceiverBTC.sats,
+            action: action,
+            amountUSD: amountUSD,
+            amountBTC: amountBTC,
+            feeUSD: feeUSD,
+            newExpectedUSD: newExpectedUSD,
+            quotePrice: price
+        ) else { return nil }
+
+        // Persist the exact signed payload and local allocation before the fee can leave.
+        let tradeDbId = try databaseService.channelRepo.recordPreparedTrade(prepared)
+        let paymentIdString: String
+        do {
+            let signature = try nodeService.signMessage(Array(prepared.requestPayload.utf8))
+            let envelope: [String: Any] = [
+                "payload": prepared.requestPayload,
+                "signature": signature
+            ]
+            let envelopeData = try JSONSerialization.data(
+                withJSONObject: envelope,
+                options: [.sortedKeys, .withoutEscapingSlashes]
+            )
+            let paymentId = try nodeService.sendKeysendWithTLV(
+                amountMsat: prepared.feeMsat,
+                to: sc.counterparty,
+                tlvs: [CustomTlvRecord(
+                    typeNum: Constants.stableChannelTLVType,
+                    value: envelopeData
+                )]
+            )
+            paymentIdString = "\(paymentId)"
+        } catch {
+            _ = try? databaseService.channelRepo.markTradeSendFailed(tradeDbId: tradeDbId)
+            throw error
+        }
+
+        // The payment has left the node at this point. A local bookkeeping failure must not
+        // report a send failure (or invite the user to pay the non-refundable fee twice).
+        let attached = (try? databaseService.channelRepo.attachTradePaymentId(
+            tradeDbId: tradeDbId,
+            paymentId: paymentIdString
+        )) == true
+        if !attached {
+            AuditService.log("TRADE_PAYMENT_ID_PERSIST_FAILED", data: [
+                "trade_db_id": "\(tradeDbId)",
+                "trade_id": prepared.tradeId,
+                "payment_id": paymentIdString
+            ])
+        }
+        AuditService.log("TRADE_MESSAGE_SENT", data: [
+            "trade_id": prepared.tradeId,
+            "request_hash": prepared.requestHash,
+            "payment_id": paymentIdString,
+            "fee_msat": "\(prepared.feeMsat)",
+            "new_expected_usd": "\(prepared.newExpectedUSD)",
+            "new_backing_sats": "\(prepared.newBackingSats)"
+        ])
+        return TradeExecutionResult(
+            paymentId: paymentIdString,
+            newExpectedUSD: prepared.newExpectedUSD,
+            btcAmount: amountBTC,
+            tradeDbId: tradeDbId
         )
-
-        return (paymentId: paymentId, newExpectedUSD: newExpectedUSD, btcAmount: btcAmount)
-    }
-
-    // MARK: - Custom TLV Messages
-
-    /// Send a TRADE_V1 message to the counterparty. Returns the PaymentId string.
-    /// The fee is sent as the keysend payment amount (matching desktop behavior).
-    @discardableResult
-    func sendTradeMessage(
-        expectedUSD: Double,
-        feeUSD: Double = 0,
-        price: Double = 0,
-        channelId: String,
-        userChannelId: String,
-        counterparty: String
-    ) throws -> String {
-        let payload: [String: Any] = [
-            "type": Constants.tradeMessageType,
-            "channel_id": channelId,
-            "user_channel_id": "\(userChannelId)",
-            "expected_usd": expectedUSD
-        ]
-
-        guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
-              let payloadStr = String(data: payloadData, encoding: .utf8) else {
-            throw TradeError.encodingFailed
-        }
-
-        let signature = try nodeService.signMessage(Array(payloadStr.utf8))
-
-        let envelope: [String: Any] = [
-            "payload": payloadStr,
-            "signature": signature
-        ]
-
-        guard let envelopeData = try? JSONSerialization.data(withJSONObject: envelope),
-              let envelopeStr = String(data: envelopeData, encoding: .utf8) else {
-            throw TradeError.encodingFailed
-        }
-
-        let tlv = CustomTlvRecord(
-            typeNum: Constants.stableChannelTLVType,
-            value: Data(envelopeStr.utf8)
-        )
-
-        // Send fee as payment amount (matches desktop: fee_msats.max(1))
-        let feeMsat: UInt64
-        if price > 0 && feeUSD > 0 {
-            let feeBtc = feeUSD / price
-            let feeSats = UInt64(feeBtc * 100_000_000)
-            feeMsat = max(feeSats * 1000, 1)
-        } else {
-            feeMsat = 1
-        }
-
-        let paymentId = try nodeService.sendKeysendWithTLV(
-            amountMsat: feeMsat,
-            to: counterparty,
-            tlvs: [tlv]
-        )
-        return "\(paymentId)"
-    }
-
-    /// Parse and verify an incoming TLV message (TRADE_V1 or SYNC_V1).
-    static func parseIncomingTLV(
-        data: [UInt8],
-        expectedCounterparty: String,
-        verifySignature: ([UInt8], String, String) -> Bool
-    ) -> (type: String, expectedUSD: Double, userChannelId: String)? {
-        guard let envelopeStr = String(bytes: data, encoding: .utf8),
-              let envelopeData = envelopeStr.data(using: .utf8),
-              let envelope = try? JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],
-              let payloadStr = envelope["payload"] as? String,
-              let signature = envelope["signature"] as? String else {
-            return nil
-        }
-
-        // Verify signature
-        guard verifySignature(Array(payloadStr.utf8), signature, expectedCounterparty) else {
-            return nil
-        }
-
-        // Parse payload
-        guard let payloadData = payloadStr.data(using: .utf8),
-              let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-              let msgType = payload["type"] as? String,
-              let expectedUSD = payload["expected_usd"] as? Double else {
-            return nil
-        }
-
-        let userChannelId = payload["user_channel_id"] as? String ?? ""
-
-        return (type: msgType, expectedUSD: expectedUSD, userChannelId: userChannelId)
-    }
-}
-
-enum TradeError: LocalizedError {
-    case encodingFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .encodingFailed: return "Failed to encode trade message"
-        }
     }
 }

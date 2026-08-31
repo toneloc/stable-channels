@@ -17,12 +17,22 @@ protocol PaymentDatabase {
     func paymentExists(paymentId: String) -> Bool
     func readChannelState() -> ChannelState?
     func activeUserChannelId() -> String?
-    func applySyncMessage(expectedUSD: Double, payloadUserChannelId: String?, priceFetcher: PriceFetcher) -> Bool
+    func applyTradeControl(
+        _ message: TradeControlMessage,
+        trustedPrice: Double?
+    ) -> StableControlDatabaseResult
     func setPendingSendPaymentId(paymentId: String) -> Bool
     func claimPendingSend(amountMsat: UInt64, price: Double) -> Bool
     func loadPendingSend() -> PendingOutgoingStabilityPayment?
     func clearPendingSend()
     func reconcilePendingOutgoingPayment(node: LDKNode.Node) -> Bool
+}
+
+enum StableControlDatabaseResult {
+    case applied
+    case duplicate
+    case invalid
+    case retry
 }
 
 /// Result of recording a payment

@@ -280,26 +280,13 @@ struct SellView: View {
                 return
             }
 
-            // Do NOT apply trade yet — wait for PaymentSuccessful event (matches desktop)
-
-            // Record trade in DB as pending
-            let tradeDbId = try appState.databaseService?.channelRepo.recordTrade(
-                channelId: sc.channelId,
-                action: "sell",
-                amountUSD: amountUSD,
-                amountBTC: result.btcAmount,
-                btcPrice: price,
-                feeUSD: feeUSD,
-                paymentId: result.paymentId,
-                status: "pending"
-            ) ?? 0
-
-            // Track so PaymentSuccessful/PaymentFailed can apply or revert
+            // View cache only; the prepared correlation was persisted before the fee send.
             appState.pendingTradePayments[result.paymentId] = PendingTradePayment(
                 newExpectedUSD: result.newExpectedUSD,
                 price: price,
-                tradeDbId: tradeDbId,
-                action: "sell"
+                tradeDbId: result.tradeDbId,
+                action: "sell",
+                status: "sent"
             )
 
             pendingPaymentId = result.paymentId

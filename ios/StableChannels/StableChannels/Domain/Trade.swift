@@ -29,6 +29,39 @@ struct PendingTradePayment {
     let price: Double
     let tradeDbId: Int64
     let action: String // "buy" or "sell"
+    let status: String
+}
+
+enum TradeControlApplyStatus {
+    case applied
+    case duplicate
+    case invalid
+    case retry
+}
+
+struct TradeControlApplyResult {
+    let status: TradeControlApplyStatus
+    let localBackingSats: UInt64?
+    let peerBackingSats: UInt64?
+    let paymentId: String?
+    let action: String?
+    let allocationApplied: Bool?
+
+    init(
+        status: TradeControlApplyStatus,
+        localBackingSats: UInt64? = nil,
+        peerBackingSats: UInt64? = nil,
+        paymentId: String? = nil,
+        action: String? = nil,
+        allocationApplied: Bool? = nil
+    ) {
+        self.status = status
+        self.localBackingSats = localBackingSats
+        self.peerBackingSats = peerBackingSats
+        self.paymentId = paymentId
+        self.action = action
+        self.allocationApplied = allocationApplied
+    }
 }
 
 /// Outgoing splice awaiting confirmation.
@@ -49,6 +82,7 @@ struct ChannelRecord: Codable {
     let nativeSats: UInt64
     let receiverSats: UInt64
     let latestPrice: Double
+    let syncVersion: UInt64
 }
 
 struct TradeRecord: Codable, Identifiable {
