@@ -298,10 +298,13 @@ class AppState(private val context: Context) : ViewModel() {
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                databaseService = DatabaseService(context)
+                val db = DatabaseService(context)
+                databaseService = db
                 launch { databaseService?.seedHistoricalPrices() }
                 launch { backfillHourlyPrices() }
-                tradeService = TradeService(nodeService)
+                tradeService = TradeService(nodeService, db)
+                db.markExpiredTradesUncertain()
+                _pendingTradePayments.value = db.unresolvedTradePayments()
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
                 AuditService.setLogPath(auditPath)
@@ -863,10 +866,25 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 }
                 val curPending = _pendingTradePayments.value
-                if (pid != null && curPending.containsKey(pid)) {
-                    val ptp = curPending[pid]!!
+                var failedTrade = pid?.let(curPending::get)
+                if (pid != null && failedTrade == null) {
+                    val amountMsat = try {
+                        nodeService.node?.payment(pid)?.amountMsat?.toLong()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (amountMsat != null) {
+                        failedTrade = try {
+                            databaseService?.failUnattachedPreparedTrade(pid, amountMsat)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                }
+                if (pid != null && failedTrade != null) {
+                    val ptp = failedTrade
                     _pendingTradePayments.value = curPending - pid
-                    databaseService?.updateTradeStatus(ptp.tradeDbId, "failed")
+                    databaseService?.markTradeSendFailed(ptp.tradeDbId)
                     val verb = if (ptp.action == "buy") "Buy" else "Sell"
                     _statusMessage.value = "$verb trade failed"
                     AuditService.log("TRADE_PAYMENT_FAILED", mapOf("payment_id" to pid))
@@ -907,7 +925,7 @@ class AppState(private val context: Context) : ViewModel() {
     private fun handlePaymentReceived(paymentId: String?, amountMsat: Long, paymentHash: String, customRecords: List<CustomTlvRecord>) {
         isWaitingForPayment = false
         // Check for sync message
-        if (handleSyncMessage(customRecords, paymentHash)) {
+        if (handleSyncMessage(customRecords, paymentHash, amountMsat)) {
             refreshBalances()
             updateStableBalances()
             return
@@ -993,36 +1011,123 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun handleSyncMessage(customRecords: List<CustomTlvRecord>, paymentHash: String): Boolean {
+    private fun handleSyncMessage(
+        customRecords: List<CustomTlvRecord>,
+        paymentHash: String,
+        amountMsat: Long
+    ): Boolean {
         val tlv = customRecords.find { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() } ?: return false
         val data = tlv.value.map { it.toByte() }.toByteArray()
-        val parsed = TradeService.parseIncomingTLV(data, _stableChannel.value.counterparty) { msg, sig, pk ->
+        if (data.contentEquals(byteArrayOf(1))) return false
+        val message = TradeProtocol.parseSignedControl(data, _stableChannel.value.counterparty) { msg, sig, pk ->
             nodeService.verifySignature(msg, sig, pk)
-        } ?: return false
-
-        val (type, expectedUsd, _) = parsed
-        if (type != Constants.SYNC_MESSAGE_TYPE) return false
-
-        val price = priceService.currentAccountingPrice()
-        if (price <= 0.0) {
-            AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
-            // Propagate to the event collector so it completes the ack with false and LDK
-            // re-delivers this authenticated sync after the price oracle recovers.
-            throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
+        } ?: run {
+            AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
+            return true
         }
-        val sc = StabilityService.applyTrade(_stableChannel.value, expectedUsd, price)
-        _stableChannel.value = sc
-        saveChannelToDB()
-        AuditService.log("SYNC_V1_APPLIED", mapOf("expected_usd" to expectedUsd))
-        return true
+        val db = databaseService ?: throw RetryableSyncException("Trade database unavailable")
+        val result = when (message) {
+            is TradeControlMessage.Rejected -> {
+                if (amountMsat != TradeProtocol.RESULT_CONTROL_AMOUNT_MSAT) {
+                    AuditService.log("TRADE_REJECTED_V1_CONTEXT_INVALID", mapOf("amount_msat" to amountMsat))
+                    return true
+                }
+                db.applyTradeRejection(message)
+            }
+            is TradeControlMessage.Sync -> {
+                if (amountMsat != TradeProtocol.RESULT_CONTROL_AMOUNT_MSAT) {
+                    AuditService.log("SYNC_V1_CONTROL_AMOUNT_INVALID", mapOf("amount_msat" to amountMsat))
+                    return true
+                }
+                if (message.correlation != null) {
+                    db.applyCorrelatedTradeAcceptance(message)
+                } else {
+                    val price = priceService.currentAccountingPrice()
+                    if (price <= 0.0) {
+                        AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
+                        throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
+                    }
+                    db.applyUncorrelatedSyncIfNewer(message, price)
+                }
+            }
+        }
+        when (result.status) {
+            TradeControlApplyStatus.RETRY -> {
+                try { db.markTradeResponseNotCommittable(message) } catch (_: Exception) {}
+                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash))
+                throw RetryableSyncException("Signed trade result could not be committed")
+            }
+            TradeControlApplyStatus.INVALID -> {
+                AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
+                return true
+            }
+            TradeControlApplyStatus.DUPLICATE -> {
+                result.paymentId?.let { paymentId ->
+                    _pendingTradePayments.value = _pendingTradePayments.value - paymentId
+                }
+                val channel = db.loadChannel(_stableChannel.value.userChannelId)
+                    ?: throw RetryableSyncException("Duplicate result channel could not be reloaded")
+                val updated = _stableChannel.value.copy(
+                    channelId = channel.channelId,
+                    expectedUSD = USD(channel.expectedUSD),
+                    backingSats = channel.backingSats,
+                    latestPrice = channel.latestPrice
+                )
+                StabilityService.recomputeNative(updated)
+                _stableChannel.value = updated
+                return true
+            }
+            TradeControlApplyStatus.APPLIED -> {
+                result.paymentId?.let { paymentId ->
+                    _pendingTradePayments.value = _pendingTradePayments.value - paymentId
+                }
+                val channel = db.loadChannel(_stableChannel.value.userChannelId)
+                    ?: throw RetryableSyncException("Applied result channel could not be reloaded")
+                val updated = _stableChannel.value.copy(
+                    channelId = channel.channelId,
+                    expectedUSD = USD(channel.expectedUSD),
+                    backingSats = channel.backingSats,
+                    latestPrice = channel.latestPrice
+                )
+                StabilityService.recomputeNative(updated)
+                _stableChannel.value = updated
+                val divergence = result.localBackingSats != null &&
+                    result.peerBackingSats != null &&
+                    result.localBackingSats != result.peerBackingSats
+                AuditService.log("TRADE_RESULT_APPLIED", mapOf(
+                    "payment_hash" to paymentHash,
+                    "local_backing_sats" to (result.localBackingSats ?: -1L),
+                    "peer_backing_sats" to (result.peerBackingSats ?: -1L),
+                    "allocation_diverged" to divergence,
+                    "allocation_applied" to result.allocationApplied
+                ))
+                if (message is TradeControlMessage.Rejected) {
+                    _statusMessage.value = TradeProtocol.rejectionMessage(message.reasonCode)
+                } else if (result.paymentId != null) {
+                    val verb = if (result.action == "buy") "Buy" else "Sell"
+                    _statusMessage.value = "$verb confirmed"
+                    triggerPaymentFlash()
+                }
+                return true
+            }
+        }
     }
 
     fun setStatus(message: String) {
         _statusMessage.value = message
     }
 
-    fun addPendingTradePayment(paymentId: String, payment: PendingTradePayment) {
+    fun addPendingTradePayment(paymentId: String, payment: PendingTradePayment): Boolean {
         _pendingTradePayments.value = _pendingTradePayments.value + (paymentId to payment)
+        val unresolved = try {
+            databaseService?.tradeIsUnresolved(payment.tradeDbId) == true
+        } catch (_: Exception) {
+            true
+        }
+        if (!unresolved) {
+            _pendingTradePayments.value = _pendingTradePayments.value - paymentId
+        }
+        return unresolved
     }
 
     fun triggerPaymentFlash() {
@@ -1035,55 +1140,99 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun handlePaymentSuccessful(paymentId: String?, paymentHash: String, feePaidMsat: Long?) {
         val currentPending = _pendingTradePayments.value
-        if (paymentId != null && currentPending.containsKey(paymentId)) {
-            val ptp = currentPending[paymentId]!!
-            _pendingTradePayments.value = currentPending - paymentId
-            val sc = StabilityService.applyTrade(_stableChannel.value, ptp.newExpectedUSD, ptp.price)
-            _stableChannel.value = sc
-            saveChannelToDB()
-            databaseService?.updateTradeStatus(ptp.tradeDbId, "completed")
-            refreshBalances()
-            updateStableBalances()
-            val verb = if (ptp.action == "buy") "Buy" else "Sell"
-            _statusMessage.value = "$verb confirmed"
-            triggerPaymentFlash()
-            AuditService.log("TRADE_COMPLETED", mapOf("payment_id" to paymentId, "action" to ptp.action))
-        } else {
-            if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
-
-            refreshBalances()
-            updateStableBalances()
-            val price = priceService.currentPrice.value
-            val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-            val reconciled = result.first
-            if (result.second != null) {
-                reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
-            }
-            _stableChannel.value = reconciled
-            var displayVal: String? = null
-            if (paymentId != null) {
-                databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
-                try {
-                    val db = databaseService?.readableDatabase
-                    val cursor = db?.rawQuery("SELECT amount_msat, amount_usd FROM payments WHERE payment_id = ?", arrayOf(paymentId))
-                    cursor?.use {
-                        if (it.moveToFirst()) {
-                            val amountMsat = it.getLong(0)
-                            val amountUsd = if (!it.isNull(1)) it.getDouble(1) else 0.0
-                            val usdVal = if (amountUsd > 0.0) amountUsd else ((amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price)
-                            displayVal = usdVal.usdFormatted()
-                        }
+        if (paymentId != null) {
+            val db = databaseService
+            var pending = currentPending[paymentId]
+            var recognizedTrade = pending != null
+            if (db != null) {
+                val marked = try {
+                    if (pending != null) {
+                        db.markKnownTradeFeePaid(pending.tradeDbId, paymentId)
+                    } else {
+                        db.markTradeFeePaid(paymentId)
                     }
-                } catch (e: Exception) {
-                    Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
+                } catch (_: Exception) {
+                    false
+                }
+                recognizedTrade = recognizedTrade || marked
+
+                var eventAmountMsat: Long? = null
+                if (!recognizedTrade) {
+                    eventAmountMsat = try {
+                        nodeService.node?.payment(paymentId)?.amountMsat?.toLong()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (eventAmountMsat != null) {
+                        pending = try {
+                            db.adoptUnattachedPreparedTrade(paymentId, eventAmountMsat)
+                        } catch (_: Exception) {
+                            null
+                        }
+                        recognizedTrade = pending != null
+                    }
+                }
+                if (!recognizedTrade) {
+                    recognizedTrade = try { db.tradePaymentExists(paymentId) } catch (_: Exception) { false }
+                }
+                if (!recognizedTrade && eventAmountMsat == null &&
+                    try { db.hasUnattachedPreparedTrade() } catch (_: Exception) { false }
+                ) {
+                    _statusMessage.value = "Payment confirmed; awaiting signed trade result"
+                    AuditService.log("TRADE_FEE_ID_UNRESOLVED", mapOf("payment_id" to paymentId))
+                    return
                 }
             }
-            saveChannelToDB(preserveBacking = true)
-            val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
-            val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
-            _statusMessage.value = successMsg
-            _lastPaymentResult.value = successMsg
+            if (recognizedTrade) {
+                if (pending != null) {
+                    _pendingTradePayments.value = currentPending +
+                        (paymentId to pending.copy(status = "fee_paid"))
+                }
+                val verb = if (pending?.action == "buy") "Buy" else "Sell"
+                _statusMessage.value = "$verb fee paid; awaiting signed result"
+                AuditService.log("TRADE_FEE_PAID", mapOf(
+                    "payment_id" to paymentId,
+                    "action" to (pending?.action ?: "unknown"),
+                    "fee_paid_msat" to (feePaidMsat ?: 0L)
+                ))
+                return
+            }
         }
+
+        if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
+
+        refreshBalances()
+        updateStableBalances()
+        val price = priceService.currentPrice.value
+        val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
+        val reconciled = result.first
+        if (result.second != null) {
+            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+        }
+        _stableChannel.value = reconciled
+        var displayVal: String? = null
+        if (paymentId != null) {
+            databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+            try {
+                val db = databaseService?.readableDatabase
+                val cursor = db?.rawQuery("SELECT amount_msat, amount_usd FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val amountMsat = it.getLong(0)
+                        val amountUsd = if (!it.isNull(1)) it.getDouble(1) else 0.0
+                        val usdVal = if (amountUsd > 0.0) amountUsd else ((amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price)
+                        displayVal = usdVal.usdFormatted()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
+            }
+        }
+        saveChannelToDB(preserveBacking = true)
+        val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
+        val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
+        _statusMessage.value = successMsg
+        _lastPaymentResult.value = successMsg
     }
 
     private fun handleStabilityPaymentSuccessful(paymentId: String?, feePaidMsat: Long?): Boolean {
@@ -1415,10 +1564,28 @@ class AppState(private val context: Context) : ViewModel() {
                 delay(Constants.STABILITY_CHECK_INTERVAL_SECS * 1000)
                 ensureLSPConnected()
                 recordCurrentPrice()
+                refreshTradeUncertainty()
                 runStabilityCheck()
                 detectOnchainDeposit()
                 pollPaymentConfirmations()
             }
+        }
+    }
+
+    private fun refreshTradeUncertainty() {
+        val db = databaseService ?: return
+        val changed = try { db.markExpiredTradesUncertain() } catch (_: Exception) { 0 }
+        if (changed > 0) {
+            _pendingTradePayments.value = try {
+                db.unresolvedTradePayments()
+            } catch (_: Exception) {
+                _pendingTradePayments.value
+            }
+            _statusMessage.value = "Trade result delayed; it will still be accepted when received"
+            AuditService.log("TRADE_RESULT_UNCERTAIN", mapOf(
+                "reason" to "no_response",
+                "count" to changed
+            ))
         }
     }
 

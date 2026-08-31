@@ -229,20 +229,16 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                 }
                                 val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, tradePrice)
                                     ?: throw Exception("Trade service unavailable")
-                                val tradeDbId = appState.databaseService?.recordTrade(
-                                    channelId = sc.channelId, action = "buy",
-                                    amountUSD = amountUSD, amountBTC = result.btcAmount,
-                                    btcPrice = tradePrice, feeUSD = feeUSD,
-                                    paymentId = result.paymentId, status = "pending"
-                                ) ?: 0
-                                appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
+                                val awaitingResult = appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
                                     price = tradePrice,
-                                    tradeDbId = tradeDbId,
+                                    tradeDbId = result.tradeDbId,
                                     action = "buy"
                                 ))
                                 pendingPaymentId = result.paymentId
-                                appState.setStatus(String.format(Locale.US, "Order pending (fee: $%.2f)", feeUSD))
+                                if (awaitingResult) {
+                                    appState.setStatus(String.format(Locale.US, "Order pending (fee: $%.2f)", feeUSD))
+                                }
                                 step = TradeStep.DONE
                             } catch (e: Exception) {
                                 error = e.message ?: "Trade failed"

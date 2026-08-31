@@ -9,7 +9,10 @@ import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
 import com.stablechannels.app.services.LdkNodeOwner
-import com.stablechannels.app.services.TradeService
+import com.stablechannels.app.services.DatabaseService
+import com.stablechannels.app.services.TradeControlApplyStatus
+import com.stablechannels.app.services.TradeControlMessage
+import com.stablechannels.app.services.TradeProtocol
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.NamedPrice
@@ -27,7 +30,6 @@ import org.lightningdevkit.ldknode.*
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.roundToLong
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
@@ -74,51 +76,45 @@ class StabilityProcessingService : Service() {
                 !it.value.contentEquals(byteArrayOf(1))
         }
 
-    private fun handleStableControlMessage(node: Node, dbPath: String, records: List<CustomTlvRecord>): Boolean {
+    private fun handleStableControlMessage(
+        node: Node,
+        records: List<CustomTlvRecord>,
+        amountMsat: Long
+    ): Boolean {
         val tlv = records.firstOrNull {
             it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
                 !it.value.contentEquals(byteArrayOf(1))
         } ?: return false
 
-        val parsed = TradeService.parseIncomingTLV(tlv.value, LspPreferencesManager.getLspPubkey(this)) { msg, sig, pk ->
+        val message = TradeProtocol.parseSignedControl(
+            tlv.value,
+            LspPreferencesManager.getLspPubkey(this)
+        ) { msg, sig, pk ->
             node.verifySignature(msg.map { it.toUByte() }, sig, pk)
-        } ?: return false
-
-        val (type, expectedUsd, parsedUserChannelId) = parsed
-        if (type != Constants.SYNC_MESSAGE_TYPE) return false
-
-        val price = fetchMedianPrice()
-        if (price <= 0.0) throw BackingUpdateFailed("Cannot apply SYNC_V1 without a BTC price")
-
-        val userChannelId = parsedUserChannelId.takeIf { it.isNotEmpty() }
-            ?: activeUserChannelId()
-            ?: throw BackingUpdateFailed("Cannot apply SYNC_V1 without a channel row")
-
-        applySyncMessageInDB(dbPath, userChannelId, expectedUsd, price)
-        Log.d(TAG, "Applied background SYNC_V1 expected_usd=$expectedUsd")
-        return true
-    }
-
-    private fun applySyncMessageInDB(dbPath: String, userChannelId: String, expectedUsd: Double, price: Double) {
-        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-        db.execSQL("BEGIN IMMEDIATE")
-        try {
-            val backingSats = ((expectedUsd / price) * Constants.SATS_IN_BTC).roundToLong().coerceAtLeast(0L)
-            val stmt = db.compileStatement(
-                "UPDATE channels SET expected_usd = ?, stable_sats = ?, latest_price = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
-            )
-            stmt.bindDouble(1, expectedUsd)
-            stmt.bindLong(2, backingSats)
-            stmt.bindDouble(3, price)
-            stmt.bindString(4, userChannelId)
-            val rowsAffected = stmt.executeUpdateDelete()
-            if (rowsAffected != 1) {
-                throw BackingUpdateFailed("SYNC_V1 UPDATE affected $rowsAffected rows, expected 1")
+        } ?: return true
+        if (amountMsat != TradeProtocol.RESULT_CONTROL_AMOUNT_MSAT) return true
+        val db = DatabaseService(this)
+        return try {
+            val result = when (message) {
+                is TradeControlMessage.Rejected -> db.applyTradeRejection(message)
+                is TradeControlMessage.Sync -> if (message.correlation != null) {
+                    db.applyCorrelatedTradeAcceptance(message)
+                } else {
+                    val price = fetchMedianPrice()
+                    if (price <= 0.0) {
+                        throw BackingUpdateFailed("Cannot apply SYNC_V1 without a BTC price")
+                    }
+                    db.applyUncorrelatedSyncIfNewer(message, price)
+                }
             }
-            db.execSQL("COMMIT")
-        } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
-            throw e
+            when (result.status) {
+                TradeControlApplyStatus.APPLIED, TradeControlApplyStatus.DUPLICATE,
+                TradeControlApplyStatus.INVALID -> true
+                TradeControlApplyStatus.RETRY -> {
+                    try { db.markTradeResponseNotCommittable(message) } catch (_: Exception) {}
+                    throw BackingUpdateFailed("Signed trade result could not be committed")
+                }
+            }
         } finally {
             db.close()
         }
@@ -279,7 +275,9 @@ class StabilityProcessingService : Service() {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
                         if (hasStableControlMessage(event.customRecords)) {
-                            if (handleStableControlMessage(node, dbPath, event.customRecords)) {
+                            if (handleStableControlMessage(
+                                    node, event.customRecords, event.amountMsat.toLong()
+                                )) {
                                 node.eventHandled()
                                 hasUnpersistedEvent = false
                                 continue
@@ -448,7 +446,9 @@ class StabilityProcessingService : Service() {
                     is Event.PaymentReceived -> {
                         Log.d(TAG, "Payment received: ${event.amountMsat} msat")
                         if (hasStableControlMessage(event.customRecords)) {
-                            if (handleStableControlMessage(node, dbPath, event.customRecords)) {
+                            if (handleStableControlMessage(
+                                    node, event.customRecords, event.amountMsat.toLong()
+                                )) {
                                 node.eventHandled()
                                 received = true
                                 hasUnpersistedEvent = false
