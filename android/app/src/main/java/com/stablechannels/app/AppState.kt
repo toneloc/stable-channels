@@ -14,6 +14,7 @@ import com.stablechannels.app.services.websocket.MempoolWebSocketClient
 import com.stablechannels.app.services.websocket.MempoolWebSocketService
 import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.TestOverrides
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -308,7 +309,9 @@ class AppState(private val context: Context) : ViewModel() {
 
                 // Load cached channel state so UI has correct slider/values immediately
                 loadChannelFromDB()
-                priceService.startAutoRefresh()
+                priceService.startAutoRefresh(
+            TestOverrides.priceRefreshSecs ?: Constants.PRICE_CACHE_REFRESH_SECS
+        )
 
                 // Resolve best esplora endpoint before starting node
                 chainUrl = resolveChainUrl()

@@ -116,8 +116,19 @@ for f in "${FLOWS[@]}"; do
     [ -n "$desc" ] && printf '   %s%s%s\n' "$C_ITAL$C_GRAY" "$desc" "$C_RESET"
 
     fstart=$(date +%s)
-    if "$MAESTRO" test --device "$DEVICE" "$FLOWS_DIR/$f.yaml" 2>&1 | style_maestro; then
-        rc=0; else rc=1; fi
+    # Optional host-side hooks: flows/<name>.pre.sh runs before the flow (a failing pre
+    # fails the flow), flows/<name>.post.sh always runs after (cleanup, best-effort).
+    rc=0
+    if [ -x "$FLOWS_DIR/$f.pre.sh" ]; then
+        "$FLOWS_DIR/$f.pre.sh" "$PLATFORM" "$DEVICE" || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        if "$MAESTRO" test --device "$DEVICE" "$FLOWS_DIR/$f.yaml" 2>&1 | style_maestro; then
+            rc=0; else rc=1; fi
+    fi
+    if [ -x "$FLOWS_DIR/$f.post.sh" ]; then
+        "$FLOWS_DIR/$f.post.sh" "$PLATFORM" "$DEVICE" || true
+    fi
     dur=$(( $(date +%s) - fstart ))
 
     names+=("$f"); times+=("$dur")

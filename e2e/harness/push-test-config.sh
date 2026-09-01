@@ -38,7 +38,7 @@ cat > "$TMP" << EOF
   "push_register_url": "http://${HOST}:3002/api/register-push",
   "channel_exists_url": "http://${HOST}:3002/api/channel-exists",
   "disable_send_auth": true,
-  "sync_interval_secs": 3
+  "sync_interval_secs": 3$( [ -n "${SC_TEST_PRICE_REFRESH_SECS:-}" ] && printf ',\n  "price_refresh_secs": %s' "$SC_TEST_PRICE_REFRESH_SECS" )
 }
 EOF
 

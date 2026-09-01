@@ -47,6 +47,7 @@ object TestOverrides {
     @Volatile var priceFeedBase: String? = null; private set
     @Volatile var disableSendAuth: Boolean = false; private set
     @Volatile var syncIntervalSecs: Long? = null; private set
+    @Volatile var priceRefreshSecs: Long? = null; private set
 
     val active: Boolean get() = network != null || lspPubkey != null || primaryChainUrl != null
 
@@ -69,6 +70,11 @@ object TestOverrides {
             priceFeedBase = opt("price_feed_base")
             disableSendAuth = json.optBoolean("disable_send_auth", false)
             syncIntervalSecs = json.optLong("sync_interval_secs", 0).takeIf { it > 0 }
+            // Lets a flow freeze the client's quote while the harness price moves under it
+            // (deterministic quote_deviation rejection). Trusted-age still applies: with a
+            // frozen refresh the app's price goes stale ~60s after launch, so flows using
+            // this must finish their trade within that window.
+            priceRefreshSecs = json.optLong("price_refresh_secs", 0).takeIf { it > 0 }
             Log.w(TAG, "E2E overrides ACTIVE: network=$network lsp=$lspAddress chain=$primaryChainUrl")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load $FILE_NAME — using production endpoints", e)
