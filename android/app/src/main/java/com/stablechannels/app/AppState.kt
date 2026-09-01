@@ -653,6 +653,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handleNodeStartFailure(e: Exception, fallbackMessage: String) {
+        if (e is NodeService.AlreadyRunningException && nodeService.isRunning) {
+            Log.w("AppState", "Ignoring duplicate node start after another start succeeded", e)
+            _phase.value = Phase.WALLET
+            _isSyncing.value = false
+            _errorMessage.value = ""
+            AuditService.log(
+                "NODE_START_DUPLICATE",
+                mapOf("error" to (e.message ?: fallbackMessage))
+            )
+            return
+        }
+
         if (isRetryableNodeStartFailure(e)) {
             _phase.value = Phase.SYNCING
             _errorMessage.value = ""
