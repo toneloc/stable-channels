@@ -233,6 +233,96 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
+    fun terminalTradeOutcomeReflectsResultsCommittedOutsideTheHandler() {
+        val identifier = "ab".repeat(32)
+        val now = System.currentTimeMillis() / 1000L
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = 50.0,
+            backingSats = 55_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0
+        )
+
+        // Rejected trade: outcome must surface with the persisted reason code.
+        val rejectedTrade = TradeProtocol.prepare(
+            sc = StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(50.0),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 55_000
+            ),
+            action = "sell",
+            amountUsd = 10.0,
+            amountBtc = 0.000099,
+            feeUsd = 0.1,
+            newExpectedUsd = 59.9,
+            quotePrice = 100_000.0,
+            now = now,
+            tradeId = "ef".repeat(32)
+        )!!
+        val rejectedDbId = service.recordPreparedTrade(rejectedTrade)
+        val rejectedPaymentId = "cd".repeat(32)
+        assertTrue(service.attachTradePaymentId(rejectedDbId, rejectedPaymentId))
+        assertNull(service.terminalTradeOutcome(rejectedPaymentId))
+
+        val rejection = TradeControlMessage.Rejected(
+            channelId = identifier,
+            correlation = TradeCorrelation(
+                rejectedTrade.tradeId, rejectedPaymentId, rejectedTrade.requestHash
+            ),
+            reasonCode = "quote_deviation",
+            decidedAt = now
+        )
+        assertEquals(TradeControlApplyStatus.APPLIED, service.applyTradeRejection(rejection).status)
+        assertEquals(Pair(false, "quote_deviation"), service.terminalTradeOutcome(rejectedPaymentId))
+
+        // Accepted trade: outcome must flip to accepted with no reason code.
+        val acceptedTrade = TradeProtocol.prepare(
+            sc = StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(50.0),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 55_000
+            ),
+            action = "sell",
+            amountUsd = 10.0,
+            amountBtc = 0.000099,
+            feeUsd = 0.1,
+            newExpectedUsd = 59.9,
+            quotePrice = 100_000.0,
+            now = now + 1,
+            tradeId = "aa".repeat(32)
+        )!!
+        val acceptedDbId = service.recordPreparedTrade(acceptedTrade)
+        val acceptedPaymentId = "bb".repeat(32)
+        assertTrue(service.attachTradePaymentId(acceptedDbId, acceptedPaymentId))
+        assertNull(service.terminalTradeOutcome(acceptedPaymentId))
+
+        val sync = TradeControlMessage.Sync(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUsd = acceptedTrade.newExpectedUsd,
+            backingSats = acceptedTrade.newBackingSats,
+            syncVersion = 1,
+            correlation = TradeCorrelation(
+                acceptedTrade.tradeId, acceptedPaymentId, acceptedTrade.requestHash
+            )
+        )
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyCorrelatedTradeAcceptance(sync).status
+        )
+        assertEquals(Pair(true, null as String?), service.terminalTradeOutcome(acceptedPaymentId))
+        service.close()
+    }
+
+    @Test
     fun failedPaymentRecoversPreparedTradeWhenPaymentIdAttachmentWasLost() {
         val channelId = "12".repeat(32)
         val paymentId = "34".repeat(32)

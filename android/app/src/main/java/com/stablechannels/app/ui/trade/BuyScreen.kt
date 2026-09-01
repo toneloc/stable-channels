@@ -264,6 +264,16 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 // "Order Confirmed" for rejected trades (caught by e2e flow 13).
                 val tradeOutcomes by appState.tradeOutcomes.collectAsState()
                 val outcome = pendingPaymentId?.let { tradeOutcomes[it] }
+                // Background services commit results straight to SQLite without touching
+                // the in-memory outcome map, so poll the database while the result is
+                // unknown — otherwise a trade resolved while backgrounded stays "Pending".
+                LaunchedEffect(pendingPaymentId) {
+                    val pid = pendingPaymentId ?: return@LaunchedEffect
+                    while (!appState.tradeOutcomes.value.containsKey(pid)) {
+                        appState.refreshTradeOutcome(pid)
+                        kotlinx.coroutines.delay(2_000)
+                    }
+                }
                 val isConfirmed = outcome?.accepted == true
                 val isRejected = outcome?.accepted == false
 

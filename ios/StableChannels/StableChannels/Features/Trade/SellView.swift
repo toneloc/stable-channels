@@ -259,6 +259,16 @@ struct SellView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
+        // The NSE commits results straight to SQLite without touching the in-memory
+        // outcome map, so poll the database while the result is unknown — otherwise a
+        // trade resolved while backgrounded stays "Order Pending".
+        .task(id: pendingPaymentId) {
+            guard let pid = pendingPaymentId else { return }
+            while !Task.isCancelled, appState.tradeOutcomes[pid] == nil {
+                appState.refreshTradeOutcome(paymentId: pid)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 
     private func confirmRow(_ label: String, _ value: String, bold: Bool = false) -> some View {

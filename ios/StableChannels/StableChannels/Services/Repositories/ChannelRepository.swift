@@ -382,6 +382,23 @@ final class ChannelRepository {
         })
     }
 
+    /// Terminal outcome for a trade's fee payment id, straight from SQLite — the source
+    /// of truth that both the foreground handler and the NSE write. The in-memory outcome
+    /// map alone misses results committed while the app was backgrounded or before a
+    /// restart. Returns nil while the trade is unresolved.
+    func terminalTradeOutcome(paymentId: String) throws -> (accepted: Bool, reasonCode: String?)? {
+        let rows = try rawSQL.query(
+            """
+            SELECT status, reason_code FROM trades
+            WHERE trade_payment_id = ? AND status IN ('accepted','rejected')
+            ORDER BY id DESC LIMIT 1
+            """,
+            params: [.text(paymentId)]
+        )
+        guard let row = rows.first else { return nil }
+        return (row.string(0) == "accepted", row.optString(1))
+    }
+
     func applyCorrelatedTradeAcceptance(
         _ sync: TradeControlMessage.Sync
     ) -> TradeControlApplyResult {

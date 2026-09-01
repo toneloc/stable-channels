@@ -559,6 +559,20 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         ) == 1
     }
 
+    /** Terminal outcome for a trade's fee payment id, straight from SQLite — the source
+     *  of truth that BOTH the foreground handler and the background service write. The
+     *  in-memory outcome map alone misses results committed while the app was backgrounded
+     *  or before a restart. Returns (accepted, reason_code) or null while unresolved. */
+    fun terminalTradeOutcome(paymentId: String): Pair<Boolean, String?>? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT status, reason_code FROM trades WHERE trade_payment_id = ? AND status IN ('accepted','rejected') ORDER BY id DESC LIMIT 1",
+            arrayOf(paymentId)
+        )
+        return cursor.use { c ->
+            if (c.moveToFirst()) Pair(c.getString(0) == "accepted", c.getString(1)) else null
+        }
+    }
+
     fun unresolvedTradePayments(): Map<String, PendingTradePayment> {
         val cursor = readableDatabase.rawQuery(
             """

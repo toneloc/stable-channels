@@ -845,6 +845,106 @@ final class DatabaseServiceTests: XCTestCase {
         ))
     }
 
+    func testTerminalTradeOutcomeReflectsResultsCommittedOutsideTheHandler() throws {
+        let channelId = String(repeating: "ab", count: 32)
+        try service.channelRepo.saveChannel(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: 50,
+            backingSats: 55_000,
+            nativeSats: 45_000,
+            note: nil,
+            receiverSats: 100_000,
+            latestPrice: 100_000
+        )
+
+        // Rejected trade: outcome must surface with the persisted reason code.
+        let rejectedTrade = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "7",
+            currentExpectedUSD: 50,
+            currentBackingSats: 55_000,
+            receiverSats: 100_000,
+            action: "sell",
+            amountUSD: 10,
+            amountBTC: 0.000099,
+            feeUSD: 0.1,
+            newExpectedUSD: 59.9,
+            quotePrice: 100_000,
+            now: 1_786_310_000,
+            tradeId: String(repeating: "ef", count: 32)
+        ))
+        let rejectedDbId = try service.channelRepo.recordPreparedTrade(rejectedTrade)
+        let rejectedPaymentId = String(repeating: "cd", count: 32)
+        XCTAssertTrue(try service.channelRepo.attachTradePaymentId(
+            tradeDbId: rejectedDbId, paymentId: rejectedPaymentId
+        ))
+        XCTAssertNil(try service.channelRepo.terminalTradeOutcome(paymentId: rejectedPaymentId))
+
+        let rejection = TradeControlMessage.Rejected(
+            channelId: channelId,
+            correlation: TradeCorrelation(
+                tradeId: rejectedTrade.tradeId,
+                tradePaymentId: rejectedPaymentId,
+                requestHash: rejectedTrade.requestHash
+            ),
+            reasonCode: "quote_deviation",
+            decidedAt: 1_786_310_002
+        )
+        guard case .applied = service.channelRepo.applyTradeRejection(rejection).status else {
+            return XCTFail("Expected rejection to commit")
+        }
+        let rejectedOutcome = try XCTUnwrap(
+            service.channelRepo.terminalTradeOutcome(paymentId: rejectedPaymentId)
+        )
+        XCTAssertFalse(rejectedOutcome.accepted)
+        XCTAssertEqual(rejectedOutcome.reasonCode, "quote_deviation")
+
+        // Accepted trade: outcome must flip to accepted with no reason code.
+        let acceptedTrade = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "7",
+            currentExpectedUSD: 50,
+            currentBackingSats: 55_000,
+            receiverSats: 100_000,
+            action: "sell",
+            amountUSD: 10,
+            amountBTC: 0.000099,
+            feeUSD: 0.1,
+            newExpectedUSD: 59.9,
+            quotePrice: 100_000,
+            now: 1_786_310_003,
+            tradeId: String(repeating: "aa", count: 32)
+        ))
+        let acceptedDbId = try service.channelRepo.recordPreparedTrade(acceptedTrade)
+        let acceptedPaymentId = String(repeating: "bb", count: 32)
+        XCTAssertTrue(try service.channelRepo.attachTradePaymentId(
+            tradeDbId: acceptedDbId, paymentId: acceptedPaymentId
+        ))
+        XCTAssertNil(try service.channelRepo.terminalTradeOutcome(paymentId: acceptedPaymentId))
+
+        let sync = TradeControlMessage.Sync(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: acceptedTrade.newExpectedUSD,
+            backingSats: acceptedTrade.newBackingSats,
+            syncVersion: 1,
+            correlation: TradeCorrelation(
+                tradeId: acceptedTrade.tradeId,
+                tradePaymentId: acceptedPaymentId,
+                requestHash: acceptedTrade.requestHash
+            )
+        )
+        guard case .applied = service.channelRepo.applyCorrelatedTradeAcceptance(sync).status else {
+            return XCTFail("Expected correlated acceptance to commit")
+        }
+        let acceptedOutcome = try XCTUnwrap(
+            service.channelRepo.terminalTradeOutcome(paymentId: acceptedPaymentId)
+        )
+        XCTAssertTrue(acceptedOutcome.accepted)
+        XCTAssertNil(acceptedOutcome.reasonCode)
+    }
+
     func testPreparedTradeWaitsForCorrelatedAcceptanceBeforeUpdatingAllocation() throws {
         let channelId = String(repeating: "ab", count: 32)
         let paymentId = String(repeating: "cd", count: 32)

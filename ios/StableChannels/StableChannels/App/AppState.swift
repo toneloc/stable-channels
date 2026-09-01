@@ -190,6 +190,29 @@ class AppState {
 
     var tradeOutcomes: [String: TradeOutcome] = [:]
 
+    /// Rehydrate a trade's terminal outcome from SQLite. The NSE and background handlers
+    /// commit accepted/rejected results directly to the database without touching this
+    /// in-memory map, so the trade sheets poll this while pending and it runs for every
+    /// known payment id on startup and foreground.
+    func refreshTradeOutcome(paymentId: String) {
+        guard tradeOutcomes[paymentId] == nil, let db = databaseService else { return }
+        guard let terminal =
+            (try? db.channelRepo.terminalTradeOutcome(paymentId: paymentId)) ?? nil else { return }
+        tradeOutcomes[paymentId] = terminal.accepted
+            ? TradeOutcome(accepted: true, message: "")
+            : TradeOutcome(
+                accepted: false,
+                message: TradeProtocol.rejectionMessage(terminal.reasonCode ?? "internal_failure")
+            )
+        pendingTradePayments.removeValue(forKey: paymentId)
+    }
+
+    private func refreshAllTradeOutcomes() {
+        for paymentId in Set(tradeOutcomes.keys).union(pendingTradePayments.keys) {
+            refreshTradeOutcome(paymentId: paymentId)
+        }
+    }
+
     // Pending splice info
     var pendingSplice: PendingSplice?
 
@@ -235,6 +258,7 @@ class AppState {
         tradeService = TradeService(nodeService: nodeService, databaseService: db)
         _ = try db.channelRepo.markExpiredTradesUncertain()
         pendingTradePayments = try db.channelRepo.unresolvedTradePayments()
+        refreshAllTradeOutcomes()
         let pollingService = databaseService.map { db in
             ConfirmationPollingService(
                 databaseService: db,
@@ -845,6 +869,9 @@ class AppState {
         // Payments received while backgrounded are recorded by the NSE, not the foreground
         // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
         refreshLatestPaymentStatus()
+        // Same story for trade results: the NSE writes accepted/rejected to SQLite while
+        // we're backgrounded, so pull any terminal outcomes into the in-memory map.
+        refreshAllTradeOutcomes()
         if nodeService.isRunning {
             // Node never stopped, so gossip was never extracted — do NOT touch
             // ldk_node_data.sqlite while LDK has it open (a stale

@@ -20,6 +20,7 @@ import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import okhttp3.Request
@@ -228,6 +229,34 @@ class AppState(private val context: Context) : ViewModel() {
     data class TradeOutcome(val accepted: Boolean, val message: String)
     private val _tradeOutcomes = MutableStateFlow<Map<String, TradeOutcome>>(emptyMap())
     val tradeOutcomes: StateFlow<Map<String, TradeOutcome>> = _tradeOutcomes
+
+    /** Rehydrate a trade's terminal outcome from SQLite. Background services commit
+     *  accepted/rejected results directly to the database without touching the in-memory
+     *  map, so the sheets poll this while pending and it runs for every known payment id
+     *  on startup/foreground. */
+    fun refreshTradeOutcome(paymentId: String) {
+        if (_tradeOutcomes.value.containsKey(paymentId)) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val terminal = try {
+                databaseService?.terminalTradeOutcome(paymentId)
+            } catch (_: Exception) { null } ?: return@launch
+            val (accepted, reason) = terminal
+            // update {} — this runs on an IO thread while the handler path writes from
+            // the event loop, and a read-modify-write on .value could drop an entry.
+            _tradeOutcomes.update { outcomes ->
+                outcomes + (paymentId to if (accepted) {
+                    TradeOutcome(true, "")
+                } else {
+                    TradeOutcome(false, TradeProtocol.rejectionMessage(reason ?: "internal_failure"))
+                })
+            }
+            _pendingTradePayments.update { it - paymentId }
+        }
+    }
+
+    private fun refreshAllTradeOutcomes(paymentIds: Collection<String>) {
+        paymentIds.forEach { refreshTradeOutcome(it) }
+    }
     var pendingSplice: PendingSplice? = null
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
@@ -312,6 +341,7 @@ class AppState(private val context: Context) : ViewModel() {
                 tradeService = TradeService(nodeService, db)
                 db.markExpiredTradesUncertain()
                 _pendingTradePayments.value = db.unresolvedTradePayments()
+                refreshAllTradeOutcomes(_tradeOutcomes.value.keys + _pendingTradePayments.value.keys)
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
                 AuditService.setLogPath(auditPath)
