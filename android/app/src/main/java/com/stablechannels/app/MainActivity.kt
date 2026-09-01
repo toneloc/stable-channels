@@ -95,6 +95,12 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         if (!::appState.isInitialized) return
+        // Cancel the pending background-stop job synchronously, on the main thread, before
+        // anything else. A process that was frozen while backgrounded can have its delayed
+        // stop and this resume fire almost simultaneously on unfreeze; racing that cancellation
+        // through restartNodeFromForeground's IO dispatch instead lost that race in practice,
+        // letting the node fully stop moments before resume and forcing a visible full resync.
+        appState.cancelBackgroundStop()
         // Defensive reset: whatever caused the last pause (picker or otherwise) has resolved by
         // the time we're resumed, so isPickingMedia can never get stuck true across a full cycle.
         appState.isPickingMedia = false

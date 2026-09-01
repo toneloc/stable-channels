@@ -55,6 +55,11 @@ class AppState(private val context: Context) : ViewModel() {
          */
         @Volatile
         var suppressNextBackgroundCycle = false
+
+        // Grace period before stopping the node on an ordinary backgrounding (no active
+        // payment/picker). Matches iOS's background-task window; no Android API exposes an
+        // exact time budget for unprivileged background execution.
+        private const val QUICK_SWITCH_GRACE_MS = 30000L
     }
 
     val nodeService = NodeService(context)
@@ -506,10 +511,11 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun stopNodeForBackground() {
         if (!isWaitingForPayment && !isPickingMedia) {
-            Log.d("AppState", "Stopping node immediately (no active payment request)")
-            // node.stop() is a blocking native call; run it off the main thread so onPause()
-            // returns immediately and Android doesn't ANR-kill us on the focus-change timeout.
-            launchBackgroundStop()
+            // Defer the stop so a quick app-switch reconnects instantly instead of forcing a
+            // full LDK restart + chain resync on every return. If the user stays away past the
+            // window, the deferred stop below runs and the node is torn down as normal.
+            Log.d("AppState", "Scheduling node stop after quick-switch grace period")
+            launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
             return
         }
 
