@@ -104,8 +104,8 @@ class PriceService(private val appContext: Context? = null) {
                 if (error.quarantinesPrice) throw error
                 Log.w(TAG, "Direct USD unavailable: ${error.message}; trying USDT fallback")
                 coroutineScope {
-                    val usdtPrices = async { fetchFeeds(PriceOracle.BITCOIN_USDT_FEEDS) }
-                    val pegPrices = async { fetchFeeds(PriceOracle.USDT_USD_FEEDS) }
+                    val usdtPrices = async { fetchFeeds(Constants.FALLBACK_USDT_PRICE_FEEDS) }
+                    val pegPrices = async { fetchFeeds(Constants.USDT_USD_PRICE_FEEDS) }
                     PriceOracle.resolve(
                         emptyList(),
                         usdtPrices.await(),

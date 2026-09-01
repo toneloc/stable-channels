@@ -83,8 +83,8 @@ class PriceService {
                 )
             } catch let failure as PriceOracleFailure where !failure.quarantinesPrice {
                 print("[PriceOracle] direct USD unavailable: \(failure); trying USDT fallback")
-                async let usdtPrices = Self.fetchFeeds(PriceOracle.bitcoinUSDTFeeds)
-                async let pegPrices = Self.fetchFeeds(PriceOracle.usdtUSDFeeds)
+                async let usdtPrices = Self.fetchFeeds(Constants.fallbackUSDTPriceFeeds)
+                async let pegPrices = Self.fetchFeeds(Constants.usdtUSDPriceFeeds)
                 let (fetchedUSDTPrices, fetchedPegPrices) = await (usdtPrices, pegPrices)
                 result = try PriceOracle.resolve(
                     usdPrices: [],

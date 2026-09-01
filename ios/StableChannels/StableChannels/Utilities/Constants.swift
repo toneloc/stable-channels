@@ -132,6 +132,20 @@ enum Constants {
         return PriceOracle.directUSDFeeds
     }
 
+    /// The USDT fallback must be silenced under the E2E override: real exchange prices
+    /// diverge arbitrarily from the harness's mocked price, so one transient direct-feed
+    /// miss would resolve real-world quotes against the mocked lastTrustedPrice, trip the
+    /// largeBitcoinMove guard, and quarantine the price — blocking every send mid-suite.
+    /// An empty fallback fails as insufficientBitcoinConsensus (non-quarantining) and the
+    /// mocked price stays trusted until the next direct refresh.
+    static var fallbackUSDTPriceFeeds: [PriceFeedConfig] {
+        TestOverrides.shared.priceFeedBase != nil ? [] : PriceOracle.bitcoinUSDTFeeds
+    }
+
+    static var usdtUSDPriceFeeds: [PriceFeedConfig] {
+        TestOverrides.shared.priceFeedBase != nil ? [] : PriceOracle.usdtUSDFeeds
+    }
+
     // MARK: - RGS (Rapid Gossip Sync) Servers
 
     enum RGSServer {

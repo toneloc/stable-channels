@@ -88,8 +88,15 @@ object Constants {
     // route there; production uses the PriceOracle feed sets from main.
     val DEFAULT_PRICE_FEEDS: List<PriceFeedConfig> get() =
         TestOverrides.priceFeedBase?.let { TestOverrides.priceFeeds(it) } ?: PriceOracle.DIRECT_USD_FEEDS
-    val FALLBACK_USDT_PRICE_FEEDS = PriceOracle.BITCOIN_USDT_FEEDS
-    val USDT_USD_PRICE_FEEDS = PriceOracle.USDT_USD_FEEDS
+    // The USDT fallback must be silenced under the E2E override: real exchange prices
+    // diverge arbitrarily from the harness's mocked price, so one transient direct-feed
+    // miss would resolve real-world quotes against the mocked lastTrustedPrice, trip the
+    // large-move guard, and quarantine the price — blocking every send mid-suite. An
+    // empty fallback fails non-quarantining and the mocked price stays trusted.
+    val FALLBACK_USDT_PRICE_FEEDS: List<PriceFeedConfig> get() =
+        if (TestOverrides.priceFeedBase != null) emptyList() else PriceOracle.BITCOIN_USDT_FEEDS
+    val USDT_USD_PRICE_FEEDS: List<PriceFeedConfig> get() =
+        if (TestOverrides.priceFeedBase != null) emptyList() else PriceOracle.USDT_USD_FEEDS
 
     object RGSServer {
         const val BITCOIN = "https://rapidsync.lightningdevkit.org/snapshot/"
