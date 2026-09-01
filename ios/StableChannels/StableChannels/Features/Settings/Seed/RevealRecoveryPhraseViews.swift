@@ -551,73 +551,52 @@ struct RevealQuizSecretPhraseView: View {
 
             // Below Grid Actions (Symmetric Copy on Left, Hide on Right)
             if isRevealed {
-                VStack(spacing: 8) {
-                    HStack(spacing: 12) {
-                        // Left: Copy Button
-                        Button {
-                            copySeedToClipboard()
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: copiedSeed ? "checkmark" : "doc.on.doc")
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text(
-                                    copiedSeed
-                                        ? String(localized: "button_copied", defaultValue: "Copied")
-                                        : String(localized: "button_copy_seed", defaultValue: "Copy Seed")
-                                )
-                                .font(.subheadline.weight(.semibold))
-                            }
-                            .foregroundStyle(copiedSeed ? .green : .white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(
-                                copiedSeed ? Color.green
-                                    .opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground)
-                            )
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule().stroke(
-                                    copiedSeed ? Color.green.opacity(0.35) : Color.white.opacity(0.08),
-                                    lineWidth: 1
-                                )
-                            )
-                        }
+                HStack(spacing: 12) {
+                    // Left: Copy Button
+                    Button {
+                        showCopyWarning = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: copiedSeed ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(copiedSeed ? Color.green : Color.white)
+                                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: copiedSeed)
 
-                        // Right: Hide Button
-                        Button {
-                            let generator = UIImpactFeedbackGenerator(style: .medium)
-                            generator.impactOccurred()
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                                isRevealed = false
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "eye.slash.fill")
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text("Hide")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground))
-                            .clipShape(Capsule())
-                            .overlay(
-                                Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
-                            )
+                            Text(String(localized: "button_copy_seed", defaultValue: "Copy Seed"))
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
                         }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
                     }
 
-                    if copiedSeed {
-                        HStack(spacing: 5) {
-                            Image(systemName: "timer")
-                                .font(.caption2)
-                            Text("Clipboard clears automatically in 60s")
-                                .font(.caption2.weight(.medium))
+                    // Right: Hide Button
+                    Button {
+                        let generator = UIImpactFeedbackGenerator(style: .medium)
+                        generator.impactOccurred()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                            isRevealed = false
                         }
-                        .foregroundStyle(.secondary)
-                        .transition(.opacity)
-                        .padding(.top, 4)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "eye.slash.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("Hide")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
                     }
                 }
                 .padding(.horizontal, 20)
@@ -639,6 +618,19 @@ struct RevealQuizSecretPhraseView: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 20)
+        }
+        .alert(
+            "Copy Secret Recovery Phrase?",
+            isPresented: $showCopyWarning
+        ) {
+            Button("Copy to Clipboard") {
+                copySeedToClipboard()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in 60 seconds."
+            )
         }
         .onDisappear {
             cancelClipboardTasks()
