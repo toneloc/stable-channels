@@ -56,10 +56,9 @@ class AppState(private val context: Context) : ViewModel() {
         @Volatile
         var suppressNextBackgroundCycle = false
 
-        // Grace period before stopping the node on an ordinary backgrounding (no active
-        // payment/picker). Matches iOS's background-task window; no Android API exposes an
-        // exact time budget for unprivileged background execution.
-        private const val QUICK_SWITCH_GRACE_MS = 30000L
+        // Covers ordinary quick app-switches without keeping an unserviced cached Android
+        // process in control of the node for longer than the common return window.
+        private const val QUICK_SWITCH_GRACE_MS = 10_000L
     }
 
     val nodeService = NodeService(context)
@@ -556,7 +555,6 @@ class AppState(private val context: Context) : ViewModel() {
     fun cancelBackgroundStop() {
         if (backgroundStopJob != null) {
             backgroundStopJob?.cancel()
-            backgroundStopJob = null
             Log.d("AppState", "Cancelled pending background stop")
         }
         try {
