@@ -127,7 +127,6 @@ struct RevealRecoveryPhraseSheet: View {
             }
         }
         .preferredColorScheme(.dark)
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
+        .interactiveDismissDisabled(true)
     }
 }

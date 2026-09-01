@@ -363,127 +363,226 @@ struct RevealQuizFeedbackView: View {
     }
 }
 
-// MARK: - Secret Phrase Revealed View (with Tap to Reveal Privacy Shield)
+// MARK: - Secret Phrase Revealed View (with In-Place Blur & Tap-to-Reveal)
 
 struct RevealQuizSecretPhraseView: View {
     let mnemonic: String
     let onDone: () -> Void
 
     @State private var isRevealed: Bool = false
+    @State private var copiedSeed = false
+    @State private var showCopyWarning = false
+    @State private var clipboardClearTask: Task<Void, Never>?
+    @State private var clipboardFadeTask: Task<Void, Never>?
+
+    private var wordList: [String] {
+        mnemonic.split(separator: " ").map(String.init)
+    }
+
+    private func copySeedToClipboard() {
+        clipboardClearTask?.cancel()
+        clipboardFadeTask?.cancel()
+        UIPasteboard.general.string = mnemonic
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+        withAnimation { copiedSeed = true }
+
+        clipboardClearTask = Task {
+            try? await Task.sleep(for: .seconds(SeedConstants.clipboardClearSeconds))
+            if UIPasteboard.general.string == mnemonic {
+                UIPasteboard.general.string = ""
+            }
+        }
+        clipboardFadeTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation { self.copiedSeed = false }
+        }
+    }
+
+    private func cancelClipboardTasks() {
+        clipboardClearTask?.cancel()
+        clipboardFadeTask?.cancel()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 24) {
-                    // Header Subtitle Description
-                    Text("Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                        .padding(.top, 16)
-                        .lineSpacing(3)
+            // Header Subtitle
+            Text("Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+                .padding(.bottom, 20)
+                .lineSpacing(3)
 
-                    // Card Container: Privacy Shield (Tap to Reveal) or Unmasked Seed
-                    ZStack {
-                        if !isRevealed {
-                            // Tap to Reveal Privacy Shield Card
-                            Button {
-                                let generator = UIImpactFeedbackGenerator(style: .medium)
-                                generator.impactOccurred()
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                                    isRevealed = true
-                                }
-                            } label: {
-                                VStack(spacing: 16) {
-                                    Spacer(minLength: 40)
+            Spacer()
 
-                                    ZStack {
-                                        Circle()
-                                            .fill(Color.white.opacity(0.06))
-                                            .frame(width: 64, height: 64)
+            // Seed Grid Area with In-Place Blur & Tap to Reveal Overlay
+            ZStack {
+                // The Word Grid (3 columns, rounded pills)
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ], spacing: 8) {
+                    ForEach(Array(wordList.enumerated()), id: \.offset) { index, word in
+                        HStack(spacing: 4) {
+                            Text("\(index + 1).")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, alignment: .trailing)
 
-                                        Image(systemName: "eye.slash")
-                                            .font(.system(size: 28, weight: .medium))
-                                            .foregroundStyle(.white)
-                                    }
-
-                                    VStack(spacing: 6) {
-                                        Text("Tap to reveal")
-                                            .font(.title3.weight(.bold))
-                                            .foregroundStyle(.white)
-
-                                        Text("Make sure no one is watching your screen.")
-                                            .font(.subheadline)
-                                            .foregroundStyle(.secondary)
-                                            .multilineTextAlignment(.center)
-                                            .padding(.horizontal, 20)
-                                    }
-
-                                    Spacer(minLength: 40)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .frame(minHeight: 260)
-                                .background(Color(uiColor: .secondarySystemGroupedBackground))
-                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                        } else {
-                            // Unmasked Seed Words View
-                            VStack(spacing: 16) {
-                                HStack {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "lock.shield.fill")
-                                            .font(.caption)
-                                            .foregroundStyle(Color.stablePrimary)
-                                        Text("Confidential")
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.secondary)
-                                    }
-
-                                    Spacer()
-
-                                    Button {
-                                        let generator = UIImpactFeedbackGenerator(style: .light)
-                                        generator.impactOccurred()
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                                            isRevealed = false
-                                        }
-                                    } label: {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "eye.slash.fill")
-                                            Text("Hide")
-                                        }
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(Color.stablePrimary)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 5)
-                                        .background(Color.stablePrimary.opacity(0.12))
-                                        .clipShape(Capsule())
-                                    }
-                                }
-                                .padding(.horizontal, 4)
-
-                                SeedDisplayView(words: mnemonic)
-                            }
-                            .padding(16)
-                            .background(Color(uiColor: .secondarySystemGroupedBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                            )
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                            Text(isRevealed ? word : "•••••")
+                                .font(.system(.subheadline, design: .monospaced).weight(.medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
                         }
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(uiColor: .secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                        )
                     }
-                    .padding(.horizontal, 20)
+                }
+                .blur(radius: isRevealed ? 0 : 16)
+                .allowsHitTesting(isRevealed)
+
+                // Tap to Reveal Privacy Shield Overlay
+                if !isRevealed {
+                    Button {
+                        let generator = UIImpactFeedbackGenerator(style: .medium)
+                        generator.impactOccurred()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                            isRevealed = true
+                        }
+                    } label: {
+                        VStack(spacing: 12) {
+                            Image(systemName: "eye.slash")
+                                .font(.system(size: 32, weight: .medium))
+                                .foregroundStyle(.white)
+
+                            Text("Tap to reveal")
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.white)
+
+                            Text("Make sure no one is watching your screen.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 24)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black.opacity(0.4))
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity)
                 }
             }
+            .frame(minHeight: 220)
+            .padding(.horizontal, 20)
+
+            // Below Grid Actions (Copy to Clipboard & Hide Toggle)
+            if isRevealed {
+                VStack(spacing: 8) {
+                    if !copiedSeed && !showCopyWarning {
+                        Button {
+                            showCopyWarning = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.subheadline)
+                                Text(String(localized: "button_copy_seed", defaultValue: "Copy to clipboard"))
+                                    .font(.subheadline.weight(.medium))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 18)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground))
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                            )
+                        }
+                        .padding(.top, 14)
+                    }
+
+                    if copiedSeed {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark")
+                            Text(String(localized: "button_copied", defaultValue: "Copied"))
+                        }
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.green)
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 18)
+                        .background(Color.green.opacity(0.12))
+                        .clipShape(Capsule())
+                        .padding(.top, 14)
+                    }
+
+                    if showCopyWarning {
+                        VStack(spacing: 8) {
+                            Text(String(localized: "warning_copy_seed_title", defaultValue: "Copy Seed Words?"))
+                                .font(.caption.bold())
+
+                            Text(String(
+                                localized: "warning_copy_seed_message",
+                                defaultValue: "Clipboard is shared with other apps."
+                            ))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+
+                            HStack(spacing: 12) {
+                                Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+                                    showCopyWarning = false
+                                }
+                                .font(.caption)
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Button(String(localized: "button_copy_anyway", defaultValue: "Copy Anyway")) {
+                                    copySeedToClipboard()
+                                    showCopyWarning = false
+                                }
+                                .font(.caption)
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color(uiColor: .tertiarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .padding(.top, 8)
+                    }
+
+                    Button {
+                        let generator = UIImpactFeedbackGenerator(style: .light)
+                        generator.impactOccurred()
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                            isRevealed = false
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "eye.slash.fill")
+                            Text("Hide phrase")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 6)
+                }
+                .padding(.horizontal, 20)
+                .transition(.opacity)
+            }
+
+            Spacer()
 
             // Dismiss Done Button
             Button(action: onDone) {
@@ -496,97 +595,195 @@ struct RevealQuizSecretPhraseView: View {
                     .clipShape(Capsule())
             }
             .padding(.horizontal, 24)
-            .padding(.top, 12)
             .padding(.bottom, 20)
+        }
+        .onDisappear {
+            cancelClipboardTasks()
         }
     }
 }
 
-// MARK: - Learn More Sheet
+// MARK: - Learn More Sheet (Editorial Luxury Design)
 
 struct RevealQuizLearnMoreSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Self-Custodial Security", systemImage: "shield.lefthalf.filled")
-                            .font(.title2.bold())
-                            .foregroundStyle(Color.stablePrimary)
+            ZStack {
+                Color.black.ignoresSafeArea()
 
-                        Text(
-                            "Stable Channels is 100% self-custodial. You have full ownership and control over your Bitcoin and Lightning keys."
-                        )
-                        .font(.body)
-                        .foregroundStyle(.secondary)
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 24) {
+                        // Hero Header with Glowing Shield Badge
+                        VStack(spacing: 14) {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        RadialGradient(
+                                            colors: [Color.stablePrimary.opacity(0.25), Color.clear],
+                                            center: .center,
+                                            startRadius: 8,
+                                            endRadius: 44
+                                        )
+                                    )
+                                    .frame(width: 88, height: 88)
+
+                                Circle()
+                                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                                    .frame(width: 58, height: 58)
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                    )
+
+                                Image(systemName: "shield.checkered")
+                                    .font(.system(size: 26, weight: .semibold))
+                                    .foregroundStyle(Color.stablePrimary)
+                            }
+                            .padding(.top, 8)
+
+                            VStack(spacing: 6) {
+                                Text("Self-Custody Guidelines")
+                                    .font(.title2.weight(.bold))
+                                    .foregroundStyle(.white)
+
+                                Text(
+                                    "Your Secret Recovery Phrase is the cryptographic root of your entire wallet. Keep these rules top of mind."
+                                )
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 20)
+                                .lineSpacing(3)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+
+                        // 4 Luxury Security Pillar Cards
+                        VStack(spacing: 12) {
+                            luxuryGuidelineCard(
+                                icon: "key.fill",
+                                iconColor: Color.stablePrimary,
+                                number: "01",
+                                title: "Your Master Cryptographic Key",
+                                desc: "Your recovery words mathematically derive all private keys. Anyone with these 12 words has full, irreversible ownership of your funds."
+                            )
+
+                            luxuryGuidelineCard(
+                                icon: "server.rack",
+                                iconColor: Color.orange,
+                                number: "02",
+                                title: "Zero Server Backups",
+                                desc: "Stable Channels is 100% self-custodial. We never store or transmit your keys. If you lose your phrase, no one in the world can restore it."
+                            )
+
+                            luxuryGuidelineCard(
+                                icon: "exclamationmark.shield.fill",
+                                iconColor: Color.red,
+                                number: "03",
+                                title: "Beware of Impersonators",
+                                desc: "No support agent, team member, or bot will EVER ask for your phrase. Anyone asking for your words is an active scammer."
+                            )
+
+                            luxuryGuidelineCard(
+                                icon: "lock.square.stack.fill",
+                                iconColor: Color.cyan,
+                                number: "04",
+                                title: "Store Offline on Physical Media",
+                                desc: "Engrave on steel or write on paper kept in a secure vault. Never take screenshots, upload to cloud storage, or paste into digital notes."
+                            )
+                        }
+                        .padding(.horizontal, 20)
+
+                        // Bottom Understood Action Button
+                        Button {
+                            dismiss()
+                        } label: {
+                            Text("I Understand")
+                                .font(.headline)
+                                .foregroundStyle(.black)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 52)
+                                .background(Color.white)
+                                .clipShape(Capsule())
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.top, 8)
+                        .padding(.bottom, 24)
                     }
-
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 16) {
-                        securityRuleRow(
-                            number: "1",
-                            title: "Your Phrase Is Your Wallet",
-                            desc: "The 12 or 24 words represent the master mathematical private key to all your funds."
-                        )
-
-                        securityRuleRow(
-                            number: "2",
-                            title: "No Support Can Recover It",
-                            desc: "Because there is no central server holding your keys, if you lose your phrase, no one can restore your wallet."
-                        )
-
-                        securityRuleRow(
-                            number: "3",
-                            title: "Beware of Impersonators",
-                            desc: "Support staff, developers, or websites asking for your recovery phrase are scammers attempting to drain your wallet."
-                        )
-
-                        securityRuleRow(
-                            number: "4",
-                            title: "Safe Storage Practices",
-                            desc: "Store your recovery phrase physically on paper or stamped steel in a secure location. Avoid saving it in unencrypted notes or screenshots."
-                        )
-                    }
+                    .padding(.top, 12)
                 }
-                .padding(24)
             }
-            .navigationTitle("Security Guidelines")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Close") {
+                    Button {
                         dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.secondary)
                     }
-                    .fontWeight(.semibold)
                 }
             }
         }
-        .presentationDetents([.fraction(0.85), .large])
-        .presentationDragIndicator(.visible)
+        .preferredColorScheme(.dark)
     }
 
-    private func securityRuleRow(number: String, title: String, desc: String) -> some View {
+    private func luxuryGuidelineCard(
+        icon: String,
+        iconColor: Color,
+        number: String,
+        title: String,
+        desc: String
+    ) -> some View {
         HStack(alignment: .top, spacing: 14) {
+            // Icon Badge
             ZStack {
-                Circle()
-                    .fill(Color.stablePrimary.opacity(0.15))
-                    .frame(width: 32, height: 32)
-                Text(number)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(Color.stablePrimary)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(iconColor.opacity(0.12))
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(iconColor.opacity(0.24), lineWidth: 1)
+                    )
+
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(iconColor)
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundStyle(.primary)
+                HStack {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+
+                    Spacer()
+
+                    Text(number)
+                        .font(.caption2.monospaced().bold())
+                        .foregroundStyle(iconColor.opacity(0.8))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(iconColor.opacity(0.1))
+                        .clipShape(Capsule())
+                }
+
                 Text(desc)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .lineSpacing(2)
             }
         }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
     }
 }
