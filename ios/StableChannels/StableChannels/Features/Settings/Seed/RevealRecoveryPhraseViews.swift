@@ -1,169 +1,213 @@
 import SwiftUI
 
-// MARK: - Editorial Vault Illustration
+// MARK: - Locked Vault Door Illustration
 
 struct RevealQuizPortalIllustration: View {
     @State private var isPulsing = false
 
     var body: some View {
         ZStack {
-            // Radial spotlight / stipple halo
+            // Ambient Radial Spotlight / Cryptographic Halo
             Circle()
                 .fill(
                     RadialGradient(
                         colors: [
-                            Color.orange.opacity(0.32),
-                            Color.stablePrimary.opacity(0.18),
+                            Color.orange.opacity(0.30),
+                            Color.stablePrimary.opacity(0.16),
                             Color.clear
                         ],
                         center: .center,
-                        startRadius: 25,
+                        startRadius: 20,
                         endRadius: 120
                     )
                 )
                 .frame(width: 240, height: 240)
-                .scaleEffect(isPulsing ? 1.05 : 0.95)
+                .scaleEffect(isPulsing ? 1.06 : 0.94)
                 .animation(
                     .easeInOut(duration: 3.2).repeatForever(autoreverses: true),
                     value: isPulsing
                 )
 
-            // Radial Stippled Line Beams (Screen-print vector lines)
-            ForEach(0..<12) { i in
+            // Radial Geometric Ray Beams
+            ForEach(0..<8) { i in
                 Rectangle()
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color.orange.opacity(0.35),
-                                Color.stablePrimary.opacity(0.15),
+                                Color.orange.opacity(0.30),
+                                Color.stablePrimary.opacity(0.12),
                                 Color.clear
                             ],
                             startPoint: .center,
                             endPoint: .trailing
                         )
                     )
-                    .frame(width: 160, height: 1.5)
-                    .rotationEffect(.degrees(Double(i) * 30))
+                    .frame(width: 150, height: 1.5)
+                    .rotationEffect(.degrees(Double(i) * 45))
             }
 
-            // Outer Arch Frame (Cryptographic Vault Monolith)
+            // Locked Security Vault Door Assembly
             ZStack {
-                // Vault background fill
-                UnevenRoundedRectangle(
-                    topLeadingRadius: 48,
-                    bottomLeadingRadius: 6,
-                    bottomTrailingRadius: 6,
-                    topTrailingRadius: 48,
-                    style: .continuous
-                )
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.12, green: 0.14, blue: 0.2),
-                            Color(red: 0.06, green: 0.08, blue: 0.12)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .frame(width: 104, height: 140)
-                .overlay(
-                    // Sharp dual-tone border (Bitcoin Orange to Stable Cyan)
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 48,
-                        bottomLeadingRadius: 6,
-                        bottomTrailingRadius: 6,
-                        topTrailingRadius: 48,
-                        style: .continuous
-                    )
-                    .stroke(
+                // Outer Heavy Steel Door Frame
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
                         LinearGradient(
                             colors: [
-                                Color.orange,
-                                Color.orange.opacity(0.7),
-                                Color.stablePrimary
+                                Color(white: 0.18),
+                                Color(white: 0.08)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 2.5
+                        )
                     )
-                )
-                .shadow(color: Color.orange.opacity(0.25), radius: 14, x: 0, y: 6)
+                    .frame(width: 124, height: 156)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(
+                                LinearGradient(
+                                    colors: [
+                                        Color.orange.opacity(0.8),
+                                        Color.stablePrimary.opacity(0.7)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 2
+                            )
+                    )
+                    .shadow(color: Color.orange.opacity(0.2), radius: 14, x: 0, y: 6)
 
-                // Inner Keyhole & Bitcoin ₿ Seal
-                VStack(spacing: 8) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.orange.opacity(0.18))
-                            .frame(width: 42, height: 42)
+                // Inner Vault Door Leaf
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(white: 0.13),
+                                Color(white: 0.05)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(width: 108, height: 140)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+
+                // Top & Bottom Inset Steel Panels
+                VStack(spacing: 16) {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.black.opacity(0.4))
+                        .frame(width: 88, height: 42)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                        )
+
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.black.opacity(0.4))
+                        .frame(width: 88, height: 42)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                        )
+                }
+
+                // Steel Door Hinges (Left side)
+                VStack(spacing: 48) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.orange.opacity(0.8))
+                        .frame(width: 6, height: 16)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.orange.opacity(0.8))
+                        .frame(width: 6, height: 16)
+                }
+                .offset(x: -58)
+
+                // Central Heavy Lock & ₿ Emblem
+                ZStack {
+                    // Lock Base Glow Plate
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.orange.opacity(0.25),
+                                    Color.black
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 48, height: 48)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.orange.opacity(0.6), lineWidth: 1.5)
+                        )
+
+                    // Padlock Silhouette & ₿ Symbol
+                    VStack(spacing: 2) {
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [
+                                        Color.orange,
+                                        Color(red: 1.0, green: 0.72, blue: 0.3)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .shadow(color: Color.orange.opacity(0.5), radius: 6, x: 0, y: 2)
 
                         Text("₿")
-                            .font(.system(size: 26, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.orange)
-                    }
-
-                    // Keyhole silhouette
-                    VStack(spacing: 0) {
-                        Circle()
-                            .fill(Color.white.opacity(0.85))
-                            .frame(width: 10, height: 10)
-                        UnevenRoundedRectangle(
-                            topLeadingRadius: 0,
-                            bottomLeadingRadius: 2,
-                            bottomTrailingRadius: 2,
-                            topTrailingRadius: 0
-                        )
-                        .fill(Color.white.opacity(0.85))
-                        .frame(width: 6, height: 12)
+                            .font(.system(size: 11, weight: .black, design: .rounded))
+                            .foregroundStyle(.black)
+                            .offset(y: -14)
                     }
                 }
-                .offset(y: -4)
             }
             .offset(y: -10)
 
-            // Floating Cryptographic Badges (Minimalist Geometric Accents)
+            // Floating Key & Security Accents
             Group {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Color.stablePrimary.opacity(0.85))
-                    .offset(x: -64, y: -44)
-
                 Image(systemName: "key.fill")
-                    .font(.system(size: 14))
+                    .font(.system(size: 16))
                     .foregroundStyle(Color.orange.opacity(0.85))
-                    .offset(x: 64, y: -36)
+                    .rotationEffect(.degrees(-35))
+                    .offset(x: 68, y: -38)
 
                 Image(systemName: "sparkle")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.75))
-                    .offset(x: -54, y: 32)
+                    .foregroundStyle(Color.white.opacity(0.8))
+                    .offset(x: -66, y: -42)
 
-                Image(systemName: "circle.grid.2x2.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.stablePrimary.opacity(0.75))
-                    .offset(x: 58, y: 28)
+                Image(systemName: "shield.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.stablePrimary.opacity(0.8))
+                    .offset(x: -64, y: 32)
             }
 
-            // Slate Floor Base
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            // Heavy Steel Platform Base
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [
-                            Color(white: 0.18),
+                            Color(white: 0.22),
                             Color(white: 0.08)
                         ],
                         startPoint: .top,
                         endPoint: .bottom
                     )
                 )
-                .frame(width: 160, height: 14)
+                .frame(width: 164, height: 12)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
                 )
-                .offset(y: 64)
-                .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 4)
+                .offset(y: 72)
+                .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 4)
         }
         .frame(height: 200)
         .onAppear {
@@ -382,20 +426,38 @@ struct RevealQuizSecretPhraseView: View {
     private func copySeedToClipboard() {
         clipboardClearTask?.cancel()
         clipboardFadeTask?.cancel()
-        UIPasteboard.general.string = mnemonic
-        let generator = UINotificationFeedbackGenerator()
-        generator.notificationOccurred(.success)
-        withAnimation { copiedSeed = true }
 
+        // 1. Apple Native Clipboard Security: Expiration Date & Local-Only (prevents iCloud Universal Clipboard
+        // leakage)
+        let expirationDate = Date().addingTimeInterval(Double(SeedConstants.clipboardClearSeconds))
+        UIPasteboard.general.setItems(
+            [["public.utf8-plain-text": mnemonic]],
+            options: [
+                .expirationDate: expirationDate,
+                .localOnly: true
+            ]
+        )
+
+        // 2. In-App Fallback Timer to wipe pasteboard string
         clipboardClearTask = Task {
             try? await Task.sleep(for: .seconds(SeedConstants.clipboardClearSeconds))
             if UIPasteboard.general.string == mnemonic {
                 UIPasteboard.general.string = ""
             }
         }
+
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            copiedSeed = true
+        }
+
         clipboardFadeTask = Task {
-            try? await Task.sleep(for: .seconds(2))
-            withAnimation { self.copiedSeed = false }
+            try? await Task.sleep(for: .seconds(2.5))
+            withAnimation(.easeInOut(duration: 0.2)) {
+                self.copiedSeed = false
+            }
         }
     }
 
@@ -487,98 +549,79 @@ struct RevealQuizSecretPhraseView: View {
             .frame(minHeight: 220)
             .padding(.horizontal, 20)
 
-            // Below Grid Actions (Copy to Clipboard & Hide Toggle)
+            // Below Grid Actions (Symmetric Copy on Left, Hide on Right)
             if isRevealed {
                 VStack(spacing: 8) {
-                    if !copiedSeed && !showCopyWarning {
+                    HStack(spacing: 12) {
+                        // Left: Copy Button
                         Button {
-                            showCopyWarning = true
+                            copySeedToClipboard()
                         } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.subheadline)
-                                Text(String(localized: "button_copy_seed", defaultValue: "Copy to clipboard"))
-                                    .font(.subheadline.weight(.medium))
+                            HStack(spacing: 8) {
+                                Image(systemName: copiedSeed ? "checkmark" : "doc.on.doc")
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text(
+                                    copiedSeed
+                                        ? String(localized: "button_copied", defaultValue: "Copied")
+                                        : String(localized: "button_copy_seed", defaultValue: "Copy Seed")
+                                )
+                                .font(.subheadline.weight(.semibold))
+                            }
+                            .foregroundStyle(copiedSeed ? .green : .white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                            .background(
+                                copiedSeed ? Color.green
+                                    .opacity(0.12) : Color(uiColor: .secondarySystemGroupedBackground)
+                            )
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule().stroke(
+                                    copiedSeed ? Color.green.opacity(0.35) : Color.white.opacity(0.08),
+                                    lineWidth: 1
+                                )
+                            )
+                        }
+
+                        // Right: Hide Button
+                        Button {
+                            let generator = UIImpactFeedbackGenerator(style: .medium)
+                            generator.impactOccurred()
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                                isRevealed = false
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "eye.slash.fill")
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("Hide")
+                                    .font(.subheadline.weight(.semibold))
                             }
                             .foregroundStyle(.white)
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 18)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
                             .background(Color(uiColor: .secondarySystemGroupedBackground))
                             .clipShape(Capsule())
                             .overlay(
                                 Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
                             )
                         }
-                        .padding(.top, 14)
                     }
 
                     if copiedSeed {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark")
-                            Text(String(localized: "button_copied", defaultValue: "Copied"))
+                        HStack(spacing: 5) {
+                            Image(systemName: "timer")
+                                .font(.caption2)
+                            Text("Clipboard clears automatically in 60s")
+                                .font(.caption2.weight(.medium))
                         }
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.green)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 18)
-                        .background(Color.green.opacity(0.12))
-                        .clipShape(Capsule())
-                        .padding(.top, 14)
-                    }
-
-                    if showCopyWarning {
-                        VStack(spacing: 8) {
-                            Text(String(localized: "warning_copy_seed_title", defaultValue: "Copy Seed Words?"))
-                                .font(.caption.bold())
-
-                            Text(String(
-                                localized: "warning_copy_seed_message",
-                                defaultValue: "Clipboard is shared with other apps."
-                            ))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-
-                            HStack(spacing: 12) {
-                                Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
-                                    showCopyWarning = false
-                                }
-                                .font(.caption)
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-
-                                Button(String(localized: "button_copy_anyway", defaultValue: "Copy Anyway")) {
-                                    copySeedToClipboard()
-                                    showCopyWarning = false
-                                }
-                                .font(.caption)
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                            }
-                        }
-                        .padding(12)
-                        .background(Color(uiColor: .tertiarySystemGroupedBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .padding(.top, 8)
-                    }
-
-                    Button {
-                        let generator = UIImpactFeedbackGenerator(style: .light)
-                        generator.impactOccurred()
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                            isRevealed = false
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "eye.slash.fill")
-                            Text("Hide phrase")
-                        }
-                        .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                        .padding(.top, 4)
                     }
-                    .padding(.top, 6)
                 }
                 .padding(.horizontal, 20)
+                .padding(.top, 16)
                 .transition(.opacity)
             }
 
@@ -603,7 +646,7 @@ struct RevealQuizSecretPhraseView: View {
     }
 }
 
-// MARK: - Learn More Sheet (Editorial Luxury Design)
+// MARK: - Learn More Sheet
 
 struct RevealQuizLearnMoreSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -613,106 +656,73 @@ struct RevealQuizLearnMoreSheet: View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 24) {
-                        // Hero Header with Glowing Shield Badge
-                        VStack(spacing: 14) {
-                            ZStack {
-                                Circle()
-                                    .fill(
-                                        RadialGradient(
-                                            colors: [Color.stablePrimary.opacity(0.25), Color.clear],
-                                            center: .center,
-                                            startRadius: 8,
-                                            endRadius: 44
-                                        )
-                                    )
-                                    .frame(width: 88, height: 88)
-
-                                Circle()
-                                    .fill(Color(uiColor: .secondarySystemGroupedBackground))
-                                    .frame(width: 58, height: 58)
-                                    .overlay(
-                                        Circle()
-                                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                                    )
-
+                VStack(spacing: 0) {
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 32) {
+                            // Hero Title Header
+                            VStack(alignment: .leading, spacing: 12) {
                                 Image(systemName: "shield.checkered")
-                                    .font(.system(size: 26, weight: .semibold))
+                                    .font(.system(size: 40))
                                     .foregroundStyle(Color.stablePrimary)
-                            }
-                            .padding(.top, 8)
 
-                            VStack(spacing: 6) {
                                 Text("Self-Custody Guidelines")
-                                    .font(.title2.weight(.bold))
+                                    .font(.system(size: 28, weight: .bold, design: .default))
                                     .foregroundStyle(.white)
 
                                 Text(
-                                    "Your Secret Recovery Phrase is the cryptographic root of your entire wallet. Keep these rules top of mind."
+                                    "Your Secret Recovery Phrase gives complete ownership of your Bitcoin and Lightning funds. Follow these core principles to stay secure."
                                 )
-                                .font(.subheadline)
+                                .font(.body)
                                 .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 20)
-                                .lineSpacing(3)
+                                .lineSpacing(4)
+                            }
+                            .padding(.top, 16)
+
+                            // Apple HIG Feature List
+                            VStack(spacing: 24) {
+                                appleGuidelineRow(
+                                    icon: "key.horizontal.fill",
+                                    title: "Your Words Are Your Master Key",
+                                    desc: "The 12 words mathematically derive all private keys in your wallet. Anyone with these words has full, irreversible control of your funds."
+                                )
+
+                                appleGuidelineRow(
+                                    icon: "icloud.slash",
+                                    title: "No Server Backups",
+                                    desc: "Stable Channels is non-custodial. We never store or transmit your keys. If you lose your phrase, no one can recover your wallet."
+                                )
+
+                                appleGuidelineRow(
+                                    icon: "exclamationmark.shield.fill",
+                                    title: "Beware of Impersonators",
+                                    desc: "Support staff, developers, or bots will never ask for your recovery phrase. Never share it with anyone under any circumstance."
+                                )
+
+                                appleGuidelineRow(
+                                    icon: "lock.shield.fill",
+                                    title: "Store Offline on Physical Media",
+                                    desc: "Write your words on paper or stamp them on metal kept in a private, secure location. Never take screenshots or save digital copies in cloud notes."
+                                )
                             }
                         }
-                        .padding(.horizontal, 16)
-
-                        // 4 Luxury Security Pillar Cards
-                        VStack(spacing: 12) {
-                            luxuryGuidelineCard(
-                                icon: "key.fill",
-                                iconColor: Color.stablePrimary,
-                                number: "01",
-                                title: "Your Master Cryptographic Key",
-                                desc: "Your recovery words mathematically derive all private keys. Anyone with these 12 words has full, irreversible ownership of your funds."
-                            )
-
-                            luxuryGuidelineCard(
-                                icon: "server.rack",
-                                iconColor: Color.orange,
-                                number: "02",
-                                title: "Zero Server Backups",
-                                desc: "Stable Channels is 100% self-custodial. We never store or transmit your keys. If you lose your phrase, no one in the world can restore it."
-                            )
-
-                            luxuryGuidelineCard(
-                                icon: "exclamationmark.shield.fill",
-                                iconColor: Color.red,
-                                number: "03",
-                                title: "Beware of Impersonators",
-                                desc: "No support agent, team member, or bot will EVER ask for your phrase. Anyone asking for your words is an active scammer."
-                            )
-
-                            luxuryGuidelineCard(
-                                icon: "lock.square.stack.fill",
-                                iconColor: Color.cyan,
-                                number: "04",
-                                title: "Store Offline on Physical Media",
-                                desc: "Engrave on steel or write on paper kept in a secure vault. Never take screenshots, upload to cloud storage, or paste into digital notes."
-                            )
-                        }
-                        .padding(.horizontal, 20)
-
-                        // Bottom Understood Action Button
-                        Button {
-                            dismiss()
-                        } label: {
-                            Text("I Understand")
-                                .font(.headline)
-                                .foregroundStyle(.black)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 52)
-                                .background(Color.white)
-                                .clipShape(Capsule())
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.top, 8)
+                        .padding(.horizontal, 28)
                         .padding(.bottom, 24)
                     }
-                    .padding(.top, 12)
+
+                    // Bottom Action Button
+                    Button {
+                        dismiss()
+                    } label: {
+                        Text("Done")
+                            .font(.headline)
+                            .foregroundStyle(.black)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 52)
+                            .background(Color.white)
+                            .clipShape(Capsule())
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -731,59 +741,28 @@ struct RevealQuizLearnMoreSheet: View {
         .preferredColorScheme(.dark)
     }
 
-    private func luxuryGuidelineCard(
+    private func appleGuidelineRow(
         icon: String,
-        iconColor: Color,
-        number: String,
         title: String,
         desc: String
     ) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            // Icon Badge
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(iconColor.opacity(0.12))
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(iconColor.opacity(0.24), lineWidth: 1)
-                    )
-
-                Image(systemName: icon)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(iconColor)
-            }
+        HStack(alignment: .top, spacing: 18) {
+            Image(systemName: icon)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(Color.stablePrimary)
+                .frame(width: 32, alignment: .center)
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-
-                    Spacer()
-
-                    Text(number)
-                        .font(.caption2.monospaced().bold())
-                        .foregroundStyle(iconColor.opacity(0.8))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(iconColor.opacity(0.1))
-                        .clipShape(Capsule())
-                }
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
 
                 Text(desc)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineSpacing(2)
+                    .lineSpacing(3)
             }
         }
-        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
     }
 }

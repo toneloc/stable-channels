@@ -1,12 +1,18 @@
 import Foundation
 import Observation
 
+enum QuizNavigationDirection: Equatable {
+    case forward
+    case backward
+}
+
 /// State machine and view model for the recovery phrase reveal quiz.
 @Observable
 final class RevealRecoveryQuizViewModel {
     private let questionsProvider: any RevealQuizQuestionsProviderProtocol
 
     var currentStep: RevealQuizStep = .intro
+    var navigationDirection: QuizNavigationDirection = .forward
     var isShowingLearnMore: Bool = false
     let mnemonic: String
     let questions: [RevealQuizQuestion]
@@ -38,6 +44,7 @@ final class RevealRecoveryQuizViewModel {
     // MARK: - Actions
 
     func startQuiz() {
+        navigationDirection = .forward
         guard !questions.isEmpty else {
             currentStep = .revealed
             return
@@ -46,6 +53,7 @@ final class RevealRecoveryQuizViewModel {
     }
 
     func answerQuestion(questionIndex: Int, optionIndex: Int) {
+        navigationDirection = .forward
         guard questionIndex >= 0, questionIndex < questions.count else { return }
         let question = questions[questionIndex]
         let isCorrect = question.isCorrect(optionIndex: optionIndex)
@@ -53,6 +61,7 @@ final class RevealRecoveryQuizViewModel {
     }
 
     func continueFromFeedback(questionIndex: Int, isCorrect: Bool) {
+        navigationDirection = .forward
         if isCorrect {
             let nextIndex = questionIndex + 1
             if nextIndex < questions.count {
@@ -67,6 +76,7 @@ final class RevealRecoveryQuizViewModel {
     }
 
     func goBack() {
+        navigationDirection = .backward
         switch currentStep {
         case .intro:
             break

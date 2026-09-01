@@ -34,10 +34,7 @@ struct RevealRecoveryPhraseSheet: View {
                                 viewModel.isShowingLearnMore = true
                             }
                         )
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .trailing)),
-                            removal: .opacity.combined(with: .move(edge: .leading))
-                        ))
+                        .transition(stepTransition)
 
                     case let .question(index):
                         if index < viewModel.questions.count {
@@ -52,10 +49,7 @@ struct RevealRecoveryPhraseSheet: View {
                                     viewModel.isShowingLearnMore = true
                                 }
                             )
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .trailing)),
-                                removal: .opacity.combined(with: .move(edge: .leading))
-                            ))
+                            .transition(stepTransition)
                         }
 
                     case let .feedback(questionIndex, isCorrect, _):
@@ -75,10 +69,7 @@ struct RevealRecoveryPhraseSheet: View {
                                     viewModel.isShowingLearnMore = true
                                 }
                             )
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .move(edge: .trailing)),
-                                removal: .opacity.combined(with: .move(edge: .leading))
-                            ))
+                            .transition(stepTransition)
                         }
 
                     case .revealed:
@@ -88,10 +79,7 @@ struct RevealRecoveryPhraseSheet: View {
                                 dismiss()
                             }
                         )
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .trailing)),
-                            removal: .opacity.combined(with: .move(edge: .leading))
-                        ))
+                        .transition(stepTransition)
                     }
                 }
             }
@@ -128,5 +116,19 @@ struct RevealRecoveryPhraseSheet: View {
         }
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled(true)
+    }
+
+    private var stepTransition: AnyTransition {
+        if viewModel.navigationDirection == .forward {
+            return .asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                removal: .opacity.combined(with: .move(edge: .leading))
+            )
+        } else {
+            return .asymmetric(
+                insertion: .opacity.combined(with: .move(edge: .leading)),
+                removal: .opacity.combined(with: .move(edge: .trailing))
+            )
+        }
     }
 }

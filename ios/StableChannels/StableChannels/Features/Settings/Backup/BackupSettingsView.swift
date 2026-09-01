@@ -136,7 +136,7 @@ struct BackupSettingsView: View {
                 importMnemonic(mnemonic)
             }
         }
-        .sheet(isPresented: $showingRevealPhraseSheet) {
+        .fullScreenCover(isPresented: $showingRevealPhraseSheet) {
             if let words = appState.nodeService.savedMnemonic, !words.isEmpty {
                 RevealRecoveryPhraseSheet(mnemonic: words)
             }
