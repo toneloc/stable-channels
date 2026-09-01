@@ -363,44 +363,125 @@ struct RevealQuizFeedbackView: View {
     }
 }
 
-// MARK: - Secret Phrase Revealed View
+// MARK: - Secret Phrase Revealed View (with Tap to Reveal Privacy Shield)
 
 struct RevealQuizSecretPhraseView: View {
     let mnemonic: String
     let onDone: () -> Void
 
+    @State private var isRevealed: Bool = false
+
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 20) {
-                    // Security Warning Banner
-                    HStack(spacing: 10) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.title2)
-                            .foregroundStyle(Color.stablePrimary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Secret Recovery Phrase")
-                                .font(.headline)
-                                .foregroundStyle(.primary)
-                            Text("Keep these words strictly confidential. Never share them with anyone.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                VStack(spacing: 24) {
+                    // Header Subtitle Description
+                    Text("Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
+                        .lineSpacing(3)
+
+                    // Card Container: Privacy Shield (Tap to Reveal) or Unmasked Seed
+                    ZStack {
+                        if !isRevealed {
+                            // Tap to Reveal Privacy Shield Card
+                            Button {
+                                let generator = UIImpactFeedbackGenerator(style: .medium)
+                                generator.impactOccurred()
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                                    isRevealed = true
+                                }
+                            } label: {
+                                VStack(spacing: 16) {
+                                    Spacer(minLength: 40)
+
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.white.opacity(0.06))
+                                            .frame(width: 64, height: 64)
+
+                                        Image(systemName: "eye.slash")
+                                            .font(.system(size: 28, weight: .medium))
+                                            .foregroundStyle(.white)
+                                    }
+
+                                    VStack(spacing: 6) {
+                                        Text("Tap to reveal")
+                                            .font(.title3.weight(.bold))
+                                            .foregroundStyle(.white)
+
+                                        Text("Make sure no one is watching your screen.")
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.center)
+                                            .padding(.horizontal, 20)
+                                    }
+
+                                    Spacer(minLength: 40)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .frame(minHeight: 260)
+                                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        } else {
+                            // Unmasked Seed Words View
+                            VStack(spacing: 16) {
+                                HStack {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "lock.shield.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(Color.stablePrimary)
+                                        Text("Confidential")
+                                            .font(.caption.bold())
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Button {
+                                        let generator = UIImpactFeedbackGenerator(style: .light)
+                                        generator.impactOccurred()
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                                            isRevealed = false
+                                        }
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "eye.slash.fill")
+                                            Text("Hide")
+                                        }
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.stablePrimary)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(Color.stablePrimary.opacity(0.12))
+                                        .clipShape(Capsule())
+                                    }
+                                }
+                                .padding(.horizontal, 4)
+
+                                SeedDisplayView(words: mnemonic)
+                            }
+                            .padding(16)
+                            .background(Color(uiColor: .secondarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                            )
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-                    .background(Color(uiColor: .secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                    )
                     .padding(.horizontal, 20)
-                    .padding(.top, 12)
-
-                    // Seed Display Component
-                    SeedDisplayView(words: mnemonic)
-                        .padding(.horizontal, 20)
                 }
             }
 
@@ -415,6 +496,7 @@ struct RevealQuizSecretPhraseView: View {
                     .clipShape(Capsule())
             }
             .padding(.horizontal, 24)
+            .padding(.top, 12)
             .padding(.bottom, 20)
         }
     }
