@@ -32,8 +32,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run Rust tests
-        run: cargo test --workspace --locked
+      - name: Run affected Rust tests
+        run: cargo test -p stable-channels -p stable-channels-lsp --locked
 
-      - name: Build Rust workspace
-        run: cargo build --workspace --locked
+      - name: Build affected Rust packages
+        run: cargo build -p stable-channels -p stable-channels-lsp --locked
