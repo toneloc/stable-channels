@@ -164,9 +164,14 @@
 		49D1E98B36290E1046BCBD0C /* ActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2229F078D1812443B9072 /* ActionButton.swift */; };
 		49AD1B512FEE82000015A7D1 /* RevealRecoveryQuizModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B512FEE82000015A7D0 /* RevealRecoveryQuizModels.swift */; };
 		49AD1B522FEE82000015A7D1 /* RevealRecoveryQuizViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B522FEE82000015A7D0 /* RevealRecoveryQuizViewModel.swift */; };
-		49AD1B532FEE82000015A7D1 /* RevealRecoveryPhraseViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B532FEE82000015A7D0 /* RevealRecoveryPhraseViews.swift */; };
 		49AD1B542FEE82000015A7D1 /* RevealRecoveryPhraseSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B542FEE82000015A7D0 /* RevealRecoveryPhraseSheet.swift */; };
 		49AD1B552FEE82000015A7D1 /* RevealRecoveryQuizViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B552FEE82000015A7D0 /* RevealRecoveryQuizViewModelTests.swift */; };
+		49AD1B612FEE82000015A7D1 /* RevealQuizPortalIllustration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B612FEE82000015A7D0 /* RevealQuizPortalIllustration.swift */; };
+		49AD1B622FEE82000015A7D1 /* RevealQuizIntroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B622FEE82000015A7D0 /* RevealQuizIntroView.swift */; };
+		49AD1B632FEE82000015A7D1 /* RevealQuizQuestionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B632FEE82000015A7D0 /* RevealQuizQuestionView.swift */; };
+		49AD1B642FEE82000015A7D1 /* RevealQuizFeedbackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B642FEE82000015A7D0 /* RevealQuizFeedbackView.swift */; };
+		49AD1B652FEE82000015A7D1 /* RevealQuizSecretPhraseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B652FEE82000015A7D0 /* RevealQuizSecretPhraseView.swift */; };
+		49AD1B662FEE82000015A7D1 /* RevealQuizLearnMoreSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B662FEE82000015A7D0 /* RevealQuizLearnMoreSheet.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -480,9 +485,14 @@
 		49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeActionButtonsView.swift; sourceTree = "<group>"; };
 		49AD1B512FEE82000015A7D0 /* RevealRecoveryQuizModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealRecoveryQuizModels.swift; sourceTree = "<group>"; };
 		49AD1B522FEE82000015A7D0 /* RevealRecoveryQuizViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealRecoveryQuizViewModel.swift; sourceTree = "<group>"; };
-		49AD1B532FEE82000015A7D0 /* RevealRecoveryPhraseViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealRecoveryPhraseViews.swift; sourceTree = "<group>"; };
 		49AD1B542FEE82000015A7D0 /* RevealRecoveryPhraseSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealRecoveryPhraseSheet.swift; sourceTree = "<group>"; };
 		49AD1B552FEE82000015A7D0 /* RevealRecoveryQuizViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealRecoveryQuizViewModelTests.swift; sourceTree = "<group>"; };
+		49AD1B612FEE82000015A7D0 /* RevealQuizPortalIllustration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizPortalIllustration.swift; sourceTree = "<group>"; };
+		49AD1B622FEE82000015A7D0 /* RevealQuizIntroView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizIntroView.swift; sourceTree = "<group>"; };
+		49AD1B632FEE82000015A7D0 /* RevealQuizQuestionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizQuestionView.swift; sourceTree = "<group>"; };
+		49AD1B642FEE82000015A7D0 /* RevealQuizFeedbackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizFeedbackView.swift; sourceTree = "<group>"; };
+		49AD1B652FEE82000015A7D0 /* RevealQuizSecretPhraseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizSecretPhraseView.swift; sourceTree = "<group>"; };
+		49AD1B662FEE82000015A7D0 /* RevealQuizLearnMoreSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizLearnMoreSheet.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -840,8 +850,13 @@
 		49ACB1D1301BCC2A00C3B1A7 /* Seed */ = {
 			isa = PBXGroup;
 			children = (
+				49AD1B642FEE82000015A7D0 /* RevealQuizFeedbackView.swift */,
+				49AD1B622FEE82000015A7D0 /* RevealQuizIntroView.swift */,
+				49AD1B662FEE82000015A7D0 /* RevealQuizLearnMoreSheet.swift */,
+				49AD1B612FEE82000015A7D0 /* RevealQuizPortalIllustration.swift */,
+				49AD1B632FEE82000015A7D0 /* RevealQuizQuestionView.swift */,
+				49AD1B652FEE82000015A7D0 /* RevealQuizSecretPhraseView.swift */,
 				49AD1B542FEE82000015A7D0 /* RevealRecoveryPhraseSheet.swift */,
-				49AD1B532FEE82000015A7D0 /* RevealRecoveryPhraseViews.swift */,
 				49AD1B512FEE82000015A7D0 /* RevealRecoveryQuizModels.swift */,
 				49AD1B522FEE82000015A7D0 /* RevealRecoveryQuizViewModel.swift */,
 				49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */,
@@ -1477,7 +1492,12 @@
 				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				49AD1B512FEE82000015A7D1 /* RevealRecoveryQuizModels.swift in Sources */,
 				49AD1B522FEE82000015A7D1 /* RevealRecoveryQuizViewModel.swift in Sources */,
-				49AD1B532FEE82000015A7D1 /* RevealRecoveryPhraseViews.swift in Sources */,
+				49AD1B612FEE82000015A7D1 /* RevealQuizPortalIllustration.swift in Sources */,
+				49AD1B622FEE82000015A7D1 /* RevealQuizIntroView.swift in Sources */,
+				49AD1B632FEE82000015A7D1 /* RevealQuizQuestionView.swift in Sources */,
+				49AD1B642FEE82000015A7D1 /* RevealQuizFeedbackView.swift in Sources */,
+				49AD1B652FEE82000015A7D1 /* RevealQuizSecretPhraseView.swift in Sources */,
+				49AD1B662FEE82000015A7D1 /* RevealQuizLearnMoreSheet.swift in Sources */,
 				49AD1B542FEE82000015A7D1 /* RevealRecoveryPhraseSheet.swift in Sources */,
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,

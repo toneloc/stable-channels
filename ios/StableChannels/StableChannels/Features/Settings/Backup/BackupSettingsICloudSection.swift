@@ -59,7 +59,7 @@ struct BackupSettingsICloudSection: View {
                         .foregroundStyle(showBackupSuccess ? .green : .blue)
                 }
                 Text(showBackupSuccess
-                    ? "Backup complete"
+                    ? String(localized: "backup_complete", defaultValue: "Backup complete")
                     : String(localized: "backup_now", defaultValue: "Backup Now"))
                 Spacer()
                 Image(systemName: "chevron.right")

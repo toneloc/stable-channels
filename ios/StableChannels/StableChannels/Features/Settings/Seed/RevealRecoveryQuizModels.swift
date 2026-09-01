@@ -117,3 +117,63 @@ struct DefaultRevealQuizQuestionsProvider: RevealQuizQuestionsProviderProtocol {
         ]
     }
 }
+
+/// Model representing a single self-custody educational guideline in the Learn More sheet.
+struct SelfCustodyGuidelineItem: Identifiable, Equatable {
+    let id: String
+    let icon: String
+    let title: String
+    let description: String
+}
+
+/// Protocol providing guidelines for self-custody education.
+protocol SelfCustodyGuidelinesProviderProtocol {
+    func getGuidelines() -> [SelfCustodyGuidelineItem]
+}
+
+/// Default provider for self-custody guidelines.
+struct DefaultSelfCustodyGuidelinesProvider: SelfCustodyGuidelinesProviderProtocol {
+    func getGuidelines() -> [SelfCustodyGuidelineItem] {
+        [
+            SelfCustodyGuidelineItem(
+                id: "master_key",
+                icon: "key.horizontal.fill",
+                title: String(localized: "guideline_master_key_title", defaultValue: "Your Words Are Your Master Key"),
+                description: String(
+                    localized: "guideline_master_key_desc",
+                    defaultValue: "The 12 words mathematically derive all private keys in your wallet. Anyone with these words has full, irreversible control of your funds."
+                )
+            ),
+            SelfCustodyGuidelineItem(
+                id: "no_server_backups",
+                icon: "icloud.slash",
+                title: String(localized: "guideline_no_backups_title", defaultValue: "No Server Backups"),
+                description: String(
+                    localized: "guideline_no_backups_desc",
+                    defaultValue: "Stable Channels is non-custodial. We never store or transmit your keys. If you lose your phrase, no one can recover your wallet."
+                )
+            ),
+            SelfCustodyGuidelineItem(
+                id: "beware_impersonators",
+                icon: "exclamationmark.shield.fill",
+                title: String(localized: "guideline_impersonators_title", defaultValue: "Beware of Impersonators"),
+                description: String(
+                    localized: "guideline_impersonators_desc",
+                    defaultValue: "Support staff, developers, or bots will never ask for your recovery phrase. Never share it with anyone under any circumstance."
+                )
+            ),
+            SelfCustodyGuidelineItem(
+                id: "store_offline",
+                icon: "lock.shield.fill",
+                title: String(
+                    localized: "guideline_store_offline_title",
+                    defaultValue: "Store Offline on Physical Media"
+                ),
+                description: String(
+                    localized: "guideline_store_offline_desc",
+                    defaultValue: "Write your words on paper or stamp them on metal kept in a private, secure location. Never take screenshots or save digital copies in cloud notes."
+                )
+            )
+        ]
+    }
+}

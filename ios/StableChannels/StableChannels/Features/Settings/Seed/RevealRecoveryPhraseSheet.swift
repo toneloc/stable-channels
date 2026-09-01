@@ -87,26 +87,12 @@ struct RevealRecoveryPhraseSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if viewModel.canGoBack {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                viewModel.goBack()
-                            }
-                        } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.white)
-                        }
-                    }
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         dismiss()
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
                     }
                 }
             }

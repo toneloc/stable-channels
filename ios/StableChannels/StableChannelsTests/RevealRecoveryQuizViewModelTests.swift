@@ -121,4 +121,31 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         XCTAssertEqual(vm.currentStep, .revealed)
         XCTAssertFalse(vm.canGoBack)
     }
+
+    func testAnswerQuestionOutOfBoundsIsNoOp() {
+        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        vm.startQuiz()
+        vm.answerQuestion(questionIndex: -1, optionIndex: 0)
+        XCTAssertEqual(vm.currentStep, .question(index: 0))
+
+        vm.answerQuestion(questionIndex: 99, optionIndex: 0)
+        XCTAssertEqual(vm.currentStep, .question(index: 0))
+    }
+
+    func testGoBackFromIntroIsNoOp() {
+        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        XCTAssertEqual(vm.currentStep, .intro)
+        vm.goBack()
+        XCTAssertEqual(vm.currentStep, .intro)
+    }
+
+    func testDefaultGuidelinesProvider() {
+        let provider = DefaultSelfCustodyGuidelinesProvider()
+        let guidelines = provider.getGuidelines()
+        XCTAssertEqual(guidelines.count, 4)
+        XCTAssertEqual(guidelines[0].id, "master_key")
+        XCTAssertEqual(guidelines[1].id, "no_server_backups")
+        XCTAssertEqual(guidelines[2].id, "beware_impersonators")
+        XCTAssertEqual(guidelines[3].id, "store_offline")
+    }
 }
