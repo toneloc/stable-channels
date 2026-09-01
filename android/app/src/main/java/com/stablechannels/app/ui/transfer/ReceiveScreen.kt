@@ -176,7 +176,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "Get your first payment over Lightning to activate your account",
+                        "Receive a payment over Lightning to activate your Lightning account.",
                         modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall
                     )

@@ -400,14 +400,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                             PendingRow(text, effectiveTxid, context)
                             if (!hasReadyChannel) {
-                                Text("Get your first payment over Lightning to activate your account",
+                                Text("Receive a payment over Lightning to activate your account.",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         } else {
                             // 4. No channel, confirmed deposit — just needs Lightning
                             Spacer(Modifier.height(4.dp))
-                            Text("Get your first payment over Lightning to activate your account",
+                            Text("Receive a payment over Lightning to activate your account.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

@@ -46,9 +46,10 @@ class NodeService(private val context: Context) {
     private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Boolean>>>(Channel.RENDEZVOUS)
     val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Boolean>>> = _eventChannel
 
+    @Synchronized
     fun start(network: Network, esploraURL: String, mnemonic: String?, strictLspConnect: Boolean = false) {
         if (node != null || _isRunning.value) {
-            throw IllegalStateException("LDK node already running")
+            throw AlreadyRunningException()
         }
         if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
             throw IllegalStateException(
@@ -56,12 +57,12 @@ class NodeService(private val context: Context) {
             )
         }
 
-        val dataDir = Constants.userDataDir(context)
-        val lspPubkey = LspPreferencesManager.getLspPubkey(context)
-        val lspAddress = LspPreferencesManager.getLspAddress(context)
         var ldkNode: Node? = null
 
         try {
+            val dataDir = Constants.userDataDir(context)
+            val lspPubkey = LspPreferencesManager.getLspPubkey(context)
+            val lspAddress = LspPreferencesManager.getLspAddress(context)
             val anchorConfig = AnchorChannelsConfig(
                 trustedPeersNoReserve = listOf(lspPubkey),
                 perChannelReserveSats = 25_000UL
@@ -174,6 +175,10 @@ class NodeService(private val context: Context) {
     }
 
     fun stop() {
+        // A start that has acquired the process-wide owner may still be building the node.
+        // Do not release that owner until start() either succeeds or cleans up its own failure.
+        if (node == null && !_isRunning.value) return
+
         try {
             eventJob?.cancel()
             eventJob = null
@@ -404,6 +409,8 @@ class NodeService(private val context: Context) {
     }
 
     class NodeServiceError : Exception("Node not running")
+
+    class AlreadyRunningException : IllegalStateException("LDK node already running")
 
     /** Thrown by [sendStabilityPayment] when the Lightning wallet's chain sync is too old
      *  to safely pay. [syncAgeSecs] is null when the wallet has never synced. */
