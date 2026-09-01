@@ -190,14 +190,32 @@ struct BuyView: View {
         }
     }
 
-    private var tradeConfirmed: Bool {
-        guard let pid = pendingPaymentId else { return false }
-        return appState.pendingTradePayments[pid] == nil
+    // Only a signed, correlated acceptance confirms the order and only a signed
+    // rejection fails it. Absence from the pending map proves nothing — a rejection
+    // also clears it, and the old absence heuristic showed "Order Confirmed" for
+    // rejected trades (caught by e2e flow 13).
+    private var tradeOutcome: AppState.TradeOutcome? {
+        guard let pid = pendingPaymentId else { return nil }
+        return appState.tradeOutcomes[pid]
     }
+
+    private var tradeConfirmed: Bool { tradeOutcome?.accepted == true }
+    private var tradeRejected: Bool { tradeOutcome?.accepted == false }
 
     private var doneScreen: some View {
         VStack(spacing: 20) {
-            if tradeConfirmed {
+            if tradeRejected {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.red)
+
+                Text(String(localized: "status_trade_rejected", defaultValue: "Order Rejected"))
+                    .font(.title2.bold())
+
+                Text(tradeOutcome?.message ?? "The provider could not process the trade.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else if tradeConfirmed {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 64))
                     .foregroundStyle(.green)

@@ -179,6 +179,17 @@ class AppState {
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
 
+    /// Terminal result of a correlated trade, keyed by its fee payment id. Only a signed
+    /// acceptance or rejection lands here — the trade sheets read this instead of inferring
+    /// success from absence in the pending map (a rejection also clears pending; the old
+    /// absence heuristic showed "Order Confirmed" for rejected trades — e2e flow 13).
+    struct TradeOutcome: Equatable {
+        let accepted: Bool
+        let message: String
+    }
+
+    var tradeOutcomes: [String: TradeOutcome] = [:]
+
     // Pending splice info
     var pendingSplice: PendingSplice?
 
@@ -1545,6 +1556,14 @@ class AppState {
             case .duplicate:
                 if let paymentId = result.paymentId {
                     pendingTradePayments.removeValue(forKey: paymentId)
+                    if case .rejected(let rejection) = message {
+                        tradeOutcomes[paymentId] = TradeOutcome(
+                            accepted: false,
+                            message: TradeProtocol.rejectionMessage(rejection.reasonCode)
+                        )
+                    } else {
+                        tradeOutcomes[paymentId] = TradeOutcome(accepted: true, message: "")
+                    }
                 }
                 guard let channel = try? databaseService.channelRepo.loadChannel(
                     userChannelId: stableChannel.userChannelId
@@ -1559,6 +1578,14 @@ class AppState {
             case .applied:
                 if let paymentId = result.paymentId {
                     pendingTradePayments.removeValue(forKey: paymentId)
+                    if case .rejected(let rejection) = message {
+                        tradeOutcomes[paymentId] = TradeOutcome(
+                            accepted: false,
+                            message: TradeProtocol.rejectionMessage(rejection.reasonCode)
+                        )
+                    } else {
+                        tradeOutcomes[paymentId] = TradeOutcome(accepted: true, message: "")
+                    }
                 }
                 guard let channel = try? databaseService.channelRepo.loadChannel(
                     userChannelId: stableChannel.userChannelId

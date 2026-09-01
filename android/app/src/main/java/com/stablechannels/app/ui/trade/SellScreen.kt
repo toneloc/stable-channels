@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -259,10 +260,30 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
             }
 
             TradeStep.DONE -> {
-                val pendingPayments by appState.pendingTradePayments.collectAsState()
-                val isConfirmed = pendingPaymentId != null && !pendingPayments.containsKey(pendingPaymentId)
+                // Only a signed, correlated acceptance confirms the order and only a signed
+                // rejection fails it. Absence from the pending map proves nothing — a
+                // rejection also clears it, and the old absence heuristic showed
+                // "Order Confirmed" for rejected trades (caught by e2e flow 13).
+                val tradeOutcomes by appState.tradeOutcomes.collectAsState()
+                val outcome = pendingPaymentId?.let { tradeOutcomes[it] }
+                val isConfirmed = outcome?.accepted == true
+                val isRejected = outcome?.accepted == false
 
-                if (isConfirmed) {
+                if (isRejected) {
+                    Icon(
+                        Icons.Filled.Cancel,
+                        contentDescription = "Rejected",
+                        tint = Color(0xFFEF4444),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("Order Rejected", style = MaterialTheme.typography.headlineMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        outcome?.message ?: "The provider could not process the trade.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else if (isConfirmed) {
                     Icon(
                         Icons.Filled.CheckCircle,
                         contentDescription = "Confirmed",
@@ -287,7 +308,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                if (isConfirmed) {
+                if (isConfirmed || isRejected) {
                     Button(onClick = onDismiss) { Text("Done") }
                 }
             }

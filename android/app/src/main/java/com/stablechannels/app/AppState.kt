@@ -221,6 +221,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
+
+    /** Terminal result of a correlated trade, keyed by its fee payment id. Only a signed
+     *  acceptance or rejection lands here — the trade sheets read this instead of inferring
+     *  success from absence in the pending map (a rejection also clears pending). */
+    data class TradeOutcome(val accepted: Boolean, val message: String)
+    private val _tradeOutcomes = MutableStateFlow<Map<String, TradeOutcome>>(emptyMap())
+    val tradeOutcomes: StateFlow<Map<String, TradeOutcome>> = _tradeOutcomes
     var pendingSplice: PendingSplice? = null
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
@@ -1064,6 +1071,13 @@ class AppState(private val context: Context) : ViewModel() {
             TradeControlApplyStatus.DUPLICATE -> {
                 result.paymentId?.let { paymentId ->
                     _pendingTradePayments.value = _pendingTradePayments.value - paymentId
+                    _tradeOutcomes.value = _tradeOutcomes.value + (
+                        paymentId to if (message is TradeControlMessage.Rejected) {
+                            TradeOutcome(false, TradeProtocol.rejectionMessage(message.reasonCode))
+                        } else {
+                            TradeOutcome(true, "")
+                        }
+                    )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: throw RetryableSyncException("Duplicate result channel could not be reloaded")
@@ -1080,6 +1094,13 @@ class AppState(private val context: Context) : ViewModel() {
             TradeControlApplyStatus.APPLIED -> {
                 result.paymentId?.let { paymentId ->
                     _pendingTradePayments.value = _pendingTradePayments.value - paymentId
+                    _tradeOutcomes.value = _tradeOutcomes.value + (
+                        paymentId to if (message is TradeControlMessage.Rejected) {
+                            TradeOutcome(false, TradeProtocol.rejectionMessage(message.reasonCode))
+                        } else {
+                            TradeOutcome(true, "")
+                        }
+                    )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: throw RetryableSyncException("Applied result channel could not be reloaded")
