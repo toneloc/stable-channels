@@ -8,14 +8,17 @@ options:
 
 packages:
   ldk-node:
-    url: https://github.com/lightningdevkit/ldk-node.git
-    exactVersion: "0.7.0"
+    url: https://github.com/toneloc/ldk-node.git
+    exactVersion: "0.7.5"
   KeychainAccess:
     url: https://github.com/kishikawakatsumi/KeychainAccess.git
     from: "4.2.2"
   CodeScanner:
     url: https://github.com/twostraws/CodeScanner.git
     from: "2.5.0"
+  QRCode:
+    url: https://github.com/dagronf/QRCode.git
+    from: "28.0.2"
 
 targets:
   StableChannels:
@@ -45,6 +48,7 @@ targets:
         product: LDKNode
       - package: KeychainAccess
       - package: CodeScanner
+      - package: QRCode
       - target: NotificationService
     info:
       path: StableChannels/Info.plist
