@@ -403,6 +403,21 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
     // MARK: - Connect / Disconnect Lifecycle
 
+    /// The delegate callback flips `isConnected` on an async MainActor hop, so a single
+    /// fixed sleep flakes on loaded CI runners (the hop simply hasn't run yet). Poll
+    /// until the flag turns true or a generous deadline passes, then assert.
+    private func waitForConnected(file: StaticString = #filePath, line: UInt = #line) {
+        let exp = expectation(description: "isConnected becomes true")
+        Task { @MainActor in
+            for _ in 0..<300 where !service.isConnected {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 5.0)
+        XCTAssertTrue(service.isConnected, "service never reported connected", file: file, line: line)
+    }
+
     func testConnectDoesNotSetIsConnectedSynchronously() {
         XCTAssertFalse(service.isConnected)
 
@@ -422,16 +437,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             didOpenWithProtocol: nil
         )
 
-        // The delegate fires an async task on MainActor, so we need to wait a beat
-        let exp = expectation(description: "isConnected becomes true")
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 10_000_000)
-            if service.isConnected {
-                exp.fulfill()
-            }
-        }
-        wait(for: [exp], timeout: 1.0)
-        XCTAssertTrue(service.isConnected)
+        waitForConnected()
     }
 
     func testDisconnectClearsIsConnected() throws {
@@ -441,15 +447,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             didOpenWithProtocol: nil
         )
 
-        let exp = expectation(description: "isConnected becomes true")
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 10_000_000)
-            if service.isConnected {
-                exp.fulfill()
-            }
-        }
-        wait(for: [exp], timeout: 1.0)
-        XCTAssertTrue(service.isConnected)
+        waitForConnected()
 
         service.disconnect()
 
@@ -540,15 +538,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             didOpenWithProtocol: nil
         )
 
-        let exp = expectation(description: "isConnected becomes true")
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 10_000_000)
-            if service.isConnected {
-                exp.fulfill()
-            }
-        }
-        wait(for: [exp], timeout: 1.0)
-        XCTAssertTrue(service.isConnected)
+        waitForConnected()
 
         service.trackAddress("bc1qmore")
 
