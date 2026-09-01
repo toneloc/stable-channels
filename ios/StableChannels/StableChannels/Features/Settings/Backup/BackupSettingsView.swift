@@ -24,6 +24,7 @@ struct BackupSettingsView: View {
     @State private var isImportingSeed = false
     @State private var showingOverwriteAlert = false
     @State private var isCheckingRemote = false
+    @State private var showingRevealPhraseSheet = false
 
     // MARK: - Computed Properties
 
@@ -135,6 +136,11 @@ struct BackupSettingsView: View {
                 importMnemonic(mnemonic)
             }
         }
+        .sheet(isPresented: $showingRevealPhraseSheet) {
+            if let words = appState.nodeService.savedMnemonic, !words.isEmpty {
+                RevealRecoveryPhraseSheet(mnemonic: words)
+            }
+        }
         .alert("Delete Backup?", isPresented: $showingDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
@@ -153,14 +159,15 @@ struct BackupSettingsView: View {
     private var seedSection: some View {
         Section {
             Button {
-                showSeedWords.toggle()
+                showingRevealPhraseSheet = true
             } label: {
                 HStack {
-                    Image(systemName: showSeedWords ? "eye.slash.fill" : "eye.fill")
+                    Image(systemName: "eye.fill")
                         .foregroundStyle(Color.stablePrimary)
-                    Text(showSeedWords
-                        ? String(localized: "button_hide_seed", defaultValue: "Hide Seed Words")
-                        : String(localized: "button_view_seed", defaultValue: "View Seed Words"))
+                    Text(String(
+                        localized: "button_reveal_recovery_phrase",
+                        defaultValue: "Reveal Secret Recovery Phrase"
+                    ))
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption)
@@ -168,10 +175,7 @@ struct BackupSettingsView: View {
                 }
             }
             .foregroundStyle(.primary)
-
-            if showSeedWords, let words = appState.nodeService.savedMnemonic, !words.isEmpty {
-                SeedDisplayView(words: words)
-            }
+            .disabled(appState.nodeService.savedMnemonic == nil)
         } header: {
             Text(String(localized: "section_backup_seed", defaultValue: "Backup"))
         } footer: {
