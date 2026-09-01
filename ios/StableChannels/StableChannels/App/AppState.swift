@@ -611,7 +611,11 @@ class AppState {
         }
 
         // Start price fetching
-        priceService.startAutoRefresh()
+        // E2E hook: a frozen refresh interval keeps the client's quote at the pre-move
+        // price while the harness shifts the LSP's view (deterministic rejection flows).
+        priceService.startAutoRefresh(
+            intervalSecs: TestOverrides.shared.priceRefreshSecs ?? Constants.priceCacheRefreshSecs
+        )
 
         // Subscribe to LDK events
         subscribeToEvents()

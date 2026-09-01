@@ -4,7 +4,7 @@
 # client's quote is frozen at launch while set_price moves the LSP's view. The whole
 # trade must complete within ~60s of launch (trusted-price age) — keep this flow lean.
 appId: com.stablechannels.app
-tags: [android, trade]
+tags: [android, ios, trade]
 env:
   HARNESS_API: "http://localhost:9737"
 ---
