@@ -24,9 +24,9 @@ final class RevealRecoveryQuizViewModel {
 
     var canGoBack: Bool {
         switch currentStep {
-        case .intro:
+        case .intro, .revealed:
             return false
-        case .question, .feedback, .revealed:
+        case .question, .feedback:
             return true
         }
     }
@@ -79,11 +79,7 @@ final class RevealRecoveryQuizViewModel {
         case let .feedback(questionIndex, _, _):
             currentStep = .question(index: questionIndex)
         case .revealed:
-            if let lastIndex = questions.indices.last {
-                currentStep = .question(index: lastIndex)
-            } else {
-                currentStep = .intro
-            }
+            break
         }
     }
 }

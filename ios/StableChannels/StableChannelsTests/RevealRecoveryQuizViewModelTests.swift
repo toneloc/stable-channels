@@ -61,7 +61,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         // Continue from final question -> moves to revealed
         vm.continueFromFeedback(questionIndex: 1, isCorrect: true)
         XCTAssertEqual(vm.currentStep, .revealed)
-        XCTAssertTrue(vm.canGoBack)
+        XCTAssertFalse(vm.canGoBack)
     }
 
     func testGoBackFromQuestion1ReturnsToIntro() {
@@ -95,6 +95,20 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         XCTAssertEqual(vm.currentStep, .question(index: 0))
     }
 
+    func testGoBackWhenRevealedIsNoOp() {
+        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        vm.startQuiz()
+        vm.answerQuestion(questionIndex: 0, optionIndex: 1)
+        vm.continueFromFeedback(questionIndex: 0, isCorrect: true)
+        vm.answerQuestion(questionIndex: 1, optionIndex: 0)
+        vm.continueFromFeedback(questionIndex: 1, isCorrect: true)
+        XCTAssertEqual(vm.currentStep, .revealed)
+        XCTAssertFalse(vm.canGoBack)
+
+        vm.goBack()
+        XCTAssertEqual(vm.currentStep, .revealed)
+    }
+
     func testCustomEmptyQuestionsProviderDirectlyReveals() {
         struct EmptyProvider: RevealQuizQuestionsProviderProtocol {
             func getQuestions() -> [RevealQuizQuestion] { [] }
@@ -105,5 +119,6 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
 
         vm.startQuiz()
         XCTAssertEqual(vm.currentStep, .revealed)
+        XCTAssertFalse(vm.canGoBack)
     }
 }
