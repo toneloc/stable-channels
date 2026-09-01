@@ -190,14 +190,32 @@ struct BuyView: View {
         }
     }
 
-    private var tradeConfirmed: Bool {
-        guard let pid = pendingPaymentId else { return false }
-        return appState.pendingTradePayments[pid] == nil
+    // Only a signed, correlated acceptance confirms the order and only a signed
+    // rejection fails it. Absence from the pending map proves nothing — a rejection
+    // also clears it, and the old absence heuristic showed "Order Confirmed" for
+    // rejected trades (caught by e2e flow 13).
+    private var tradeOutcome: AppState.TradeOutcome? {
+        guard let pid = pendingPaymentId else { return nil }
+        return appState.tradeOutcomes[pid]
     }
+
+    private var tradeConfirmed: Bool { tradeOutcome?.accepted == true }
+    private var tradeRejected: Bool { tradeOutcome?.accepted == false }
 
     private var doneScreen: some View {
         VStack(spacing: 20) {
-            if tradeConfirmed {
+            if tradeRejected {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.red)
+
+                Text(String(localized: "status_trade_rejected", defaultValue: "Order Rejected"))
+                    .font(.title2.bold())
+
+                Text(tradeOutcome?.message ?? "The provider could not process the trade.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else if tradeConfirmed {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 64))
                     .foregroundStyle(.green)
@@ -238,6 +256,16 @@ struct BuyView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
+        // The NSE commits results straight to SQLite without touching the in-memory
+        // outcome map, so poll the database while the result is unknown — otherwise a
+        // trade resolved while backgrounded stays "Order Pending".
+        .task(id: pendingPaymentId) {
+            guard let pid = pendingPaymentId else { return }
+            while !Task.isCancelled, appState.tradeOutcomes[pid] == nil {
+                appState.refreshTradeOutcome(paymentId: pid)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 
     private func confirmRow(_ label: String, _ value: String, bold: Bool = false) -> some View {
@@ -275,26 +303,13 @@ struct BuyView: View {
                 return
             }
 
-            // Do NOT apply trade yet — wait for PaymentSuccessful event (matches desktop)
-
-            // Record trade in DB as pending
-            let tradeDbId = try appState.databaseService?.channelRepo.recordTrade(
-                channelId: sc.channelId,
-                action: "buy",
-                amountUSD: amountUSD,
-                amountBTC: result.btcAmount,
-                btcPrice: price,
-                feeUSD: feeUSD,
-                paymentId: result.paymentId,
-                status: "pending"
-            ) ?? 0
-
-            // Track so PaymentSuccessful/PaymentFailed can apply or revert
+            // View cache only; the prepared correlation was persisted before the fee send.
             appState.pendingTradePayments[result.paymentId] = PendingTradePayment(
                 newExpectedUSD: result.newExpectedUSD,
                 price: price,
-                tradeDbId: tradeDbId,
-                action: "buy"
+                tradeDbId: result.tradeDbId,
+                action: "buy",
+                status: "sent"
             )
 
             pendingPaymentId = result.paymentId

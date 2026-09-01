@@ -12,33 +12,37 @@ enum StableControlParser {
         node: LDKNode.Node,
         db: PaymentDatabase,
         priceFetcher: PriceFetcher,
-        customRecords: [CustomTlvRecord]
+        customRecords: [CustomTlvRecord],
+        amountMsat: UInt64
     ) -> StableControlResult {
         for record in customRecords where record.typeNum == Constants.stableChannelTLVType {
             if record.value == Data([1]) {
                 continue
             }
-            guard let envelopeStr = String(data: record.value, encoding: .utf8),
-                  let envelopeData = envelopeStr.data(using: .utf8),
-                  let envelope = try? JSONSerialization.jsonObject(with: envelopeData) as? [String: Any],
-                  let payloadStr = envelope["payload"] as? String,
-                  let signature = envelope["signature"] as? String,
-                  node.verifySignature(
-                      msg: Array(payloadStr.utf8),
-                      sig: signature,
-                      pkey: Constants.lspPubkey
-                  ),
-                  let payloadData = payloadStr.data(using: .utf8),
-                  let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-                  let type = payload["type"] as? String,
-                  type == Constants.syncMessageType,
-                  let expectedUSD = payload["expected_usd"] as? Double else {
-                return .deferToForeground
+            guard let message = TradeProtocol.parseSignedControl(
+                data: record.value,
+                expectedCounterparty: Constants.lspPubkey,
+                verifySignature: { msg, signature, publicKey in
+                    node.verifySignature(msg: msg, sig: signature, pkey: publicKey)
+                }
+            ) else {
+                // Auth failures and malformed control packets are never accounting input and
+                // should not loop forever in the extension.
+                return .handled
             }
-            let ucid = payload["user_channel_id"] as? String
-            return db
-                .applySyncMessage(expectedUSD: expectedUSD, payloadUserChannelId: ucid, priceFetcher: priceFetcher) ?
-                .handled : .deferToForeground
+            guard amountMsat == TradeProtocol.resultControlAmountMsat else { return .handled }
+            let price: Double?
+            if case .sync(let sync) = message, sync.correlation == nil {
+                let fetched = priceFetcher.fetchPrice()
+                price = PriceOracle.isPlausibleBitcoinPrice(fetched) ? fetched : nil
+                if price == nil { return .deferToForeground }
+            } else {
+                price = nil
+            }
+            switch db.applyTradeControl(message, trustedPrice: price) {
+            case .applied, .duplicate, .invalid: return .handled
+            case .retry: return .deferToForeground
+            }
         }
         return .none
     }

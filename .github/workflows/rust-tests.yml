@@ -1,0 +1,39 @@
+name: Rust Tests
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "server/**"
+      - ".github/workflows/rust-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - "server/**"
+      - ".github/workflows/rust-tests.yml"
+
+concurrency:
+  group: rust-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run affected Rust tests
+        run: cargo test -p stable-channels -p stable-channels-lsp --locked
+
+      - name: Build affected Rust packages
+        run: cargo build -p stable-channels -p stable-channels-lsp --locked

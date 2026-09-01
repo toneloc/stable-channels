@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -229,20 +230,16 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                 }
                                 val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, tradePrice)
                                     ?: throw Exception("Trade service unavailable")
-                                val tradeDbId = appState.databaseService?.recordTrade(
-                                    channelId = sc.channelId, action = "buy",
-                                    amountUSD = amountUSD, amountBTC = result.btcAmount,
-                                    btcPrice = tradePrice, feeUSD = feeUSD,
-                                    paymentId = result.paymentId, status = "pending"
-                                ) ?: 0
-                                appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
+                                val awaitingResult = appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
                                     price = tradePrice,
-                                    tradeDbId = tradeDbId,
+                                    tradeDbId = result.tradeDbId,
                                     action = "buy"
                                 ))
                                 pendingPaymentId = result.paymentId
-                                appState.setStatus(String.format(Locale.US, "Order pending (fee: $%.2f)", feeUSD))
+                                if (awaitingResult) {
+                                    appState.setStatus(String.format(Locale.US, "Order pending (fee: $%.2f)", feeUSD))
+                                }
                                 step = TradeStep.DONE
                             } catch (e: Exception) {
                                 error = e.message ?: "Trade failed"
@@ -261,10 +258,40 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
             }
 
             TradeStep.DONE -> {
-                val pendingPayments by appState.pendingTradePayments.collectAsState()
-                val isConfirmed = pendingPaymentId != null && !pendingPayments.containsKey(pendingPaymentId)
+                // Only a signed, correlated acceptance confirms the order and only a signed
+                // rejection fails it. Absence from the pending map proves nothing — a
+                // rejection also clears it, and the old absence heuristic showed
+                // "Order Confirmed" for rejected trades (caught by e2e flow 13).
+                val tradeOutcomes by appState.tradeOutcomes.collectAsState()
+                val outcome = pendingPaymentId?.let { tradeOutcomes[it] }
+                // Background services commit results straight to SQLite without touching
+                // the in-memory outcome map, so poll the database while the result is
+                // unknown — otherwise a trade resolved while backgrounded stays "Pending".
+                LaunchedEffect(pendingPaymentId) {
+                    val pid = pendingPaymentId ?: return@LaunchedEffect
+                    while (!appState.tradeOutcomes.value.containsKey(pid)) {
+                        appState.refreshTradeOutcome(pid)
+                        kotlinx.coroutines.delay(2_000)
+                    }
+                }
+                val isConfirmed = outcome?.accepted == true
+                val isRejected = outcome?.accepted == false
 
-                if (isConfirmed) {
+                if (isRejected) {
+                    Icon(
+                        Icons.Filled.Cancel,
+                        contentDescription = "Rejected",
+                        tint = Color(0xFFEF4444),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("Order Rejected", style = MaterialTheme.typography.headlineMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        outcome?.message ?: "The provider could not process the trade.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                } else if (isConfirmed) {
                     Icon(
                         Icons.Filled.CheckCircle,
                         contentDescription = "Confirmed",
@@ -289,7 +316,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                if (isConfirmed) {
+                if (isConfirmed || isRejected) {
                     Button(onClick = onDismiss) { Text("Done") }
                 }
             }

@@ -438,6 +438,7 @@ impl StableChannelManager {
             Ok(true) => stable_channels::audit::audit_event(
                 "TRADE_REJECTION_QUEUED",
                 serde_json::json!({
+                    "protocol_path": "hardened",
                     "trade_id": trade_id,
                     "trade_payment_id": inbound_payment_id,
                     "request_hash": request_hash,
@@ -2628,6 +2629,14 @@ impl StableChannelManager {
             "TRADE_SIGNATURE_VALID",
             serde_json::json!({ "channel_id": chan.channel_id, "user_channel_id": chan.user_channel_id.clone() }),
         );
+        stable_channels::audit::audit_event(
+            "TRADE_PROTOCOL_PATH",
+            serde_json::json!({
+                "path": if payload.trade_id.is_some() { "hardened" } else { "legacy" },
+                "channel_id": chan.channel_id,
+                "user_channel_id": chan.user_channel_id.clone(),
+            }),
+        );
 
         // Verify-then-write: the settlement row is recorded only now that the envelope's
         // signature is verified against the channel counterparty. An unauthenticated peer's
@@ -2888,6 +2897,7 @@ impl StableChannelManager {
                     stable_channels::audit::audit_event(
                         "TRADE_ACCEPTED",
                         serde_json::json!({
+                            "protocol_path": "hardened",
                             "trade_id": trade_id,
                             "trade_payment_id": inbound_payment_id,
                             "request_hash": request_hash,
@@ -3103,6 +3113,7 @@ impl StableChannelManager {
         stable_channels::audit::audit_event(
             "TRADE_APPLIED",
             serde_json::json!({
+                "protocol_path": "legacy",
                 "channel_id": channel_id_hex,
                 "user_channel_id": ucid_str,
                 "new_expected_usd": expected_usd_f,
@@ -4810,6 +4821,8 @@ mod tests {
             expected_trade_fee_msat(50.0, 50.0, 100_000.0),
             Some(1)
         );
+        assert_eq!(expected_trade_fee_msat(1.0, 0.0, 1_000_000.0), Some(1_000));
+        assert_eq!(expected_trade_fee_msat(1.0, 0.1, 1_000_000.0), Some(1));
         assert_eq!(trade_fee_tolerance_msat(114_000, true), 1_000);
 
         // At this boundary the wallet's original gross fee floors to 113 sats, while recovering

@@ -69,6 +69,7 @@ final class DatabaseService {
                 note TEXT,
                 receiver_sats INTEGER NOT NULL DEFAULT 0,
                 latest_price REAL NOT NULL DEFAULT 0.0,
+                sync_version INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
                 updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
@@ -84,6 +85,21 @@ final class DatabaseService {
                 fee_usd REAL NOT NULL DEFAULT 0.0,
                 payment_id TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
+                user_channel_id TEXT,
+                trade_id TEXT,
+                request_hash TEXT,
+                request_payload TEXT,
+                trade_payment_id TEXT,
+                old_expected_usd REAL,
+                new_expected_usd REAL,
+                new_backing_sats INTEGER,
+                quote_price REAL,
+                fee_msat INTEGER NOT NULL DEFAULT 0,
+                expires_at INTEGER,
+                outcome TEXT,
+                reason_code TEXT,
+                uncertainty_reason TEXT,
+                resolved_at INTEGER,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
@@ -213,6 +229,44 @@ final class DatabaseService {
         if !colNames.contains("native_sats") {
             try rawSQL.execute("ALTER TABLE channels ADD COLUMN native_sats INTEGER NOT NULL DEFAULT 0")
         }
+        if !colNames.contains("sync_version") {
+            try rawSQL.execute("ALTER TABLE channels ADD COLUMN sync_version INTEGER NOT NULL DEFAULT 0")
+        }
+
+        let tradeColumns = try rawSQL.query("PRAGMA table_info(trades)")
+            .compactMap { $0[1] as? String }
+        let tradeMigrations: [(String, String)] = [
+            ("user_channel_id", "TEXT"),
+            ("trade_id", "TEXT"),
+            ("request_hash", "TEXT"),
+            ("request_payload", "TEXT"),
+            ("trade_payment_id", "TEXT"),
+            ("old_expected_usd", "REAL"),
+            ("new_expected_usd", "REAL"),
+            ("new_backing_sats", "INTEGER"),
+            ("quote_price", "REAL"),
+            ("fee_msat", "INTEGER NOT NULL DEFAULT 0"),
+            ("expires_at", "INTEGER"),
+            ("outcome", "TEXT"),
+            ("reason_code", "TEXT"),
+            ("uncertainty_reason", "TEXT"),
+            ("resolved_at", "INTEGER")
+        ]
+        for (name, type) in tradeMigrations where !tradeColumns.contains(name) {
+            try rawSQL.execute("ALTER TABLE trades ADD COLUMN \(name) \(type)")
+        }
+        try rawSQL.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_trade_id_unique ON trades(trade_id) WHERE trade_id IS NOT NULL"
+        )
+        try rawSQL.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_request_hash_unique ON trades(request_hash) WHERE request_hash IS NOT NULL"
+        )
+        try rawSQL.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_payment_id_unique ON trades(trade_payment_id) WHERE trade_payment_id IS NOT NULL"
+        )
+        try rawSQL.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_unresolved_channel ON trades(channel_id, status)"
+        )
 
         // Migrate: add tx_block_height to payments if missing (on-chain confirmation tracking)
         let paymentsCols = try rawSQL.query("PRAGMA table_info(payments)")
