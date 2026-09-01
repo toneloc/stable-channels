@@ -1,0 +1,133 @@
+import SwiftUI
+
+/// Master sheet container hosting the Reveal Secret Recovery Phrase quiz flow.
+struct RevealRecoveryPhraseSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var viewModel: RevealRecoveryQuizViewModel
+
+    init(
+        mnemonic: String,
+        questionsProvider: any RevealQuizQuestionsProviderProtocol = DefaultRevealQuizQuestionsProvider()
+    ) {
+        _viewModel = State(initialValue: RevealRecoveryQuizViewModel(
+            mnemonic: mnemonic,
+            questionsProvider: questionsProvider
+        ))
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    // Content step views
+                    switch viewModel.currentStep {
+                    case .intro:
+                        RevealQuizIntroView(
+                            onGetStarted: {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    viewModel.startQuiz()
+                                }
+                            },
+                            onLearnMore: {
+                                viewModel.isShowingLearnMore = true
+                            }
+                        )
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .trailing)),
+                            removal: .opacity.combined(with: .move(edge: .leading))
+                        ))
+
+                    case let .question(index):
+                        if index < viewModel.questions.count {
+                            RevealQuizQuestionView(
+                                question: viewModel.questions[index],
+                                onSelectOption: { optionIndex in
+                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                        viewModel.answerQuestion(questionIndex: index, optionIndex: optionIndex)
+                                    }
+                                },
+                                onLearnMore: {
+                                    viewModel.isShowingLearnMore = true
+                                }
+                            )
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                                removal: .opacity.combined(with: .move(edge: .leading))
+                            ))
+                        }
+
+                    case let .feedback(questionIndex, isCorrect, _):
+                        if questionIndex < viewModel.questions.count {
+                            RevealQuizFeedbackView(
+                                question: viewModel.questions[questionIndex],
+                                isCorrect: isCorrect,
+                                onContinue: {
+                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                        viewModel.continueFromFeedback(
+                                            questionIndex: questionIndex,
+                                            isCorrect: isCorrect
+                                        )
+                                    }
+                                },
+                                onLearnMore: {
+                                    viewModel.isShowingLearnMore = true
+                                }
+                            )
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .trailing)),
+                                removal: .opacity.combined(with: .move(edge: .leading))
+                            ))
+                        }
+
+                    case .revealed:
+                        RevealQuizSecretPhraseView(
+                            mnemonic: viewModel.mnemonic,
+                            onDone: {
+                                dismiss()
+                            }
+                        )
+                        .transition(.asymmetric(
+                            insertion: .opacity.combined(with: .move(edge: .trailing)),
+                            removal: .opacity.combined(with: .move(edge: .leading))
+                        ))
+                    }
+                }
+            }
+            .navigationTitle(viewModel.navigationTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if viewModel.canGoBack {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                viewModel.goBack()
+                            }
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .sheet(isPresented: $viewModel.isShowingLearnMore) {
+                RevealQuizLearnMoreSheet()
+            }
+        }
+        .preferredColorScheme(.dark)
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+}
