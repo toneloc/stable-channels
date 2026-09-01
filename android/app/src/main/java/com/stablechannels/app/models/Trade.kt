@@ -30,7 +30,8 @@ data class PendingTradePayment(
     val newExpectedUSD: Double,
     val price: Double,
     val tradeDbId: Long,
-    val action: String
+    val action: String,
+    val status: String = "sent"
 )
 
 data class PendingSplice(
@@ -46,7 +47,8 @@ data class ChannelRecord(
     val note: String?,
     val backingSats: Long,
     val receiverSats: Long = 0,
-    val latestPrice: Double = 0.0
+    val latestPrice: Double = 0.0,
+    val syncVersion: Long = 0
 )
 
 data class TradeRecord(

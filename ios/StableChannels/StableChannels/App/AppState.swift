@@ -194,6 +194,40 @@ class AppState {
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
 
+    /// Terminal result of a correlated trade, keyed by its fee payment id. Only a signed
+    /// acceptance or rejection lands here — the trade sheets read this instead of inferring
+    /// success from absence in the pending map (a rejection also clears pending; the old
+    /// absence heuristic showed "Order Confirmed" for rejected trades — e2e flow 13).
+    struct TradeOutcome: Equatable {
+        let accepted: Bool
+        let message: String
+    }
+
+    var tradeOutcomes: [String: TradeOutcome] = [:]
+
+    /// Rehydrate a trade's terminal outcome from SQLite. The NSE and background handlers
+    /// commit accepted/rejected results directly to the database without touching this
+    /// in-memory map, so the trade sheets poll this while pending and it runs for every
+    /// known payment id on startup and foreground.
+    func refreshTradeOutcome(paymentId: String) {
+        guard tradeOutcomes[paymentId] == nil, let db = databaseService else { return }
+        guard let terminal =
+            (try? db.channelRepo.terminalTradeOutcome(paymentId: paymentId)) ?? nil else { return }
+        tradeOutcomes[paymentId] = terminal.accepted
+            ? TradeOutcome(accepted: true, message: "")
+            : TradeOutcome(
+                accepted: false,
+                message: TradeProtocol.rejectionMessage(terminal.reasonCode ?? "internal_failure")
+            )
+        pendingTradePayments.removeValue(forKey: paymentId)
+    }
+
+    private func refreshAllTradeOutcomes() {
+        for paymentId in Set(tradeOutcomes.keys).union(pendingTradePayments.keys) {
+            refreshTradeOutcome(paymentId: paymentId)
+        }
+    }
+
     // Pending splice info
     var pendingSplice: PendingSplice?
 
@@ -219,7 +253,8 @@ class AppState {
     }
 
     private func initializeDatabaseServices() throws {
-        databaseService = try DatabaseService(dataDir: Constants.userDataDir)
+        let db = try DatabaseService(dataDir: Constants.userDataDir)
+        databaseService = db
         nodeService.databaseService = databaseService
 
         txidResolutionService.databaseService = databaseService
@@ -235,7 +270,10 @@ class AppState {
             }
         }
 
-        tradeService = TradeService(nodeService: nodeService)
+        tradeService = TradeService(nodeService: nodeService, databaseService: db)
+        _ = try db.channelRepo.markExpiredTradesUncertain()
+        pendingTradePayments = try db.channelRepo.unresolvedTradePayments()
+        refreshAllTradeOutcomes()
         let pollingService = databaseService.map { db in
             ConfirmationPollingService(
                 databaseService: db,
@@ -850,6 +888,9 @@ class AppState {
         // Payments received while backgrounded are recorded by the NSE, not the foreground
         // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
         refreshLatestPaymentStatus()
+        // Same story for trade results: the NSE writes accepted/rejected to SQLite while
+        // we're backgrounded, so pull any terminal outcomes into the in-memory map.
+        refreshAllTradeOutcomes()
         if nodeService.isRunning {
             // Node never stopped, so gossip was never extracted — do NOT touch
             // ldk_node_data.sqlite while LDK has it open (a stale
@@ -1285,8 +1326,19 @@ class AppState {
 
         case .paymentFailed(let paymentId, let paymentHash, let reason):
             // Check if this is a pending trade payment
-            if let pid = paymentId, let trade = pendingTradePayments.removeValue(forKey: "\(pid)") {
-                try? databaseService?.paymentRepo.updateTradeStatus(trade.tradeDbId, status: "failed")
+            var failedTrade = paymentId.flatMap { pendingTradePayments["\($0)"] }
+            if let pid = paymentId, failedTrade == nil,
+               let payment = nodeService.node?.payment(paymentId: pid),
+               payment.direction == .outbound,
+               let amountMsat = payment.amountMsat {
+                failedTrade = try? databaseService?.channelRepo.failUnattachedPreparedTrade(
+                    paymentId: "\(pid)",
+                    amountMsat: amountMsat
+                )
+            }
+            if let pid = paymentId, let trade = failedTrade {
+                pendingTradePayments.removeValue(forKey: "\(pid)")
+                _ = try? databaseService?.channelRepo.markTradeSendFailed(tradeDbId: trade.tradeDbId)
                 statusMessage = "Order failed"
 
                 AuditService.log("TRADE_FAILED", data: [
@@ -1373,7 +1425,11 @@ class AppState {
 
         // Check for SYNC_V1 message from LSP. A valid sync that cannot yet be applied must
         // remain in LDK's event queue; treating it like malformed control traffic loses it.
-        switch handleSyncMessage(customRecords: customRecords, paymentHash: paymentHashStr) {
+        switch handleSyncMessage(
+            customRecords: customRecords,
+            paymentHash: paymentHashStr,
+            amountMsat: amountMsat
+        ) {
         case .applied:
             refreshBalances()
             updateStableBalances()
@@ -1492,40 +1548,124 @@ class AppState {
     /// Parse a SYNC_V1 TLV and distinguish invalid control traffic from retryable processing.
     private func handleSyncMessage(
         customRecords: [CustomTlvRecord],
-        paymentHash: String
+        paymentHash: String,
+        amountMsat: UInt64
     ) -> SyncMessageHandlingResult {
         for tlv in customRecords {
             guard tlv.typeNum == Constants.stableChannelTLVType else { continue }
 
-            guard let parsed = TradeService.parseIncomingTLV(
-                data: [UInt8](tlv.value),
+            guard let message = TradeProtocol.parseSignedControl(
+                data: tlv.value,
                 expectedCounterparty: stableChannel.counterparty,
                 verifySignature: { [weak self] msg, sig, pubkey in
                     self?.nodeService.verifySignature(message: msg, signature: sig, pubkey: pubkey) ?? false
                 }
             ) else { continue }
-
-            guard parsed.type == Constants.syncMessageType else { continue }
-
-            let oldExpected = stableChannel.expectedUSD.amount
-            let price = accountingBTCPrice
-            guard price > 0 else {
-                AuditService.log("SYNC_V1_DEFERRED", data: [
-                    "reason": "untrusted_price",
+            guard amountMsat == TradeProtocol.resultControlAmountMsat else {
+                AuditService.log("TRADE_RESULT_CONTROL_AMOUNT_INVALID", data: [
+                    "amount_msat": "\(amountMsat)",
                     "payment_hash": paymentHash
                 ])
-                return .retry
+                return .applied
             }
-            StabilityService.applyTrade(&stableChannel, newExpectedUSD: parsed.expectedUSD, price: price)
-            saveChannelToDB()
-
-            AuditService.log("SYNC_V1_APPLIED", data: [
-                "old_expected_usd": "\(oldExpected)",
-                "new_expected_usd": "\(parsed.expectedUSD)",
-                "btc_price": "\(price)",
-                "payment_hash": paymentHash
-            ])
-            return .applied
+            guard let databaseService else { return .retry }
+            let result: TradeControlApplyResult
+            switch message {
+            case .rejected(let rejection):
+                result = databaseService.channelRepo.applyTradeRejection(rejection)
+            case .sync(let sync):
+                if sync.correlation != nil {
+                    result = databaseService.channelRepo.applyCorrelatedTradeAcceptance(sync)
+                } else {
+                    let price = accountingBTCPrice
+                    guard price > 0 else {
+                        AuditService.log("SYNC_V1_DEFERRED", data: [
+                            "reason": "untrusted_price",
+                            "payment_hash": paymentHash
+                        ])
+                        return .retry
+                    }
+                    result = databaseService.channelRepo.applyUncorrelatedSyncIfNewer(
+                        sync,
+                        trustedPrice: price
+                    )
+                }
+            }
+            switch result.status {
+            case .retry:
+                _ = try? databaseService.channelRepo.markTradeResponseNotCommittable(message)
+                AuditService.log("TRADE_RESULT_DEFERRED", data: ["payment_hash": paymentHash])
+                return .retry
+            case .invalid:
+                AuditService.log("TRADE_RESULT_INVALID", data: ["payment_hash": paymentHash])
+                return .applied
+            case .duplicate:
+                if let paymentId = result.paymentId {
+                    pendingTradePayments.removeValue(forKey: paymentId)
+                    if case .rejected(let rejection) = message {
+                        tradeOutcomes[paymentId] = TradeOutcome(
+                            accepted: false,
+                            message: TradeProtocol.rejectionMessage(rejection.reasonCode)
+                        )
+                    } else {
+                        tradeOutcomes[paymentId] = TradeOutcome(accepted: true, message: "")
+                    }
+                }
+                guard let channel = try? databaseService.channelRepo.loadChannel(
+                    userChannelId: stableChannel.userChannelId
+                ) else { return .retry }
+                stableChannel.channelId = channel.channelId
+                stableChannel.expectedUSD = USD(amount: channel.expectedUSD)
+                stableChannel.backingSats = channel.backingSats
+                stableChannel.nativeSats = channel.nativeSats
+                stableChannel.nativeChannelBTC = Bitcoin(sats: channel.nativeSats)
+                stableChannel.latestPrice = channel.latestPrice
+                return .applied
+            case .applied:
+                if let paymentId = result.paymentId {
+                    pendingTradePayments.removeValue(forKey: paymentId)
+                    if case .rejected(let rejection) = message {
+                        tradeOutcomes[paymentId] = TradeOutcome(
+                            accepted: false,
+                            message: TradeProtocol.rejectionMessage(rejection.reasonCode)
+                        )
+                    } else {
+                        tradeOutcomes[paymentId] = TradeOutcome(accepted: true, message: "")
+                    }
+                }
+                guard let channel = try? databaseService.channelRepo.loadChannel(
+                    userChannelId: stableChannel.userChannelId
+                ) else { return .retry }
+                stableChannel.channelId = channel.channelId
+                stableChannel.expectedUSD = USD(amount: channel.expectedUSD)
+                stableChannel.backingSats = channel.backingSats
+                stableChannel.nativeSats = channel.nativeSats
+                stableChannel.nativeChannelBTC = Bitcoin(sats: channel.nativeSats)
+                stableChannel.latestPrice = channel.latestPrice
+                let diverged = result.localBackingSats != nil &&
+                    result.peerBackingSats != nil &&
+                    result.localBackingSats != result.peerBackingSats
+                AuditService.log("TRADE_RESULT_APPLIED", data: [
+                    "payment_hash": paymentHash,
+                    "local_backing_sats": result.localBackingSats.map { "\($0)" } ?? "nil",
+                    "peer_backing_sats": result.peerBackingSats.map { "\($0)" } ?? "nil",
+                    "allocation_diverged": "\(diverged)",
+                    "allocation_applied": result.allocationApplied.map { "\($0)" } ?? "nil"
+                ])
+                switch message {
+                case .rejected(let rejection):
+                    statusMessage = TradeProtocol.rejectionMessage(rejection.reasonCode)
+                case .sync:
+                    if result.paymentId != nil {
+                        statusMessage = "Order confirmed"
+                        paymentFlash = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                            self?.paymentFlash = false
+                        }
+                    }
+                }
+                return .applied
+            }
         }
         return .notSync
     }
@@ -1539,36 +1679,70 @@ class AppState {
     ) {
         let paymentHashStr = "\(paymentHash)"
 
-        // Check if this is a pending trade payment — apply trade now that payment confirmed
-        if let pid = paymentId, let trade = pendingTradePayments.removeValue(forKey: "\(pid)") {
-            // Apply the trade (deferred until confirmation — matches desktop)
-            StabilityService.applyTrade(
-                &stableChannel,
-                newExpectedUSD: trade.newExpectedUSD,
-                price: trade.price
-            )
-            saveChannelToDB()
+        // Fee settlement is not trade acceptance. Keep the durable correlation pending until a
+        // signed SYNC_V1 or TRADE_REJECTED_V1 commits the outcome.
+        if let pid = paymentId {
+            let paymentIdString = "\(pid)"
+            var trade = pendingTradePayments[paymentIdString]
+            var recognizedTrade = trade != nil
+            if let databaseService {
+                let marked: Bool
+                if let trade {
+                    marked = (try? databaseService.channelRepo.markKnownTradeFeePaid(
+                        tradeDbId: trade.tradeDbId,
+                        paymentId: paymentIdString
+                    )) == true
+                } else {
+                    marked = (try? databaseService.channelRepo.markTradeFeePaid(
+                        paymentId: paymentIdString
+                    )) == true
+                }
+                recognizedTrade = recognizedTrade || marked
 
-            try? databaseService?.paymentRepo.updateTradeStatus(trade.tradeDbId, status: "completed")
-
-            AuditService.log("TRADE_CONFIRMED", data: [
-                "payment_hash": paymentHashStr,
-                "action": trade.action,
-                "new_expected_usd": "\(trade.newExpectedUSD)",
-                "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
-            ])
-
-            refreshBalances()
-            updateStableBalances()
-
-            statusMessage = "Order confirmed"
-
-            // Flash so user notices the confirmation
-            paymentFlash = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.paymentFlash = false
+                let paymentDetails = recognizedTrade ? nil : nodeService.node?.payment(paymentId: pid)
+                let eventAmountMsat = paymentDetails?.direction == .outbound
+                    ? paymentDetails?.amountMsat
+                    : nil
+                if !recognizedTrade, let eventAmountMsat {
+                    trade = try? databaseService.channelRepo.adoptUnattachedPreparedTrade(
+                        paymentId: paymentIdString,
+                        amountMsat: eventAmountMsat
+                    )
+                    recognizedTrade = trade != nil
+                }
+                if !recognizedTrade {
+                    recognizedTrade = (try? databaseService.channelRepo.tradePaymentExists(
+                        paymentId: paymentIdString
+                    )) == true
+                }
+                if !recognizedTrade, eventAmountMsat == nil,
+                   (try? databaseService.channelRepo.hasUnattachedPreparedTrade()) == true {
+                    statusMessage = "Payment confirmed; awaiting signed trade result"
+                    AuditService.log("TRADE_FEE_ID_UNRESOLVED", data: [
+                        "payment_id": paymentIdString
+                    ])
+                    return
+                }
             }
-            return
+            if recognizedTrade {
+                if let trade {
+                    pendingTradePayments[paymentIdString] = PendingTradePayment(
+                        newExpectedUSD: trade.newExpectedUSD,
+                        price: trade.price,
+                        tradeDbId: trade.tradeDbId,
+                        action: trade.action,
+                        status: "fee_paid"
+                    )
+                }
+                AuditService.log("TRADE_FEE_PAID", data: [
+                    "payment_hash": paymentHashStr,
+                    "action": trade?.action ?? "unknown",
+                    "new_expected_usd": trade.map { "\($0.newExpectedUSD)" } ?? "unknown",
+                    "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
+                ])
+                statusMessage = "Trade fee paid; awaiting signed result"
+                return
+            }
         }
 
         if handleStabilityPaymentSuccessful(paymentId: paymentId, feePaidMsat: feePaidMsat) {
@@ -2109,11 +2283,26 @@ class AppState {
 
                 await MainActor.run { [weak self] in
                     self?.recordCurrentPrice()
+                    self?.refreshTradeUncertainty()
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
                 }
             }
         }
+    }
+
+    private func refreshTradeUncertainty() {
+        guard let databaseService,
+              let changed = try? databaseService.channelRepo.markExpiredTradesUncertain(),
+              changed > 0 else { return }
+        if let restored = try? databaseService.channelRepo.unresolvedTradePayments() {
+            pendingTradePayments = restored
+        }
+        statusMessage = "Trade result delayed; it will still be accepted when received"
+        AuditService.log("TRADE_RESULT_UNCERTAIN", data: [
+            "reason": "no_response",
+            "count": "\(changed)"
+        ])
     }
 
     func ensureLSPConnected() {

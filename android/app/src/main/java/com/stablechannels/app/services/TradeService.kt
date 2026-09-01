@@ -10,11 +10,14 @@ import kotlin.math.min
 data class TradeResult(
     val paymentId: String,
     val newExpectedUSD: Double,
-    val btcAmount: Double
+    val btcAmount: Double,
+    val tradeDbId: Long
 )
 
-class TradeService(private val nodeService: NodeService) {
-
+class TradeService(
+    private val nodeService: NodeService,
+    private val databaseService: DatabaseService
+) {
     fun executeBuy(
         sc: StableChannel,
         amountUSD: Double,
@@ -25,8 +28,9 @@ class TradeService(private val nodeService: NodeService) {
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0.0)
         val btcAmount = netAmount / price
-        val paymentId = sendTradeMessage(newExpectedUSD, sc.userChannelId, sc.channelId, sc.counterparty, feeUSD, price)
-        return TradeResult(paymentId, newExpectedUSD, btcAmount)
+        return preparePersistAndSend(
+            sc, "buy", amountUSD, btcAmount, feeUSD, newExpectedUSD, price
+        )
     }
 
     fun executeSell(
@@ -40,56 +44,72 @@ class TradeService(private val nodeService: NodeService) {
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = min(sc.expectedUSD.amount + netAmount, maxUSD)
         val btcAmount = netAmount / price
-        val paymentId = sendTradeMessage(newExpectedUSD, sc.userChannelId, sc.channelId, sc.counterparty, feeUSD, price)
-        return TradeResult(paymentId, newExpectedUSD, btcAmount)
+        return preparePersistAndSend(
+            sc, "sell", amountUSD, btcAmount, feeUSD, newExpectedUSD, price
+        )
     }
 
-    fun sendTradeMessage(expectedUSD: Double, userChannelId: String, channelId: String, counterparty: String, feeUSD: Double, price: Double): String {
-        val payload = JSONObject().apply {
-            put("type", Constants.TRADE_MESSAGE_TYPE)
-            put("user_channel_id", userChannelId)
-            put("channel_id", channelId)
-            put("expected_usd", expectedUSD)
+    private fun preparePersistAndSend(
+        sc: StableChannel,
+        action: String,
+        amountUsd: Double,
+        amountBtc: Double,
+        feeUsd: Double,
+        newExpectedUsd: Double,
+        price: Double
+    ): TradeResult? {
+        val prepared = TradeProtocol.prepare(
+            sc = sc,
+            action = action,
+            amountUsd = amountUsd,
+            amountBtc = amountBtc,
+            feeUsd = feeUsd,
+            newExpectedUsd = newExpectedUsd,
+            quotePrice = price
+        ) ?: return null
+
+        // This row is the recovery authority. It must exist before the non-refundable fee send.
+        val tradeDbId = databaseService.recordPreparedTrade(prepared)
+        val paymentId = try {
+            val signature = nodeService.signMessage(
+                prepared.requestPayload.toByteArray(Charsets.UTF_8)
+            )
+            val envelope = JSONObject().apply {
+                put("payload", prepared.requestPayload)
+                put("signature", signature)
+            }.toString().toByteArray(Charsets.UTF_8)
+            nodeService.sendKeysendWithTLV(
+                prepared.feeMsat,
+                sc.counterparty,
+                listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelope))
+            )
+        } catch (error: Exception) {
+            databaseService.markTradeSendFailed(tradeDbId)
+            throw error
         }
-        val payloadStr = payload.toString()
-        val signature = nodeService.signMessage(payloadStr.toByteArray(Charsets.UTF_8))
 
-        val envelope = JSONObject().apply {
-            put("payload", payloadStr)
-            put("signature", signature)
+        // The payment has left the node at this point. A local bookkeeping failure must not
+        // report a send failure (or invite the user to pay the non-refundable fee twice).
+        val attached = try {
+            databaseService.attachTradePaymentId(tradeDbId, paymentId)
+        } catch (error: Exception) {
+            false
         }
-        val envelopeBytes = envelope.toString().toByteArray(Charsets.UTF_8)
-
-        val feeMsat = max((feeUSD / price * Constants.SATS_IN_BTC).toLong() * 1000, 1)
-        val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelopeBytes)
-        return nodeService.sendKeysendWithTLV(feeMsat, counterparty, listOf(tlv))
-    }
-
-    companion object {
-        fun parseIncomingTLV(
-            data: ByteArray,
-            expectedCounterparty: String,
-            verifySignature: (ByteArray, String, String) -> Boolean
-        ): Triple<String, Double, String>? {
-            return try {
-                val envelopeStr = String(data, Charsets.UTF_8)
-                val envelope = JSONObject(envelopeStr)
-                val payloadStr = envelope.getString("payload")
-                val signature = envelope.getString("signature")
-
-                if (!verifySignature(payloadStr.toByteArray(Charsets.UTF_8), signature, expectedCounterparty)) {
-                    return null
-                }
-
-                val payload = JSONObject(payloadStr)
-                val type = payload.getString("type")
-                val expectedUsd = payload.getDouble("expected_usd")
-                val userChannelId = payload.getString("user_channel_id")
-
-                Triple(type, expectedUsd, userChannelId)
-            } catch (_: Exception) {
-                null
-            }
+        if (!attached) {
+            AuditService.log("TRADE_PAYMENT_ID_PERSIST_FAILED", mapOf(
+                "trade_db_id" to tradeDbId,
+                "trade_id" to prepared.tradeId,
+                "payment_id" to paymentId
+            ))
         }
+        AuditService.log("TRADE_MESSAGE_SENT", mapOf(
+            "trade_id" to prepared.tradeId,
+            "request_hash" to prepared.requestHash,
+            "payment_id" to paymentId,
+            "fee_msat" to prepared.feeMsat,
+            "new_expected_usd" to prepared.newExpectedUsd,
+            "new_backing_sats" to prepared.newBackingSats
+        ))
+        return TradeResult(paymentId, prepared.newExpectedUsd, amountBtc, tradeDbId)
     }
 }

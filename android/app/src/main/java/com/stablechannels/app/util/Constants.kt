@@ -9,6 +9,7 @@ object Constants {
     const val STABLE_CHANNEL_TLV_TYPE: Long = 13_377_331L
     const val TRADE_MESSAGE_TYPE = "TRADE_V1"
     const val SYNC_MESSAGE_TYPE = "SYNC_V1"
+    const val TRADE_REJECTED_MESSAGE_TYPE = "TRADE_REJECTED_V1"
 
     // Overridable via TestOverrides (debug builds only) for E2E regtest runs.
     val DEFAULT_NETWORK: String get() = TestOverrides.network ?: "bitcoin"

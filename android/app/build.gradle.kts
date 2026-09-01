@@ -17,9 +17,15 @@ android {
     defaultConfig {
         applicationId = "com.stablechannels.app"
         minSdk = 26
+        // Google Play requires target API 36+ from 2026-08-31 (evaluated across ALL
+        // active tracks, not just production — a stale testing-track bundle targeting
+        // 35 trips the requirement for the whole app).
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.9.4"
+        // Play has already consumed versionCodes 6 and 7 (0.9.5, released 2026-08-06
+        // from the sheet-to-edge-fix branch); those bumps never landed on main, so
+        // main's next uploadable build starts at 8.
+        versionCode = 8
+        versionName = "0.9.6"
     }
 
     // Play upload signing. Reads STABLECHANNELS_UPLOAD_* Gradle properties
@@ -59,6 +65,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -132,4 +142,5 @@ dependencies {
     // Unit tests
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.robolectric:robolectric:4.16.1")
 }

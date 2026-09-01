@@ -39,7 +39,8 @@ final class IncomingPaymentHandler: PaymentHandler {
                     node: node,
                     db: db,
                     priceFetcher: priceFetcher,
-                    customRecords: customRecords
+                    customRecords: customRecords,
+                    amountMsat: amountMsat
                 )
                 switch stableControl {
                 case .handled:

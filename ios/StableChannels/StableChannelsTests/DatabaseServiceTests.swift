@@ -729,4 +729,432 @@ final class DatabaseServiceTests: XCTestCase {
             )
         )
     }
+
+    // MARK: - Mobile trade-result protocol
+
+    func testTradeProtocolHashAndFeeVectorsMatchRust() {
+        let payload = #"{"type":"TRADE_V1","user_channel_id":"7","expected_usd":25.0}"#
+        XCTAssertEqual(
+            TradeProtocol.requestHash(Data(payload.utf8)),
+            "c07dcdff3aae2fc7ebd4fb19a7f1cd60b8e61c94a89acd35c5c600935d671602"
+        )
+
+        XCTAssertEqual(
+            TradeProtocol.expectedTradeFeeMsat(
+                oldExpectedUSD: 50, newExpectedUSD: 99.5, quotePrice: 100_000
+            ),
+            500_000
+        )
+        XCTAssertEqual(
+            TradeProtocol.expectedTradeFeeMsat(
+                oldExpectedUSD: 100, newExpectedUSD: 50, quotePrice: 100_000
+            ),
+            500_000
+        )
+        XCTAssertEqual(
+            TradeProtocol.expectedTradeFeeMsat(
+                oldExpectedUSD: 1, newExpectedUSD: 0, quotePrice: 1_000_000
+            ),
+            1_000
+        )
+        XCTAssertEqual(
+            TradeProtocol.expectedTradeFeeMsat(
+                oldExpectedUSD: 1, newExpectedUSD: 0.1, quotePrice: 1_000_000
+            ),
+            1
+        )
+        XCTAssertEqual(TradeProtocol.normalizeExpectedUSD(0.009), 0)
+        XCTAssertEqual(
+            TradeProtocol.expectedTradeFeeMsat(
+                oldExpectedUSD: 0, newExpectedUSD: 0, quotePrice: 100_000
+            ),
+            1
+        )
+    }
+
+    func testSignedTradeControlRequiresExactBytesAndCompleteCorrelation() throws {
+        let identifier = String(repeating: "ab", count: 32)
+        let payload = """
+        {"type":"SYNC_V1","channel_id":"\(
+            identifier
+        )","user_channel_id":"7","expected_usd":25.0,"backing_sats":31250,"sync_version":4,"trade_id":"\(
+            identifier
+        )","trade_payment_id":"\(identifier)","request_hash":"\(identifier)"}
+        """
+        let envelope = try JSONSerialization.data(withJSONObject: [
+            "payload": payload,
+            "signature": "valid"
+        ])
+        let parsed = TradeProtocol.parseSignedControl(
+            data: envelope,
+            expectedCounterparty: "peer",
+            verifySignature: { bytes, signature, peer in
+                bytes == Array(payload.utf8) && signature == "valid" && peer == "peer"
+            }
+        )
+        guard case .sync(let sync) = parsed else {
+            return XCTFail("Expected correlated SYNC_V1")
+        }
+        XCTAssertEqual(sync.correlation?.tradeId, identifier)
+
+        let partialPayload = payload.replacingOccurrences(
+            of: ",\"request_hash\":\"\(identifier)\"",
+            with: ""
+        )
+        let partialEnvelope = try JSONSerialization.data(withJSONObject: [
+            "payload": partialPayload,
+            "signature": "valid"
+        ])
+        XCTAssertNil(TradeProtocol.parseSignedControl(
+            data: partialEnvelope,
+            expectedCounterparty: "peer",
+            verifySignature: { _, _, _ in true }
+        ))
+        XCTAssertNil(TradeProtocol.parseSignedControl(
+            data: envelope,
+            expectedCounterparty: "peer",
+            verifySignature: { _, _, _ in false }
+        ))
+
+        let fractionalPayload = payload.replacingOccurrences(
+            of: "\"sync_version\":4",
+            with: "\"sync_version\":1.5"
+        )
+        let fractionalEnvelope = try JSONSerialization.data(withJSONObject: [
+            "payload": fractionalPayload,
+            "signature": "valid"
+        ])
+        XCTAssertNil(TradeProtocol.parseSignedControl(
+            data: fractionalEnvelope,
+            expectedCounterparty: "peer",
+            verifySignature: { _, _, _ in true }
+        ))
+
+        let booleanPayload = payload.replacingOccurrences(
+            of: "\"expected_usd\":25.0",
+            with: "\"expected_usd\":true"
+        )
+        let booleanEnvelope = try JSONSerialization.data(withJSONObject: [
+            "payload": booleanPayload,
+            "signature": "valid"
+        ])
+        XCTAssertNil(TradeProtocol.parseSignedControl(
+            data: booleanEnvelope,
+            expectedCounterparty: "peer",
+            verifySignature: { _, _, _ in true }
+        ))
+    }
+
+    func testTerminalTradeOutcomeReflectsResultsCommittedOutsideTheHandler() throws {
+        let channelId = String(repeating: "ab", count: 32)
+        try service.channelRepo.saveChannel(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: 50,
+            backingSats: 55_000,
+            nativeSats: 45_000,
+            note: nil,
+            receiverSats: 100_000,
+            latestPrice: 100_000
+        )
+
+        // Rejected trade: outcome must surface with the persisted reason code.
+        let rejectedTrade = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "7",
+            currentExpectedUSD: 50,
+            currentBackingSats: 55_000,
+            receiverSats: 100_000,
+            action: "sell",
+            amountUSD: 10,
+            amountBTC: 0.000099,
+            feeUSD: 0.1,
+            newExpectedUSD: 59.9,
+            quotePrice: 100_000,
+            now: 1_786_310_000,
+            tradeId: String(repeating: "ef", count: 32)
+        ))
+        let rejectedDbId = try service.channelRepo.recordPreparedTrade(rejectedTrade)
+        let rejectedPaymentId = String(repeating: "cd", count: 32)
+        XCTAssertTrue(try service.channelRepo.attachTradePaymentId(
+            tradeDbId: rejectedDbId, paymentId: rejectedPaymentId
+        ))
+        XCTAssertNil(try service.channelRepo.terminalTradeOutcome(paymentId: rejectedPaymentId))
+
+        let rejection = TradeControlMessage.Rejected(
+            channelId: channelId,
+            correlation: TradeCorrelation(
+                tradeId: rejectedTrade.tradeId,
+                tradePaymentId: rejectedPaymentId,
+                requestHash: rejectedTrade.requestHash
+            ),
+            reasonCode: "quote_deviation",
+            decidedAt: 1_786_310_002
+        )
+        guard case .applied = service.channelRepo.applyTradeRejection(rejection).status else {
+            return XCTFail("Expected rejection to commit")
+        }
+        let rejectedOutcome = try XCTUnwrap(
+            service.channelRepo.terminalTradeOutcome(paymentId: rejectedPaymentId)
+        )
+        XCTAssertFalse(rejectedOutcome.accepted)
+        XCTAssertEqual(rejectedOutcome.reasonCode, "quote_deviation")
+
+        // Accepted trade: outcome must flip to accepted with no reason code.
+        let acceptedTrade = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "7",
+            currentExpectedUSD: 50,
+            currentBackingSats: 55_000,
+            receiverSats: 100_000,
+            action: "sell",
+            amountUSD: 10,
+            amountBTC: 0.000099,
+            feeUSD: 0.1,
+            newExpectedUSD: 59.9,
+            quotePrice: 100_000,
+            now: 1_786_310_003,
+            tradeId: String(repeating: "aa", count: 32)
+        ))
+        let acceptedDbId = try service.channelRepo.recordPreparedTrade(acceptedTrade)
+        let acceptedPaymentId = String(repeating: "bb", count: 32)
+        XCTAssertTrue(try service.channelRepo.attachTradePaymentId(
+            tradeDbId: acceptedDbId, paymentId: acceptedPaymentId
+        ))
+        XCTAssertNil(try service.channelRepo.terminalTradeOutcome(paymentId: acceptedPaymentId))
+
+        let sync = TradeControlMessage.Sync(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: acceptedTrade.newExpectedUSD,
+            backingSats: acceptedTrade.newBackingSats,
+            syncVersion: 1,
+            correlation: TradeCorrelation(
+                tradeId: acceptedTrade.tradeId,
+                tradePaymentId: acceptedPaymentId,
+                requestHash: acceptedTrade.requestHash
+            )
+        )
+        guard case .applied = service.channelRepo.applyCorrelatedTradeAcceptance(sync).status else {
+            return XCTFail("Expected correlated acceptance to commit")
+        }
+        let acceptedOutcome = try XCTUnwrap(
+            service.channelRepo.terminalTradeOutcome(paymentId: acceptedPaymentId)
+        )
+        XCTAssertTrue(acceptedOutcome.accepted)
+        XCTAssertNil(acceptedOutcome.reasonCode)
+    }
+
+    func testPreparedTradeWaitsForCorrelatedAcceptanceBeforeUpdatingAllocation() throws {
+        let channelId = String(repeating: "ab", count: 32)
+        let paymentId = String(repeating: "cd", count: 32)
+        let tradeId = String(repeating: "ef", count: 32)
+        try service.channelRepo.saveChannel(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: 50,
+            backingSats: 55_000,
+            nativeSats: 45_000,
+            note: nil,
+            receiverSats: 100_000,
+            latestPrice: 100_000
+        )
+        let prepared = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "7",
+            currentExpectedUSD: 50,
+            currentBackingSats: 55_000,
+            receiverSats: 100_000,
+            action: "sell",
+            amountUSD: 10,
+            amountBTC: 0.000099,
+            feeUSD: 0.1,
+            newExpectedUSD: 59.9,
+            quotePrice: 100_000,
+            now: 1_786_310_000,
+            tradeId: tradeId
+        ))
+        let tradeDbId = try service.channelRepo.recordPreparedTrade(prepared)
+        let adopted = try XCTUnwrap(service.channelRepo.adoptUnattachedPreparedTrade(
+            paymentId: paymentId,
+            amountMsat: prepared.feeMsat,
+            now: 1_786_310_001
+        ))
+        XCTAssertEqual(adopted.tradeDbId, tradeDbId)
+        XCTAssertTrue(try service.channelRepo.tradePaymentExists(paymentId: paymentId))
+
+        let beforeAcceptance = try XCTUnwrap(
+            service.channelRepo.loadChannel(userChannelId: "7")
+        )
+        XCTAssertEqual(beforeAcceptance.expectedUSD, 50)
+        XCTAssertEqual(beforeAcceptance.backingSats, 55_000)
+        XCTAssertEqual(
+            try service.channelRepo.unresolvedTradePayments()[paymentId]?.status,
+            "fee_paid"
+        )
+
+        let sync = TradeControlMessage.Sync(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: prepared.newExpectedUSD,
+            backingSats: prepared.newBackingSats + 1,
+            syncVersion: 1,
+            correlation: TradeCorrelation(
+                tradeId: tradeId,
+                tradePaymentId: paymentId,
+                requestHash: prepared.requestHash
+            )
+        )
+        XCTAssertTrue(try service.channelRepo.markTradeResponseNotCommittable(.sync(sync)))
+        XCTAssertEqual(
+            try service.channelRepo.unresolvedTradePayments()[paymentId]?.status,
+            "uncertain"
+        )
+        let accepted = service.channelRepo.applyCorrelatedTradeAcceptance(sync)
+        guard case .applied = accepted.status else {
+            return XCTFail("Expected correlated acceptance to commit")
+        }
+        XCTAssertEqual(accepted.localBackingSats, prepared.newBackingSats)
+        XCTAssertEqual(accepted.peerBackingSats, prepared.newBackingSats + 1)
+
+        let afterAcceptance = try XCTUnwrap(
+            service.channelRepo.loadChannel(userChannelId: "7")
+        )
+        XCTAssertEqual(afterAcceptance.expectedUSD, prepared.newExpectedUSD, accuracy: 0.000000001)
+        XCTAssertEqual(afterAcceptance.backingSats, prepared.newBackingSats)
+        XCTAssertEqual(afterAcceptance.syncVersion, 1)
+        XCTAssertNil(try service.channelRepo.unresolvedTradePayments()[paymentId])
+
+        let duplicate = service.channelRepo.applyCorrelatedTradeAcceptance(sync)
+        guard case .duplicate = duplicate.status else {
+            return XCTFail("Expected accepted response replay to be idempotent")
+        }
+
+        let superseded = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "7",
+            currentExpectedUSD: prepared.newExpectedUSD,
+            currentBackingSats: prepared.newBackingSats,
+            receiverSats: 100_000,
+            action: "buy",
+            amountUSD: 1,
+            amountBTC: 0.0000099,
+            feeUSD: 0.01,
+            newExpectedUSD: prepared.newExpectedUSD - 1,
+            quotePrice: 100_000,
+            now: 1_786_310_001,
+            tradeId: String(repeating: "aa", count: 32)
+        ))
+        let supersededDbId = try service.channelRepo.recordPreparedTrade(superseded)
+        let supersededPaymentId = String(repeating: "bb", count: 32)
+        XCTAssertTrue(try service.channelRepo.attachTradePaymentId(
+            tradeDbId: supersededDbId,
+            paymentId: supersededPaymentId
+        ))
+        let staleAcceptance = TradeControlMessage.Sync(
+            channelId: channelId,
+            userChannelId: "7",
+            expectedUSD: superseded.newExpectedUSD,
+            backingSats: superseded.newBackingSats,
+            syncVersion: 1,
+            correlation: TradeCorrelation(
+                tradeId: superseded.tradeId,
+                tradePaymentId: supersededPaymentId,
+                requestHash: superseded.requestHash
+            )
+        )
+        let staleResult = service.channelRepo.applyCorrelatedTradeAcceptance(staleAcceptance)
+        guard case .applied = staleResult.status else {
+            return XCTFail("A superseded acceptance must still resolve its trade")
+        }
+        XCTAssertEqual(staleResult.allocationApplied, false)
+        let afterSuperseded = try XCTUnwrap(
+            service.channelRepo.loadChannel(userChannelId: "7")
+        )
+        XCTAssertEqual(afterSuperseded.expectedUSD, prepared.newExpectedUSD, accuracy: 0.000000001)
+        XCTAssertEqual(afterSuperseded.backingSats, prepared.newBackingSats)
+        XCTAssertEqual(afterSuperseded.syncVersion, 1)
+        XCTAssertNil(try service.channelRepo.unresolvedTradePayments()[supersededPaymentId])
+    }
+
+    func testFailedPaymentRecoversPreparedTradeWhenPaymentIdAttachmentWasLost() throws {
+        let channelId = String(repeating: "12", count: 32)
+        let paymentId = String(repeating: "34", count: 32)
+        let prepared = try XCTUnwrap(TradeProtocol.prepare(
+            channelId: channelId,
+            userChannelId: "9",
+            currentExpectedUSD: 25,
+            currentBackingSats: 25_000,
+            receiverSats: 100_000,
+            action: "buy",
+            amountUSD: 5,
+            amountBTC: 0.0000495,
+            feeUSD: 0.05,
+            newExpectedUSD: 20,
+            quotePrice: 100_000,
+            now: 1_786_310_000,
+            tradeId: String(repeating: "56", count: 32)
+        ))
+        let tradeDbId = try service.channelRepo.recordPreparedTrade(prepared)
+
+        let failed = try XCTUnwrap(service.channelRepo.failUnattachedPreparedTrade(
+            paymentId: paymentId,
+            amountMsat: prepared.feeMsat,
+            now: 1_786_310_001
+        ))
+
+        XCTAssertEqual(failed.tradeDbId, tradeDbId)
+        XCTAssertEqual(failed.status, "send_failed")
+        XCTAssertTrue(try service.channelRepo.tradePaymentExists(paymentId: paymentId))
+        XCTAssertNil(try service.channelRepo.unresolvedTradePayments()[paymentId])
+    }
+
+    func testLegacyTradeSchemaMigratesWithoutLosingRows() throws {
+        let legacyDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_trade_migration_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: legacyDir) }
+
+        var legacyDB: OpaquePointer?
+        let path = legacyDir.appendingPathComponent(DatabaseService.dbFilename).path
+        XCTAssertEqual(sqlite3_open(path, &legacyDB), SQLITE_OK)
+        let legacySQL = """
+        CREATE TABLE channels (
+            channel_id TEXT PRIMARY KEY, user_channel_id TEXT UNIQUE,
+            expected_usd REAL NOT NULL DEFAULT 0.0, stable_sats INTEGER NOT NULL DEFAULT 0,
+            note TEXT, created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL,
+            action TEXT NOT NULL, amount_usd REAL NOT NULL, amount_btc REAL NOT NULL DEFAULT 0.0,
+            btc_price REAL NOT NULL, fee_usd REAL NOT NULL DEFAULT 0.0,
+            payment_id TEXT, status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats)
+            VALUES ('legacy-channel', 'legacy-user-channel', 25.0, 25000);
+        INSERT INTO trades (channel_id, action, amount_usd, btc_price, status)
+            VALUES ('legacy-channel', 'buy', 5.0, 100000.0, 'pending');
+        """
+        XCTAssertEqual(sqlite3_exec(legacyDB, legacySQL, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(legacyDB)
+
+        let upgraded = try DatabaseService(dataDir: legacyDir)
+        let channelColumns = try upgraded.rawSQL.query("PRAGMA table_info(channels)")
+            .compactMap { $0[1] as? String }
+        let tradeColumns = try upgraded.rawSQL.query("PRAGMA table_info(trades)")
+            .compactMap { $0[1] as? String }
+        XCTAssertTrue(channelColumns.contains("sync_version"))
+        XCTAssertTrue(tradeColumns.contains("trade_id"))
+        XCTAssertTrue(tradeColumns.contains("uncertainty_reason"))
+
+        let legacyChannel = try XCTUnwrap(
+            upgraded.channelRepo.loadChannel(userChannelId: "legacy-user-channel")
+        )
+        XCTAssertEqual(legacyChannel.expectedUSD, 25)
+        XCTAssertEqual(legacyChannel.backingSats, 25_000)
+        let legacyTradeCount = try upgraded.rawSQL.query("SELECT COUNT(*) FROM trades")
+        XCTAssertEqual(legacyTradeCount.first?.first as? Int64, 1)
+    }
 }

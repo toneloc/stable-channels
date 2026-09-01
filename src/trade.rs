@@ -150,6 +150,12 @@ mod tests {
             "53842fe0ffc7d71ad4b6f9d0940152f9803eba24ba30de840b8967c410acbcd4"
         );
         assert_ne!(request_hash(compact), request_hash(spaced));
+
+        let mobile_fixture = br#"{"type":"TRADE_V1","user_channel_id":"7","expected_usd":25.0}"#;
+        assert_eq!(
+            request_hash(mobile_fixture),
+            "c07dcdff3aae2fc7ebd4fb19a7f1cd60b8e61c94a89acd35c5c600935d671602"
+        );
     }
 
     #[test]
