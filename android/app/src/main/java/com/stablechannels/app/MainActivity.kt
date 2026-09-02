@@ -128,9 +128,10 @@ class MainActivity : FragmentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::appState.isInitialized) {
-            appState.stop()
-        }
+        if (!::appState.isInitialized) return
+        // Route through the graced stop (like onPause()) instead of stopping immediately,
+        // since the OS can destroy/recreate this Activity on plain backgrounding, not just a real close.
+        appState.stopNodeForBackground()
     }
 
     @Composable
