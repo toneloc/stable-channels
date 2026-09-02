@@ -262,6 +262,12 @@ class AppState(private val context: Context) : ViewModel() {
         paymentIds.forEach { refreshTradeOutcome(it) }
     }
     var pendingSplice: PendingSplice? = null
+    // LDK redelivers the same unhandled event until eventHandled() is called, so a sync message
+    // that can never commit (e.g. no give-up path for an uncorrelated RETRY) would otherwise
+    // wedge the entire event pipeline behind it forever. Caps retries per payment hash per
+    // process lifetime; resets on restart.
+    private val syncRetryCounts = mutableMapOf<String, Int>()
+    private val MAX_SYNC_RETRIES = 20
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
     var isChannelClosing: Boolean
@@ -1107,7 +1113,14 @@ class AppState(private val context: Context) : ViewModel() {
         when (result.status) {
             TradeControlApplyStatus.RETRY -> {
                 try { db.markTradeResponseNotCommittable(message) } catch (_: Exception) {}
-                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash))
+                val attempts = (syncRetryCounts[paymentHash] ?: 0) + 1
+                syncRetryCounts[paymentHash] = attempts
+                if (attempts > MAX_SYNC_RETRIES) {
+                    syncRetryCounts.remove(paymentHash)
+                    AuditService.log("TRADE_RESULT_GAVE_UP", mapOf("payment_hash" to paymentHash, "attempts" to attempts))
+                    return true
+                }
+                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash, "attempt" to attempts))
                 throw RetryableSyncException("Signed trade result could not be committed")
             }
             TradeControlApplyStatus.INVALID -> {
@@ -1387,29 +1400,9 @@ class AppState(private val context: Context) : ViewModel() {
         isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
-        val splice = pendingSplice
-        if (splice != null) {
-            when (splice.direction) {
-                "in" -> databaseService?.setPendingSpliceTxid(txid)
-                "out" -> {
-                    val price = priceService.currentPrice.value
-                    databaseService?.recordPayment(
-                        paymentId = null, paymentType = "splice_out", direction = "sent",
-                        amountMsat = splice.amountSats * 1000,
-                        amountUSD = (splice.amountSats.toDouble() / Constants.SATS_IN_BTC) * price,
-                        // bare txid (not the "txid:vout" outpoint) so completeSplice
-                        // txid lookups match this row
-                        btcPrice = price, status = "pending", txid = txid, address = splice.address
-                    )
-                }
-            }
-        } else {
-            // pendingSplice is in-memory and lost across relaunch. If this event
-            // is a restart replay, the latest NULL-txid splice row is this
-            // splice's initiation row — stamp it so ChannelReady can complete it
-            // and the no-txid expiry can't mark it failed.
-            databaseService?.setPendingSpliceTxid(txid)
-        }
+        // Both directions persist their pending row up front, so stamping the txid here also
+        // recovers a restart-replay (pendingSplice lost in memory across relaunch).
+        databaseService?.setPendingSpliceTxid(txid)
         refreshBalances()
         updateStableBalances()
         _statusMessage.value = "Move pending confirmation"
@@ -1422,6 +1415,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
         isSweeping = true
         pendingSplice = PendingSplice("out", amountSats, address)
+        // Persisted immediately (txid unknown yet) so this survives a restart before negotiation completes.
+        val price = priceService.currentPrice.value
+        databaseService?.recordPayment(
+            paymentId = null, paymentType = "splice_out", direction = "sent",
+            amountMsat = amountSats * 1000,
+            amountUSD = if (price > 0) (amountSats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+            btcPrice = price.takeIf { it > 0 }, status = "pending", address = address
+        )
         _statusMessage.value = "Move pending..."
     }
 
@@ -1429,6 +1430,7 @@ class AppState(private val context: Context) : ViewModel() {
         if (spliceTxid == null) {
             isSweeping = false
             pendingSplice = null
+            databaseService?.failPendingSpliceOutWithoutTxid()
             _statusMessage.value = ""
         }
     }
@@ -2436,6 +2438,8 @@ class AppState(private val context: Context) : ViewModel() {
                 val currentTxid = txo.txid
                 if (currentTxid != fundingTxid) {
                     fundingTxid = currentTxid
+                    // Recovers a splice row stuck without a txid if its SpliceNegotiated event was lost.
+                    databaseService?.recoverStuckSpliceTxid(currentTxid)
                 }
             }
             // Derive the authoritative counterparty from the live channel. For an open channel

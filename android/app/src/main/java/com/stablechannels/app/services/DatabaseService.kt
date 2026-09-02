@@ -1330,8 +1330,25 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     fun setPendingSpliceTxid(txid: String) {
         writableDatabase.execSQL(
-            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'splice_in' AND status IN ('pending','failed') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)",
+            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status IN ('pending','failed') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)",
             arrayOf(txid)
+        )
+    }
+
+    /** Stamps a txid onto a splice row stuck at NULL (event lost across a restart) and un-fails
+     *  it, using the live channel's funding txid as the restart-proof source of truth. */
+    fun recoverStuckSpliceTxid(txid: String): Boolean {
+        val stmt = writableDatabase.compileStatement(
+            "UPDATE payments SET txid = ?, status = 'pending' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)"
+        )
+        stmt.bindString(1, txid)
+        return stmt.executeUpdateDelete() > 0
+    }
+
+    /** Fails a splice-out row if negotiation never even started (no txid assigned yet). */
+    fun failPendingSpliceOutWithoutTxid() {
+        writableDatabase.execSQL(
+            "UPDATE payments SET status = 'failed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'splice_out' AND status = 'pending' AND txid IS NULL ORDER BY created_at DESC LIMIT 1)"
         )
     }
 
