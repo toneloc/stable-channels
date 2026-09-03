@@ -313,7 +313,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 if (hasChannel) {
                                     if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                     val sc = appState.stableChannel.value
-                                    appState.beginSpliceOut(sats, addr)
+                                    appState.beginSpliceOut(sats, addr, accountingPrice)
                                     try {
                                         appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
                                     } catch (e: Exception) {

@@ -37,7 +37,8 @@ data class PendingTradePayment(
 data class PendingSplice(
     val direction: String, // "in" or "out"
     val amountSats: Long,
-    val address: String? = null
+    val address: String? = null,
+    val paymentRowId: Long
 )
 
 data class ChannelRecord(

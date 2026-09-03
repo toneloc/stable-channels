@@ -395,12 +395,13 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeStartRetryJob = null
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
+                    // Restore the known funding txid before the first live balance refresh so
+                    // an ordinary cold start is not mistaken for a funding transition.
+                    fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                        .getString("funding_txid", null)
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
                     connectMempoolWebSocket()
-                    // Restore fundingTxid
-                    fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-                        .getString("funding_txid", null)
                     resumePendingSpliceConfirmation()
                     // Restore channel-closing state if a close is still pending on-chain
                     val pendingCloseId = databaseService?.getPendingChannelClosePaymentId()
@@ -959,13 +960,14 @@ class AppState(private val context: Context) : ViewModel() {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
+                val paymentRowId = pendingSplice?.paymentRowId
                 isSweeping = false
                 spliceTxid = null
                 spliceConfirmationJob?.cancel()
                 spliceConfirmationJob = null
                 monitoredSpliceTxid = null
                 pendingSplice = null
-                databaseService?.failLatestPendingSplice()
+                databaseService?.failPendingSplice(paymentRowId)
                 AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
             }
             is Event.ChannelClosed -> {
@@ -1387,28 +1389,18 @@ class AppState(private val context: Context) : ViewModel() {
         isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
-        val splice = pendingSplice
-        if (splice != null) {
-            when (splice.direction) {
-                "in" -> databaseService?.setPendingSpliceTxid(txid)
-                "out" -> {
-                    val price = priceService.currentPrice.value
-                    databaseService?.recordPayment(
-                        paymentId = null, paymentType = "splice_out", direction = "sent",
-                        amountMsat = splice.amountSats * 1000,
-                        amountUSD = (splice.amountSats.toDouble() / Constants.SATS_IN_BTC) * price,
-                        // bare txid (not the "txid:vout" outpoint) so completeSplice
-                        // txid lookups match this row
-                        btcPrice = price, status = "pending", txid = txid, address = splice.address
-                    )
-                }
-            }
-        } else {
-            // pendingSplice is in-memory and lost across relaunch. If this event
-            // is a restart replay, the latest NULL-txid splice row is this
-            // splice's initiation row — stamp it so ChannelReady can complete it
-            // and the no-txid expiry can't mark it failed.
-            databaseService?.setPendingSpliceTxid(txid)
+        // Prefer the exact in-memory row. After a process restart the LDK event can be replayed;
+        // the database then accepts only one recent pending candidate and never a failed row.
+        val assignedRowId = databaseService?.assignPendingSpliceTxid(
+            txid = txid,
+            paymentRowId = pendingSplice?.paymentRowId
+        )
+        if (assignedRowId == null) {
+            AuditService.log("SPLICE_TXID_UNMATCHED", mapOf(
+                "channel_id" to channelId,
+                "user_channel_id" to userChannelId,
+                "txid" to txid
+            ))
         }
         refreshBalances()
         updateStableBalances()
@@ -1416,19 +1408,37 @@ class AppState(private val context: Context) : ViewModel() {
         startSpliceConfirmationMonitor(txid)
     }
 
-    fun beginSpliceOut(amountSats: Long, address: String) {
+    fun beginSpliceOut(amountSats: Long, address: String, accountingPrice: Double) {
         if (isSweeping) {
             throw IllegalStateException("A splice is already in progress — try again shortly")
         }
+        val db = databaseService
+            ?: throw IllegalStateException("Payment history is unavailable — splice not started")
+        // Persist before the native call so the operation survives a process restart.
+        val paymentRowId = db.recordPayment(
+            paymentId = null, paymentType = "splice_out", direction = "sent",
+            amountMsat = amountSats * 1000,
+            amountUSD = if (accountingPrice > 0) {
+                (amountSats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice
+            } else null,
+            btcPrice = accountingPrice.takeIf { it > 0 },
+            status = "pending",
+            address = address
+        )
+        if (paymentRowId <= 0) {
+            throw IllegalStateException("Could not save pending splice — splice not started")
+        }
         isSweeping = true
-        pendingSplice = PendingSplice("out", amountSats, address)
+        pendingSplice = PendingSplice("out", amountSats, address, paymentRowId)
         _statusMessage.value = "Move pending..."
     }
 
     fun cancelPendingSpliceStart() {
         if (spliceTxid == null) {
+            val paymentRowId = pendingSplice?.paymentRowId
             isSweeping = false
             pendingSplice = null
+            databaseService?.failPendingSplice(paymentRowId)
             _statusMessage.value = ""
         }
     }
@@ -1454,7 +1464,7 @@ class AppState(private val context: Context) : ViewModel() {
     private fun resumePendingSpliceConfirmation() {
         if (databaseService?.hasPendingSplice() != true) return
         isSweeping = true
-        spliceTxid = databaseService?.getPendingSpliceTxid() ?: spliceTxid ?: fundingTxid
+        spliceTxid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
         spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
     }
 
@@ -2173,24 +2183,32 @@ class AppState(private val context: Context) : ViewModel() {
         }
         val sweepAmount = spendable
 
-        // Set isSweeping=true BEFORE calling spliceInWithAll so that if LDK fires
-        // a ChannelReady event synchronously during the call, the event handler
-        // correctly identifies it as still in-flight and does not prematurely clear
-        // the sweep state and re-show the Swap button.
+        val db = databaseService ?: run {
+            _statusMessage.value = "Payment history is unavailable — move not started"
+            return
+        }
+        val price = priceService.currentAccountingPrice()
+        val amountUSD = if (price > 0) {
+            (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price
+        } else null
+        // Persist before the native call so SpliceNegotiated always has a row to update,
+        // even if the event is delivered before spliceInWithAll returns.
+        val paymentRowId = db.recordPayment(
+            paymentId = null, paymentType = "splice_in", direction = "received",
+            amountMsat = sweepAmount * 1000,
+            amountUSD = amountUSD, btcPrice = price.takeIf { it > 0 }, status = "pending"
+        )
+        if (paymentRowId <= 0) {
+            _statusMessage.value = "Could not save pending move — move not started"
+            return
+        }
         isSweeping = true
-        pendingSplice = PendingSplice("in", sweepAmount)
+        pendingSplice = PendingSplice("in", sweepAmount, paymentRowId = paymentRowId)
 
         try {
             nodeService.spliceInWithAll(channel.userChannelId, channel.counterpartyNodeId)
             sweepOnchainStart = spendable
             _statusMessage.value = "Moving all onchain funds to channel..."
-            val price = priceService.currentPrice.value
-            val amountUSD = if (price > 0) (sweepAmount.toDouble() / Constants.SATS_IN_BTC) * price else null
-            databaseService?.recordPayment(
-                paymentId = null, paymentType = "splice_in", direction = "received",
-                amountMsat = sweepAmount * 1000,
-                amountUSD = amountUSD, btcPrice = price.takeIf { it > 0 }, status = "pending"
-            )
             AuditService.log("SWEEP_TO_CHANNEL", mapOf(
                 "amount_sats" to sweepAmount,
                 "mode" to "splice_in_with_all"
@@ -2198,6 +2216,7 @@ class AppState(private val context: Context) : ViewModel() {
         } catch (e: Exception) {
             isSweeping = false
             pendingSplice = null
+            db.failPendingSplice(paymentRowId)
             _statusMessage.value = "Sweep failed: ${e.message}"
             AuditService.log("SWEEP_FAILED", mapOf("error" to (e.message ?: "")))
             return
