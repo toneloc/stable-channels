@@ -77,10 +77,12 @@ fun ModernBottomNavBar(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 92.dp, vertical = 12.dp)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        contentAlignment = Alignment.BottomCenter
     ) {
         Surface(
             modifier = Modifier
+                .widthIn(min = 180.dp, max = 228.dp)
                 .fillMaxWidth()
                 .then(
                     if (isDark) Modifier.border(
