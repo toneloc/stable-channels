@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import androidx.core.database.sqlite.transaction
 import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
@@ -49,6 +50,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 3
+        internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -1328,40 +1330,88 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
-    fun setPendingSpliceTxid(txid: String) {
-        writableDatabase.execSQL(
-            "UPDATE payments SET txid = ? WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status IN ('pending','failed') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)",
-            arrayOf(txid)
+    private fun SQLiteDatabase.queryIds(sql: String, args: Array<String>): List<Long> =
+        rawQuery(sql, args).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) }
+        }
+
+    private fun SQLiteDatabase.recentPendingSpliceIds(paymentRowId: Long?, cutoff: Long): List<Long> {
+        val idClause = if (paymentRowId == null) "" else "AND id = ?"
+        val args = buildList {
+            if (paymentRowId != null) add(paymentRowId.toString())
+            add(cutoff.toString())
+        }.toTypedArray()
+        return queryIds(
+            """
+            SELECT id FROM payments
+            WHERE payment_type IN ('splice_in','splice_out')
+              AND status = 'pending' AND txid IS NULL
+              $idClause AND created_at >= ?
+            LIMIT 2
+            """.trimIndent(),
+            args
         )
     }
 
-    /** Stamps a txid onto a splice row stuck at NULL (event lost across a restart) and un-fails
-     *  it, using the live channel's funding txid as the restart-proof source of truth. */
-    fun recoverStuckSpliceTxid(txid: String): Boolean {
-        val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET txid = ?, status = 'pending' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND txid IS NULL ORDER BY created_at DESC LIMIT 1)"
-        )
-        stmt.bindString(1, txid)
-        return stmt.executeUpdateDelete() > 0
-    }
+    /** Assigns a negotiated txid to one pending splice without guessing from payment history.
+     *  The exact row is preferred. After a process restart, where that in-memory id is gone,
+     *  exactly one recent pending NULL-txid splice must exist or no row is changed. */
+    fun assignPendingSpliceTxid(
+        txid: String,
+        paymentRowId: Long? = null,
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000L
+    ): Long? {
+        val normalizedTxid = txid.trim()
+        if (normalizedTxid.isEmpty()) return null
 
-    /** Fails a splice-out row if negotiation never even started (no txid assigned yet). */
-    fun failPendingSpliceOutWithoutTxid() {
-        writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type = 'splice_out' AND status = 'pending' AND txid IS NULL ORDER BY created_at DESC LIMIT 1)"
-        )
-    }
-
-    fun completeLatestSplice(txid: String?) {
-        if (txid.isNullOrBlank()) {
-            writableDatabase.execSQL(
-                "UPDATE payments SET status = 'completed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status IN ('pending','failed') ORDER BY created_at DESC LIMIT 1)"
+        return writableDatabase.transaction {
+            val existing = queryIds(
+                "SELECT id FROM payments WHERE txid = ? AND payment_type IN ('splice_in','splice_out') AND status = 'pending' LIMIT 2",
+                arrayOf(normalizedTxid)
             )
-        } else {
-            writableDatabase.execSQL(
-                "UPDATE payments SET status = 'completed' WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')",
-                arrayOf(txid)
+            if (existing.isNotEmpty()) {
+                return@transaction existing.singleOrNull()
+                    ?.takeIf { paymentRowId == null || it == paymentRowId }
+            }
+            val txidInUse = rawQuery(
+                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
+                arrayOf(normalizedTxid)
+            ).use { it.moveToFirst() }
+            if (txidInUse) return@transaction null
+
+            val cutoff = nowEpochSecs - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
+            val candidates = recentPendingSpliceIds(paymentRowId, cutoff)
+            val candidateId = candidates.singleOrNull() ?: return@transaction null
+            val values = ContentValues().apply { put("txid", normalizedTxid) }
+            val updated = update(
+                "payments",
+                values,
+                """
+                id = ? AND status = 'pending' AND txid IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)
+                """.trimIndent(),
+                arrayOf(candidateId.toString(), normalizedTxid, candidateId.toString())
             )
+            if (updated == 1) candidateId else null
+        }
+    }
+
+    /** Marks one pre-negotiation splice failed. Failed rows are terminal. */
+    fun failPendingSplice(
+        paymentRowId: Long? = null,
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000L
+    ): Boolean {
+        return writableDatabase.transaction {
+            val cutoff = nowEpochSecs - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
+            val candidates = recentPendingSpliceIds(paymentRowId, cutoff)
+            val candidateId = candidates.singleOrNull() ?: return@transaction false
+            val values = ContentValues().apply { put("status", "failed") }
+            update(
+                "payments",
+                values,
+                "id = ? AND status = 'pending' AND txid IS NULL",
+                arrayOf(candidateId.toString())
+            ) == 1
         }
     }
 
@@ -1369,24 +1419,20 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      *  so callers can use the result as the "this ChannelReady was a splice" signal. */
     fun completeSplice(txid: String): Boolean {
         val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status IN ('pending','failed')"
+            "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status = 'pending'"
         )
         stmt.bindString(1, txid)
         return stmt.executeUpdateDelete() > 0
     }
 
-    fun failLatestPendingSplice() {
-        writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE rowid = (SELECT rowid FROM payments WHERE payment_type IN ('splice_in','splice_out') AND status = 'pending' ORDER BY created_at DESC LIMIT 1)"
-        )
-    }
-
     fun getPendingSpliceTxid(): String? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+        val txids = readableDatabase.rawQuery(
+            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL LIMIT 2",
             null
-        )
-        return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
+        ).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        }
+        return txids.singleOrNull()
     }
 
     fun hasPendingSplice(): Boolean {
@@ -1394,7 +1440,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
         // Keep with-txid rows pending: confirmation can outlive the app process,
         // and the splice confirmation monitor completes them after 1 conf.
-        val noTxidCutoff = System.currentTimeMillis() / 1000 - 600
+        val noTxidCutoff = System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
         writableDatabase.execSQL(
             "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ?",
             arrayOf(noTxidCutoff)
