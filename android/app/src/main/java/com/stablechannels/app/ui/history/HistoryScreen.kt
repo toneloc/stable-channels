@@ -91,7 +91,6 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .defaultMinSize(minHeight = 36.dp)
                 .background(inactiveBg, shape = RoundedCornerShape(8.dp))
                 .padding(2.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -99,12 +98,12 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight()
                     .background(
                         color = if (selectedSegment == 0) activeBg else Color.Transparent,
                         shape = RoundedCornerShape(6.dp)
                     )
-                    .clickable { selectedSegment = 0 },
+                    .clickable { selectedSegment = 0 }
+                    .padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -117,12 +116,12 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight()
                     .background(
                         color = if (selectedSegment == 1) activeBg else Color.Transparent,
                         shape = RoundedCornerShape(6.dp)
                     )
-                    .clickable { selectedSegment = 1 },
+                    .clickable { selectedSegment = 1 }
+                    .padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
