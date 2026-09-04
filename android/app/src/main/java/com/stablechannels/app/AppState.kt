@@ -78,6 +78,31 @@ class AppState(private val context: Context) : ViewModel() {
         // Covers ordinary quick app-switches without keeping an unserviced cached Android
         // process in control of the node for longer than the common return window.
         private const val QUICK_SWITCH_GRACE_MS = 10_000L
+
+        fun calculateTotalBalance(
+            lightning: Long,
+            onchain: Long,
+            hasReady: Boolean,
+            isChannelClosing: Boolean,
+            isSweeping: Boolean,
+            pendingSweep: Long = 0L,
+            isOpeningChannel: Boolean = false
+        ): Long {
+            return when {
+                isChannelClosing -> onchain
+                isOpeningChannel -> if (lightning > 0) lightning else onchain
+                isSweeping -> lightning
+                !hasReady -> onchain + pendingSweep
+                else -> lightning + onchain
+            }
+        }
+
+        fun requiredConfirmationsForType(paymentType: String): Int {
+            return when (paymentType) {
+                "splice_in", "splice_out" -> 1
+                else -> 6
+            }
+        }
     }
 
     val nodeService = NodeService(context)
@@ -132,6 +157,8 @@ class AppState(private val context: Context) : ViewModel() {
     val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
     private val _hasReadyChannel = MutableStateFlow(false)
     val hasReadyChannel: StateFlow<Boolean> get() = _hasReadyChannel
+    private val _pendingSweepBalanceSats = MutableStateFlow(0L)
+    val pendingSweepBalanceSats: StateFlow<Long> get() = _pendingSweepBalanceSats
 
     private val _onchainReceiveAddress = MutableStateFlow<String?>(null)
     val onchainReceiveAddress: StateFlow<String?> get() = _onchainReceiveAddress
@@ -1827,12 +1854,6 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun requiredConfirmationsForType(paymentType: String): Int {
-        return when (paymentType) {
-            "splice_in", "splice_out" -> 1
-            else -> 6
-        }
-    }
 
     private data class TxConfirmationStatus(
         val confirmed: Boolean,
@@ -1984,6 +2005,10 @@ class AppState(private val context: Context) : ViewModel() {
 
             if (anyUpdated) {
                 _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+                try {
+                    nodeService.syncWallets()
+                } catch (_: Exception) {}
+                refreshBalances()
             }
             lastConfirmationPollAtMs = now
         } finally {
@@ -2623,6 +2648,18 @@ class AppState(private val context: Context) : ViewModel() {
                 _stableChannel.value = _stableChannel.value.copy(counterparty = liveCounterparty)
             }
         }
+        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
+        // These funds are NOT yet in total_onchain_balance_sats
+        var sweepSats = 0L
+        for (pending in balances.pendingBalancesFromChannelClosures) {
+            when (pending) {
+                is PendingSweepBalance.PendingBroadcast -> sweepSats += pending.amountSatoshis.toLong()
+                is PendingSweepBalance.BroadcastAwaitingConfirmation -> sweepSats += pending.amountSatoshis.toLong()
+                else -> {}
+            }
+        }
+        _pendingSweepBalanceSats.value = sweepSats
+
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
@@ -2637,14 +2674,14 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
-        _totalBalanceSats.value = when {
-            isChannelClosing -> onchain
-            isSweeping -> lightning
-            // No open channel but both balances present: lightning is pending-close claimable
-            // that overlaps with on-chain — avoid double-count
-            !hasReady && lightning > 0 && onchain > 0 -> onchain
-            else -> lightning + onchain
-        }
+        _totalBalanceSats.value = calculateTotalBalance(
+            lightning = lightning,
+            onchain = onchain,
+            hasReady = hasReady,
+            isChannelClosing = isChannelClosing,
+            isSweeping = isSweeping,
+            pendingSweep = sweepSats
+        )
 
         // Calculate native sats (lightning minus stable portion) for slider position
         // On-chain funds excluded — they're not in the channel yet
@@ -2661,6 +2698,42 @@ class AppState(private val context: Context) : ViewModel() {
             .putLong("cached_spendable_sats", spendable)
             .putLong("cached_native_sats", native)
             .apply()
+    }
+
+    fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean) {
+        val currentOnchain = _onchainBalanceSats.value
+        val currentSpendable = _spendableOnchainSats.value
+        val newOnchain = if (isSendAll) 0L else (currentOnchain - amountSats).coerceAtLeast(0L)
+        val newSpendable = if (isSendAll) 0L else (currentSpendable - amountSats).coerceAtLeast(0L)
+
+        _onchainBalanceSats.value = newOnchain
+        _spendableOnchainSats.value = newSpendable
+
+        val lightning = _lightningBalanceSats.value
+        val hasReady = _hasReadyChannel.value
+        _totalBalanceSats.value = calculateTotalBalance(
+            lightning = lightning,
+            onchain = newOnchain,
+            hasReady = hasReady,
+            isChannelClosing = isChannelClosing,
+            isSweeping = isSweeping,
+            pendingSweep = _pendingSweepBalanceSats.value
+        )
+
+        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+            .putLong("cached_onchain_sats", newOnchain)
+            .putLong("cached_spendable_sats", newSpendable)
+        if (!hasReady) {
+            editor.putLong("cached_lightning_sats", 0L)
+        }
+        editor.apply()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                nodeService.syncWallets()
+            } catch (_: Exception) {}
+            refreshBalances()
+        }
     }
 
     fun updateStableBalances() {
