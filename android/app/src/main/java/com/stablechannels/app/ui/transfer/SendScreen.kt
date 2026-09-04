@@ -730,6 +730,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             } else {
                                                 appState.nodeService.sendOnchain(trimmed, sats)
                                             }
+                                            appState.onchainSendBroadcasted(sats, isSendAll = isSendMax)
                                             appState.databaseService?.recordPayment(
                                                 paymentId = null, paymentType = "onchain",
                                                 direction = "sent", amountMsat = sats * 1000,
