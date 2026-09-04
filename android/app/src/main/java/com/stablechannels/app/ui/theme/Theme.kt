@@ -1,6 +1,8 @@
 package com.stablechannels.app.ui.theme
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
@@ -11,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -18,6 +21,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
 // ─── Branded Color Palette ───────────────────────────────────────────────────
 
@@ -175,6 +180,10 @@ val LocalSemanticColors = staticCompositionLocalOf {
     LightSemanticColors
 }
 
+val LocalDarkTheme = staticCompositionLocalOf {
+    false
+}
+
 // ─── Theme Preference ────────────────────────────────────────────────────────
 
 enum class ThemePreference(val label: String) {
@@ -225,6 +234,12 @@ private fun rememberThemePreference(): ThemePreference {
     return preference
 }
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 @Composable
 fun StableChannelsTheme(
     content: @Composable () -> Unit
@@ -240,7 +255,22 @@ fun StableChannelsTheme(
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     val semanticColors = if (darkTheme) DarkSemanticColors else LightSemanticColors
 
-    CompositionLocalProvider(LocalSemanticColors provides semanticColors) {
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = view.context.findActivity()?.window
+            if (window != null) {
+                val insetsController = WindowCompat.getInsetsController(window, view)
+                insetsController.isAppearanceLightStatusBars = !darkTheme
+                insetsController.isAppearanceLightNavigationBars = !darkTheme
+            }
+        }
+    }
+
+    CompositionLocalProvider(
+        LocalSemanticColors provides semanticColors,
+        LocalDarkTheme provides darkTheme
+    ) {
         MaterialTheme(
             colorScheme = colorScheme,
             content = content

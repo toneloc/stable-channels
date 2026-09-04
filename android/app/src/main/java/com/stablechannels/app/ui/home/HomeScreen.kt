@@ -36,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -636,7 +637,8 @@ private fun PendingRow(text: String, txid: String?, context: android.content.Con
 @Composable
 private fun SheetEdgeToEdgeEffect() {
     val view = LocalView.current
-    DisposableEffect(view) {
+    val isDark = LocalDarkTheme.current
+    DisposableEffect(view, isDark) {
         var context = view.context
         var dialog: android.app.Dialog? = null
         while (context is android.content.ContextWrapper) {
@@ -649,6 +651,9 @@ private fun SheetEdgeToEdgeEffect() {
         val window = dialog?.window
         if (window != null) {
             WindowCompat.setDecorFitsSystemWindows(window, false)
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.isAppearanceLightStatusBars = !isDark
+            insetsController.isAppearanceLightNavigationBars = !isDark
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
                 @Suppress("DEPRECATION")
                 window.navigationBarColor = android.graphics.Color.TRANSPARENT
