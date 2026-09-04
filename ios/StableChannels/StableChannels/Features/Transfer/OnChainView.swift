@@ -376,6 +376,7 @@ struct OnChainSendView: View {
                     txid: result,
                     address: address
                 )
+                appState.onchainSendBroadcasted(amountSats: onchainSats, isSendAll: true)
             } else {
                 let result = try appState.nodeService.sendOnchain(address: address, amountSats: sats)
                 txid = result
@@ -392,6 +393,7 @@ struct OnChainSendView: View {
                     txid: result,
                     address: address
                 )
+                appState.onchainSendBroadcasted(amountSats: sats, isSendAll: false)
             }
         } catch {
             errorMessage = error.localizedDescription

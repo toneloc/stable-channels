@@ -118,22 +118,23 @@ struct PaymentDetailView: View {
 
     private func statusLabel(for payment: PaymentRecord) -> String {
         if payment.shouldShowConfirmationProgress {
+            let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
             let confs = Int(payment.confirmations)
-            if confs >= ConfirmationPolicy.requiredConfirmations {
+            if confs >= required {
                 return String(localized: "status_confirmed", defaultValue: "Confirmed")
             }
-            // Show confirmation count for all values 0..5 so the label
+            // Show confirmation count for all values below required so the label
             // never falls through to the stored status (which may be
             // "Completed" before the poller has run).
-            return "\(confs)/\(ConfirmationPolicy.requiredConfirmations) confirmed"
+            return "\(confs)/\(required) confirmed"
         }
         return payment.status.capitalized
     }
 
     @ViewBuilder
     private func confirmationProgressRow(for payment: PaymentRecord) -> some View {
-        let confs = min(Int(payment.confirmations), ConfirmationPolicy.requiredConfirmations)
-        let required = ConfirmationPolicy.requiredConfirmations
+        let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
+        let confs = min(Int(payment.confirmations), required)
         HStack {
             Text(String(localized: "label_confirmations", defaultValue: "Confirmations"))
                 .foregroundStyle(.secondary)
