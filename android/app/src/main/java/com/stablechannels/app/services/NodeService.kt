@@ -325,6 +325,11 @@ class NodeService(private val context: Context) {
         return n.onchainPayment().sendAllToAddress(address, false, null)
     }
 
+    fun syncWallets() {
+        val n = node ?: throw NodeServiceError()
+        n.syncWallets()
+    }
+
     fun balances(): BalanceDetails? = node?.listBalances()
 
     fun spendableOnchainSats(): Long {
