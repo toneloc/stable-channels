@@ -102,6 +102,7 @@ final class ConfirmationPollingService {
                     if blockHeight != payment.txBlockHeight || progress.display != payment.confirmations {
                         try? databaseService.paymentRepo.updateConfirmations(
                             paymentId: payment.id,
+                            paymentType: payment.paymentType,
                             txBlockHeight: blockHeight,
                             currentBlockHeight: currentHeight
                         )
@@ -127,6 +128,7 @@ final class ConfirmationPollingService {
             do {
                 try databaseService.paymentRepo.updateConfirmations(
                     paymentId: payment.id,
+                    paymentType: payment.paymentType,
                     txBlockHeight: blockHeight,
                     currentBlockHeight: currentHeight
                 )

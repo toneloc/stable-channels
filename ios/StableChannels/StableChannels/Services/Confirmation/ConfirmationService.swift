@@ -19,9 +19,14 @@ final class ConfirmationService {
         guard let txid = payment.txid, !txid.isEmpty else {
             return .noTxid
         }
+        let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
         // Fast path: only trust cached tx_block_height when not forceRechecking
         if !forceRecheck, let existingHeight = payment.txBlockHeight, existingHeight > 0 {
-            let progress = calculator.progress(for: existingHeight, currentBlockHeight: currentBlockHeight)
+            let progress = calculator.progress(
+                for: existingHeight,
+                currentBlockHeight: currentBlockHeight,
+                required: required
+            )
             if progress.isComplete {
                 return .confirmed(progress: progress, blockHeight: existingHeight)
             }
@@ -30,7 +35,7 @@ final class ConfirmationService {
             guard let height = try await provider.blockHeight(for: txid) else {
                 return .pending
             }
-            let progress = calculator.progress(for: height, currentBlockHeight: currentBlockHeight)
+            let progress = calculator.progress(for: height, currentBlockHeight: currentBlockHeight, required: required)
             return .confirmed(progress: progress, blockHeight: height)
         } catch {
             return .error(error.localizedDescription)
