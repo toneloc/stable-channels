@@ -91,7 +91,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(36.dp)
+                .defaultMinSize(minHeight = 36.dp)
                 .background(inactiveBg, shape = RoundedCornerShape(8.dp))
                 .padding(2.dp),
             verticalAlignment = Alignment.CenterVertically
