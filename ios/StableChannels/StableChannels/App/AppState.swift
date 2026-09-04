@@ -102,7 +102,15 @@ class AppState {
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
-    var spendableOnchainSats: UInt64 = 0
+    var spendableOnchainSats: UInt64 = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        if let val = ud?.object(forKey: "cached_spendable_onchain_sats") as? Int {
+            return UInt64(bitPattern: Int64(val))
+        }
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+    }()
+
+    var pendingSweepBalanceSats: UInt64 = 0
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
@@ -130,10 +138,10 @@ class AppState {
         if isSweeping {
             return lightningBalanceSats
         }
-        // If no open channels but both balances exist, lightning balance is
-        // pending-close claimable that overlaps with on-chain — avoid double-count.
-        if !hasReadyChannel && lightningBalanceSats > 0 && onchainBalanceSats > 0 {
-            return onchainBalanceSats
+        // If no ready channel, lightning balance contains stale claimables from
+        // closed channels — never count it, even when onchainBalanceSats reaches 0 (Issue #260).
+        if !hasReadyChannel {
+            return onchainBalanceSats + pendingSweepBalanceSats
         }
         return lightningBalanceSats + onchainBalanceSats
     }
@@ -268,7 +276,15 @@ class AppState {
         }
         confirmationPollingService = pollingService
         pollingService?.onUpdate = { [weak self] in
-            self?.confirmationUpdateEpoch += 1
+            guard let self else { return }
+            self.confirmationUpdateEpoch += 1
+            self.refreshBalances()
+            Task.detached { [weak self] in
+                try? self?.nodeService.syncWallets()
+                await MainActor.run {
+                    self?.refreshBalances()
+                }
+            }
         }
         if let db = databaseService, let polling = pollingService {
             let spvService = SPVHeaderChainService(
@@ -456,6 +472,7 @@ class AppState {
         onchainBalanceSats = 0
         hasReadyChannel = false
         spendableOnchainSats = 0
+        pendingSweepBalanceSats = 0
         transactionLinkService.onchainReceiveAddress = nil
         transactionLinkService.clearCloseTxid()
         transactionLinkService.clearReceiveTxid()
@@ -467,6 +484,7 @@ class AppState {
         shared?.removeObject(forKey: "node_id")
         shared?.set(Int64(0), forKey: "cached_lightning_sats")
         shared?.set(Int64(0), forKey: "cached_onchain_sats")
+        shared?.set(Int64(0), forKey: "cached_spendable_onchain_sats")
         shared?.set(false, forKey: "pending_push_payment")
     }
 
@@ -2900,6 +2918,22 @@ class AppState {
         let onchain = balances.totalOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
 
+        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
+        // These funds are NOT yet in total_onchain_balance_sats
+        // (Desktop src/user.rs lines 5989-6002 parity)
+        var sweepSats: UInt64 = 0
+        for pending in balances.pendingBalancesFromChannelClosures {
+            switch pending {
+            case let .pendingBroadcast(_, amountSatoshis):
+                sweepSats += amountSatoshis
+            case let .broadcastAwaitingConfirmation(_, _, _, amountSatoshis):
+                sweepSats += amountSatoshis
+            default:
+                break
+            }
+        }
+        pendingSweepBalanceSats = sweepSats
+
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
@@ -2914,6 +2948,30 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: lightning), forKey: "cached_lightning_sats")
         ud?.set(Int64(bitPattern: onchain), forKey: "cached_onchain_sats")
+        ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: "cached_spendable_onchain_sats")
+    }
+
+    /// Deducts sent on-chain amount immediately from cached and in-memory balances
+    /// so the UI updates with zero lag, then triggers wallet sync in the background.
+    func onchainSendBroadcasted(amountSats: UInt64, isSendAll: Bool) {
+        if isSendAll {
+            onchainBalanceSats = 0
+            spendableOnchainSats = 0
+        } else {
+            onchainBalanceSats = onchainBalanceSats >= amountSats ? onchainBalanceSats - amountSats : 0
+            spendableOnchainSats = spendableOnchainSats >= amountSats ? spendableOnchainSats - amountSats : 0
+        }
+
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: "cached_onchain_sats")
+        ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: "cached_spendable_onchain_sats")
+
+        Task.detached { [weak self] in
+            try? self?.nodeService.syncWallets()
+            await MainActor.run {
+                self?.refreshBalances()
+            }
+        }
     }
 
     /// Update the StableChannel struct from current LDK channel data + price.
