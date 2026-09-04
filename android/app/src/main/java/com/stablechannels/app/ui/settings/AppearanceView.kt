@@ -1,6 +1,8 @@
 package com.stablechannels.app.ui.settings
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.*
@@ -22,6 +24,7 @@ fun AppearanceView() {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
         Text(
@@ -47,7 +50,7 @@ fun AppearanceView() {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(56.dp)
+                            .defaultMinSize(minHeight = 56.dp)
                             .selectable(
                                 selected = (selectedTheme == preference),
                                 onClick = {

@@ -248,6 +248,6 @@ private fun SettingsNavLink(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         },
-        modifier = Modifier.height(44.dp).clickable(onClick = onClick)
+        modifier = Modifier.defaultMinSize(minHeight = 44.dp).clickable(onClick = onClick)
     )
 }
