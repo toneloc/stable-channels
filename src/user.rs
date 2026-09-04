@@ -189,6 +189,20 @@ struct IncomingSync {
     request_hash: Option<String>,
 }
 
+/// Dynamic confirmation threshold policy for splices and on-chain transactions:
+/// - splices (splice_in, splice_out): 1 confirmation (channel established/trusted)
+/// - onchain (inbound / outbound): 6 confirmations
+/// - lightning: 0 confirmations
+pub fn required_confirmations_for_payment(payment_type: &str, direction: &str) -> u32 {
+    let _ = direction;
+    match payment_type {
+        "splice_in" | "splice_out" => 1,
+        "onchain" => 6,
+        "lightning" => 0,
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
     InvalidValues,
@@ -8377,12 +8391,21 @@ impl UserApp {
                                         ),
                                     );
 
-                                    let (status_label, status_color) = match payment.status.as_str()
-                                    {
-                                        "completed" => ("Confirmed", theme::SUCCESS),
-                                        "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                                        "failed" => ("Failed", theme::DANGER_HOVER),
-                                        _ => (&*payment.status, Color32::DARK_GRAY),
+                                    let (status_label, status_color) = match payment.status.as_str() {
+                                        "completed" => ("Confirmed".to_string(), theme::SUCCESS),
+                                        "pending" => {
+                                            let threshold = required_confirmations_for_payment(
+                                                &payment.payment_type,
+                                                &payment.direction,
+                                            );
+                                            if threshold > 0 {
+                                                (format!("{}/{}", payment.confirmations, threshold), Color32::from_rgb(234, 179, 8))
+                                            } else {
+                                                ("Pending".to_string(), Color32::from_rgb(234, 179, 8))
+                                            }
+                                        }
+                                        "failed" => ("Failed".to_string(), theme::DANGER_HOVER),
+                                        _ => (payment.status.clone(), Color32::DARK_GRAY),
                                     };
                                     let (badge_rect, _) = ui.allocate_exact_size(
                                         egui::vec2(58.0, 18.0),
@@ -8397,7 +8420,7 @@ impl UserApp {
                                     ui.painter().text(
                                         badge_rect.center(),
                                         egui::Align2::CENTER_CENTER,
-                                        status_label,
+                                        &status_label,
                                         egui::FontId::proportional(10.0),
                                         status_color,
                                     );
@@ -8675,10 +8698,20 @@ impl UserApp {
                 }
 
                 let (status_label, status_color) = match payment.status.as_str() {
-                    "completed" => ("Confirmed", theme::SUCCESS),
-                    "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                    "failed" => ("Failed", theme::DANGER_HOVER),
-                    _ => (&*payment.status, Color32::DARK_GRAY),
+                    "completed" => ("Confirmed".to_string(), theme::SUCCESS),
+                    "pending" => {
+                        let threshold = required_confirmations_for_payment(
+                            &payment.payment_type,
+                            &payment.direction,
+                        );
+                        if threshold > 0 {
+                            (format!("{}/{}", payment.confirmations, threshold), Color32::from_rgb(234, 179, 8))
+                        } else {
+                            ("Pending".to_string(), Color32::from_rgb(234, 179, 8))
+                        }
+                    }
+                    "failed" => ("Failed".to_string(), theme::DANGER_HOVER),
+                    _ => (payment.status.clone(), Color32::DARK_GRAY),
                 };
                 ui.horizontal(|ui| {
                     ui.add_sized(
@@ -8687,13 +8720,23 @@ impl UserApp {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(status_label)
+                            RichText::new(&status_label)
                                 .size(12.0)
                                 .color(status_color)
                                 .strong(),
                         );
                     });
                 });
+                let threshold = required_confirmations_for_payment(
+                    &payment.payment_type,
+                    &payment.direction,
+                );
+                if threshold > 0 {
+                    let conf_str = format!("{}/{}", payment.confirmations, threshold);
+                    row(ui, "Confirmations", &conf_str);
+                } else if payment.confirmations > 0 {
+                    row(ui, "Confirmations", &payment.confirmations.to_string());
+                }
                 ui.add_space(2.0);
 
                 row(ui, "Date", &Self::format_timestamp(payment.created_at));
