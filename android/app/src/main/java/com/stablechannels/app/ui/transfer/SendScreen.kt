@@ -326,6 +326,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .navigationBarsPadding()
+            .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally

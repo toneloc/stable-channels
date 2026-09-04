@@ -556,10 +556,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
 @Composable
 fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, rotation: Float = 0f, pulse: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
-    Box(modifier = modifier.height(56.dp).clip(RoundedCornerShape(12.dp))) {
+    Box(modifier = modifier.defaultMinSize(minHeight = 52.dp).clip(RoundedCornerShape(12.dp))) {
         FilledTonalButton(
             onClick = onClick,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 52.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
             shape = RoundedCornerShape(12.dp),
             enabled = enabled,
             colors = ButtonDefaults.filledTonalButtonColors(
