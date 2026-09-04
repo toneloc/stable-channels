@@ -171,16 +171,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Title
-            Text(
-                text = "Stable Channels",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(8.dp))
-
             // Notification warning
             if (!notificationsEnabled) {
                 Card(
