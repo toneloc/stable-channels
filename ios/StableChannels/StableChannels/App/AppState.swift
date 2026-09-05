@@ -102,12 +102,21 @@ class AppState {
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
+    private enum BalanceCacheKey {
+        static let lightning = "cached_lightning_sats"
+        static let onchain = "cached_onchain_sats"
+        static let spendable = "cached_spendable_onchain_sats"
+        static let pendingAmount = "pending_outbound_onchain_sats"
+        static let pendingIsSendAll = "pending_outbound_is_send_all"
+        static let pendingBaseline = "pending_outbound_baseline_sats"
+    }
+
     var spendableOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        if let val = ud?.object(forKey: "cached_spendable_onchain_sats") as? Int {
+        if let val = ud?.object(forKey: BalanceCacheKey.spendable) as? Int {
             return UInt64(bitPattern: Int64(val))
         }
-        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.onchain) ?? 0))
     }()
 
     var pendingSweepBalanceSats: UInt64 = 0
@@ -115,26 +124,19 @@ class AppState {
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_lightning_sats") ?? 0))
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.lightning) ?? 0))
     }()
 
     var onchainBalanceSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.onchain) ?? 0))
     }()
 
     var hasReadyChannel: Bool = false
 
     var pendingOutboundSend: BalanceCalculator.PendingOutboundSend = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        let amount = UInt64(bitPattern: Int64(ud?.integer(forKey: "pending_outbound_onchain_sats") ?? 0))
-        let isSendAll = ud?.bool(forKey: "pending_outbound_is_send_all") ?? false
-        let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: "pending_outbound_baseline_sats") ?? 0))
-        return BalanceCalculator.PendingOutboundSend(
-            amountSats: amount,
-            isSendAll: isSendAll,
-            baselineOnchainSats: baseline
-        )
+        return AppState.loadCachedPendingOutboundSend(from: ud)
     }()
 
     /// The active LSP configuration managed by `LSPService`.
@@ -153,8 +155,8 @@ class AppState {
         )
     }
 
-    /// Static calculation entry point adhering to Single Responsibility Principle,
-    /// enabling pure functional testing without initializing full AppState graph.
+    /// Static calculation entry point enabling pure functional testing
+    /// without initializing the full AppState graph.
     static func calculateTotalBalance(
         lightning: UInt64,
         onchain: UInt64,
@@ -199,6 +201,43 @@ class AppState {
             rawOnchain: rawOnchain,
             pending: pending
         )
+    }
+
+    static func recordBroadcast(
+        currentPending: BalanceCalculator.PendingOutboundSend,
+        amountSats: UInt64,
+        isSendAll: Bool,
+        currentOnchain: UInt64
+    ) -> BalanceCalculator.PendingOutboundSend {
+        BalanceCalculator.recordBroadcast(
+            currentPending: currentPending,
+            amountSats: amountSats,
+            isSendAll: isSendAll,
+            currentOnchain: currentOnchain
+        )
+    }
+
+    static func loadCachedPendingOutboundSend(from ud: UserDefaults?) -> BalanceCalculator.PendingOutboundSend {
+        let amount = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingAmount) ?? 0))
+        let isSendAll = ud?.bool(forKey: BalanceCacheKey.pendingIsSendAll) ?? false
+        let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingBaseline) ?? 0))
+        return BalanceCalculator.PendingOutboundSend(
+            amountSats: amount,
+            isSendAll: isSendAll,
+            baselineOnchainSats: baseline
+        )
+    }
+
+    private func persistPendingOutboundSend(to ud: UserDefaults?) {
+        ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: BalanceCacheKey.pendingAmount)
+        ud?.set(pendingOutboundSend.isSendAll, forKey: BalanceCacheKey.pendingIsSendAll)
+        ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: BalanceCacheKey.pendingBaseline)
+    }
+
+    private func clearPendingOutboundSendCache(from ud: UserDefaults?) {
+        ud?.removeObject(forKey: BalanceCacheKey.pendingAmount)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingIsSendAll)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingBaseline)
     }
 
     var totalBalanceUSD: Double {
@@ -503,7 +542,7 @@ class AppState {
         }
     }
 
-    private func resetInMemoryWalletState() {
+    func resetInMemoryWalletState() {
         stableChannel = .default
         statusMessage = ""
         paymentFlash = false
@@ -523,6 +562,7 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
+        pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
         transactionLinkService.clearCloseTxid()
         transactionLinkService.clearReceiveTxid()
@@ -532,9 +572,10 @@ class AppState {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.removeObject(forKey: "funding_txid")
         shared?.removeObject(forKey: "node_id")
-        shared?.set(Int64(0), forKey: "cached_lightning_sats")
-        shared?.set(Int64(0), forKey: "cached_onchain_sats")
-        shared?.set(Int64(0), forKey: "cached_spendable_onchain_sats")
+        shared?.set(Int64(0), forKey: BalanceCacheKey.lightning)
+        shared?.set(Int64(0), forKey: BalanceCacheKey.onchain)
+        shared?.set(Int64(0), forKey: BalanceCacheKey.spendable)
+        clearPendingOutboundSendCache(from: shared)
         shared?.set(false, forKey: "pending_push_payment")
     }
 
@@ -3010,12 +3051,10 @@ class AppState {
 
         // Cache for instant display on next launch
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        ud?.set(Int64(bitPattern: lightning), forKey: "cached_lightning_sats")
-        ud?.set(Int64(bitPattern: onchain), forKey: "cached_onchain_sats")
-        ud?.set(Int64(bitPattern: spendable), forKey: "cached_spendable_onchain_sats")
-        ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: "pending_outbound_onchain_sats")
-        ud?.set(pendingOutboundSend.isSendAll, forKey: "pending_outbound_is_send_all")
-        ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: "pending_outbound_baseline_sats")
+        ud?.set(Int64(bitPattern: lightning), forKey: BalanceCacheKey.lightning)
+        ud?.set(Int64(bitPattern: onchain), forKey: BalanceCacheKey.onchain)
+        ud?.set(Int64(bitPattern: spendable), forKey: BalanceCacheKey.spendable)
+        persistPendingOutboundSend(to: ud)
     }
 
     /// Deducts sent on-chain amount immediately from cached and in-memory balances
@@ -3024,20 +3063,12 @@ class AppState {
         let currentOnchain = onchainBalanceSats
         let currentSpendable = spendableOnchainSats
 
-        if isSendAll {
-            pendingOutboundSend = BalanceCalculator.PendingOutboundSend(
-                amountSats: currentOnchain,
-                isSendAll: true,
-                baselineOnchainSats: currentOnchain
-            )
-        } else {
-            pendingOutboundSend = BalanceCalculator.PendingOutboundSend(
-                amountSats: pendingOutboundSend.amountSats + amountSats,
-                isSendAll: false,
-                baselineOnchainSats: pendingOutboundSend.baselineOnchainSats == 0 ? currentOnchain : pendingOutboundSend
-                    .baselineOnchainSats
-            )
-        }
+        pendingOutboundSend = BalanceCalculator.recordBroadcast(
+            currentPending: pendingOutboundSend,
+            amountSats: amountSats,
+            isSendAll: isSendAll,
+            currentOnchain: currentOnchain
+        )
 
         let effective = BalanceCalculator.calculateEffectiveBalances(
             rawOnchain: currentOnchain,
@@ -3048,11 +3079,9 @@ class AppState {
         spendableOnchainSats = effective.spendable
 
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: "cached_onchain_sats")
-        ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: "cached_spendable_onchain_sats")
-        ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: "pending_outbound_onchain_sats")
-        ud?.set(pendingOutboundSend.isSendAll, forKey: "pending_outbound_is_send_all")
-        ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: "pending_outbound_baseline_sats")
+        ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: BalanceCacheKey.onchain)
+        ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: BalanceCacheKey.spendable)
+        persistPendingOutboundSend(to: ud)
 
         syncWalletsInBackground()
     }
