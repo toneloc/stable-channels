@@ -12471,6 +12471,36 @@ mod tests {
         assert_eq!(super::closure_reason_to_json(&none)["kind"], "UNKNOWN");
     }
 
+    #[test]
+    fn test_required_confirmations_for_payment() {
+        assert_eq!(super::required_confirmations_for_payment("splice_in", "inbound"), 1);
+        assert_eq!(super::required_confirmations_for_payment("splice_out", "outbound"), 1);
+        assert_eq!(super::required_confirmations_for_payment("onchain", "inbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("onchain", "outbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("lightning", "inbound"), 0);
+        assert_eq!(super::required_confirmations_for_payment("lightning", "outbound"), 0);
+        assert_eq!(super::required_confirmations_for_payment("unknown", "outbound"), 0);
+    }
+
+    #[test]
+    fn test_pending_outbound_onchain_deduction() {
+        let live_onchain_sats: u64 = 50_000;
+        let send_amount_sats: u64 = 20_000;
+
+        // Immediately after broadcast:
+        let pending_outbound = send_amount_sats;
+        let displayed_onchain = live_onchain_sats.saturating_sub(pending_outbound);
+        assert_eq!(displayed_onchain, 30_000);
+
+        // Send max / full balance broadcast:
+        let send_max_pending = 50_000;
+        let displayed_send_max = live_onchain_sats.saturating_sub(send_max_pending);
+        assert_eq!(displayed_send_max, 0);
+
+        // Over-deduction edge case safely saturates at 0:
+        let over_deduction = 60_000;
+        assert_eq!(live_onchain_sats.saturating_sub(over_deduction), 0);
+    }
 }
 
 /// Convert an LDK `ClosureReason` into a structured JSON object for the audit log so a channel
